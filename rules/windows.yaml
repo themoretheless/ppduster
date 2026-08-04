@@ -1,0 +1,58 @@
+pack: windows
+rules:
+  - id: windows-temp-user
+    name: User TEMP
+    description: "User TEMP and LocalAppData Temp files"
+    category: temp
+    platform: windows
+    risk: low
+    default_enabled: true
+    min_age_days: 2
+    paths:
+      - "$TEMP"
+      - "%LOCALAPPDATA%/Temp"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: windows-localappdata-cache
+    name: LocalAppData caches
+    description: "Common application cache folders under LocalAppData"
+    category: caches
+    platform: windows
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "%LOCALAPPDATA%/Temp"
+      - "%LOCALAPPDATA%/Microsoft/Windows/INetCache"
+      - "%LOCALAPPDATA%/Microsoft/Windows/Explorer"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: windows-prefetch-report
+    name: Prefetch (report-only)
+    description: "Prefetch can affect boot/app launch analysis; never auto-delete"
+    category: system
+    platform: windows
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - "C:/Windows/Prefetch"
+    delete_mode: contents
+    max_depth: 1
+
+  - id: windows-old-report
+    name: Windows.old (report-only)
+    description: "Previous Windows installation; use Disk Cleanup / storage settings"
+    category: system
+    platform: windows
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - "C:/Windows.old"
+    delete_mode: path
+    max_depth: 1

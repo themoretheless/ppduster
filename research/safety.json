@@ -1,0 +1,171 @@
+[
+  {
+    "topic": "Deletion safety model for a system cleaner: dry-run default, trash vs permanent delete, age thresholds, open-file checks, symlink escape prevention, path canonicalization",
+    "rules": [
+      "Dry-run is the default for any delete path: clean without an explicit apply flag only scans and reports (BleachBit preview / docker confirm pattern).",
+      "Trash/Recycle Bin is the default delete method; permanent unlink is opt-in only, never the silent default (trash-cli / FreeDesktop recoverability).",
+      "Permanent mass delete requires a second confirmation barrier (typed phrase or interactive confirm); --yes alone is insufficient.",
+      "Per-rule minimum age thresholds gate sticky regenerable junk; global override is allowed, but age 0 only disables the age gate, not other safety checks (docker until= filters).",
+      "Never-touch paths (user data roots, secrets, system trees, filesystem roots) always override rules and are re-checked at delete time.",
+      "Authorize only after path canonicalization (canonicalize if exists, else lexical normalize of . and ..); failed normalization means refuse.",
+      "Every candidate must stay under its rule root after normalization; refuse symlink escapes that leave the allowed root.",
+      "Do not force-delete open or locked files by default: skip, report, and continue (best-effort EBUSY / sharing-violation handling).",
+      "High-blast categories (named volumes, archives, package stores, OS restore points) are report-only unless a separate, warned opt-in path is used (docker volumes excluded from default system prune).",
+      "Medium/high-risk rules and shred/wipe modes are disabled by default and never auto-enabled for a max clean score.",
+      "Revalidate existence, never-touch, and root containment between scan and delete; failures are skipped with logged reasons.",
+      "Delete deepest paths first; continue on per-item errors and surface them; report method (dry-run|trash|permanent), counts, bytes, and skips with no silent blocked deletes.",
+      "Core junk cleaning must not require root/admin; privileged system cleaning is out of the default MVP path.",
+      "Secure overwrite/shred is out of MVP default backends and, if added later, still inherits dry-run, trash preference, never-touch, and confirm rules."
+    ],
+    "must_have": [
+      "Dry-run default on clean (no disk mutation without explicit apply)",
+      "Explicit apply flag (--yes or equivalent) to perform deletes",
+      "Trash-first delete via OS Trash / FreeDesktop Trash / Recycle Bin",
+      "Permanent delete only with second-factor confirm (typed phrase)",
+      "Per-rule min_age_days plus optional global age override",
+      "Hard never-touch denylist enforced at scan and delete",
+      "Path canonicalize with lexical fallback and fail-closed on error",
+      "Symlink escape guard: candidate must stay under rule root after normalize",
+      "Skip/report locked or in-use files instead of force-delete",
+      "report_only support for dangerous rule categories",
+      "Delete-time safety revalidation (TOCTOU harden)",
+      "Auditable report (human + JSON) of method, freed bytes, skips, and errors"
+    ],
+    "anti_patterns": [
+      "Permanent unlink (rm-style) as the default cleaner action",
+      "Any clean mode that deletes without a prior dry-run/preview path",
+      "Following symlinks out of rule roots into home or system trees",
+      "Letting YAML/rules override never-touch or filesystem-root protections",
+      "Authorizing deletes on non-canonical paths (../, unresolved links, mixed roots)",
+      "Including volumes, package stores, or archives in default prune without opt-in",
+      "Force-deleting open databases or live app data and reporting success",
+      "Auto-enabling high-risk, shred, or wipe modes for aggressive cleaning",
+      "Silently ignoring blocked or failed paths without error counters",
+      "Scareware health scores or dark patterns that push permanent mass deletes"
+    ]
+  },
+  {
+    "topic": "Rule engine design: YAML/JSON clean rules (BleachBit-style), allowlist/denylist, per-app plugins, versioned rule packs",
+    "rules": [
+      "Rules are declarative data only (YAML primary, JSON same schema); no shell/process/code execution inside rule files in core.",
+      "Every rule has a stable unique id, human name/description, category, risk, platform, and explicit path templates; scan/clean must attribute every path to a rule id and pack.",
+      "Path templates expand env/XDG/Windows variables; refuse filesystem roots and bare home as rule roots; enforce post-normalize stay-under-root against symlink escape.",
+      "Risk is binding: low may default on; medium/high default off; report_only never deletes on the normal clean path even with --yes.",
+      "Age (min_age_days), include/exclude globs, max_depth, and delete_mode (prefer contents over path) are first-class match constraints.",
+      "Hard denylist in code (Documents/Desktop/Downloads, keys/mail, system trees, home, roots) always wins; user path denylist wins over rules; user allowlist cannot override hard denylist or report_only.",
+      "Per-app targets are separate rules in named packs (apps/dev/os); browser rules are cache-only by default; cookies/logins/history stay off or high-risk separate rules.",
+      "Packs are versioned (pack_version + schema_version); load order is shipped then site then user with documented id override; refuse silent misparse of unknown schema.",
+      "Special cleaners (docker prune, package managers, registry, sqlite vacuum) are plugins with the same candidate model; default docker-like volume/data stores stay report-only or explicit opt-in.",
+      "Default delete semantics are trash/restore-friendly (trash-cli/FreeDesktop style); permanent delete is explicit; shred/overwrite is out of MVP.",
+      "Dry-run/preview and path transparency are required before destructive clean; no hidden rule expansion beyond user-selected categories/ids."
+    ],
+    "must_have": [
+      "YAML rule packs with id, category, risk, platform, paths, globs, min_age_days, delete_mode, default_enabled, report_only",
+      "Multi-dir load: bundled packs plus user rules directory with documented id override",
+      "Unix and Windows path template expansion ($HOME, $XDG_*, %LOCALAPPDATA%, etc.)",
+      "Hard never-touch denylist enforced on every match after normalize",
+      "Dry-run scan report mapping path/size/risk to rule id",
+      "Trash-backed clean with confirmation; report_only never deletes",
+      "Risk gates: medium/high off by default",
+      "CLI list rules, show rule, list categories, doctor (sources/packs)",
+      "pack_version and schema_version surfaced in doctor/version output",
+      "Include/exclude globs and max_depth for precise app/browser rules",
+      "User path denylist config that always excludes matches",
+      "Platform filtering so only host-matching rules activate"
+    ],
+    "anti_patterns": [
+      "Never ship or accept rules that wipe whole home, Documents, Desktop, or Downloads without hard blocks",
+      "Never execute shell/binaries from rule YAML/JSON in the core engine",
+      "Never default-enable cookies, logins, mail, SSH, or key material cleaning",
+      "Never prune Docker volumes or shared package stores (e.g. pnpm store) except report-only or ultra-explicit plugin flags",
+      "Never let config disable the hard denylist or quietly force-delete report_only rules",
+      "Never unbounded-walk entire home/disk as a built-in pack rule",
+      "Never auto-apply unauthenticated remote rule-pack updates into deletes",
+      "Never hide which rule matched a deleted path",
+      "Never make secure multi-pass wipe the default clean path",
+      "Never use scareware scores, fake health meters, or registry cleaning as default value"
+    ]
+  },
+  {
+    "topic": "CLI UX for cleaners: subcommands, table/JSON, exit codes, CI, progress",
+    "rules": [
+      "Verbs only: scan (read-only), clean (mutate), doctor (self-check), rules list|show; same filters on scan and clean so scan is a true dry-run of clean.",
+      "scan never mutates; clean defaults to dry-run and only deletes with explicit --yes (BleachBit preview vs clean).",
+      "Human default is table; machines use -o json|--format json on every data-bearing command.",
+      "JSON is complete and stable (full findings, totals, skipped roots, rule ids); table may truncate via --limit; schema additive only.",
+      "Stdout holds table/JSON payload; stderr holds progress, warnings, prompts, and errors so pipes to jq stay clean.",
+      "Exit codes are public API: 0 success (including empty scan), 1 operational/partial failure, 2 usage/config error; document in --help.",
+      "Noninteractive when not a TTY, --yes/--non-interactive, or CI: no prompts, no TTY-only spinners; refuse destructive clean if confirmation missing (fail closed, never hang).",
+      "Risk-matched confirmation: Trash delete needs --yes; permanent mass delete needs a second gate (confirm phrase); never treat piped input as yes.",
+      "Progress only on interactive TTY stderr; quiet under --json/non-TTY; SIGINT aborts with partial report and non-success if work incomplete.",
+      "rules and doctor are first-class, offline, same output formats so operators audit CI targets before --yes."
+    ],
+    "must_have": [
+      "Subcommands: scan, clean, doctor, rules list|show",
+      "Shared filters: category, min-age, include high-risk",
+      "Table: size, path, category, risk, rule id, category summary, truncate + hint",
+      "JSON on stdout for scan, clean, doctor, rules",
+      "clean dry-run default; --yes applies; Trash default; permanent + hard confirm",
+      "CI/non-TTY: no hang; refuse clean without --yes",
+      "TTY progress on long runs; silent under JSON/non-TTY",
+      "Documented exit codes; 0 empty success; nonzero on real failure",
+      "Actionable stderr errors with next step (e.g. pass --yes)"
+    ],
+    "anti_patterns": [
+      "Default-on or surprise delete without scan/preview",
+      "Interactive y/N with no --yes/--force for scripts",
+      "Progress, color, or logs mixed into JSON stdout",
+      "Different filter meaning between scan and clean",
+      "Exit 0 when some deletes failed",
+      "GUI-only presets required for headless clean",
+      "Opaque deletes without path and rule id",
+      "Empty stdin or pipe treated as confirmation",
+      "Unbounded table of millions of paths without limit/JSON escape"
+    ]
+  },
+  {
+    "topic": "Legal/ethical product rules: no scareware, no forced upsell, honest sizes, accessible deletion logs",
+    "rules": [
+      "Never invent PC dirty/health/threat scores or urgency not backed by concrete reclaimable paths.",
+      "Present scan results as facts only: bytes, paths, categories, risk, and rule IDs.",
+      "Default flow is preview then explicit user choice then confirm then clean; no silent first-run bulk delete.",
+      "Dry-run/preview is the safe default; never delete without preview or an explicit noninteractive consent flag.",
+      "Report measured reclaimable size on scan and attempted vs actually freed after clean; explain hard links, sparse files, and permission skips.",
+      "Never inflate sizes via double-counting, marketing up to claims, or non-deleted optimization theater.",
+      "Rule labels must match deleted content (e.g. logs must not wipe caches or settings).",
+      "Core clean path must work without accounts, licenses, nag screens, or paid unlock for real delete.",
+      "Every clean produces an accessible audit log or machine-readable report of deleted, failed, and skipped items with timestamps, sizes, and rule IDs.",
+      "Default to trash/recoverable delete; permanent delete only via explicit harder-to-reach option.",
+      "Interactive sessions confirm before delete; noninteractive requires explicit --yes/--force, never implied by scan.",
+      "No dark-pattern consent: no pre-checked high-risk wipe-all, buried extras, or fake progress inventing work.",
+      "Do not overclaim 100% safe, legal compliance theater, or malware removal unless those features truly exist and are separate.",
+      "No phone-home of path inventories or machine fingerprints without clear opt-in telemetry; default is no telemetry.",
+      "Report partial cleans honestly (permission denied, in-use files); never claim full success when results were partial."
+    ],
+    "must_have": [
+      "Preview/dry-run scan listing paths, categories, risk, and byte sizes before any delete",
+      "Clean command or flag separate from scan with interactive confirmation",
+      "Accurate per-finding, per-category, and total size aggregation",
+      "Post-clean summary with deleted count, bytes removed, and failures/skips with reasons",
+      "Persistent or exportable deletion log (human-readable and JSON) of what was deleted",
+      "Trash-first delete path with permanent delete only via explicit flag",
+      "Accurate rule labels/descriptions shipped with rule packs",
+      "No health score or scare UI in CLI output or documentation",
+      "Opt-in noninteractive mode that still writes full deletion logs",
+      "Medium/high-risk categories off by default until user opts in",
+      "Public docs of each category and what defaults never touch"
+    ],
+    "anti_patterns": [
+      "Fake Your PC is N% dirty/infected gauges to drive action",
+      "Auto-clean on install, login, or schedule without prior user configuration",
+      "Freemium wall: free scan but paid delete or paid access to deletion logs",
+      "Blocking or mid-clean upsells to finish cleaning",
+      "Inflating reclaimable space with free space, other volumes, or unselected categories",
+      "Registry fix, startup optimizer, or RAM booster dressed as junk cleaning",
+      "Bundled PUPs, browser hijackers, or default-on affiliate installers",
+      "Deleting settings, passwords, or cookies under a cache or junk label",
+      "Hiding or paywalling deletion logs so users cannot audit what was removed",
+      "Reporting cleaned when files were only skipped or silently moved without saying so"
+    ]
+  }
+]

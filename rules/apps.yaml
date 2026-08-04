@@ -1,0 +1,103 @@
+pack: apps
+rules:
+  - id: app-spotify-cache
+    name: Spotify cache
+    description: Local Spotify data cache (music re-downloads as needed).
+    category: app-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Caches/com.spotify.client"
+      - "$HOME/Library/Application Support/Spotify/PersistentCache"
+      - "$HOME/.cache/spotify"
+      - '%LOCALAPPDATA%/Spotify/Storage'
+    delete_mode: contents
+    max_depth: 5
+
+  - id: app-discord-cache
+    name: Discord cache
+    description: Discord Code Cache / Cache / GPUCache.
+    category: app-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 5
+    paths:
+      - "$HOME/Library/Application Support/discord/Cache"
+      - "$HOME/Library/Application Support/discord/Code Cache"
+      - "$HOME/Library/Application Support/discord/GPUCache"
+      - "$HOME/.config/discord/Cache"
+      - "$HOME/.config/discord/Code Cache"
+      - "%APPDATA%/discord/Cache"
+      - "%APPDATA%/discord/Code Cache"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-slack-cache
+    name: Slack cache
+    description: Slack desktop cache directories.
+    category: app-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 5
+    paths:
+      - "$HOME/Library/Application Support/Slack/Cache"
+      - "$HOME/Library/Application Support/Slack/Code Cache"
+      - "$HOME/Library/Application Support/Slack/GPUCache"
+      - "$HOME/.config/Slack/Cache"
+      - "%APPDATA%/Slack/Cache"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-zoom-cache
+    name: Zoom cache
+    description: Zoom logs and cache (not recordings).
+    category: app-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/zoom.us/Logs"
+      - "$HOME/Library/Caches/us.zoom.xos"
+      - "$HOME/.zoom"
+      - "%APPDATA%/Zoom/logs"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-chrome-cache
+    name: Chrome cache (not profile)
+    description: Browser disk cache only; cookies/logins untouched.
+    category: browser-cache
+    platform: any
+    risk: medium
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Caches/Google/Chrome"
+      - "$HOME/.cache/google-chrome"
+      - "%LOCALAPPDATA%/Google/Chrome/User Data/Default/Cache"
+      - "%LOCALAPPDATA%/Google/Chrome/User Data/Default/Code Cache"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: app-firefox-cache
+    name: Firefox cache
+    description: Firefox cache2 only.
+    category: browser-cache
+    platform: any
+    risk: medium
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Caches/Firefox"
+      - "$HOME/.cache/mozilla/firefox"
+      - "%LOCALAPPDATA%/Mozilla/Firefox/Profiles"
+    include_globs:
+      - "**/cache2/**"
+      - "**/startupCache/**"
+    delete_mode: contents
+    max_depth: 8

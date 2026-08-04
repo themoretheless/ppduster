@@ -1,0 +1,29 @@
+[package]
+name = "ppduster"
+version = "0.1.0"
+edition = "2021"
+description = "Safe, rule-driven system junk cleaner (logs, caches, temp, leftovers)"
+license = "MIT"
+readme = "README.md"
+keywords = ["cleaner", "cache", "temp", "disk", "maintenance"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1"
+bytesize = "2"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+colored = "3"
+dirs = "6"
+globset = "0.4"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tabled = "0.18"
+thiserror = "2"
+trash = "5"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"

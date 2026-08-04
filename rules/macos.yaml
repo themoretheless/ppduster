@@ -1,0 +1,180 @@
+pack: macos
+rules:
+  - id: macos-user-caches
+    name: User Library Caches
+    description: Non-essential app caches under ~/Library/Caches (excludes some Apple services).
+    category: caches
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 3
+    paths:
+      - "$HOME/Library/Caches"
+    exclude_globs:
+      - "CloudKit"
+      - "CloudKit/**"
+      - "com.apple.Safari"
+      - "com.apple.Safari/**"
+      - "com.apple.HomeKit"
+      - "com.apple.HomeKit/**"
+      - "FamilyCircle"
+      - "FamilyCircle/**"
+      - "com.apple.findmy*"
+      - "com.apple.findmy*/**"
+      - "JetBrains"
+      - "JetBrains/**"
+      - "Google"
+      - "Google/**"
+      - "Homebrew"
+      - "Homebrew/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: macos-user-logs
+    name: User Library Logs
+    description: Application log files in ~/Library/Logs.
+    category: logs
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Logs"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: macos-saved-state
+    name: Saved Application State
+    description: Window restoration state; safe to remove, apps recreate it.
+    category: leftovers
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Saved Application State"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-tmp
+    name: User temp (TMPDIR)
+    description: Files in the user temporary directory older than min age.
+    category: temp
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 2
+    paths:
+      - "$TMPDIR"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-ios-device-support
+    name: iOS Device Support (Xcode)
+    description: Old device symbols; large and regenerable via Xcode.
+    category: dev
+    platform: macos
+    risk: medium
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - "$HOME/Library/Developer/Xcode/iOS DeviceSupport"
+    delete_mode: contents
+    max_depth: 3
+
+  - id: macos-xcode-derived-data
+    name: Xcode DerivedData
+    description: Build intermediates; will force full rebuilds.
+    category: dev
+    platform: macos
+    risk: medium
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Developer/Xcode/DerivedData"
+    delete_mode: contents
+    max_depth: 2
+
+  - id: macos-xcode-archives
+    name: Xcode Archives
+    description: "Report-only archives may be needed for App Store or dSYM."
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 90
+    paths:
+      - "$HOME/Library/Developer/Xcode/Archives"
+    delete_mode: contents
+    max_depth: 3
+
+  - id: macos-homebrew-cache
+    name: Homebrew downloads cache
+    description: Cached bottles and source downloads.
+    category: package-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Caches/Homebrew"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: macos-quicklook-cache
+    name: Quick Look thumbnails cache
+    description: qlmanage thumbnail cache if present.
+    category: caches
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Caches/com.apple.QuickLook.thumbnailcache"
+      - "$HOME/Library/Caches/CloudKit/com.apple.QuickLook.thumbnailcache"
+    delete_mode: path
+    max_depth: 2
+
+  - id: macos-mail-downloads
+    name: Mail Downloads
+    description: Attachments saved by Mail.app; medium risk.
+    category: leftovers
+    platform: macos
+    risk: medium
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - "$HOME/Library/Containers/com.apple.mail/Data/Library/Mail Downloads"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-ds-store-home-library
+    name: .DS_Store under Library Caches/Logs only
+    description: Finder metadata files limited to known junk trees (not full home walk).
+    category: leftovers
+    platform: macos
+    risk: low
+    default_enabled: false
+    min_age_days: 1
+    paths:
+      - "$HOME/Library/Caches"
+      - "$HOME/Library/Logs"
+    include_globs:
+      - "**/.DS_Store"
+    delete_mode: contents
+    max_depth: 10
+
+  - id: macos-ios-backups-report
+    name: iOS backups (report-only)
+    description: Device backups under MobileSync; never auto-delete.
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - "$HOME/Library/Application Support/MobileSync/Backup"
+    delete_mode: path
+    max_depth: 2

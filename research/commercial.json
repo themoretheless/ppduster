@@ -1,0 +1,422 @@
+[
+  {
+    "product": "CleanMyMac X (MacPaw; later CleanMyMac v5 / CleanMyMac CLI)",
+    "features": [
+      "System junk: caches, logs, temporary and system-generated clutter (category-level rules)",
+      "Named junk markers include .DS_Store and .Spotlight-V100; trash emptying (incl. historical iPhoto Trash)",
+      "Language files and (classic) universal-binary architecture slices as space reclaim",
+      "App leftovers / broken preference-pane remnants after incomplete uninstalls",
+      "Mail attachment cleanup; large third-party caches called out (e.g. Spotify, Dropbox)",
+      "Large & Old Files / My Clutter: large files, forgotten downloads, duplicates, similar photos",
+      "Space Lens visual disk map; later Cloud Cleanup for iCloud Drive, Google Drive, OneDrive",
+      "Full app Uninstaller (app + support/install leftovers) and multi-app Updater (Sparkle + App Store)",
+      "Malware/adware scan via Moonlock Engine (not positioned as full antivirus)",
+      "Privacy cleanup: browser data, recent items, app permissions, untrusted Wi-Fi networks",
+      "Performance maintenance: DNS flush, Spotlight/Mail reindex, login items and Launch Agents/background control",
+      "Smart Scan / Smart Care one-pass multi-routine; menu-bar resource/threat monitor",
+      "Safety Database whitelist so bulk delete avoids known-critical files",
+      "CleanMyMac CLI (2026): clean junk, dev-tool caches (Homebrew/npm/Docker/etc.), purge project artifacts"
+    ],
+    "ui_model": "Primary GUI suite with sidebar categories (Cleanup, Protection, Performance, Applications, My Clutter/Space Lens) plus Smart Scan/Smart Care one-button multi-scan; results shown as summaries/tiles with Review (file list) or Remove; Safety Database + confirm-before-delete; menu-bar monitor. Not a pure wizard. Family also ships CleanMyMac CLI (category subcommands: clean, purge, analyze). No public open library API; closed-source commercial product.",
+    "risks": [
+      "Apple Support Communities often advise against it after breakage and leftover-helper reports",
+      "Malware module incomplete in third-party tests (misses/leaves remnants); not a full AV replacement",
+      "Bulk cache deletion can temporarily slow apps while caches rebuild",
+      "User reports of aggressive or incorrect moves/deletes when rules misfire",
+      "Privacy policy collects cleanup log paths/sizes, installed apps, device/disk info, Mac Health; malware automation may upload suspect binaries",
+      "Closed source prevents independent audit of deletion and network behavior",
+      "Freemium pressure: trial expiry, Basic/Plus gates, App Store missing features, paid major upgrades",
+      "Scare/upsell perception: urgency messaging and subscription pricing vs free macOS Storage tools"
+    ],
+    "lessons": [
+      "Copy category taxonomy and risk tiers (safe caches/logs vs high-risk binary/language stripping)",
+      "Copy Safety Database / hard deny-lists for critical system paths",
+      "Copy scan → dry-run report → explicit select → delete; never silent default delete",
+      "Copy leftover-aware uninstall model (bundle + known ~/Library and /Library support paths)",
+      "Copy composable CLI categories (analyze vs clean <category>) for scripting and libraries",
+      "Avoid scareware, RAM-boost theater, and marketing incomplete malware as protection",
+      "Avoid default telemetry of file paths, app inventories, and device identifiers; local-first open source",
+      "Avoid auto-remove-all for non-experts; keep high-risk categories opt-in with restore story",
+      "Avoid subscription walls on basic cache/log cleaning; keep helpers fully uninstallable"
+    ],
+    "monetization_hooks": [
+      "7-day full-feature free trial then paywall",
+      "Annual and monthly subscriptions; higher one-time license",
+      "One-time licenses that may exclude free major-version upgrades",
+      "Basic vs Plus tiers gating Space Lens / Cloud Cleanup",
+      "Multi-device seats (1/2/5) and business/volume licensing experiments",
+      "Setapp bundle distribution",
+      "App Store edition with reduced features vs direct MacPaw download",
+      "Cross-sell (Setapp, CleanMyPhone, Moonlock branding, upgrade discounts)"
+    ]
+  },
+  {
+    "product": "CCleaner (Piriform/Avast/Gen Digital)",
+    "features": [
+      "Health Check one-click clean: Recycle Bin, unused system/app temps, browser cookies/history/cache/trackers",
+      "Custom Clean with Windows + Applications category checkboxes, Analyze preview, then Run Cleaner",
+      "Browser junk/privacy: Edge, IE, Firefox, Chrome, Opera, Safari (history, cookies, cache, form autocomplete)",
+      "System junk: memory dumps, log files, file fragments, system caches, application temp data",
+      "Windows path patterns: %TEMP% (AppData\\Local\\Temp), C:\\Windows\\Temp, Prefetch, Temporary Internet Files, browser Code Cache",
+      "Safety options: skip temps in use; optional Recycle Bin min-age (~24h); some temp rules target files idle ~48h",
+      "Registry cleaner: missing shared DLL refs, unused file-extension registrations, missing application paths",
+      "Tools: uninstall programs, manage startup apps, delete System Restore points",
+      "Drive free-space / MFT wipe (Drive Wiper; reduced or absent in some CCleaner 7 builds per community)",
+      "Smart Cleaning (ex-Active Monitoring): background/scheduled or browser-close cleaning",
+      "Software Updater and Driver Updater (often Pro-tier)",
+      "Performance Optimizer and multi-user cleaning (Pro marketing: Cleans Everywhere)",
+      "CLI automation: documented switches including /AUTO clean-and-exit",
+      "Community Winapp2.ini declarative rules for extra app caches/logs/MRUs (off by default)",
+      "Optional CCleaner Browser (Chromium/Avast Secure Browser family) via installer",
+      "Mac/Android/iOS cleaners exist; product remains Windows-first historically"
+    ],
+    "ui_model": "GUI freemium: (1) Health Check guided one-shot, (2) Custom Clean category tree with Analyze then delete, (3) Smart Cleaning automation, (4) Tools (Registry/Startup/Uninstall/Drive Wiper/updaters). CLI /AUTO for unattended runs. v7 modernized UI but reduced quit/startup control.",
+    "risks": [
+      "2017 supply-chain attack: signed CCleaner 5.33 shipped Floxif backdoor to ~2.27M machines; ~40 got second-stage payload targeting tech firms",
+      "2019 second attempt to inject malware into CCleaner build pipeline (reported unsuccessful)",
+      "Post-Avast bundling of antivirus/other apps; Windows Defender flagged Free as PUA (2020) over unexpected bundled software",
+      "Telemetry/Active Monitoring controversy (v5.45): hard-to-disable monitoring and data collection backlash",
+      "Registry cleaners generally discouraged by Microsoft guidance; can break apps with limited performance benefit",
+      "Aggressive privacy cleans log users out and reset cookies/site state",
+      "Over-cleaning caches/Prefetch can worsen app launch times as data is rebuilt",
+      "Freemium nagware, Pro feature gates, and cross-sell (Browser, suite tools, Gen Digital security products)",
+      "CCleaner 7 reported to remove easy close / disable-run-on-startup options",
+      "Free historically limited vs Pro for multi-user profiles and automation completeness"
+    ],
+    "lessons": [
+      "Require scan/plan/preview before any delete; always support dry-run",
+      "Use declarative, inspectable path rules (Winapp2-style) instead of opaque heuristics",
+      "Default only high-confidence space reclaim (%TEMP%, Windows\\Temp, Recycle Bin); privacy wipes opt-in",
+      "Do not ship registry repair as a default or primary feature",
+      "Apply safety guards: skip in-use files, optional min-age, clear warnings for cookies/logins",
+      "No silent telemetry, forced startup, or bundled AV/browser",
+      "Harden distribution: signed reproducible builds; treat supply chain as a first-class risk",
+      "Avoid performance marketing for cache deletion; state space/privacy goals honestly",
+      "Expose first-class CLI/library API for automation without GUI nags",
+      "Keep aggressive community rulesets off-by-default and labeled by risk"
+    ],
+    "monetization_hooks": [
+      "Free tier limited to basic Health Check / current-user clean",
+      "Pro subscription: Smart Cleaning schedules, multi-user Cleans Everywhere, Performance Optimizer",
+      "Pro: Driver Updater, Software Updater, auto history/junk guards",
+      "Professional Plus / Premium Bundle: Recuva, Speccy, Defraggler",
+      "Installer upsell of CCleaner Browser and Avast/Norton ecosystem products",
+      "Business/Cloud centrally managed edition; Free restricted for commercial use"
+    ]
+  },
+  {
+    "product": "BleachBit",
+    "features": [
+      "App/browser caches and system temporary files (Linux ~/.cache and /tmp; Windows %TMP% and profile temps)",
+      "Application and system logs (including Windows Defender logs in practice)",
+      "Browser privacy artifacts: cookies, URL/history, form history, sessions, crash reports, site data (LocalStorage/IndexedDB), site preferences",
+      "Cookie manager (6.0+): keep selected cookies while cleaning Chromium- and Firefox-based browsers",
+      "Password wipe for major browsers (warning + expert-mode protection)",
+      "SQLite vacuum for browser DBs (space + speed without deleting data)",
+      "Deep scan leftovers: Thumbs.db, .DS_Store, *.bak/~ backups, node_modules, venv, __pycache__, Office-style tmp, VIM .swp under home or /",
+      "System: clipboard, Recycle Bin/trash, update installers, Windows Explorer shellbags/recent documents/thumbnails",
+      "Linux package cleaners: APT clean/autoclean/autoremove and /var/lib/apt/lists; DNF/yum/pacman-style cleaners",
+      "Linux localizations: unused locales under /usr/share/locale, man pages, Flatpak runtime locales (keep languages via prefs)",
+      "Windows registry key/value deletion via CleanerML; optional winapp2.ini community cleaners (2400+)",
+      "Custom user-defined paths under System; allowlist (skip list) for paths",
+      "Secure delete: single-pass overwrite of cleaner targets; shred arbitrary files/folders; rename before delete",
+      "Wipe empty (free) space on selected drives; fstrim on Linux partitions when available (6.0)",
+      "Linux-only: clear memory and swap; delete broken desktop shortcuts",
+      "Chaff: generate decoy data to raise cost of forensic recovery",
+      "CleanerML extensibility with env/XDG vars; paths for Firefox/Chrome profiles including snap/Flatpak",
+      "6.0 browser coverage: Vivaldi/Zen; expanded Chromium/Firefox artifact cleaners (shader/code caches, DIPS, IndexedDB, etc.)",
+      "Optional periodic update check (no auto-download); offline use without registration",
+      "Not a malware scanner: no antivirus engine or infection removal"
+    ],
+    "ui_model": "GUI: left-side tree of cleaners with nested options, per-option descriptions/warnings, Preview (list every file/size) then Delete with confirmation; Expert mode (5.1+) locks high-risk options (passwords, empty-space wipe, deep scan, shellbags, etc.) until enabled; cookie manager for selective cookie keep; shred files/folders from menu; preferences for overwrite-on-clean, drives for free-space wipe, languages, allowlist, custom paths. CLI: bleachbit / bleachbit_console.exe with --list-cleaners, --preview, --clean, option wildcards (app.*), --preset, --all-but-warning, --except, --overwrite, --shred, --wipe-empty-space for scripts/cron/Task Scheduler. Extensible CleanerML and optional winapp2.ini. Not a one-click smart-scan wizard; user-driven checkbox selection.",
+    "risks": [
+      "No undo: deletions permanent; overwrite and wipe empty space make recovery unlikely (ZDNET: create restore point first)",
+      "Aggressive options: browser passwords, cookies (logouts), sessions, DNF autoremove package removal",
+      "Wipe empty space fills the disk for minutes/hours; interrupting leaves huge random files in ~/.cache, /tmp, or %TMP%",
+      "Deep scan can flag wanted backups, node_modules, or project files if preview is skipped",
+      "SSD free-space wipe is weak (wear leveling) and causes write wear; less useful with full-disk encryption",
+      "Admin/root vs user split: system cleaners need elevation; dual runs may be required on Linux",
+      "Cleaning while apps (browsers) are open can fail or corrupt profiles",
+      "Antivirus false positives on BleachBit installers/binaries due to shredding heuristics",
+      "Political brand association (Clinton email server used BleachBit) and early 'Linux registry cleaner' controversy",
+      "Historical Recycle Bin junction/symlink following could delete unintended data (called fixed as important in 6.0)",
+      "Official product has no ads/upsell/telemetry beyond optional update check; freemium competitors are the upsell contrast"
+    ],
+    "lessons": [
+      "Default to dry-run/preview with explicit path listing and sizes before any delete",
+      "Ship a safe default profile; gate passwords, free-space wipe, and deep scan behind expert mode",
+      "Use declarative path rules with XDG/AppData variables; support Flatpak/snap profile layouts",
+      "Split reclaim-space, privacy-erase, and secure-wipe into distinct modes with different defaults",
+      "Document honest secure-delete limits (1-pass HDD; weak on SSD; prefer encryption)",
+      "First-class CLI: list, dry-run, clean, except, presets for automation and library embedding",
+      "Refuse to clean if target process is running; support allowlists and custom path include/exclude",
+      "Never follow junctions/symlinks into unexpected trees without an explicit policy",
+      "Deep scan needs age/size/denylist filters and forced interactive review",
+      "Crash-safe wipe: recoverable temp naming and a documented recovery cleaner",
+      "No ads, telemetry, or bundled crapware: primary trust differentiator vs freemium cleaners",
+      "Do not claim malware removal without a real scanner; do not oversell unrecoverability beyond OS/storage reality"
+    ],
+    "monetization_hooks": [
+      "BleachBit itself: none (GPLv3, no ads, no upsells, optional update check only)",
+      "Freemium cleaners typically upsell: expanded app cleaner packs",
+      "Real-time junk monitors and scheduled automatic cleanup",
+      "Registry cleaners / startup managers / driver updaters",
+      "Bundled antivirus or 'PC health' suites",
+      "Paid multi-pass shredding marketed as DoD/Gutmann (often oversold)",
+      "Tech-support / remote-help subscriptions",
+      "Cloud backup or premium support tiers"
+    ]
+  },
+  {
+    "product": "Stacer",
+    "features": [
+      "System Cleaner categories: package caches, crash reports, application logs, application caches, trash",
+      "Package cache scan/delete: /var/cache/apt/archives/ (APT) and /var/cache/pacman/pkg/ (pacman)",
+      "Crash reports under /var/crash (files)",
+      "Application logs: top-level files only in /var/log (not subdirectories)",
+      "Application caches: entries under ~/.cache (files and directories)",
+      "Empty Trash: ~/.local/share/Trash/files and ~/.local/share/Trash/info",
+      "Dashboard: CPU, memory, disk, network rates, basic system info",
+      "Startup Apps manager (autostart entries, often ~/.config/autostart)",
+      "Services: search, start/stop, enable/disable system services",
+      "Processes: list/sort by PID/CPU/memory, end process, refresh rate",
+      "Uninstaller for installed packages (dpkg/apt) and Snap packages (later versions)",
+      "Resources graphs (~60s) for CPU cores, RAM, disk, load average, network; disk pie chart in later UI",
+      "APT Repository Manager: enable/disable/edit/delete package sources",
+      "File Search (beta): files, directories, symlinks with advanced options",
+      "Helpers: hosts file manager; limited GNOME Settings tweaks; resource threshold alerts"
+    ],
+    "ui_model": "Qt desktop GUI with left-sidebar sections (all-in-one optimizer, not a CLI). System Cleaner flow: enable category checkboxes (or select all) -> System Scan -> tree of results with name and size (items unchecked by default) -> check files/categories -> Clean. Privileged actions use sudo; selected non-trash paths are removed with sudo rm -rf; trash is wiped recursively under the user Trash directory. Also includes monitoring, process/service control, uninstaller, APT sources, search, hosts, and GNOME tweaks.",
+    "risks": [
+      "Upstream abandoned: GitHub warns no further releases, so bugs and breakage accumulate",
+      "App-cache deletes from ~/.cache can slow app launches and disrupt sessions (e.g. browser re-login)",
+      "Deleting application logs can remove useful or important files; docs warn to keep current X.org, Apt, and Dpkg logs",
+      "Cleaner uses aggressive sudo rm -rf on selected paths with no documented dry-run, quarantine, or undo",
+      "Uninstaller can list and remove core packages; reviews note weak confirmation and no undo",
+      "Service toggles can break the session or require a reboot if critical services are stopped",
+      "Historical privilege UX: wrong sudo password could still open the UI while actions fail silently",
+      "Coarse categories (especially whole ~/.cache and top-level /var/log files) invite over-deletion via select-all",
+      "Not a malware or privacy product; optimizer framing can overstate safety/security value",
+      "Reports of hangs/slow scans on large cache trees on some distros"
+    ],
+    "lessons": [
+      "Copy scan-then-select with sizes and default-unchecked results rather than silent one-click mass delete",
+      "Copy multi-package-manager awareness for real cache roots (apt archives, pacman pkg cache, etc.)",
+      "Copy open-source no-adware model; optional donations instead of nags or bundled upsells",
+      "Avoid treating all of ~/.cache as equally safe; split high-risk trees (browsers) with strong warnings",
+      "Default-protect critical logs (apt/dpkg/Xorg-class) instead of offering them as ordinary junk",
+      "Prefer library+CLI with dry-run, explicit path rules, and clear failure when privileges are missing",
+      "Prefer quarantine/trash or --force over immediate irreversible rm -rf as the only path",
+      "Stay maintained; an abandoned system cleaner becomes a liability in distro repos",
+      "Do not bundle process kill, service disable, hosts edits, or GNOME tweaks into a junk cleaner without hard gates",
+      "Require confirmation and safety lists for package removal; never market core packages as casual cleanup"
+    ],
+    "monetization_hooks": [
+      "Stacer itself: free MIT with Patreon/OpenCollective donations only (no freemium paywall found)",
+      "Class comparison (not Stacer): freemium cleaners often upsell scheduled/auto clean, premium monitors, driver updaters, malware add-ons, and multi-device licenses"
+    ]
+  },
+  {
+    "product": "ppduster design brief (OnyX/AppCleaner/DaisyDisk/CleanMyMac)",
+    "features": [
+      "User/system/app/font/internet cache cleaning (OnyX: System/User/Internet/Font caches; CleanMyMac System Junk)",
+      "Log and diagnostic report cleanup (OnyX Cleaning: Log messages/reports; CleanMyMac junk logs)",
+      "App leftover uninstall: ~/Library/{Application Support,Preferences,Caches,Logs,Containers,Saved Application State} plus LaunchAgents/Daemons",
+      "SmartDelete-style trash watch for .app removals with selectable related files (AppCleaner)",
+      "Force Empty Trash and rebuild indexes/DBs (OnyX: Trash, Launch Services, Spotlight, Mail, XPC/CoreDuet)",
+      "Mail attachment local copies with review before delete (CleanMyMac Mail Attachments)",
+      "Large/old/user bulk: ~/Downloads, ~/Movies, ~/Music, iOS backups ~/Library/Application Support/MobileSync/Backup",
+      "Visual or size-ranked disk map including hidden/System Data, purgeable space, APFS snapshots (DaisyDisk)",
+      "Admin/Full Disk Access scan for restricted folders (DaisyDisk, OnyX, CleanMyMac deep modules)",
+      "Optional privacy wipe: browsing history/recent items (CleanMyMac Protection); not core junk reclaim",
+      "Optional malware module only with real engine (CleanMyMac Moonlock); high false-positive risk if naive",
+      "Dry-run scan with per-path size, category, confidence, and user confirm before delete (DaisyDisk/AppCleaner pattern)"
+    ],
+    "ui_model": "Preferred: CLI+library with scan→plan(dry-run)→apply; category checklists (OnyX-style); leftover file picklists (AppCleaner); optional size-map exploration (DaisyDisk). Avoid freemium one-click Smart Care that frames routine state as problems (CleanMyMac).",
+    "risks": [
+      "False positives labeling legitimate system/Gatekeeper data as malware (reported with OnyX-style scans)",
+      "Name-matched leftover deletion removing shared or still-needed Library files (AppCleaner-class tools)",
+      "Aggressive cache/log wipes that refill quickly or break apps until rebuild",
+      "Deleting under ~/Library/Application Support without understanding app libraries (DaisyDisk warns)",
+      "Breaking media libraries if content deleted outside Photos/Music/Time Machine UIs",
+      "Manufactured urgency and free-tier nags selling paid clean (CleanMyMac/ freemium peer complaints)",
+      "Default telemetry and privacy concerns in commercial cleaners",
+      "Supply-chain malware risk for privileged auto-updating cleaners (CCleaner 2017, Windows precedent)",
+      "Wrong OS-version or overly deep system tweaks on modern SIP-locked macOS (OnyX version pinning)",
+      "Community skepticism that macOS self-maintenance makes bulk cleaners low-value or harmful"
+    ],
+    "lessons": [
+      "Default to dry-run; show exact paths and sizes; never silent bulk delete",
+      "Hard-block system-critical paths (DaisyDisk safety stoppers)",
+      "Prefer reclaiming large user bulk (downloads, backups, sims, leftovers) over RAM/optimize myths",
+      "Narrow high-trust modules (uninstall leftovers, caches, logs) beat all-in-one scareware",
+      "OS-version-aware behavior and explicit categories reduce breakage (OnyX)",
+      "No default telemetry; scan metadata only when possible (DaisyDisk privacy model)",
+      "Avoid malware theater without a low-FP engine; never sell routine state as infection",
+      "Keep apply step human-confirmed; confidence scores for fuzzy leftover matching",
+      "Treat auto-update signing and privilege as security-critical (CCleaner lesson)",
+      "Document what is safe vs use Apple app UIs for Photos/Time Machine content"
+    ],
+    "monetization_hooks": [
+      "Free scan / trial that unlocks paid Clean (CleanMyMac-style freemium)",
+      "Subscription vs one-time license and multi-Mac seats",
+      "Malware/real-time protection upsell (Moonlock tier)",
+      "Cloud storage cleanup to avoid paid iCloud/Drive upgrades",
+      "Menu bar monitoring stickiness (CPU/RAM/storage)",
+      "Lifetime/corporate licenses (DaisyDisk model for analyzers)",
+      "Donationware without feature hostage (OnyX)"
+    ]
+  },
+  {
+    "product": "Junk cleaners (Wise Disk Cleaner, Glary Utilities, CCleaner, BleachBit, CleanMyMac)",
+    "features": [
+      "Temp and log cleanup: Windows %TEMP%/%WINDIR%\\Temp, app logs, memory dumps (*.dmp), thumbnail/icon caches",
+      "Browser junk: cache, history, cookies, autocomplete for Chrome/Firefox/Edge/IE/Opera/Safari (20+ browsers in Wise Store listing)",
+      "Windows Update / installer residues: downloaded update files, installer baseline cache, obsolete installation files",
+      "App leftovers: Office, Adobe, Java, Flash, WinRAR/WinZip, Steam HTML cache, 300+ apps (Wise); CCleaner app-specific cleaners",
+      "Recycle Bin / Recent Documents / Quick Access style traces (Wise, PortableApps, Glary Tracks Eraser)",
+      "Privacy tracks: visited URLs, typed URLs, recent docs, index.dat, form history (Glary Tracks Eraser; Wise warns on passwords/cookies)",
+      "Advanced extension scan: *.tmp *.temp *.chk *.gid *.dmp plus custom types and empty custom folders (Wise Advanced Cleaner)",
+      "System slimming: IME packs, help files, wallpapers, sample media (Wise; can break SFC completeness)",
+      "Registry invalid-entry cleaner (CCleaner, Glary; Microsoft does not support this class of tool)",
+      "Secure delete / overwrite and free-space or empty-space wipe (Wise Safe Deletion, CCleaner MFT wipe, BleachBit shred/wipe-empty-space)",
+      "HDD defrag + SSD TRIM (Wise Disk Cleaner)",
+      "Duplicates, large/old files, disk space analyzer, startup manager, software updater (Glary suite; CleanMyMac clutter tools)",
+      "Mac system junk, complete app uninstall leftovers, malware scan, cloud cleanup, Smart Care multi-routine (CleanMyMac)",
+      "macOS cache targets commonly cited by cleanup guides: ~/Library/Caches, logs, Trash, System Data (snapshots/backups/app caches)",
+      "Extensible rules: BleachBit CleanerML + winapp2.ini; SQLite vacuum-style specialized actions",
+      "Scheduled/auto clean: Wise AutoClean; Glary Pro scheduled maintenance; BleachBit cron/Task Scheduler CLI"
+    ],
+    "ui_model": "Dominant pattern is scan-then-select-then-delete: category trees with Recommended presets (Wise Common Cleaner; CCleaner Analyze/Clean; BleachBit option checkboxes + preview). Suites add a One-Click/Smart/Health wizard (Glary 1-Click Maintenance, CleanMyMac Smart Care, CCleaner Health Check) plus deep modules. Power path is CLI: BleachBit --list-cleaners/--preview/--clean/--preset/--all-but-warning/--except for scripts and scheduled tasks. Safety UX includes ignore/exclusion lists, open file location, export results, and explicit warnings on passwords/cookies (Wise, BleachBit).",
+    "risks": [
+      "Registry cleaners: Microsoft unsupported; can delete needed keys and break apps/OS with little speed benefit",
+      "False confidence from huge freeable-space claims and scareware-style problem counts (CCleaner nags; MacKeeper PUP/affiliate fake scans)",
+      "Aggressive or irreversible deletes: passwords, cookies, System Restore points, OS help/IME/slimming (Wise SFC warning)",
+      "CCleaner 2017 supply-chain malware in official build (~2.27M machines); later breach attempt; trust damage for all cleaners",
+      "Telemetry and hard-to-disable monitoring (CCleaner Active Monitoring/Smart Cleaning controversy)",
+      "Bundled AV/browser/PUA installers (CCleaner/Avast; Microsoft PUA flag for bundling)",
+      "Unwanted persistence: tray apps, scheduled tasks, freemium nags, hard-to-exit startup (CCleaner v7 complaints)",
+      "System Slimming / deep OS cleanup that later fails integrity checks or removes needed input methods",
+      "Secure wipe misused as performance tool: slow, does not free extra space when wiping empty space",
+      "Suite bloat increases attack surface and confuses safe junk vs security claims"
+    ],
+    "lessons": [
+      "Default to dry-run/preview and Recommended soft targets only; require explicit opt-in for privacy and OS-slimming categories",
+      "Ship first-class CLI + library API like BleachBit (list, preview, clean, except, warning flags) for automation without a GUI",
+      "Use declarative community-extensible cleaner rules (CleanerML/winapp2-style) instead of opaque binary scanners",
+      "Per-path exclude lists, open-location, and exportable scan reports build trust and recoverability",
+      "Do not make registry cleaning a core feature; treat Microsoft’s non-support as a product constraint",
+      "Never use fake threat counts, inflated freeable GB, or forced AV/browser bundles",
+      "Mark irreversible categories (passwords, cookies, restore points, system components) with hard warnings",
+      "Prefer offline, no-telemetry operation; any metrics must be opt-in and documented",
+      "Separate junk cleaning from malware claims unless real detection is in scope and independently validated",
+      "Document OS paths by platform (Windows Temp/Update/browser profiles; macOS ~/Library/Caches and System Data caveats; Linux ~/.cache and package caches)",
+      "If automation ships, schedule only the same safe preset as the default GUI—never silent deep wipe"
+    ],
+    "monetization_hooks": [
+      "Free basic clean → paid suite (Wise Care 365, Glary Pro all-in-one)",
+      "Gate scheduler, deep clean, and auto privacy-on-shutdown behind Pro (Glary, CCleaner)",
+      "Subscription Mac maintenance (CleanMyMac trial → monthly/yearly)",
+      "Cross-sell antivirus, VPN, Chromium browser, driver updater (CCleaner/Gen Digital ecosystem)",
+      "Upsell file recovery, shredder, duplicate finder, priority support",
+      "Restrict Free to home use; charge commercial/network licenses (CCleaner)",
+      "Scareware/PUP affiliate installs (anti-pattern: MacKeeper-class ads—avoid entirely)"
+    ]
+  },
+  {
+    "product": "Built-in OS cleaners (Windows Storage Sense + macOS Storage/Optimize Storage)",
+    "features": [
+      "Windows Storage Sense: auto-delete temp files on low disk or schedule (system drive only)",
+      "Windows: Recycle Bin age policy and optional Downloads not-opened-for-N-days policy",
+      "Windows: OneDrive/cloud dehydrate to online-only for inactive files (not permanent delete; Always keep exempt)",
+      "Windows Temporary files UI: Windows.old/previous installs, Update leftovers, Delivery Optimization, thumbnails, browser temp",
+      "macOS Storage dashboard: category sizes (Apps, Documents, Messages, Photos, Mail, TV, Trash, System Data/Other)",
+      "macOS Store in iCloud: Desktop/Documents, Photos, Messages with local recent/optimized copies",
+      "macOS Optimize Storage: remove watched Apple TV content; keep only recent Mail attachments when space needed",
+      "macOS Empty Trash automatically after 30 days",
+      "macOS automatic safe cleanup of caches/logs: temp DB files, interrupted downloads, staged updates, Safari website data",
+      "User-directed free space: Downloads, unused apps, old iOS backups, Mail junk/deleted, streamable media, unused user accounts",
+      "Safe Mode temporary system cache clear for install headroom",
+      "Common junk path categories third parties also target: %TEMP%, C:\\Windows\\Temp, ~/Library/Caches, ~/Library/Logs, Trash",
+      "App leftover locations (uninstall tools): ~/Library/Application Support, Preferences, Containers, Saved Application State, LaunchAgents",
+      "BleachBit-class extras (not built-in): multi-app browser cleaners, secure delete, free-space wipe, CLI, CleanerML rules",
+      "CCleaner-class extras (not built-in): registry cleaner, startup manager, System Restore point wipe, driver/software updater (paid)"
+    ],
+    "ui_model": "Policy-driven automation (Storage Sense schedule/low-disk; macOS Optimize/iCloud recommendations) plus category storage dashboard with opt-in Temporary files / More Info lists; explicit user confirmation for Downloads and content deletion; third-party pattern is checkbox categories or one-click Smart Care then review-delete (prefer dry-run report over opaque clean-all)",
+    "risks": [
+      "Downloads or user-content cleanup deletes real files if age policies are enabled carelessly",
+      "Registry cleaners: Microsoft and experts advise against; risk of breakage with no performance benefit",
+      "False positives: cleaners mislabel user data as cache (e.g. music libraries, needed app support files)",
+      "Aggressive app leftover deletion can remove shared prefs, licenses, or data still needed after reinstall",
+      "CCleaner 2017 supply-chain malware in official build; later telemetry and bundling/PUA controversies",
+      "Freemium scare metrics, nag screens, and upsell of driver updater/AV/browser bundles",
+      "Opaque System Data/Other on macOS drives users to over-aggressive third-party wipes",
+      "Privacy clean of browser profiles logs users out and drops sessions/passwords/cookies if selected",
+      "Free-space wipe/shred is slow and can wear SSDs; not equivalent to secure erase of whole disk",
+      "Cloud optimize frees local space but depends on iCloud/OneDrive quotas and network for rehydrate"
+    ],
+    "lessons": [
+      "Default only OS-safe temp/trash/cache categories; require opt-in for Downloads, Documents, browser profiles, Application Support",
+      "Always scan and list absolute paths with sizes and risk tier before delete; dry-run by default for CLI/library",
+      "Use age/last-access policies like Storage Sense instead of blanket folder wipes",
+      "Separate dehydrate/online-only from permanent delete in wording and APIs",
+      "Do not implement registry cleaning or fake RAM/CPU boost claims",
+      "No telemetry-by-default, no silent bundled extras, no scare-ware gauges for upsell",
+      "For app leftovers, bind to uninstalled app identity and preview like AppCleaner; never silent deep Library clean",
+      "Prefer open, auditable cleaner rules (CleanerML-style) over proprietary black-box junk databases",
+      "Scope clearly: which volumes, which users, what is purgeable vs user data",
+      "Malware belongs to real security tools, not as a junk-cleaner checkbox that invents confidence"
+    ],
+    "monetization_hooks": [
+      "Scheduled/auto Smart Cleaning (CCleaner Pro, CleanMyMac)",
+      "Driver updater and software updater upsells",
+      "Malware/real-time protection modules",
+      "Multi-device, business, and network editions",
+      "Subscription vs forced upgrade after rebrand/version drop",
+      "iCloud/cloud storage plan upgrades when optimize storage is used (Apple)",
+      "Bundle into suite (Setapp, Gen Digital/Avast)",
+      "Secure wipe / deep privacy clean gated behind paid tiers"
+    ]
+  },
+  {
+    "product": "ppduster",
+    "features": [
+      "Scan rebuildable workspace dirs: node_modules, Pods, .build, .gradle, build, target, __pycache__, .next/.vite/.turbo (profile-based)",
+      "Package-manager caches: ~/.npm/_cacache, Yarn cache (~/Library/Caches/Yarn), pnpm store, ~/.bun/install/cache",
+      "JVM/language caches: ~/.gradle/caches+daemon, ~/.m2/repository, pip/cargo/go-build/pub caches",
+      "Xcode/macOS dev: ~/Library/Developer/Xcode/DerivedData, Archives, *DeviceSupport, Caches/com.apple.dt.Xcode, CoreSimulator",
+      "Docker reclaimables via system df + prune: stopped containers, unused networks, dangling/unused images, build cache; volumes as separate high-risk tier",
+      "Size + last-modified/age ranking and sort; dry-run; JSON/stream + library API for automation",
+      "Risk tiers: safe cache vs costly reinstall vs data (named volumes, archives, device support symbols)",
+      "Sensitive/generic-name warnings (app-bundled node_modules; basename traps like Library/out/deps)",
+      "Prefer native tool prune (docker/npm/pnpm/yarn) when safer than raw recursive delete"
+    ],
+    "ui_model": "CLI+library defaulting to scan-only report, then interactive TUI list (npkill-style multi-select by path/size/age) and/or category panels (DevCleaner-style); confirm per risk tier; optional --force after dry-run; no wizard and no pre-selected deletes",
+    "risks": [
+      "Docker --volumes / volume prune can destroy DB and app state when containers are stopped",
+      "docker system prune -a removes unused tagged images, forcing re-pulls",
+      "Desktop Docker prune may not free host disk until VHDX/Docker.raw compact or Clean/Purge data",
+      "Deleting Archives or Device Support loses release history and forces large redownloads",
+      "Basename-only targets can hit wrong trees (Unity Library vs ~/Library; generic out/deps)",
+      "delete-all / clean-all without dry-run breaks system apps that ship node_modules",
+      "Size mis-estimates and non-undoable deletes; cleaning while Xcode/Docker busy causes odd failures",
+      "Industry freemium cleaners associated with upsell, telemetry, and past malware scandals—avoid that trust model"
+    ],
+    "lessons": [
+      "Rebuildable-only catalogs with ecosystem profiles beat vague 'junk' claims",
+      "Never auto-select items; interactive consent is the DevCleaner/npkill trust pattern",
+      "Separate inventory (df/report) from mutate (prune/delete) like Docker",
+      "Warn and gate high-impact classes: volumes, archives, device support, global package stores",
+      "Expose dry-run, JSON, and a library API for CI and custom UIs",
+      "Show size and staleness so users delete old projects first",
+      "Limit default scope to user Home/workspaces; opt-in broader roots",
+      "Use path-context rules, not basename-only matching",
+      "Stay open, tip/donation optional, no malware/optimizer paywalls or opaque telemetry"
+    ],
+    "monetization_hooks": [
+      "Optional tips/donations while core CLI stays free (DevCleaner/npkill pattern)",
+      "Paid GUI, scheduled reminders, or multi-machine reports without locking scan/delete",
+      "Avoid freemium 'scan free / clean paid' and malware-upsell suites used by general cleaners"
+    ]
+  }
+]

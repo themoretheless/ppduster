@@ -1,0 +1,77 @@
+pack: linux
+rules:
+  - id: linux-xdg-cache
+    name: XDG user cache
+    description: Files under $XDG_CACHE_HOME / ~/.cache.
+    category: caches
+    platform: linux
+    risk: low
+    default_enabled: true
+    min_age_days: 3
+    paths:
+      - "$XDG_CACHE_HOME"
+      - "$HOME/.cache"
+    exclude_globs:
+      - "mesa_shader_cache/**"
+      - "nvidia/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: linux-thumbnails
+    name: Thumbnail cache
+    description: Freedesktop thumbnail cache.
+    category: caches
+    platform: linux
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/.cache/thumbnails"
+      - "$HOME/.thumbnails"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: linux-tmp
+    name: User and system temp
+    description: Temporary files (age-filtered).
+    category: temp
+    platform: linux
+    risk: low
+    default_enabled: true
+    min_age_days: 2
+    paths:
+      - "$TMPDIR"
+      - "$HOME/.local/share/Trash/files"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: linux-user-logs
+    name: User log files
+    description: Common user-level log directories.
+    category: logs
+    platform: linux
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/.local/share/xorg"
+      - "$HOME/.local/state"
+    include_globs:
+      - "**/*.log"
+      - "**/*.old"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: linux-journal-report
+    name: systemd journal (report-only)
+    description: Does not vacuum journald; only reports if path exists for awareness.
+    category: logs
+    platform: linux
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - "/var/log/journal"
+    delete_mode: path
+    max_depth: 1

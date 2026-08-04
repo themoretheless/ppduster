@@ -1,0 +1,1081 @@
+[
+  {
+    "platform": "macos",
+    "categories": [
+      {
+        "id": "macos-user-caches",
+        "label": "User Library Caches",
+        "paths_or_globs": [
+          "$HOME/Library/Caches"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Safe regenerable app caches. Prefer contents-only delete with min_age. Exclude CloudKit, HomeKit, Find My, and Safari from bulk wipe (Safari handled separately). Do not delete the Caches directory itself."
+      },
+      {
+        "id": "macos-user-logs",
+        "label": "User Library Logs",
+        "paths_or_globs": [
+          "$HOME/Library/Logs"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "User-space app logs only (~/Library/Logs). Safe to remove contents; leave the Logs folder. Do not include /var/log or /private/var/log (system)."
+      },
+      {
+        "id": "macos-saved-state",
+        "label": "Saved Application State",
+        "paths_or_globs": [
+          "$HOME/Library/Saved Application State"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Window restore / Resume state (*.savedState). Apps recreate on next launch. Only clears restore data, not documents."
+      },
+      {
+        "id": "macos-user-tmpdir",
+        "label": "User temporary directory (TMPDIR)",
+        "paths_or_globs": [
+          "$TMPDIR"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Resolves to this user's /private/var/folders/.../T/. Clean aged contents only; skip open/in-use files. Never wipe sibling user folders under /private/var/folders."
+      },
+      {
+        "id": "macos-system-tmp",
+        "label": "Shared system temp (/tmp)",
+        "paths_or_globs": [
+          "/tmp",
+          "/private/tmp"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "World-writable shared temps. Default off: other users and running processes may use files here. Age-filter + contents-only if enabled; never delete the directory nodes."
+      },
+      {
+        "id": "macos-var-folders-report",
+        "label": "Darwin /private/var/folders (report-only)",
+        "paths_or_globs": [
+          "/private/var/folders"
+        ],
+        "risk": "report-only",
+        "default_enabled": false,
+        "notes": "Per-user 0/C/T trees for all accounts. Report size only; never auto-delete the tree. User cleanup goes through $TMPDIR (T) or careful owned C caches, not a bulk rm of /private/var/folders."
+      },
+      {
+        "id": "macos-homebrew-cache",
+        "label": "Homebrew download cache",
+        "paths_or_globs": [
+          "$HOME/Library/Caches/Homebrew",
+          "$HOMEBREW_CACHE"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Default brew --cache is $HOME/Library/Caches/Homebrew (overridable via HOMEBREW_CACHE). Cached bottles/sources; brew re-downloads as needed. Prefer brew cleanup when available."
+      },
+      {
+        "id": "macos-xcode-derived-data",
+        "label": "Xcode DerivedData",
+        "paths_or_globs": [
+          "$HOME/Library/Developer/Xcode/DerivedData"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Default DerivedData location (Xcode Settings > Locations). Safe but forces full rebuilds/reindex. Default off for developer machines."
+      },
+      {
+        "id": "macos-ios-device-support",
+        "label": "Xcode device support symbols",
+        "paths_or_globs": [
+          "$HOME/Library/Developer/Xcode/iOS DeviceSupport",
+          "$HOME/Library/Developer/Xcode/watchOS DeviceSupport",
+          "$HOME/Library/Developer/Xcode/tvOS DeviceSupport",
+          "$HOME/Library/Developer/Xcode/visionOS DeviceSupport"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Symbols for attached devices; large and regenerable when the device reconnects. Prefer deleting old OS version folders only."
+      },
+      {
+        "id": "macos-xcode-archives",
+        "label": "Xcode Archives (report-only)",
+        "paths_or_globs": [
+          "$HOME/Library/Developer/Xcode/Archives"
+        ],
+        "risk": "report-only",
+        "default_enabled": false,
+        "notes": "May be required for App Store uploads, TestFlight, and crash symbolication (dSYM). Measure only; delete only via Organizer with user intent."
+      },
+      {
+        "id": "macos-coresimulator-caches",
+        "label": "CoreSimulator caches",
+        "paths_or_globs": [
+          "$HOME/Library/Developer/CoreSimulator/Caches"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Simulator dyld/runtime caches only. Do not delete Devices or system runtimes under /Library/Developer/CoreSimulator without explicit user action (use simctl for devices/runtimes)."
+      },
+      {
+        "id": "macos-mail-downloads",
+        "label": "Mail Downloads (attachments)",
+        "paths_or_globs": [
+          "$HOME/Library/Containers/com.apple.mail/Data/Library/Mail Downloads"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Attachments Mail opened and copied here; not mailbox store. Can free space but may remove local copies still wanted. Never touch $HOME/Library/Mail or other Mail container data (Accounts, MailData, Preferences)."
+      },
+      {
+        "id": "macos-browser-caches",
+        "label": "Browser disk caches",
+        "paths_or_globs": [
+          "$HOME/Library/Caches/Google/Chrome",
+          "$HOME/Library/Caches/Chromium",
+          "$HOME/Library/Caches/Microsoft Edge",
+          "$HOME/Library/Caches/com.microsoft.edgemac",
+          "$HOME/Library/Caches/Firefox",
+          "$HOME/Library/Caches/BraveSoftware",
+          "$HOME/Library/Caches/com.apple.Safari",
+          "$HOME/Library/Caches/com.apple.Safari.SafeBrowsing"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Disk/network caches only; do not touch Application Support profiles, cookies, logins, or ~/Library/Safari bookmarks/history. Close browsers first when possible. Safari/WebKit caches can be recreated but are stickier while Safari is running."
+      },
+      {
+        "id": "macos-quicklook-cache",
+        "label": "Quick Look thumbnail cache",
+        "paths_or_globs": [
+          "$HOME/Library/Caches/com.apple.QuickLook.thumbnailcache",
+          "$HOME/Library/Caches/CloudKit/com.apple.QuickLook.thumbnailcache"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Thumbnail caches rebuilt by Quick Look as files are previewed."
+      },
+      {
+        "id": "macos-swiftpm-cache",
+        "label": "Swift Package Manager cache",
+        "paths_or_globs": [
+          "$HOME/Library/Caches/org.swift.swiftpm",
+          "$HOME/Library/Caches/swiftpm"
+        ],
+        "risk": "low",
+        "default_enabled": false,
+        "notes": "Resolved SPM package cache; re-downloaded on next build. Default off to avoid surprise network/build cost on CI-like machines."
+      }
+    ],
+    "never_touch": [
+      "$HOME",
+      "$HOME/Documents",
+      "$HOME/Desktop",
+      "$HOME/Downloads",
+      "$HOME/Pictures",
+      "$HOME/Movies",
+      "$HOME/Music",
+      "$HOME/Photos Library.photoslibrary",
+      "$HOME/.ssh",
+      "$HOME/.gnupg",
+      "$HOME/.aws",
+      "$HOME/Library/Keychains",
+      "$HOME/Library/Mail",
+      "$HOME/Library/Messages",
+      "$HOME/Library/Mobile Documents",
+      "$HOME/Library/CloudStorage",
+      "$HOME/Library/Preferences",
+      "$HOME/Library/Developer/Xcode/UserData",
+      "/System",
+      "/Library"
+    ]
+  },
+  {
+    "platform": "macos",
+    "categories": [
+      {
+        "id": "macos-user-caches",
+        "label": "User Library Caches",
+        "paths_or_globs": [
+          "$HOME/Library/Caches"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Primary safe reclaim surface. Delete contents of aged app cache dirs, not the Caches folder node itself. Exclude CloudKit, HomeKit, Find My, and full Safari tree from bulk auto-clean unless browser-cache category is on. Never scan /System/Library/Caches or /Library/Caches as rule roots."
+      },
+      {
+        "id": "macos-user-logs",
+        "label": "User Library Logs",
+        "paths_or_globs": [
+          "$HOME/Library/Logs"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "User-scoped app logs only. Regenerable diagnostic text; keep min_age (e.g. 7d). Do not touch /var/log or /Library/Logs without elevated opt-in."
+      },
+      {
+        "id": "macos-saved-application-state",
+        "label": "Saved Application State",
+        "paths_or_globs": [
+          "$HOME/Library/Saved Application State"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Window restoration blobs; apps recreate on next launch. Low user impact."
+      },
+      {
+        "id": "macos-user-tmp",
+        "label": "User temporary directory",
+        "paths_or_globs": [
+          "$TMPDIR"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "macOS per-user temp is typically under /var/folders/.../T via $TMPDIR. Only delete aged contents; never target /private/var/folders wholesale or other users' folders."
+      },
+      {
+        "id": "macos-homebrew-cache",
+        "label": "Homebrew download cache",
+        "paths_or_globs": [
+          "$HOME/Library/Caches/Homebrew"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Default brew --cache location. Bottles/sources re-download; prefer brew cleanup for live Cellar interaction. Safe contents wipe of aged downloads."
+      },
+      {
+        "id": "macos-quicklook-cache",
+        "label": "Quick Look thumbnail cache",
+        "paths_or_globs": [
+          "$HOME/Library/Caches/com.apple.QuickLook.thumbnailcache",
+          "$HOME/Library/Caches/CloudKit/com.apple.QuickLook.thumbnailcache"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Thumbnail indexes rebuild via qlmanage/Finder. Narrow paths only; do not wipe all CloudKit."
+      },
+      {
+        "id": "macos-trash",
+        "label": "User Trash",
+        "paths_or_globs": [
+          "$HOME/.Trash"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "User-intended discard but irreversible after empty. Off by default; confirm UI/dry-run. Volume Trashes under /.Trashes are out of scope for auto-clean."
+      },
+      {
+        "id": "macos-xcode-derived-data",
+        "label": "Xcode DerivedData",
+        "paths_or_globs": [
+          "$HOME/Library/Developer/Xcode/DerivedData",
+          "$HOME/Library/Caches/com.apple.dt.Xcode"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Build intermediates; next build is cold/full. Safe to clear when Xcode is quit. Not source code."
+      },
+      {
+        "id": "macos-xcode-device-support",
+        "label": "Xcode iOS DeviceSupport",
+        "paths_or_globs": [
+          "$HOME/Library/Developer/Xcode/iOS DeviceSupport"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Device symbols for debugging; large and regenerable when device reconnects. Keep recent platforms if actively debugging."
+      },
+      {
+        "id": "macos-coresimulator-caches",
+        "label": "CoreSimulator caches",
+        "paths_or_globs": [
+          "$HOME/Library/Developer/CoreSimulator/Caches"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "dyld and related simulator caches grow large and rebuild. Do NOT auto-delete Devices/ (wipes simulator VMs and app data); that stays report-only or manual simctl."
+      },
+      {
+        "id": "macos-xcode-archives",
+        "label": "Xcode Archives",
+        "paths_or_globs": [
+          "$HOME/Library/Developer/Xcode/Archives"
+        ],
+        "risk": "report-only",
+        "default_enabled": false,
+        "notes": "May hold dSYMs and App Store submission artifacts. Measure and list only; never auto-delete."
+      },
+      {
+        "id": "macos-browser-disk-cache",
+        "label": "Browser disk cache (not profiles)",
+        "paths_or_globs": [
+          "$HOME/Library/Caches/Google/Chrome",
+          "$HOME/Library/Caches/Chromium",
+          "$HOME/Library/Caches/Microsoft Edge",
+          "$HOME/Library/Caches/Firefox",
+          "$HOME/Library/Caches/com.apple.Safari/WebKitCache",
+          "$HOME/Library/Caches/com.apple.Safari/fsCachedData",
+          "$HOME/Library/Containers/com.apple.Safari/Data/Library/Caches"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "HTTP/disk caches only. Leaves cookies, passwords, extensions, Local Storage, and profile DBs alone. Default off because active browsers lock files and Safari cache layout varies by version."
+      },
+      {
+        "id": "macos-browser-privacy-data",
+        "label": "Browser profiles and privacy data",
+        "paths_or_globs": [
+          "$HOME/Library/Application Support/Google/Chrome",
+          "$HOME/Library/Application Support/Firefox",
+          "$HOME/Library/Application Support/Microsoft Edge",
+          "$HOME/Library/Safari",
+          "$HOME/Library/Cookies",
+          "$HOME/Library/Caches/com.apple.Safari"
+        ],
+        "risk": "high",
+        "default_enabled": false,
+        "notes": "EXPLICIT PRIVACY MODE ONLY. Logs users out, drops history/cookies/site data. Blocked by never_touch for normal auto-clean; enable only with dual confirmation and dry-run. Prefer browser-native clear APIs when available."
+      },
+      {
+        "id": "macos-mail-downloads",
+        "label": "Mail attachment downloads",
+        "paths_or_globs": [
+          "$HOME/Library/Containers/com.apple.mail/Data/Library/Mail Downloads"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Attachments Mail saved to disk; may be the only local copy. Requires narrow allowlist of this subpath only; never delete $HOME/Library/Mail or the whole com.apple.mail container."
+      },
+      {
+        "id": "macos-ios-device-backups",
+        "label": "Local iPhone/iPad backups",
+        "paths_or_globs": [
+          "$HOME/Library/Application Support/MobileSync/Backup"
+        ],
+        "risk": "report-only",
+        "default_enabled": false,
+        "notes": "Full device backups via Finder/iTunes. Irreplaceable without another backup. Report size only; user deletes via Finder Manage Backups or explicit manual action."
+      },
+      {
+        "id": "macos-package-manager-caches",
+        "label": "Language package manager caches",
+        "paths_or_globs": [
+          "$HOME/Library/Caches/pip",
+          "$HOME/Library/Caches/Yarn",
+          "$HOME/Library/Caches/npm",
+          "$HOME/Library/Caches/go-build",
+          "$HOME/Library/Caches/CocoaPods",
+          "$HOME/.npm/_cacache",
+          "$HOME/.cache/pip",
+          "$HOME/.cache/yarn",
+          "$XDG_CACHE_HOME/pip",
+          "$XDG_CACHE_HOME/yarn"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Regenerable download caches for common toolchains on macOS. Do not delete pnpm global store, full .cargo registry sources blindly, or project node_modules/target dirs from this category."
+      }
+    ],
+    "never_touch": [
+      "/System",
+      "/Applications",
+      "/Library",
+      "/usr",
+      "/bin",
+      "/sbin",
+      "/private/var/db",
+      "$HOME/Documents",
+      "$HOME/Desktop",
+      "$HOME/Pictures",
+      "$HOME/Photos Library.photoslibrary",
+      "$HOME/.ssh",
+      "$HOME/.gnupg",
+      "$HOME/Library/Keychains",
+      "$HOME/Library/Mail",
+      "$HOME/Library/Messages",
+      "$HOME/Library/Mobile Documents",
+      "$HOME/Library/CloudStorage",
+      "$HOME/Library/Application Support/Google/Chrome",
+      "$HOME/Library/Safari"
+    ]
+  },
+  {
+    "platform": "linux",
+    "categories": [
+      {
+        "id": "xdg-user-cache",
+        "label": "XDG user cache",
+        "paths_or_globs": [
+          "$XDG_CACHE_HOME",
+          "$HOME/.cache"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Non-essential app caches per XDG (default $HOME/.cache). Prefer contents-only delete with min_age_days>=3. Exclude GPU/driver shader dirs (mesa_shader_cache, nvidia, amd/gl_shader_cache) if wipe causes long recompiles. Do not treat as a free-for-all over nested browser profile data if linked outside pure cache trees."
+      },
+      {
+        "id": "thumbnails",
+        "label": "Thumbnail cache",
+        "paths_or_globs": [
+          "$XDG_CACHE_HOME/thumbnails",
+          "$HOME/.cache/thumbnails",
+          "$HOME/.thumbnails"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "FreeDesktop thumbnail cache (normal/large/x-large/xx-large/fail). Regenerated by file managers. Legacy ~/.thumbnails still appears on older desktops. Safe contents wipe; min_age_days>=7 optional to keep recent previews."
+      },
+      {
+        "id": "user-temp-and-trash",
+        "label": "User temp and Trash",
+        "paths_or_globs": [
+          "$TMPDIR",
+          "$XDG_RUNTIME_DIR",
+          "$HOME/.local/share/Trash/files",
+          "$HOME/.local/share/Trash/info"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Age-filter $TMPDIR (min_age_days>=2). Trash is user-recoverable junk. Never wipe whole $XDG_RUNTIME_DIR (sockets/locks for live session); if included, only age-stale nested cache-like subdirs or omit runtime entirely and keep Trash+$TMPDIR. Prefer omitting $XDG_RUNTIME_DIR from auto-clean in implementation."
+      },
+      {
+        "id": "user-logs",
+        "label": "User log files",
+        "paths_or_globs": [
+          "$HOME/.local/state",
+          "$HOME/.local/share/xorg",
+          "$XDG_STATE_HOME"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Restrict to **/*.log and **/*.old under state trees. XDG_STATE_HOME defaults to $HOME/.local/state. Do not delete non-log state (history DBs, app state). min_age_days>=14."
+      },
+      {
+        "id": "journald",
+        "label": "systemd journal (journald)",
+        "paths_or_globs": [
+          "/var/log/journal",
+          "/run/log/journal"
+        ],
+        "risk": "report-only",
+        "default_enabled": false,
+        "notes": "Persistent journals live under /var/log/journal/<machine-id>/; volatile under /run/log/journal. Never unlink active *.journal files from disk directly. Size control must be journalctl --vacuum-size/--vacuum-time (optionally after --rotate). Report size only; cleaning requires a dedicated privileged vacuum action, not generic file delete."
+      },
+      {
+        "id": "apt-package-cache",
+        "label": "APT package cache (Debian/Ubuntu)",
+        "paths_or_globs": [
+          "/var/cache/apt/archives/*.deb",
+          "/var/cache/apt/archives/partial/*",
+          "/var/cache/apt/archives"
+        ],
+        "risk": "low",
+        "default_enabled": false,
+        "notes": "Downloaded .deb payloads; equivalent to apt clean. Regenerable; needs root. Keep lock files; do not delete /var/lib/apt/lists (package indexes) or /var/lib/dpkg. default_enabled false because system/root scope."
+      },
+      {
+        "id": "pacman-package-cache",
+        "label": "pacman package cache (Arch family)",
+        "paths_or_globs": [
+          "/var/cache/pacman/pkg",
+          "/var/cache/pacman/pkg/*"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Default CacheDir is /var/cache/pacman/pkg/. Safe to remove packages but loses easy downgrade/reinstall offline. Prefer paccache -rkN semantics over wiping every package. Needs root. Never touch /var/lib/pacman."
+      },
+      {
+        "id": "dnf-package-cache",
+        "label": "DNF package cache (Fedora/RHEL)",
+        "paths_or_globs": [
+          "/var/cache/dnf",
+          "/var/cache/libdnf5",
+          "/var/tmp/dnf-*"
+        ],
+        "risk": "low",
+        "default_enabled": false,
+        "notes": "dnf4 uses /var/cache/dnf; Fedora 41+ dnf5 also uses /var/cache/libdnf5. Metadata and any keepcache RPMs are regenerable (dnf clean all). Needs root. Never delete /var/lib/dnf or RPM DB under /var/lib/rpm."
+      },
+      {
+        "id": "systemd-tmpfiles-temps",
+        "label": "systemd-tmpfiles temporary dirs",
+        "paths_or_globs": [
+          "/tmp",
+          "/var/tmp"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "systemd-tmpfiles ages /tmp (~10d) and /var/tmp (~30d) via tmpfiles.d. Auto-clean only aged file contents, never the directory roots, never sockets currently in use, never /tmp/.X11-unix, /tmp/.ICE-unix, systemd private dirs. Never delete tmpfiles configs under /etc/tmpfiles.d, /usr/lib/tmpfiles.d, /run/tmpfiles.d, or $HOME/.config/user-tmpfiles.d. Prefer invoking systemd-tmpfiles --clean when possible."
+      },
+      {
+        "id": "flatpak-app-cache",
+        "label": "Flatpak per-app caches",
+        "paths_or_globs": [
+          "$HOME/.var/app/*/cache",
+          "$HOME/.var/app/*/cache/**"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Sandbox XDG cache for each Flatpak app under ~/.var/app/<app-id>/cache. Regenerable. Do not delete sibling config or data dirs. min_age_days>=3."
+      },
+      {
+        "id": "flatpak-leftovers",
+        "label": "Flatpak installs and unused runtimes",
+        "paths_or_globs": [
+          "$HOME/.local/share/flatpak",
+          "/var/lib/flatpak",
+          "$HOME/.var/app"
+        ],
+        "risk": "report-only",
+        "default_enabled": false,
+        "notes": "Installed apps/runtimes live in user ~/.local/share/flatpak and system /var/lib/flatpak; leftover app data after uninstall stays in ~/.var/app/<id>. Blind rm breaks installs and OSTree repos. Report sizes only; cleanup via flatpak uninstall --unused [--delete-data] and flatpak repair, not file-level delete of repo/objects."
+      },
+      {
+        "id": "snap-download-cache",
+        "label": "Snap download cache",
+        "paths_or_globs": [
+          "/var/lib/snapd/cache",
+          "/var/lib/snapd/cache/*"
+        ],
+        "risk": "low",
+        "default_enabled": false,
+        "notes": "snapd working/download cache; safe to clear (may force re-download). Needs root. Distinct from mounted/active snap images in /var/lib/snapd/snaps."
+      },
+      {
+        "id": "snap-leftovers",
+        "label": "Snap revisions and user leftovers",
+        "paths_or_globs": [
+          "/var/lib/snapd/snaps",
+          "/var/snap",
+          "$HOME/snap",
+          "$HOME/snap/*/*/.cache"
+        ],
+        "risk": "report-only",
+        "default_enabled": false,
+        "notes": "Old revisions under /var/lib/snapd/snaps and ~/snap/<name>/<rev> must be pruned with snap remove --revision or snap set system refresh.retain=N, not rm. User data in ~/snap and /var/snap can hold important app state. Report only; optional future medium rule limited to $HOME/snap/*/*/.cache if clearly cache."
+      },
+      {
+        "id": "old-kernels",
+        "label": "Old kernels and modules",
+        "paths_or_globs": [
+          "/boot/vmlinuz-*",
+          "/boot/initrd.img-*",
+          "/boot/initramfs-*.img",
+          "/boot/System.map-*",
+          "/boot/config-*",
+          "/lib/modules/*",
+          "/usr/lib/modules/*"
+        ],
+        "risk": "report-only",
+        "default_enabled": false,
+        "notes": "Always report-only. Removing the running or only fallback kernel bricks the system. Instruct users to purge via apt autoremove / dnf remove $(dnf repoquery --installonly --latest-limit=-2 -q) / package-manager tools. Never auto-delete /boot or module trees."
+      }
+    ],
+    "never_touch": [
+      "/",
+      "$HOME",
+      "$HOME/Documents",
+      "$HOME/Desktop",
+      "$HOME/Downloads",
+      "$HOME/Pictures",
+      "$HOME/Videos",
+      "$HOME/Music",
+      "$HOME/.ssh",
+      "$HOME/.gnupg",
+      "$HOME/.config",
+      "$XDG_CONFIG_HOME",
+      "/boot",
+      "/etc",
+      "/usr",
+      "/bin",
+      "/sbin",
+      "/lib",
+      "/lib64",
+      "/var/lib/dpkg"
+    ]
+  },
+  {
+    "platform": "windows",
+    "categories": [
+      {
+        "id": "windows-temp-user",
+        "label": "User TEMP",
+        "paths_or_globs": [
+          "$TEMP",
+          "$TMP",
+          "%LOCALAPPDATA%/Temp"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Default user temp is %LOCALAPPDATA%\\Temp (via %TEMP%/%TMP%). Delete contents only; keep the folder; skip in-use files; min_age_days >= 1–2 recommended."
+      },
+      {
+        "id": "windows-temp-system",
+        "label": "System TEMP",
+        "paths_or_globs": [
+          "%WINDIR%/Temp"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "C:\\Windows\\Temp (or %WINDIR%\\Temp). Often needs elevation; many files locked by services. Contents-only; never delete the Temp directory itself."
+      },
+      {
+        "id": "windows-prefetch",
+        "label": "Prefetch",
+        "paths_or_globs": [
+          "%WINDIR%/Prefetch"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Default %WINDIR%\\Prefetch (*.pf, ReadyBoot). Safe-ish contents clear but slows cold starts until rebuilt and erases launch traces. Prefer report or opt-in; do not wipe Layout.ini aggressively; avoid if Superfetch/SysMain analysis matters."
+      },
+      {
+        "id": "windows-winsxs",
+        "label": "WinSxS component store",
+        "paths_or_globs": [
+          "%WINDIR%/WinSxS"
+        ],
+        "risk": "report-only",
+        "default_enabled": false,
+        "notes": "Report size only. Never auto-delete. Cleanup only via DISM StartComponentCleanup / Storage Sense / Disk Cleanup. Manual deletes break servicing."
+      },
+      {
+        "id": "windows-delivery-optimization",
+        "label": "Delivery Optimization cache",
+        "paths_or_globs": [
+          "%WINDIR%/ServiceProfiles/NetworkService/AppData/Local/Microsoft/Windows/DeliveryOptimization/Cache",
+          "%WINDIR%/DeliveryOptimization/Cache",
+          "%SystemDrive%/ProgramData/Microsoft/Windows/DeliveryOptimization/Cache"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Default cache drive is %SystemDrive% (DOModifyCacheDrive). Live cache usually under NetworkService DeliveryOptimization\\Cache; alternate layouts exist. Prefer Settings/Disk Cleanup; stop DoSvc if clearing files; admin required; cache rebuilds on next updates."
+      },
+      {
+        "id": "windows-browser-cache",
+        "label": "Browser disk caches",
+        "paths_or_globs": [
+          "%LOCALAPPDATA%/Google/Chrome/User Data/*/Cache",
+          "%LOCALAPPDATA%/Google/Chrome/User Data/*/Code Cache",
+          "%LOCALAPPDATA%/Google/Chrome/User Data/*/GPUCache",
+          "%LOCALAPPDATA%/Microsoft/Edge/User Data/*/Cache",
+          "%LOCALAPPDATA%/Microsoft/Edge/User Data/*/Code Cache",
+          "%LOCALAPPDATA%/Microsoft/Edge/User Data/*/GPUCache",
+          "%LOCALAPPDATA%/Mozilla/Firefox/Profiles/*/cache2",
+          "%LOCALAPPDATA%/Mozilla/Firefox/Profiles/*/startupCache",
+          "%LOCALAPPDATA%/Microsoft/Windows/INetCache"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Cache-only under Chromium profiles and Firefox cache2/startupCache; INetCache is legacy web cache. Never touch Cookies, Login Data, Web Data, Local Storage, IndexedDB, Preferences, or whole User Data/profile roots. Close browsers first."
+      },
+      {
+        "id": "windows-old",
+        "label": "Windows.old",
+        "paths_or_globs": [
+          "%SystemDrive%/Windows.old"
+        ],
+        "risk": "report-only",
+        "default_enabled": false,
+        "notes": "Previous Windows installation after in-place upgrade. Report only; remove via Settings > System > Storage or Disk Cleanup (Previous Windows installation). Direct delete may fail ACLs and blocks rollback."
+      },
+      {
+        "id": "windows-recycle-bin",
+        "label": "Recycle Bin",
+        "paths_or_globs": [
+          "%SystemDrive%/$Recycle.Bin",
+          "C:/$Recycle.Bin",
+          "D:/$Recycle.Bin"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Per-volume $Recycle.Bin holds recoverable user files. Opt-in only. Path expander must treat $Recycle.Bin as a literal name (not a $variable). Prefer SHEmptyRecycleBin API over raw deletes when possible."
+      },
+      {
+        "id": "windows-thumbnail-cache",
+        "label": "Thumbnail and icon cache",
+        "paths_or_globs": [
+          "%LOCALAPPDATA%/Microsoft/Windows/Explorer/thumbcache_*.db",
+          "%LOCALAPPDATA%/Microsoft/Windows/Explorer/iconcache_*.db",
+          "%LOCALAPPDATA%/IconCache.db",
+          "%USERPROFILE%/**/Thumbs.db"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "thumbcache_*.db under %LOCALAPPDATA%\\Microsoft\\Windows\\Explorer; legacy Thumbs.db in folders. Safe to delete; Explorer rebuilds. May need Explorer restart if files are locked. Do not wipe entire Explorer folder (other settings live there)."
+      }
+    ],
+    "never_touch": [
+      "%USERPROFILE%",
+      "%USERPROFILE%/Documents",
+      "%USERPROFILE%/Desktop",
+      "%USERPROFILE%/Downloads",
+      "%USERPROFILE%/Pictures",
+      "%USERPROFILE%/Videos",
+      "%USERPROFILE%/Music",
+      "%USERPROFILE%/.ssh",
+      "%USERPROFILE%/.gnupg",
+      "%WINDIR%/System32",
+      "%WINDIR%/SysWOW64",
+      "%WINDIR%/WinSxS",
+      "%WINDIR%/Boot",
+      "C:/Program Files",
+      "C:/Program Files (x86)",
+      "%SystemDrive%/pagefile.sys",
+      "%SystemDrive%/hiberfil.sys",
+      "%SystemDrive%/swapfile.sys",
+      "%LOCALAPPDATA%/**/User Data/*/Cookies",
+      "%LOCALAPPDATA%/**/User Data/*/Login Data"
+    ]
+  },
+  {
+    "platform": "any",
+    "categories": [
+      {
+        "id": "js-node-modules",
+        "label": "Node.js project node_modules",
+        "paths_or_globs": [
+          "**/node_modules",
+          "**/node_modules/**"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Regenerable via npm/yarn/pnpm install. Never full-home auto-delete: only under explicit project scan roots, require package.json/lockfile sibling, min_age_days>=14, max_depth bound. Excludes Yarn PnP .yarn/cache (project policy) and pnpm content store."
+      },
+      {
+        "id": "rust-target",
+        "label": "Rust Cargo target/ build dirs",
+        "paths_or_globs": [
+          "**/target",
+          "**/target/debug",
+          "**/target/release",
+          "**/target/incremental"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Default is workspace-root target/ (or CARGO_TARGET_DIR). Match only when Cargo.toml exists at parent/workspace root. Forces full recompile. Do not delete $HOME/.cargo/bin or source crates."
+      },
+      {
+        "id": "web-build-artifacts",
+        "label": "Web/frontend build outputs (dist, .next, out)",
+        "paths_or_globs": [
+          "**/dist",
+          "**/out",
+          "**/.next",
+          "**/.nuxt",
+          "**/.turbo",
+          "**/.vite",
+          "**/storybook-static"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Common regenerable frontend outputs. Avoid bare **/build (collides with CMake/Python/Make). Require project markers (package.json, etc.) and min_age. May contain deliberately kept release artifacts: keep opt-in."
+      },
+      {
+        "id": "python-bytecode",
+        "label": "Python __pycache__ and .pyc",
+        "paths_or_globs": [
+          "$HOME/.cache",
+          "$XDG_CACHE_HOME",
+          "%LOCALAPPDATA%",
+          "**/__pycache__",
+          "**/*.pyc",
+          "**/*.pyo"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Bytecode is always regenerable. Default-enabled only under known cache trees (existing dev-pycache-home pattern). Project-tree **/__pycache__ should stay opt-in or age-gated to avoid walking all of $HOME."
+      },
+      {
+        "id": "js-package-caches",
+        "label": "npm and Yarn download caches",
+        "paths_or_globs": [
+          "$HOME/.npm/_cacache",
+          "$HOME/.npm/_logs",
+          "%LOCALAPPDATA%/npm-cache",
+          "$HOME/.cache/yarn",
+          "$XDG_CACHE_HOME/yarn",
+          "$HOME/Library/Caches/Yarn",
+          "$HOME/Library/Caches/npm"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Official npm cache: ~/.npm (posix) or %LocalAppData%/npm-cache (Windows). Yarn classic/berry user cache under XDG or Library/Caches. Prefer contents delete + min_age_days>=14. Not node_modules, not pnpm store."
+      },
+      {
+        "id": "python-package-caches",
+        "label": "pip and Python package caches",
+        "paths_or_globs": [
+          "$HOME/.cache/pip",
+          "$XDG_CACHE_HOME/pip",
+          "$HOME/Library/Caches/pip",
+          "%LOCALAPPDATA%/pip/Cache"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "HTTP wheel/sdist cache only. Do not touch virtualenvs (.venv, venv) or conda envs."
+      },
+      {
+        "id": "gradle-caches",
+        "label": "Gradle dependency and build caches",
+        "paths_or_globs": [
+          "$HOME/.gradle/caches",
+          "$HOME/.gradle/.tmp",
+          "$HOME/.gradle/daemon",
+          "$HOME/.gradle/native",
+          "$HOME/.gradle/wrapper/dists"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Gradle User Home caches (~/.gradle/caches). Safe to wipe but forces large re-downloads. Never delete project source or required wrapper scripts outside dists. Project-level .gradle/ is separate and higher risk."
+      },
+      {
+        "id": "xcode-derived-data",
+        "label": "Xcode DerivedData and iOS DeviceSupport",
+        "paths_or_globs": [
+          "$HOME/Library/Developer/Xcode/DerivedData",
+          "$HOME/Library/Developer/Xcode/iOS DeviceSupport",
+          "$HOME/Library/Developer/Xcode/watchOS DeviceSupport",
+          "$HOME/Library/Developer/Xcode/tvOS DeviceSupport",
+          "$HOME/Library/Developer/CoreSimulator/Caches"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "DerivedData default remains ~/Library/Developer/Xcode/DerivedData. Regenerable; full rebuilds. Archives (~/Library/Developer/Xcode/Archives) stay report-only (dSYM/App Store)."
+      },
+      {
+        "id": "android-sdk-leftovers",
+        "label": "Android SDK caches and unused system-images",
+        "paths_or_globs": [
+          "$HOME/Library/Android/sdk/.temp",
+          "$HOME/Library/Android/sdk/system-images",
+          "$HOME/Library/Android/sdk/build-tools",
+          "%LOCALAPPDATA%/Android/Sdk/.temp",
+          "%LOCALAPPDATA%/Android/Sdk/system-images",
+          "$HOME/Android/Sdk/.temp",
+          "$HOME/Android/Sdk/system-images",
+          "$HOME/.android/cache",
+          "$HOME/.android/build-cache",
+          "$HOME/.android/metrics"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "SDK defaults: macOS ~/Library/Android/sdk, Windows %LOCALAPPDATA%\\Android\\Sdk, Linux ~/Android/Sdk or ANDROID_HOME. Only caches/temp/system-images leftovers—never whole SDK, platform-tools, or licenses. AVD userdata is never_touch."
+      },
+      {
+        "id": "docker-disk-report",
+        "label": "Docker Desktop images, volumes, and VM disk",
+        "paths_or_globs": [
+          "$HOME/Library/Containers/com.docker.docker/Data/vms",
+          "$HOME/Library/Group Containers/group.com.docker",
+          "%LOCALAPPDATA%/Docker/wsl",
+          "%LOCALAPPDATA%/Docker/wsl/disk/docker_data.vhdx",
+          "$HOME/.docker/buildx",
+          "/var/lib/docker"
+        ],
+        "risk": "report-only",
+        "default_enabled": false,
+        "notes": "macOS Docker.raw under Containers/.../vms/0/data; Windows docker_data.vhdx under Local\\Docker\\wsl (path varies by Desktop version). File-delete destroys all images/volumes. Report size only; reclaim via docker system prune / Desktop."
+      },
+      {
+        "id": "asdf-mise-downloads",
+        "label": "asdf/mise download and install caches",
+        "paths_or_globs": [
+          "$HOME/.asdf/downloads",
+          "$HOME/.asdf/tmp",
+          "$HOME/.cache/mise",
+          "$XDG_CACHE_HOME/mise",
+          "$HOME/Library/Caches/mise",
+          "$HOME/.local/share/mise/downloads",
+          "$XDG_DATA_HOME/mise/downloads"
+        ],
+        "risk": "low",
+        "default_enabled": true,
+        "notes": "Download/cache only (asdf downloads/; mise cache dir). Does not remove installed tool versions. Prefer contents delete + min_age_days>=7."
+      },
+      {
+        "id": "asdf-mise-installs",
+        "label": "asdf/mise installed tool versions (unused)",
+        "paths_or_globs": [
+          "$HOME/.asdf/installs",
+          "$HOME/.local/share/mise/installs",
+          "$XDG_DATA_HOME/mise/installs",
+          "$HOME/.local/share/mise/installs/**",
+          "$HOME/.asdf/installs/**"
+        ],
+        "risk": "report-only",
+        "default_enabled": false,
+        "notes": "asdf: ${ASDF_DATA_DIR:-$HOME/.asdf}/installs/<plugin>/<version>. mise: ~/.local/share/mise/installs (XDG). Never bulk-delete: only report, or delete versions proven unused vs .tool-versions/mise.toml/global config. Keep shims/plugins/config."
+      },
+      {
+        "id": "pnpm-store",
+        "label": "pnpm content-addressable store",
+        "paths_or_globs": [
+          "$HOME/.local/share/pnpm/store",
+          "$XDG_DATA_HOME/pnpm/store",
+          "$HOME/Library/pnpm/store",
+          "%LOCALAPPDATA%/pnpm/store",
+          "$HOME/.pnpm-store"
+        ],
+        "risk": "report-only",
+        "default_enabled": false,
+        "notes": "Shared store; deleting breaks projects until re-fetch. Prefer pnpm store prune for unused packages. Report size only unless user explicitly overrides."
+      },
+      {
+        "id": "cargo-registry-cache",
+        "label": "Cargo registry and git dependency cache",
+        "paths_or_globs": [
+          "$HOME/.cargo/registry/cache",
+          "$HOME/.cargo/registry/src",
+          "$HOME/.cargo/git/db",
+          "$HOME/.cargo/git/checkouts"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Downloaded crate sources/cache only—not project target/. Never delete $HOME/.cargo/bin (installed binaries) or .cargo/config.toml."
+      }
+    ],
+    "never_touch": [
+      "$HOME",
+      "$HOME/.ssh",
+      "$HOME/.gnupg",
+      "$HOME/.aws",
+      "$HOME/.config/gcloud",
+      "$HOME/.docker/config.json",
+      "$HOME/.docker/contexts",
+      "$HOME/.cargo/bin",
+      "$HOME/.asdf/shims",
+      "$HOME/.asdf/plugins",
+      "$HOME/.local/share/mise/shims",
+      "$HOME/.android/avd",
+      "$HOME/.gradle/wrapper/dists/**/gradle-*/bin",
+      "**/.git",
+      "$HOME/Documents",
+      "$HOME/Desktop",
+      "$HOME/Library/Keychains",
+      "/var/lib/docker",
+      "%USERPROFILE%\\Documents",
+      "C:\\Windows"
+    ]
+  },
+  {
+    "platform": "macos",
+    "categories": [
+      {
+        "id": "privacy-recent-docs",
+        "label": "macOS recent documents and apps",
+        "paths_or_globs": [
+          "$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.RecentDocuments.sfl*",
+          "$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.RecentApplications.sfl*",
+          "$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.RecentServers.sfl*",
+          "$HOME/Library/Preferences/com.apple.recentitems.plist"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "Opt-in privacy wipe of Apple menu / Finder recents. Confirmed .sfl4 on current macOS; globs cover older .sfl2/.sfl3. Does not include FavoriteItems/FavoriteVolumes/ProjectsItems. Regenerates as files are opened."
+      },
+      {
+        "id": "privacy-app-recents",
+        "label": "Per-app Open Recent and Office recents",
+        "paths_or_globs": [
+          "$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments",
+          "$HOME/Library/Containers/com.microsoft.Word/Data/Library/Preferences/com.microsoft.Word.securebookmarks.plist",
+          "$HOME/Library/Containers/com.microsoft.Excel/Data/Library/Preferences/com.microsoft.Excel.securebookmarks.plist",
+          "$HOME/Library/Containers/com.microsoft.Powerpoint/Data/Library/Preferences/com.microsoft.Powerpoint.securebookmarks.plist"
+        ],
+        "risk": "medium",
+        "default_enabled": false,
+        "notes": "ApplicationRecentDocuments holds per-app .sfl* Open Recent lists. Office securebookmarks.plist files hold Word/Excel/PowerPoint recent lists on Mac. Close Office first. Cloud-synced Microsoft account recents may reappear after sign-in."
+      },
+      {
+        "id": "privacy-clipboard",
+        "label": "Clipboard history stores (third-party)",
+        "paths_or_globs": [
+          "$HOME/Library/Containers/org.p0deje.Maccy",
+          "$HOME/Library/Containers/com.wiheads.paste/Data/Library/Application Support/Paste",
+          "$HOME/Library/Application Support/Alfred/Databases/clipboard.alfdb",
+          "$HOME/Library/Application Support/Alfred/Databases/clipboard.alfdb.data"
+        ],
+        "risk": "high",
+        "default_enabled": false,
+        "notes": "No durable system clipboard history path on macOS comparable to Windows Clipboard folder; targets common managers (Maccy, Paste, Alfred). May hold passwords and tokens. Quit the manager before delete. Prefer contents of store dirs, not unrelated container siblings."
+      },
+      {
+        "id": "privacy-shell-history",
+        "label": "Shell and REPL history",
+        "paths_or_globs": [
+          "$HOME/.zsh_history",
+          "$HOME/.bash_history",
+          "$HOME/.local/share/fish/fish_history",
+          "$HOME/.python_history",
+          "$HOME/.node_repl_history",
+          "$HOME/.mysql_history",
+          "$HOME/.psql_history",
+          "$HOME/.sqlite_history",
+          "$HOME/.lesshst",
+          "$HOME/.viminfo"
+        ],
+        "risk": "high",
+        "default_enabled": false,
+        "notes": "NEVER default-enable. Histories can contain secrets, tokens, and private paths. Does not touch shell config (.zshrc, .bashrc, fish config). New empty history files may be recreated on next session."
+      },
+      {
+        "id": "privacy-browser-cookies",
+        "label": "Browser cookies (opt-in)",
+        "paths_or_globs": [
+          "$HOME/Library/Containers/com.apple.Safari/Data/Library/Cookies",
+          "$HOME/Library/Cookies",
+          "$HOME/Library/Application Support/Google/Chrome/Default/Cookies",
+          "$HOME/Library/Application Support/Google/Chrome/Default/Cookies-journal",
+          "$HOME/Library/Application Support/Google/Chrome/Profile */Cookies",
+          "$HOME/Library/Application Support/Google/Chrome/Profile */Cookies-journal",
+          "$HOME/Library/Application Support/Firefox/Profiles/*/cookies.sqlite",
+          "$HOME/Library/Application Support/Firefox/Profiles/*/cookies.sqlite-*"
+        ],
+        "risk": "high",
+        "default_enabled": false,
+        "notes": "Opt-in only. Logs out websites. Safari primary store is the sandboxed Cookies.binarycookies path; legacy Library/Cookies may still exist. Chrome/Firefox profile DBs only; never Login Data, Web Data, or full profile dirs. Close browsers first."
+      },
+      {
+        "id": "privacy-browser-localstorage",
+        "label": "Browser localStorage and site storage (opt-in)",
+        "paths_or_globs": [
+          "$HOME/Library/Safari/LocalStorage",
+          "$HOME/Library/Containers/com.apple.Safari/Data/Library/WebKit/WebsiteData/LocalStorage",
+          "$HOME/Library/Containers/com.apple.Safari/Data/Library/WebKit/WebsiteData/Default",
+          "$HOME/Library/Application Support/Google/Chrome/Default/Local Storage",
+          "$HOME/Library/Application Support/Google/Chrome/Default/Session Storage",
+          "$HOME/Library/Application Support/Google/Chrome/Profile */Local Storage",
+          "$HOME/Library/Application Support/Google/Chrome/Profile */Session Storage",
+          "$HOME/Library/Application Support/Firefox/Profiles/*/storage/default",
+          "$HOME/Library/Application Support/Firefox/Profiles/*/webappsstore.sqlite"
+        ],
+        "risk": "high",
+        "default_enabled": false,
+        "notes": "Opt-in only. Clears origin-scoped site data (sessions, offline apps). Safari WebsiteData/Default also holds IndexedDB and service workers under origin subdirs. Keep separate from browser disk cache rules. Close browsers first."
+      }
+    ],
+    "never_touch": [
+      "$HOME/Library/Keychains",
+      "$HOME/.ssh",
+      "$HOME/.gnupg",
+      "$HOME/.zshrc",
+      "$HOME/.bashrc",
+      "$HOME/.zprofile",
+      "$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.FavoriteItems.sfl*",
+      "$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.FavoriteVolumes.sfl*",
+      "$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ProjectsItems.sfl*",
+      "$HOME/Library/Application Support/Google/Chrome/**/Login Data",
+      "$HOME/Library/Application Support/Google/Chrome/**/Web Data",
+      "$HOME/Library/Application Support/Google/Chrome/**/Bookmarks",
+      "$HOME/Library/Safari/Bookmarks.plist",
+      "$HOME/Library/Application Support/Firefox/Profiles/*/logins.json",
+      "$HOME/Library/Application Support/Firefox/Profiles/*/key4.db",
+      "$HOME/Library/Mail",
+      "$HOME/Library/Messages",
+      "$HOME/Library/Mobile Documents",
+      "$HOME/Documents",
+      "$HOME/Desktop"
+    ]
+  }
+]

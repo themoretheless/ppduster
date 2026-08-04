@@ -1,0 +1,1002 @@
+[
+  {
+    "name": "BleachBit",
+    "url_or_slug": "bleachbit/bleachbit",
+    "language": "Python",
+    "stars_approx": "6.5k",
+    "what_it_cleans": "Application/browser caches, cookies, history, temp files, logs, package leftovers; optional secure shred and free-space wipe for privacy and disk space",
+    "technique": "Declarative CleanerML XML rule DB (globs, walk.all, SQLite-aware actions, OS path vars, running-process guards); not a blind full-disk heuristic scan",
+    "safety": "Mandatory Preview before Delete; per-cleaner option toggles; keep/whitelist lists; warnings on destructive options; optional shred; CLI and GUI",
+    "steal": "Ship junk definitions as external CleanerML-style rule packs so the engine stays generic and cleaners are community-editable data"
+  },
+  {
+    "name": "rmlint",
+    "url_or_slug": "sahib/rmlint",
+    "language": "C",
+    "stars_approx": "2.4k",
+    "what_it_cleans": "Duplicate files and directories, empty files/dirs, broken symlinks, non-stripped binaries, files with bad UID/GID",
+    "technique": "Fast filesystem walk with size-group then multi-stage hashing; optional mtime/stamp incremental scans; Btrfs clone/reflink support; many output formatters",
+    "safety": "Never modifies FS by default; writes reviewable rmlint.sh/JSON/Python; shell script confirms before delete; can hardlink/symlink/reflink/trash instead of unlink",
+    "steal": "Plan-then-execute: emit an auditable delete plan (script/JSON) the user reviews and runs, never silent deletion as the default"
+  },
+  {
+    "name": "FSlint",
+    "url_or_slug": "pixelb/fslint",
+    "language": "Python",
+    "stars_approx": "372",
+    "what_it_cleans": "Filesystem lint: duplicates, empty directories, bad names, bad symlinks, temp files, dead user IDs, non-stripped binaries",
+    "technique": "Directory walk plus modular shell finders (findup, finded, findid, findns, etc.) orchestrated by a GTK GUI or CLI",
+    "safety": "Find-first workflow; user selects which groups or items to remove in the GUI; finders report until explicit delete/merge actions",
+    "steal": "One small finder per junk class composed by a thin UI, so each heuristic is testable and optional"
+  },
+  {
+    "name": "tmpwatch",
+    "url_or_slug": "pete4abw/tmpwatch",
+    "language": "C",
+    "stars_approx": "5",
+    "what_it_cleans": "Aged files under temp-like directories (e.g. /tmp); empty dirs; optional shred. Closest OSS core to classic Red Hat tmpwatch / Debian tmpreaper lineage",
+    "technique": "Recursive walk with atime/mtime/ctime age threshold; exclude path/pattern/user; optional fuser open-file check; no symlink-follow into targets; no cross-filesystem jumps",
+    "safety": "--test dry-run; path/user/pattern excludes; skips symlink follow and race-prone cases; limited file types by default; cron-oriented",
+    "steal": "Age-gated temp reaping with dry-run, excludes, and skip-if-open (fuser) as the default policy for volatile directories"
+  },
+  {
+    "name": "Stacer",
+    "url_or_slug": "oguzhaninan/Stacer",
+    "language": "C++",
+    "stars_approx": "9.3k",
+    "what_it_cleans": "Package caches, crash reports, application logs/caches, and trash (system cleaner); broader optimizer for startup apps, processes, services (project abandoned)",
+    "technique": "GUI category scan over known cache/log/package/trash path sets; select categories, scan for sizes, then clean",
+    "safety": "User enables categories and scans before cleaning; no silent full-disk mode; coarser than BleachBit file-level preview (app cache/log caution advised)",
+    "steal": "Category dashboard with reclaimable size totals (package vs app cache vs trash) for a simple first-run cleaner UX over a safer detailed backend"
+  },
+  {
+    "name": "Czkawka",
+    "url_or_slug": "qarmin/czkawka",
+    "language": "Rust",
+    "stars_approx": "32500",
+    "what_it_cleans": "Exact duplicate files (name/size/hash), empty folders and files, temporary files, big files, similar images/videos, same-music (tags or content), invalid symlinks, broken files, bad extensions, plus related media cleanup tools",
+    "technique": "Recursive walk with multi-threaded grouping: size prefilter then content hashes (e.g. blake3/xxh3); persistent hash cache for rescans; separate engines for perceptual image/video similarity and music tags/fingerprints",
+    "safety": "GUI select-then-act (no auto wipe); optional move-to-trash (off by default so permanent delete is possible); CLI delete-method default NONE, dry-run for duplicates, hard-link option; confirmation dialog setting",
+    "steal": "Shared czkawka_core library plus on-disk hash cache so second scans of the same trees are dramatically faster while frontends (CLI/GUI) stay thin"
+  },
+  {
+    "name": "dupeGuru",
+    "url_or_slug": "arsenetar/dupeguru",
+    "language": "Python",
+    "stars_approx": "7700",
+    "what_it_cleans": "Duplicate files by content or fuzzy filename match; specialized music-mode (tags) and picture-mode (similar images); move/copy/delete of selected dupes",
+    "technique": "Directory scan with configurable engines: full content comparison, fuzzy filename matching, music-tag comparison, and fuzzy picture matching with tunable match thresholds",
+    "safety": "Reference-directory model and result grouping designed so originals are protected; user selects actions (delete/move/copy); filters and sort to weed out low-threshold false positives before acting",
+    "steal": "Reference folders: mark paths whose files are never deleted so the engine always treats them as keepers when matching against other trees"
+  },
+  {
+    "name": "fdupes",
+    "url_or_slug": "adrianlopezroche/fdupes",
+    "language": "C",
+    "stars_approx": "3000",
+    "what_it_cleans": "Content-identical duplicate files under given directories; interactive or batch deletion of extras in each match set",
+    "technique": "Walk dirs; size and optional min/max filters; signature/hash comparison with optional signature cache database; byte-for-byte confirmation of matches; hardlinks normally treated as non-dupes unless overridden",
+    "safety": "Default is list-only; -d interactive preserve/delete prompts; -N noprompt keeps first file; remove-if-not-changed guards; deletion logging; warnings about symlink and double-path pitfalls",
+    "steal": "Interactive per-group preserve prompts (pick which file numbers to keep) plus optional deferred byte confirmation until just before deletion"
+  },
+  {
+    "name": "jdupes",
+    "url_or_slug": "codeberg.org/jbruchon/jdupes",
+    "language": "C",
+    "stars_approx": "100 (Codeberg; GitHub upstream removed)",
+    "what_it_cleans": "Duplicate files; can delete, hardlink, symlink, or block-level dedupe; advanced filtering for large multi-platform trees (enhanced fdupes fork)",
+    "technique": "fdupes-style walk with performance-focused partial/progressive hashing and match confirmation; optional persistent hash database for repeated scans of huge mostly-static datasets; hardlink-aware hash reuse",
+    "safety": "Default report/summarize actions; interactive delete path; optional no-prompt modes; build-time NO_DELETE can strip unlink code; hashdb written with restricted permissions to limit metadata leaks",
+    "steal": "Persistent hash database so re-scanning multi-million-file cold archives finishes in seconds after the first full pass"
+  },
+  {
+    "name": "rdfind",
+    "url_or_slug": "pauldreik/rdfind",
+    "language": "C++",
+    "stars_approx": "1300",
+    "what_it_cleans": "Content-identical redundant files for cleanup or backup compression; optional replace with hardlinks/symlinks or delete extras",
+    "technique": "O(N log N) pipeline: list files, optional collapse identical device+inode hardlinks, drop unique sizes, sample first bytes then last bytes, then full checksum (md5/xxhash); sort by device/inode for sequential reads; original chosen by CLI arg priority and depth",
+    "safety": "Default only writes results.txt (report-only dry run); deletions/links require explicit flags (-deleteduplicates / -makehardlinks / -makesymlinks); UndoableUnlink-style careful unlink path; documents hardlink-group caveats",
+    "steal": "Cheap staged elimination (size -> first bytes -> last bytes -> checksum) plus argument-order priority so the user controls which tree wins as the original"
+  },
+  {
+    "name": "ncdu",
+    "url_or_slug": "code.blicky.net/yorhel/ncdu",
+    "language": "Zig (2.x) / C (1.x LTS)",
+    "stars_approx": "n/a (Forgejo; widely packaged)",
+    "what_it_cleans": "User-selected large files and directories found via interactive ncurses size browser",
+    "technique": "Recursive filesystem walk with bottom-up size aggregation; exclude patterns/exclude-from; CACHEDIR.TAG support; optional one-filesystem and parallel scan; JSON/binary export for offline or remote-scan browse",
+    "safety": "confirm-delete on by default; --disable-delete and -r read-only; delete/shell/refresh disabled on imported exports; --delete-command can use trash (e.g. gio trash) or interactive rm",
+    "steal": "Pluggable --delete-command (trash vs unlink) plus export/import so scan and destructive cleanup can be separated (remote scan, local careful delete)"
+  },
+  {
+    "name": "dua-cli",
+    "url_or_slug": "Byron/dua-cli",
+    "language": "Rust",
+    "stars_approx": "~6.1k",
+    "what_it_cleans": "User-marked unwanted files/directories in interactive mode (bulk delete optimized vs plain rm)",
+    "technique": "Parallel directory walk and size graph; aggregate CLI plus interactive TUI; gitignore-style --ignore-from / DUA_IGNORE_FROM skips matches without descending",
+    "safety": "Multi-stage interactive delete flow to prevent accidents; ignore patterns; non-interactive paths are analyze-only",
+    "steal": "Multi-stage TUI delete confirmations combined with ignore files that never enter excluded trees (node_modules, targets, etc.)"
+  },
+  {
+    "name": "dust",
+    "url_or_slug": "bootandy/dust",
+    "language": "Rust",
+    "stars_approx": "~12.1k",
+    "what_it_cleans": "Nothing in-process (read-only du alternative); surfaces largest paths so the user can clean externally",
+    "technique": "Parallel walk with smart prune to terminal-height largest entries; hierarchy-shaded bars; hardlink single-count; min-size, regex include/exclude, filetype grouping, collapse, JSON export",
+    "safety": "No delete/trash at all; pure reporting tool",
+    "steal": "Largest-N hierarchy bar view that reveals buried large files even when parent dirs dominate (complements dir-first TUIs)"
+  },
+  {
+    "name": "diskonaut",
+    "url_or_slug": "imsnif/diskonaut",
+    "language": "Rust",
+    "stars_approx": "~3.1k",
+    "what_it_cleans": "User-selected files and folders chosen from a terminal treemap navigator",
+    "technique": "Background scan indexes metadata to memory; progressive live treemap while scanning; drill-down navigation; tracks bytes freed after deletes",
+    "safety": "Delete requires y/n confirmation; quit confirmation; direct unlink (no trash layer)",
+    "steal": "Live treemap fill during scan plus a session space-freed counter that measures cleanup progress"
+  },
+  {
+    "name": "godu",
+    "url_or_slug": "viktomas/godu",
+    "language": "Go",
+    "stars_approx": "~580",
+    "what_it_cleans": "Marked large files/folders only when the user pipes stdout to rm, mv, or trash",
+    "technique": "Fast walk with min-size filter (default 10MB); carousel TUI mark/unmark; ~/.goduignore skips whole folder names (e.g. node_modules)",
+    "safety": "Never unlinks itself; space-mark then exit prints NUL-separated paths (-print0); discovery and destroy are separate processes",
+    "steal": "Mark-then-print0 pipeline so cleanup is composable with external trash/dry-run/review tools"
+  },
+  {
+    "name": "trash-cli",
+    "url_or_slug": "andreafrancia/trash-cli",
+    "language": "Python",
+    "stars_approx": "4450",
+    "what_it_cleans": "User-specified files/dirs via soft-delete into the FreeDesktop.org trashcan (shared with KDE/GNOME/XFCE); also lists, restores, pattern-removes, and empties trash contents.",
+    "technique": "FreeDesktop Trash spec: move targets into trash dirs (e.g. ~/.local/share/Trash/files) with .trashinfo metadata (original path, deletion date, permissions); trash-empty can filter by age in days; trash-rm matches patterns against trashed names.",
+    "safety": "Moves to trash instead of unlink; interactive trash-restore with index/range selection and optional --overwrite; trash-empty <days> for age-based purge; README strongly discourages aliasing rm to trash-put due to different semantics.",
+    "steal": "Age-gated trash purge (trash-empty N) as a built-in retention policy for recoverable deletes."
+  },
+  {
+    "name": "trashy",
+    "url_or_slug": "oberblastmeister/trashy",
+    "language": "Rust",
+    "stars_approx": "530",
+    "what_it_cleans": "User paths moved into the system trash (Linux FreeDesktop + Windows recycle); manages list/restore/empty of trashed items. Not a junk scanner.",
+    "technique": "Fast put/list/restore/empty CLI over OS trash backends; restore/empty args default to regex (override with --match=exact); recursive put by default; optional fzf pipelines for multi-select.",
+    "safety": "Always trashes on put (no permanent delete); selective restore/empty with filters; --force for scripted restore/empty; no macOS support; docs warn against aliasing rm.",
+    "steal": "fzf multi-select restore/empty pipeline over trashy list for interactive, filterable recovery."
+  },
+  {
+    "name": "rip (Rm ImProved)",
+    "url_or_slug": "nivekuil/rip",
+    "language": "Rust",
+    "stars_approx": "1730",
+    "what_it_cleans": "User-specified files/dirs by moving them into a private graveyard (not the desktop trash); undo via unbury; optional full graveyard wipe.",
+    "technique": "Rename/move under configurable graveyard (/tmp/graveyard-$USER, $XDG_DATA_HOME/graveyard, or $GRAVEYARD) mirroring absolute paths; numbered backups on path collision; .record deletion log; --seance lists deletions under cwd.",
+    "safety": "No data overwrite; --inspect prints size/preview then prompts; --unbury undoes last or named items (aims to be idempotent); --decompose permanently unlinks entire graveyard; deliberately not XDG-trash.",
+    "steal": "Path-mirrored graveyard layout so undo restores by original absolute path without a heavy index UI."
+  },
+  {
+    "name": "gomi",
+    "url_or_slug": "babarot/gomi",
+    "language": "Go",
+    "stars_approx": "560",
+    "what_it_cleans": "User-specified files as an rm-compatible safer delete into XDG or legacy trash; TUI restore; prune of old/orphan trash entries.",
+    "technique": "Configurable strategy (auto/xdg/legacy ~/.gomi), multi-volume trash, concurrent ops; history filters (within_days, globs, size); --prune by duration ranges or orphans; TUI browse with search/preview.",
+    "safety": "forbidden_paths blocklist (/, /etc, trash backends, etc.); restore confirm optional; permanent delete from trash is opt-in and double-confirmed; prune requires double confirmation.",
+    "steal": "Configurable forbidden_paths so delete/empty operations refuse critical system paths and the trash store itself."
+  },
+  {
+    "name": "macos-trash",
+    "url_or_slug": "sindresorhus/macos-trash",
+    "language": "Swift",
+    "stars_approx": "450",
+    "what_it_cleans": "User-specified files/folders by moving them into the macOS Trash (Finder-compatible). Note: macOS 15+ has a built-in trash; this OSS binary adds --interactive and fixes Put Back.",
+    "technique": "Native macOS trash APIs via a small Swift CLI (platform FileManager/trash integration rather than FreeDesktop or ad-hoc ~/.Trash moves).",
+    "safety": "Soft-delete into system Trash only; --interactive/-i confirmation; when aliased as rm, extra rm flags are ignored rather than enabling hard delete.",
+    "steal": "Use platform trash APIs that preserve Finder Put Back metadata instead of raw filesystem moves into ~/.Trash."
+  },
+  {
+    "name": "Stacer",
+    "url_or_slug": "oguzhaninan/Stacer",
+    "language": "C++",
+    "stars_approx": "9.3k",
+    "what_it_cleans": "Package caches (apt/pacman/etc.), crash reports under /var/crash, /var/log app logs, ~/.cache app caches, and user trash (~/.local/share/Trash); also uninstaller/services/startup tools beyond pure junk cleaning",
+    "technique": "Fixed path walks and package-manager detection: list files in known dirs (e.g. /var/cache/apt/archives, /var/cache/pacman/pkg, /var/crash, /var/log, ~/.cache); detect PM via executable presence (apt-get/dnf/yum/pacman/zypper) then shell out to dpkg/rpm/pacman/snap for package lists",
+    "safety": "Category checkboxes then scan builds a tree of selectable files with sizes; per-item and select-all checkboxes before clean; package-cache/logs/cache deleted via sudo rm -rf on checked paths; trash emptied by removeRecursively on Trash/files and Trash/info; no dry-run mode; project marked abandoned",
+    "steal": "Two-step scan UI: categories first, then a sortable tree of concrete paths with sizes and independent checkboxes before any destructive sudo delete"
+  },
+  {
+    "name": "Ubuntu Cleaner",
+    "url_or_slug": "gerardpuig/ubuntu-cleaner",
+    "language": "Python",
+    "stars_approx": "256",
+    "what_it_cleans": "APT deb cache, apt autoremove candidates, old kernel packages, residual package configs, thumbnail cache, browser caches (Chrome/Edge/Mozilla/Opera), and a few app-specific caches (Software Center, Empathy, Google Earth)",
+    "technique": "Plugin janitor architecture: each cleaner is a JanitorPlugin loaded by category (system/personal/application); cache plugins use root_path+glob or os.walk/du; package plugins query AptWorker/python-apt cache and regex-match linux-image/headers kernels older than uname; privileged apt cache deletes go through a DBus daemon proxy",
+    "safety": "Scan-before-clean with per-plugin and per-cruft checkboxes; UI lists names and sizes; apt/package work via AptWorker transactions rather than blind rm for kernels/autoremove; apt archive files deleted via privileged proxy; no trash-first path (direct os.remove/shutil.rmtree for cache plugins)",
+    "steal": "Category-tagged plugin modules with a shared scan/clean signal protocol so new cleaners are drop-in files without core UI changes"
+  },
+  {
+    "name": "BleachBit",
+    "url_or_slug": "bleachbit/bleachbit",
+    "language": "Python",
+    "stars_approx": "6.5k",
+    "what_it_cleans": "Cross-platform junk and privacy data: browser caches/cookies/history, temp files, logs, package-manager leftovers (apt/yum actions), SQLite vacuum targets, and many app-specific paths via bundled CleanerML definitions",
+    "technique": "Declarative CleanerML rules DB: search modes file/glob/walk.files/walk.all/walk.top/deep plus regex filters; actions delete/truncate/shred/process/sqlite.vacuum/apt.autoclean/apt.autoremove/yum.clean_all and specialized browser cleaners; OS and running-process guards; loads cleaners from system and personal dirs",
+    "safety": "Mandatory Preview before Delete in GUI workflow; per-cleaner options and optional warning elements; CLI preview; can abort when target app is running; shred/truncate options for sensitive data; whitelist-style only-selected cleaners run; no blanket full-disk heuristic deletes",
+    "steal": "Separate rule language (CleanerML) with Preview mode, XSD validation, running-process guards, and deep-scan batching for sparse junk under $HOME"
+  },
+  {
+    "name": "CleanerML (BleachBit cleaners pack)",
+    "url_or_slug": "bleachbit/cleanerml",
+    "language": "XML",
+    "stars_approx": "189",
+    "what_it_cleans": "Bonus/community cleaner definitions for apps and Linux paths not always shipped in core BleachBit (release pack) plus pending definitions awaiting review",
+    "technique": "Pure rules repository: CleanerML XML packs organized as pending/ vs release/; consumers copy into BleachBit personal_cleaners_dir; Makefile XSD tests and pretty-print; metadata headers (@url, @tested, @note) document verification",
+    "safety": "Two-tier pipeline: pending must be human-verified before promotion to release; XSD/make tests catch invalid XML; safety inherits BleachBit runtime (preview, options, warnings); no execution engine in-repo",
+    "steal": "Split cleaner knowledge into a versioned rules pack with pending vs release lanes and maintainer test annotations instead of hardcoding every path in app code"
+  },
+  {
+    "name": "Sweeper",
+    "url_or_slug": "KDE/sweeper",
+    "language": "C++",
+    "stars_approx": "8 (GitHub mirror; canonical invent.kde.org/utilities/sweeper)",
+    "what_it_cleans": "KDE/Plasma privacy traces: thumbnails, recent documents/apps, KRunner history, Klipper clipboard history, cookies and cookie policies, Konqueror/web history and HTTP cache, form completions, favicons (preserving bookmark-referenced icons)",
+    "technique": "Hardcoded PrivacyAction classes per target: QDir file removal for thumbnail/favicon caches; KConfig group edits; D-Bus calls to kcookiejar/klipper/Konqueror; KActivities::Stats forgetResources queries; kio_http_cache_cleaner process for web cache",
+    "safety": "Checkbox list of discrete actions with persisted selection in kprivacyrc; GUI confirmation dialog ('potentially valuable data') unless --automatic; favicon cleaner allowlists icons still referenced by Konqueror bookmarks; conditional actions only if services (klipper/ActivityManager) are registered",
+    "steal": "Desktop-integration cleaners that call official D-Bus/KConfig APIs and preserve bookmark-referenced favicons instead of only deleting cache directories"
+  },
+  {
+    "name": "Pearcleaner",
+    "url_or_slug": "alienator88/Pearcleaner",
+    "language": "Swift",
+    "stars_approx": "14.2k",
+    "what_it_cleans": "App bundles and leftovers (prefs, caches, containers, launch agents), orphaned files from deleted apps, Homebrew/dev env junk, PKG/plugins/services; optional universal-binary lipo and unused translations. Closest popular OSS alternative to closed-source Freemacsoft AppCleaner.",
+    "technique": "Library-path walk with bundle-id + app-name matching, adjustable search sensitivity, include/exclude directories; Finder extension and Sentinel watches Trash to auto-find leftovers when apps are discarded.",
+    "safety": "Full Disk Access + privileged helper for system folders; user review of related files; directory include/exclude; Trash-oriented removal rather than silent system wipe. Source-available fair-code (Apache 2.0 + Commons Clause), not pure OSI MIT.",
+    "steal": "Sentinel-style low-RAM watcher that cleans leftovers automatically when an app is moved to Trash."
+  },
+  {
+    "name": "Mole",
+    "url_or_slug": "tw93/Mole",
+    "language": "Shell/Go",
+    "stars_approx": "61.9k",
+    "what_it_cleans": "User/system/browser caches, logs and temps, developer caches (Xcode, Node, etc.), Trash, orphaned leftovers of already-uninstalled apps, full app uninstall with remnants, installer files, and project build artifacts.",
+    "technique": "Category rule scanners over known macOS cache/junk roots; interactive uninstall that enumerates related files across many Library locations; TUI plus scriptable mo clean/uninstall/optimize/analyze/purge commands.",
+    "safety": "mo clean/uninstall/purge --dry-run; persistent whitelist for protected caches; path validation and protected-directory rules; stronger confirmation on higher-risk actions; operations logged under ~/Library/Logs/mole with mo history; analyze can move via Finder Trash.",
+    "steal": "Persistent cleanup whitelist plus operation history so aggressive default rules remain reviewable and reversible."
+  },
+  {
+    "name": "PureMac",
+    "url_or_slug": "momenbasel/PureMac",
+    "language": "Swift",
+    "stars_approx": "5.5k",
+    "what_it_cleans": "Full app uninstall + orphan finder; system/user caches, logs, temp; Xcode, Homebrew, Node, Docker caches; mail attachments; large/old files; AI app caches. Open MIT CleanMyMac-class GUI (Sensei has no OSS core).",
+    "technique": "10-level leftover matching (bundle ID, team ID, entitlements, Spotlight metadata, containers, company-name heuristics); 120+ filesystem search locations; 25 per-app edge-case conditions; parallel category scanners.",
+    "safety": "Trash-only via FileManager.trashItem; explicit review before delete; high-risk system paths hard-excluded; allow-list roots for cleaning; symlink resolve + re-resolve before unlink (TOCTOU); Apple system apps cannot be uninstalled; optional scheduled clean with reclaim threshold.",
+    "steal": "Strict/Enhanced/Deep leftover-match sensitivity tiers so users trade recall vs false positives without rewriting rules."
+  },
+  {
+    "name": "Mac Sai",
+    "url_or_slug": "iliyami/MacSai",
+    "language": "Swift",
+    "stars_approx": "1.4k",
+    "what_it_cleans": "16 system-junk categories, mail attachments, Trash, browser privacy data, malware signatures, large/old files, duplicates, complete app uninstall leftovers, universal binary thinning. Closest OSS peer to commercial Sensei/CleanMyMac suites.",
+    "technique": "Modular scanners with APFS URLResourceKey prefetch and FSEvents incremental updates; 10-level uninstaller over 17+ Library subdirs; progressive duplicate detection (size, partial SHA-256, full hash, inode); SMAppService + XPC privileged helper.",
+    "safety": "Protected-path blocklist; trash-first; dry-run; firmlink canonicalization; pre-scan cleanability filter drops untrashable items; TOCTOU re-resolve; orphan cleanup limited to caches/logs; chunked cancelable cleans; in-app activity log.",
+    "steal": "Pre-scan cleanability filter so the UI never offers items the process cannot actually trash (root-owned or data-vault paths)."
+  },
+  {
+    "name": "Dusty",
+    "url_or_slug": "yagcioglutoprak/dusty",
+    "language": "Swift",
+    "stars_approx": "65",
+    "what_it_cleans": "Menu-bar junk cleaner: Safe (user/browser/app caches, logs, Trash), Developer (Xcode DerivedData/simulators, package-manager caches), Deep (old DMG/PKG installers, archives, local TM snapshots, stale project node_modules/target/venvs). Not a full AppCleaner uninstaller.",
+    "technique": "Fixed CleanupTargetRegistry of path templates only (no open-ended walks); concurrent size scan; age/mtime heuristics for deep project artifacts requiring a sibling project manifest; CLI dusty scan/clean and Shortcuts actions.",
+    "safety": "Allowlist-only deletes gated by single SafetyValidator; personal folders blocked; no symlink following; dry-run option; Trash + short Undo; JSONL deletion log; skips caches for running apps; CLI requires --yes to delete.",
+    "steal": "Data-driven cleanup targets: one registry entry drives scan, UI, and safety authorization (prefer allowlist over unrestricted heuristics)."
+  },
+  {
+    "name": "Bulk Crap Uninstaller",
+    "url_or_slug": "BCUninstaller/Bulk-Crap-Uninstaller",
+    "language": "C#",
+    "stars_approx": "20.5k",
+    "what_it_cleans": "Unwanted Windows programs in bulk, leftover files/registry after uninstall, orphaned apps, empty/unused Program Files folders; supports Store, Steam, Features, MSI/NSIS/Inno",
+    "technique": "Enumerates uninstall registry + Store/Steam/installer APIs; special handlers per installer engine; leftover and orphan detection via path/registry heuristics keyed to uninstalled products; batch lists and bcu-console automation",
+    "safety": "User multi-select before uninstall; leftover cleanup is review-oriented not fully blind; force-uninstall is explicit; portable/settings-in-one-file; not a free-space wipe tool",
+    "steal": "Product-scoped leftover scanner that runs after uninstall (files + registry tied to the removed app identity) instead of only global temp globs"
+  },
+  {
+    "name": "BleachBit",
+    "url_or_slug": "bleachbit/bleachbit",
+    "language": "Python",
+    "stars_approx": "6.5k",
+    "what_it_cleans": "Browser/app caches, cookies, history, temp files, logs, clipboard, Windows junk; privacy data; optional file shred and free-space wipe (Windows + Linux)",
+    "technique": "Declarative cleaner definitions (CleanerML/XML under cleaners/) plus optional winapp2.ini flavors; path rules per application; Preview scans then Delete; CLI for scripting",
+    "safety": "Mandatory Preview dry-run listing files before delete; per-cleaner opt-in toggles; shred is optional; no silent full-disk wipe without user selection",
+    "steal": "First-class dry-run that enumerates every target path and size before any unlink, with independent enable flags per cleaner"
+  },
+  {
+    "name": "FluentCleaner",
+    "url_or_slug": "builtbybel/FluentCleaner",
+    "language": "C#",
+    "stars_approx": "4.7k",
+    "what_it_cleans": "Windows app and browser caches, temps, logs, and targeted registry traces described by winapp2-style databases; modern CCleaner-class junk clean",
+    "technique": "Shared FluentCleaner.Core engine parses winapp2.ini (and custom DBs); Analyze then clean; exact path/reg targets per entry; /AUTO silent clean from saved selection",
+    "safety": "Nothing runs unless user selects entries; rules are inspectable path-specific entries not drive-wide wildcards; permanent delete (user warned to backup); scheduled/silent mode uses prior selection only",
+    "steal": "Thin native engine + multi-database winapp2 parser so community rules update independently of the app binary"
+  },
+  {
+    "name": "WinDirStat",
+    "url_or_slug": "windirstat/windirstat",
+    "language": "C++",
+    "stars_approx": "3.8k",
+    "what_it_cleans": "Disk space hogs (large files/folders), duplicates, empty folders; assists manual cleanup and launches Windows maintenance (Disk Cleanup, DISM, etc.). OSS stand-in for proprietary WizTree/TreeSize",
+    "technique": "Filesystem walk with multithreading and fast NTFS scanning; interactive treemap + extension breakdown; optional content-hash duplicate detection; filters (size, path, reparse points, cloud files)",
+    "safety": "User-driven selection for delete/move; Explorer context menu and Recycle Bin paths; cloud-file safeguards and hardlink-aware sizing; no automatic whole-disk junk deletion",
+    "steal": "Treemap + largest-files view as the primary UI for deciding what to remove before any rule-based cleaner runs"
+  },
+  {
+    "name": "Winapp2",
+    "url_or_slug": "MoscaDotTo/Winapp2",
+    "language": "INI/C#",
+    "stars_approx": "1.0k",
+    "what_it_cleans": "Not a cleaner binary: community database of declarative routines targeting per-app temp/cache/log/MRU/registry junk consumed by CCleaner, BleachBit, FluentCleaner, System Ninja, etc.",
+    "technique": "Massive winapp2.ini ruleset (app section → FileKey/RegKey paths); automated flavors per host tool; winapp2ool trims to installed software and patches host configs",
+    "safety": "Entries typically default-off in host UIs; explicit inspectable targets over sweeping globs; Winapp3 labeled power-user/aggressive; host still performs delete with its own confirmations",
+    "steal": "Flavor + trim pipeline: one shared rules corpus, generate host-specific subsets and only load entries that match software present on the machine"
+  },
+  {
+    "name": "BleachBit",
+    "url_or_slug": "bleachbit/bleachbit",
+    "language": "Python",
+    "stars_approx": "6.5k",
+    "what_it_cleans": "Package-manager caches for APT (clean/autoclean/autoremove + /var/lib/apt/lists), yum, DNF, and pacman, plus many app caches via CleanerML definitions",
+    "technique": "Declarative CleanerML rules DB that maps options to package-manager commands (apt.clean, yum.clean_all, dnf.clean_all) and path walks; running-process guards for apt-get/synaptic",
+    "safety": "GUI Preview before delete, per-option toggles, warnings on risky options (e.g. dnf autoremove), CLI help for non-interactive use",
+    "steal": "Ship a small XML/YAML cleaner definition format: each PM gets native commands + path globs, OS filters, and 'tool is running' checks"
+  },
+  {
+    "name": "pacman-contrib (paccache)",
+    "url_or_slug": "archlinux/pacman-contrib",
+    "language": "Shell",
+    "stars_approx": "48",
+    "what_it_cleans": "Pacman package cache (CacheDir from pacman.conf, typically /var/cache/pacman/pkg): old .pkg.tar* versions and matching .sig files",
+    "technique": "Walk cache dirs, parse package filenames into name/version/arch, sort with pacsort, keep N newest per package; optional atime/mtime floors; whitelist/blacklist; --uninstalled via pacman -Qq",
+    "safety": "Explicit op required: -d dryrun, -r remove, or -m move to another dir; sudo only when write needed; reports candidates and disk space saved",
+    "steal": "Version-retention policy (keep last K versions per package) plus dry-run and move-aside instead of always unlinking the whole cache"
+  },
+  {
+    "name": "Ubuntu Cleaner",
+    "url_or_slug": "gerardpuig/ubuntu-cleaner",
+    "language": "Python",
+    "stars_approx": "256",
+    "what_it_cleans": "APT archive cache (/var/cache/apt/archives/*.deb), unneeded packages, old kernels, old installers, browser and thumbnail caches",
+    "technique": "Janitor plugin model: AptCachePlugin scans fixed root_path with *.deb pattern and deletes named files via a privileged DBus proxy",
+    "safety": "GUI category selection before clean; privileged deletes go through daemon proxy rather than unconstrained root walks",
+    "steal": "Per-PM plugin interface (discover -> list sized cruft -> clean via privileged helper) so the UI never holds root"
+  },
+  {
+    "name": "mac-cleanup-py",
+    "url_or_slug": "mac-cleanup/mac-cleanup-py",
+    "language": "Python",
+    "stars_approx": "2.4k",
+    "what_it_cleans": "Homebrew download/cache (brew cleanup -s, brew --cache path, brew tap --repair) and many language-tool package caches (npm, yarn, pnpm, gem, pod, etc.)",
+    "technique": "Modular collectors that detect if brew (or other tools) exist, invoke the package manager CLI for real cleanup, then delete the resolved cache path from brew --cache",
+    "safety": "--dry-run, interactive with_prompt on destructive modules, --force to skip warnings, configure screen to enable/disable modules",
+    "steal": "Prefer calling the PM's own cleanup API then wiping residual cache from the PM-reported path over hardcoding cache directories only"
+  },
+  {
+    "name": "Chocolatey CLI (choco)",
+    "url_or_slug": "chocolatey/choco",
+    "language": "C#",
+    "stars_approx": "11.5k",
+    "what_it_cleans": "Chocolatey HTTP download cache (user always; system HTTP cache when elevated) via choco cache list/remove; note licensed edition historically covers install-file cleanup beyond FOSS HTTP cache",
+    "technique": "Package-manager-owned cache API (list stats, remove all, remove --expired) with elevation gating for system vs user cache contexts",
+    "safety": "list before remove; --expired partial clean; --noop/--whatif; elevation required for system HTTP cache",
+    "steal": "Split list vs remove vs remove-expired, and separate user vs system cache by privilege level"
+  },
+  {
+    "name": "npkill",
+    "url_or_slug": "voidcosmos/npkill",
+    "language": "TypeScript",
+    "stars_approx": "9400",
+    "what_it_cleans": "node_modules (and other named target dirs) under a scan root; npm/yarn/pnpm project dependency trees, not global package stores",
+    "technique": "Low-level filesystem walk for directory name targets (profiles or -t); computes size and last workspace mtime; optional regex filter; interactive multi-select",
+    "safety": "Per-item confirm via TUI; dry-run; --exclude and --exclude-sensitive; warns with icon on system-sensitive node_modules; --delete-all needs -y to skip warning; default is unlink/rm not Trash",
+    "steal": "Interactive list sorted by size/age with sensitive-path highlighting before any delete"
+  },
+  {
+    "name": "cargo-cache",
+    "url_or_slug": "matthiaskrgr/cargo-cache",
+    "language": "Rust",
+    "stars_approx": "989",
+    "what_it_cleans": "Cargo home cache (~/.cargo or $CARGO_HOME): registry crate archives, extracted sources, git db/checkouts; optional local target/ and sccache stats",
+    "technique": "Knows cargo home layout; size breakdown by component; --autoclean removes re-extractable checkouts only; clean-unref vs Cargo.toml graph; age filters; trim to size cap; query/top-N",
+    "safety": "Default is report-only; --dry-run; --autoclean preserves archives and bins needed for rebuild; --info documents what is safe; selective --remove-dir categories",
+    "steal": "Layered cache model: keep original archives, drop extracted checkouts, optional size-cap trim and unreferenced-crate purge"
+  },
+  {
+    "name": "kondo",
+    "url_or_slug": "tbillington/kondo",
+    "language": "Rust",
+    "stars_approx": "2400",
+    "what_it_cleans": "Per-project build/deps junk for 20+ types: Node node_modules, Cargo target, Gradle/Maven build dirs, Python/Pixi/Jupyter artifacts, .NET, Unity, etc.",
+    "technique": "Recursive walk + project-type heuristics (fingerprint files/dirs per ecosystem); optional --older duration mtime filter; multi-path roots",
+    "safety": "Interactive prompt per project (rm -rf style); warns it is essentially destructive delete; no Trash; age filter reduces accidental wipe of active work",
+    "steal": "Project-type fingerprint table plus mtime age gate so only stale project artifacts are offered"
+  },
+  {
+    "name": "mac-cleanup-py",
+    "url_or_slug": "mac-cleanup/mac-cleanup-py",
+    "language": "Python",
+    "stars_approx": "2400",
+    "what_it_cleans": "Modular macOS caches including npm, yarn, pnpm, poetry, go, gradle (also bun, gem, nuget, xcode, docker, brew)",
+    "technique": "Plugin-style default modules that call each tool's cache-clean path/API or known cache dirs; user can enable/disable modules and add custom modules",
+    "safety": "--dry-run; --force accepts warnings; interactive module configuration; not full-disk walk, only module-defined targets",
+    "steal": "One module per toolchain with dry-run and user-configurable enable/disable registry"
+  },
+  {
+    "name": "oxiclean",
+    "url_or_slug": "croaky-fx/oxiclean",
+    "language": "Rust",
+    "stars_approx": "24",
+    "what_it_cleans": "Opt-in --dev language caches: npm/yarn/pnpm/bun/deno, pip/uv/poetry/conda, cargo registry/git, go modules, Gradle/Maven, NuGet, ccache (plus Linux system caches)",
+    "technique": "Known cache path inventory + tool-aware commands (e.g. pnpm store prune, package manager clean); labels safe vs re-download; --deep for aggressive; scans then shows table before action",
+    "safety": "--dev excluded from --all; --dry-run; --yes; never touches ~/.cargo/bin, poetry venvs, Gradle wrapper dists, npm globals; avoids hardlink-breaking store wipes; JSON mode for scripts",
+    "steal": "Safe-vs-deep tiering with package-manager-native prune instead of blind rm of hardlinked stores"
+  },
+  {
+    "name": "docker-gc",
+    "url_or_slug": "spotify/docker-gc",
+    "language": "Shell",
+    "stars_approx": "5.0k",
+    "what_it_cleans": "Exited containers past grace period, unreferenced images (and optionally dangling volumes); classic Docker host GC for cron/CI",
+    "technique": "Docker CLI inventory: list exited containers by exit age (GRACE_PERIOD_SECONDS), remove them, then rmi images not used by remaining containers; optional volume prune; exclude lists via grep patterns on files",
+    "safety": "DRY_RUN=1; exclude files for images/containers/volumes; grace period; MINIMUM_IMAGES_TO_SAVE; does not strip tags from images still referenced by containers; archived (prefer modern prune for new work)",
+    "steal": "Grace period + exclude-list files + keep-N-most-recent-images-per-repo so aggressive GC never deletes the only local base image you rebuild against daily"
+  },
+  {
+    "name": "docker-clean",
+    "url_or_slug": "ZZROTDesign/docker-clean",
+    "language": "Shell",
+    "stars_approx": "1.3k",
+    "what_it_cleans": "Stopped containers, untagged/dangling images, dangling volumes, empty networks; optional full wipe of containers/images/volumes and daemon restart",
+    "technique": "Thin shell wrapper composing docker ps/images/volume/network queries and rm/rmi; mode commands (run/stop/images/all) select which object classes run",
+    "safety": "--dry-run lists targets without deleting; per-resource flags so you can prune containers without touching tagged images; empty-networks-only for network clean",
+    "steal": "Compose cleanup as named intensity tiers (safe default vs images vs all) with a first-class dry-run that prints the same plan the delete path would execute"
+  },
+  {
+    "name": "docuum",
+    "url_or_slug": "stepchowfun/docuum",
+    "language": "Rust",
+    "stars_approx": "705",
+    "what_it_cleans": "Docker images only, until total image disk usage is under a configured threshold (daemon-style continuous cleaner for CI/dev hosts)",
+    "technique": "Subscribes to docker system events to track last-use timestamps (persisted locally); on events/start runs LRU eviction; deletes children before parents; threshold as absolute size or % of disk",
+    "safety": "--keep REGEX allowlist; --min-age floor; never deletes images in use by containers; threshold-based instead of blind TTL so frequently used old images survive",
+    "steal": "Space-budget cleaner driven by real last-use from engine events, not created-at, with persisted LRU state so restarts do not reset policy"
+  },
+  {
+    "name": "docker-custodian",
+    "url_or_slug": "Yelp/docker-custodian",
+    "language": "Python",
+    "stars_approx": "374",
+    "what_it_cleans": "Stopped containers and unused images older than max ages (dcgc); optionally stops long-running containers matching a name prefix (dcstop)",
+    "technique": "Docker Engine API via Python: filter by container/image age (pytimeparse max-age), skip running containers and images still referenced; pattern match on tags and labels for excludes",
+    "safety": "Never removes running containers or images used by any container; --exclude-image / --exclude-image-file and --exclude-container-label with wildcard patterns",
+    "steal": "Label- and tag-pattern allowlists for compose projects so a host-wide age prune cannot delete stopped debug containers marked keep=true"
+  },
+  {
+    "name": "docker-reclaim-disk-space",
+    "url_or_slug": "samoshkin/docker-reclaim-disk-space",
+    "language": "Shell",
+    "stars_approx": "39",
+    "what_it_cleans": "Stopped containers, orphan/dangling image layers, unused volumes, builder cache, plus Docker Desktop Mac VM disk (Docker.raw) after prune; restarts engine",
+    "technique": "docker system df before/after; sequential docker prune-style removals; platform-specific sparse VM shrink for Docker.raw; launchctl/systemctl restart and wait-until-ready",
+    "safety": "Interactive confirmation by default; -y to skip; --no-restart to avoid engine bounce; prints usage before and after so reclaim is measurable",
+    "steal": "Two-phase reclaim: prune container objects, then compact the host VM disk image and re-measure df, because prune alone often does not free host space on Docker Desktop/Colima-style VMs"
+  },
+  {
+    "name": "npkill",
+    "url_or_slug": "voidcosmos/npkill",
+    "language": "TypeScript",
+    "stars_approx": "9400",
+    "what_it_cleans": "Scattered node_modules (default); extensible targets/profiles for other named dirs like .cache",
+    "technique": "Fast filesystem walk from cwd/home for directory name targets; sizes folders; last workspace mtime; profiles/targets config; optional JSON/JSON-stream output",
+    "safety": "Interactive select (Del/Space); dry-run; exclude/exclude-sensitive; warning highlight for system-critical installs; --delete-all needs -y to skip warning",
+    "steal": "TUI multi-select with range mode, sort by size/path/age, and sensitive-path warnings before bulk delete"
+  },
+  {
+    "name": "DevCleaner (xcode-dev-cleaner)",
+    "url_or_slug": "vashpan/xcode-dev-cleaner",
+    "language": "Swift",
+    "stars_approx": "1600",
+    "what_it_cleans": "Xcode Device Support symbols, Archives, DerivedData, documentation cache, old simulator/device logs, legacy offline docs",
+    "technique": "Inspect known undocumented Xcode layout under Developer/Xcode paths; category UI; optional periodic scan reminder; CLI for scripted cleans",
+    "safety": "Inspect-before-clean UI; Device Support defaults exclude latest OS version per platform; backup warning; relies on internal folder layouts",
+    "steal": "Per-category defaults that keep newest Device Support while offering older versions for reclaim"
+  },
+  {
+    "name": "kondo",
+    "url_or_slug": "tbillington/kondo",
+    "language": "Rust",
+    "stars_approx": "2400",
+    "what_it_cleans": "Project-local deps/build artifacts: node_modules, Cargo target, Gradle/Maven build dirs, Flutter/Pub, Unity/Unreal, .NET bin/obj, and 20+ project types",
+    "technique": "Walk trees; detect project type via manifests; map type to artifact dirs; optional --older mtime filter; CLI + GUI",
+    "safety": "Prompt before delete (essentially rm -rf with confirm); quiet/all modes; no trash by default; docs stress backups",
+    "steal": "Project-type fingerprint table (manifest marker -> list of cleanable artifact paths) reusable as a rules engine"
+  },
+  {
+    "name": "ClearDisk",
+    "url_or_slug": "bysiber/cleardisk",
+    "language": "Swift",
+    "stars_approx": "560",
+    "what_it_cleans": "63+ global dev caches (Xcode DerivedData/Archives/simulators, JetBrains, Gradle, Maven, npm/pnpm, Docker, Flutter, VS Code, AI tool caches) plus per-project artifacts across 23 project types",
+    "technique": "Rules DB of known absolute paths scanned on a timer; project-folder walk for type-specific artifacts; DerivedData broken down by reading info.plist; risk + human descriptions",
+    "safety": "Safe/Caution/Risky labels; move to Trash only; Xcode-running warning; no network/telemetry; age-based suggestions",
+    "steal": "Risk-tiered known-path catalog with one-line rebuild explanations and DerivedData-per-project size via info.plist"
+  },
+  {
+    "name": "AndroidStudioCacheCleaner-mac",
+    "url_or_slug": "Blaze414/AndroidStudioCacheCleaner-mac",
+    "language": "Swift",
+    "stars_approx": "small",
+    "what_it_cleans": "Android Studio caches/Application Support, ~/.gradle/caches, Flutter pub-cache; per-project Flutter (flutter clean) and Kotlin/Gradle build/ dirs",
+    "technique": "Known global cache paths with size refresh; scan user-chosen tree for pubspec.yaml / build.gradle|settings.gradle; shell out to flutter clean for Flutter projects",
+    "safety": "Toggle which global items to clean; Clean All requires confirmation; native macOS app (user-driven)",
+    "steal": "Two-layer model: shared global tool caches vs project-local clean that can invoke official clean commands when available"
+  },
+  {
+    "name": "BleachBit",
+    "url_or_slug": "bleachbit/bleachbit",
+    "language": "Python",
+    "stars_approx": "6500",
+    "what_it_cleans": "Browser cookies, history, cache, IndexedDB, GPU/code/shader caches, crash reports for Chrome/Firefox/Edge/Brave/Opera/Vivaldi/Zen and many non-browser apps; system temps/logs",
+    "technique": "Declarative CleanerML rules DB (path globs, SQLite ops) over known profile dirs; multi-cleaner options; cookie keep-list manager for selective domain retention",
+    "safety": "GUI Preview before delete; selective option toggles; CLI; optional shred; cookie allowlist keeps chosen sites signed in while wiping other junk",
+    "steal": "Ship browser junk knowledge as external CleanerML/YAML rules (not hard-coded paths) so profiles and new Chromium forks can be added without code changes"
+  },
+  {
+    "name": "Cookie AutoDelete",
+    "url_or_slug": "Cookie-AutoDelete/Cookie-AutoDelete",
+    "language": "TypeScript",
+    "stars_approx": "2000",
+    "what_it_cleans": "Cookies and optional site data (localStorage, IndexedDB, cache, plugin data) when tabs close, domains change, or the browser restarts",
+    "technique": "WebExtension cookies + browsingData APIs; tracks open tabs/containers; matches domains against whitelist (keep forever) and greylist (until restart)",
+    "safety": "Auto-clean opt-in; whitelist/greylist allowlists; manual popup clean; config import/export; no blind global wipe of trusted domains",
+    "steal": "Two-tier policy model (permanent whitelist + session greylist) so privacy cleaning never logs users out of intentionally trusted sites"
+  },
+  {
+    "name": "Cookie-Editor",
+    "url_or_slug": "Moustachauve/cookie-editor",
+    "language": "JavaScript",
+    "stars_approx": "1600",
+    "what_it_cleans": "Cookies for the current tab (create, edit, delete, mass-delete for that site); Chrome, Firefox, Safari, Edge, Opera including mobile Safari/Firefox",
+    "technique": "Extension cookies API scoped to active tab origin; separate manifests and Safari/Xcode packaging for WebKit vs Chromium vs Gecko",
+    "safety": "Fully manual user-driven edits; mass-delete is an explicit UI action; no automatic background wiping",
+    "steal": "First-class Safari/WebKit packaging with per-browser manifests so macOS/iOS Safari cookie cleanup is not a Chromium-only afterthought"
+  },
+  {
+    "name": "mTTCleaner",
+    "url_or_slug": "mytech-today-now/mTTCleaner",
+    "language": "PowerShell",
+    "stars_approx": "5",
+    "what_it_cleans": "Disk caches (Cache, Code Cache, GPU Cache, cache2, startupCache), SQLite compaction of cookies/history/web data DBs, and metrics/telemetry files across 28+ browsers including Safari",
+    "technique": "Platform-specific path maps plus install detection (registry/mdfind/which/flatpak/snap); stop browser processes; delete known cache dirs; SQLite VACUUM; glob *metrics*/*telemetry*",
+    "safety": "-WhatIf dry-run; confirmation unless -Automated/-SkipConfirmation; per-browser target; skip DB compaction; operation logging",
+    "steal": "Detect running browsers, close them, then clean profile paths with dry-run size preview so multi-profile disk clean avoids locked SQLite files"
+  },
+  {
+    "name": "Cache Cleaner",
+    "url_or_slug": "cssnr/cache-cleaner",
+    "language": "Vue",
+    "stars_approx": "12",
+    "what_it_cleans": "User-selected cache and browsing data for the current site or the whole browser; Firefox Cache Storage (service worker) workaround; optional page reload after clear",
+    "technique": "Cross-browser browsingData API with Firefox vs Chromium branching; hotkey (default F4); popup, side panel, and context menu triggers",
+    "safety": "User picks data types and site vs global scope; no background auto-delete; preferences stored locally",
+    "steal": "Site-scoped vs global clear matrix with one-key clear-and-reload for iterative privacy sweeps without quitting the browser"
+  },
+  {
+    "name": "logrotate",
+    "url_or_slug": "logrotate/logrotate",
+    "language": "C",
+    "stars_approx": "1500",
+    "what_it_cleans": "Text/binary log files under admin-defined paths: rotates, compresses, mails, and removes old generations for daemons that keep writing unbounded logs.",
+    "technique": "Declarative rules DB (/etc/logrotate.conf + /etc/logrotate.d/*): match log globs, trigger on size, interval (hourly..monthly), minutes elapsed, or count; keep N rotations; optional compress, copytruncate, create mode/owner, sharedscripts, prerotate/postrotate hooks; state file tracks last action per log.",
+    "safety": "Debug/dry-run mode (-d) prints planned actions without rotating; state file avoids double-rotation; policies are explicit per path; does not invent targets outside config; careful with copytruncate vs rename for open files.",
+    "steal": "Per-path policy objects with OR triggers (size OR age) plus rotate-N retention and a durable state file so cleaners are idempotent across scheduled runs."
+  },
+  {
+    "name": "log2ram",
+    "url_or_slug": "azlux/log2ram",
+    "language": "Shell",
+    "stars_approx": "3100",
+    "what_it_cleans": "Does not bulk-delete logs; maintains /var/log (and optional PATH_DISK paths) on tmpfs/zram so writes stay in RAM, then syncs to disk on timer/shutdown. Journal-aware path vacuum-sizes systemd journal so it fits the RAM budget.",
+    "technique": "systemd unit mounts size-capped tmpfs over log dirs; daily/timer sync via rsync or cp; JOURNALD_AWARE path runs journal rotation/vacuum before sync; optional zram with COMP_ALG; SIZE/LOG_DISK_SIZE caps capacity.",
+    "safety": "Hard SIZE cap prevents RAM fill; NOTIFICATION when space is insufficient; journal vacuum recommended to a fraction of SIZE before first start; uninstall restores disk layout; no blind recursive wipe of non-log user data.",
+    "steal": "Journal-aware capacity guard: before committing logs to a constrained store, call journalctl vacuum (or equivalent) so retained journal cannot exceed the log volume budget."
+  },
+  {
+    "name": "oxiclean",
+    "url_or_slug": "croaky-fx/oxiclean",
+    "language": "Rust",
+    "stars_approx": "24",
+    "what_it_cleans": "Among broader Linux cleanup: systemd journal archives via vacuum; also package caches, trash, coredumps. Explicit -j/--journal module for log maintenance.",
+    "technique": "Distro detect from /etc/os-release + PATH tools; for journals shells out to journalctl --disk-usage then vacuum (size/time semantics of journald); measures directory sizes before/after for freed-space reporting; modular flags rather than path walking for journals.",
+    "safety": "--dry-run preview, --yes non-interactive, --json for automation, --skip to exclude journal from --all; refuses personal docs/downloads; sudo only for privileged ops; deep mode opt-in and discouraged for cron.",
+    "steal": "First-class journal module: print current journal disk-usage, vacuum with explicit size/time policy, report bytes freed, expose as a single flag usable alone or in --all with skip."
+  },
+  {
+    "name": "mac-cleanup-sh",
+    "url_or_slug": "mac-cleanup/mac-cleanup-sh",
+    "language": "Shell",
+    "stars_approx": "2800",
+    "what_it_cleans": "macOS Apple System Logs (/private/var/log/asl/*.asl), /Library/Logs/DiagnosticReports, Mail/CoreSimulator logs, plus many app logs (JetBrains, Steam, Minecraft, Teams, etc.). Note: classic ASL focus; not a full unified-log (log show) vacuum tool. Repo marked DEPRECATED but still the common OSS reference for ASL cleanup paths.",
+    "technique": "Hardcoded path globs collected into path_list then batch-removed; dry-run uses sudo du -ck to sum reclaimable size; no package APIs for logs, pure filesystem walk of known log roots.",
+    "safety": "--dry-run estimates space and prompts (Enter) before real run; real path uses rm -rf (no trash); requires upfront sudo; no fine-grained allowlist beyond the fixed path list; aggressive system cache paths included, so dry-run is essential.",
+    "steal": "collect_paths / remove_paths batching: accumulate every candidate, optionally sum du in dry-run, then delete once, so macOS log modules share one confirm and one space report."
+  },
+  {
+    "name": "privacy.sexy",
+    "url_or_slug": "undergroundwires/privacy.sexy",
+    "language": "TypeScript",
+    "stars_approx": "5900",
+    "what_it_cleans": "Windows log maintenance scripts: %SYSTEMROOT%\\Logs\\CBS\\CBS.log, DISM.log, Temp\\CBS, waasmedic, NetSetup; DiagTrack Event Trace Logs (AutoLogger/ShutdownLogger *.etl); full Event Viewer clear via wevtutil el/cl. Closest OSS catalog for CBS/ETL-style cleanup when proprietary cleaners have no open core.",
+    "technique": "Declarative YAML collection (windows.yaml): named actions with file/directory globs, StopService/StartService around locked files, grantPermissions for SYSTEM-owned ETL, raw batch with wevtutil for event logs; templating expands portable scripts; docs cite Microsoft/forensic sources per path.",
+    "safety": "recommend tiers (standard/strict/null); transparent human-readable docs per tweak; admin elevation check; service stop/start state files; reversible where designed; user selects scripts (not silent wipe-all); no trash vs unlink distinction (direct delete after privilege fix).",
+    "steal": "Locked-log pattern: stop owning service -> grant ACL if needed -> delete CBS/ETL globs -> restart service; plus wevtutil enumerate-and-clear as a separate Event Viewer module with documented risk tiers."
+  },
+  {
+    "name": "Pearcleaner",
+    "url_or_slug": "alienator88/Pearcleaner",
+    "language": "Swift",
+    "stars_approx": "14166",
+    "what_it_cleans": "macOS apps plus related prefs/caches/containers/launch agents; orphaned leftovers after manual Trash deletes; Homebrew/PKG/plugin remnants",
+    "technique": "Bundle metadata + Library path walks with tunable sensitivity/include-exclude dirs; Sentinel Monitor FS watcher re-scans when apps hit Trash",
+    "safety": "User reviews matched files before removal; Full Disk Access + privileged helper for system paths; source-available (Apache 2.0 + Commons Clause)",
+    "steal": "Background Trash watcher that auto-offers leftover cleanup right after a manual app delete"
+  },
+  {
+    "name": "Bulk Crap Uninstaller",
+    "url_or_slug": "BCUninstaller/Bulk-Crap-Uninstaller",
+    "language": "C#",
+    "stars_approx": "20536",
+    "what_it_cleans": "Windows apps (MSI/NSIS/Inno/Store/Steam/Features) and post-uninstall leftovers including files, registry keys, and residual app data",
+    "technique": "Registry Uninstall entries + multi-installer APIs; orphaned app detection; leftover scan after batch uninstall keyed to app identity",
+    "safety": "Reviewable leftover lists; bulk/unattended modes with confirmations; Apache 2.0",
+    "steal": "Two-phase uninstall: run the vendor uninstaller first, then residual scan using the same app identity (name/publisher/path)"
+  },
+  {
+    "name": "Mole",
+    "url_or_slug": "tw93/Mole",
+    "language": "Shell",
+    "stars_approx": "61915",
+    "what_it_cleans": "Installed apps + related leftovers; already-uninstalled app leftovers via mo clean; caches, logs, installer artifacts",
+    "technique": "Bundle-ID or app-name variant matching across 20+ Library locations; rejects generic/short names; skips broad Preferences/ByHost; protected-path checks",
+    "safety": "mo clean/uninstall --dry-run; whitelist for protected caches; operation log/history; analyze uses Trash; confirmations on risky actions",
+    "steal": "Separate clean modes for still-installed vs already-gone apps, with short-name floors so tokens never match half of Library"
+  },
+  {
+    "name": "MacCleaner",
+    "url_or_slug": "dheerajbatra/MacCleaner",
+    "language": "Python",
+    "stars_approx": "1",
+    "what_it_cleans": "Per-app Library remants (Preferences plists, Application Support, Caches, Containers, LaunchAgents/Daemons, cookies/WebKit); orphaned prefs after apps deleted",
+    "technique": "Parse CFBundleIdentifier from each .app Info.plist; precise bundle-ID prefix or exact app-name match; reverse orphan scan for com.*/io.*/org.* with no installed owner",
+    "safety": "Full list before delete; all removals via Finder Trash (osascript); skips com.apple.*; per-row selection",
+    "steal": "Orphan residual-plist pass: inventory installed bundle IDs, then flag reverse-DNS prefs/support files with no living owner"
+  },
+  {
+    "name": "MS-Scripts Find-AppLeftovers",
+    "url_or_slug": "koki7o/MS-Scripts",
+    "language": "PowerShell",
+    "stars_approx": "7",
+    "what_it_cleans": "Orphaned folders under %LOCALAPPDATA% and %APPDATA% left by uninstalled Windows apps (identify/report only)",
+    "technique": "Installed set from Uninstall registry (HKLM/HKCU/Wow6432Node) + Appx; normalize names to alnum; walk AppData dirs; flag unmatched folders; size ranking",
+    "safety": "Report-only, no auto-delete; explicit manual-review warnings for shared/system folders",
+    "steal": "Normalize display names and folder names before fuzzy match, then sort leftovers by size to prioritize reclaimable space"
+  },
+  {
+    "name": "CrunchyCleaner",
+    "url_or_slug": "Knuspii/CrunchyCleaner",
+    "language": "Go",
+    "stars_approx": "141",
+    "what_it_cleans": "Steam appcache/htmlcache, Discord Cache/Code/GPUCache, Spotify Storage, Slack Cache/Code/GPUCache, browsers, JetBrains, GPU shader caches; Flatpak paths on Linux",
+    "technique": "Hardcoded per-OS path rules DB (cc_caches.go) with env vars, profile wildcards, and Flatpak sibling paths",
+    "safety": "CLI -d dry-run/simulation, interactive TUI multi-select, optional -a auto-all; docs say cache/temp only",
+    "steal": "Single rules table mapping each app to multiple platform-specific globs including Flatpak variants"
+  },
+  {
+    "name": "WindowsClearCache",
+    "url_or_slug": "inode64/WindowsClearCache",
+    "language": "PowerShell",
+    "stars_approx": "32",
+    "what_it_cleans": "Microsoft Teams (classic + MSTeams Store package), Slack, Discord, Steam htmlcache, browsers, Epic, OneDrive, Office, AppX package caches, Windows temp/prefetch/WU",
+    "technique": "Shared Chromium cache-subdir template applied to Electron apps; per-app known relative paths under each user profile; multi-user scan of C:\\Users",
+    "safety": "-DryRun with file/byte preview; IncludeUsers/ExcludeUsers; skips AAD Broker and MSTeams packages to protect sign-in; never deletes Outlook OST/PST",
+    "steal": "Chromium template reuse for Electron apps plus protected-package allowlist so auth-bearing AppX caches are not wiped"
+  },
+  {
+    "name": "spotify-cleaner",
+    "url_or_slug": "joseareia/spotify-cleaner",
+    "language": "Lua",
+    "stars_approx": "2",
+    "what_it_cleans": "Spotify desktop Storage and Data dirs under ~/.cache/spotify (configurable paths)",
+    "technique": "Measure directory size; if >= user threshold (default 150MB) run rm -r contents; cron every 5h after install",
+    "safety": "Threshold gate is the primary guard (below limit = no delete); logs keep/clear decisions; settings.conf for custom paths; uninstall removes cron",
+    "steal": "Per-app soft size cap: only clear large media caches when they exceed a configured budget"
+  },
+  {
+    "name": "Steam-Deck.Shader-Cache-Killer",
+    "url_or_slug": "scawp/Steam-Deck.Shader-Cache-Killer",
+    "language": "Shell",
+    "stars_approx": "491",
+    "what_it_cleans": "Steam shadercache and compatdata per appid; companion mover relocates caches to SD/external via copy+symlink",
+    "technique": "du per appid dir; name resolution via libraryfolders.vdf + appmanifest.acf, Steam GetAppList API fallback, Steam log scrape for non-Steam; excludes Proton",
+    "safety": "dry-run mode (live=0); zenity checklist; extra confirmation before compatdata delete; Proton filtered; USE AT OWN RISK disclaimer",
+    "steal": "Offer move/symlink of huge per-game caches to secondary storage instead of only hard-deleting"
+  },
+  {
+    "name": "decky-storage-cleaner",
+    "url_or_slug": "mcarlucci/decky-storage-cleaner",
+    "language": "Python/TypeScript",
+    "stars_approx": "81",
+    "what_it_cleans": "Steam Deck steamapps/shadercache and steamapps/compatdata on a per-appid basis (Steam and non-Steam)",
+    "technique": "Walk appid subdirs and sum sizes (skip symlinks); Decky UI maps appid via Steam appStore.GetAppOverviewByGameID for name/type/cloud_status; shutil.rmtree by selection",
+    "safety": "Selective multi-select UI (not blind full wipe); documents shader regen; cloud_status available to reason about save risk on compatdata",
+    "steal": "Present junk as named games with human sizes by joining filesystem appid folders to live Steam app metadata"
+  },
+  {
+    "name": "BleachBit",
+    "url_or_slug": "bleachbit/bleachbit",
+    "language": "Python",
+    "stars_approx": "6500",
+    "what_it_cleans": "Linux Freedesktop thumbnail dirs (~/.thumbnails, $XDG_CACHE_HOME/thumbnails); Windows Explorer thumbcache*.db under LocalAppData\\Microsoft\\Windows\\Explorer",
+    "technique": "CleanerML rules DB: unix walk.files on known thumbnail roots; windows process kill explorer + glob-delete thumbcache*.db + relaunch explorer.exe",
+    "safety": "Preview/dry-run listing before Delete; per-option checkboxes; Windows option warns Explorer will restart; permanent unlink not trash",
+    "steal": "Dedicated cleaner id for preview caches with platform actions, especially kill-shell / delete locked DB globs / restart-shell for Windows"
+  },
+  {
+    "name": "Thumbcache Viewer",
+    "url_or_slug": "thumbcacheviewer/thumbcacheviewer",
+    "language": "C++",
+    "stars_approx": "165",
+    "what_it_cleans": "Does not wipe live caches; extracts/views Windows Vista-11 thumbcache_*.db and iconcache_*.db (OSS alternative to opaque Disk Cleanup/CCleaner thumbnail handling)",
+    "technique": "Binary format parsers for multi-size thumb/icon cache databases; GUI and CLI extraction of embedded JPEG/PNG/BMP thumbnails",
+    "safety": "Read-only by design; docs note DBs are often locked by Explorer and should not be casually deleted while in use",
+    "steal": "Treat Windows thumbnails as size-tier database set (thumbcache_*.db), not a walkable image folder; add inspect-before-wipe using format knowledge"
+  },
+  {
+    "name": "osx-thumbnails",
+    "url_or_slug": "CoderCookE/osx-thumbnails",
+    "language": "Go",
+    "stars_approx": "<50",
+    "what_it_cleans": "Reconstructs images from macOS Quick Look thumbnail cache (forensic/privacy); maps store that closed cleaners wipe via qlmanage or path delete",
+    "technique": "Locate $TMPDIR/../C/com.apple.QuickLook.thumbnailcache; copy index.sqlite; SQL SELECT bitmap offsets/sizes from thumbnails table; slice thumbnails.data into PNGs",
+    "safety": "Read-only reconstruction; copies SQLite to temp before querying so live cache is not written",
+    "steal": "Model Quick Look as index.sqlite + thumbnails.data pair; optional export-then-clear with qlmanage -r cache for safe privacy wipe"
+  },
+  {
+    "name": "Vinetto",
+    "url_or_slug": "AtesComp/Vinetto",
+    "language": "Python",
+    "stars_approx": "22",
+    "what_it_cleans": "Parses legacy Windows Thumbs.db (OLE) and modern Thumbcache_*.db; optional ESEDB name recovery; targets stale/orphan thumbnail intelligence more than bulk free-space",
+    "technique": "Mode-based scan (file/dir/recursive/automatic Vista+ user Explorer paths); format-aware extract; optional Windows.edb cross-check; HTML reports; planned dir-vs-cache consistency",
+    "safety": "Extract-to-output-dir only; no system wipe; quiet/verbose levels and structured exit codes",
+    "steal": "Orphan policy: report or delete cache entries whose source file is gone instead of always nuking the entire thumbnail store"
+  },
+  {
+    "name": "Fix white or blank Icons (Windows 10/11)",
+    "url_or_slug": "K3V1991/Fix-white-or-blank-Icons-Windows-10-and-11",
+    "language": "Batch",
+    "stars_approx": "38",
+    "what_it_cleans": "Windows iconcache*.* and thumbcache*.* (plus optional full Explorer cache folder and Start Menu tile caches)",
+    "technique": "Hardcoded LocalAppData\\Microsoft\\Windows\\Explorer paths; taskkill explorer.exe; del /f /s /q globs; start explorer; notes ThumbCacheToDelete leftovers until reboot",
+    "safety": "No dry-run or trash; user double-clicks scripts; documents access-denied leftovers and post-reboot cleanup",
+    "steal": "Second-pass model for locked files (ThumbCacheToDelete + reboot) and separate modes for icon-only vs thumbnail-only vs full Explorer cache wipe"
+  },
+  {
+    "name": "BleachBit",
+    "url_or_slug": "bleachbit/bleachbit",
+    "language": "Python",
+    "stars_approx": "6500",
+    "what_it_cleans": "App caches, browser junk, temp/logs, privacy traces; optional shred of selected files; free/empty disk space; Linux RAM and swap wipe",
+    "technique": "Declarative CleanerML rules DB (paths, globs, app-specific targets) plus Winapp2.ini; shred uses single-pass overwrite plus rename then unlink; free-space wipe fills unused space so deleted remnants are overwritten",
+    "safety": "Preview/dry-run lists files before delete; per-cleaner checkboxes; shred opt-in; documents SSD/TRIM/HDD limits and rejects multi-pass marketing myths",
+    "steal": "Dual-mode delete (fast unlink vs shred) gated by preference, with Preview listing every path before any irreversible write"
+  },
+  {
+    "name": "privacy.sexy",
+    "url_or_slug": "undergroundwires/privacy.sexy",
+    "language": "TypeScript",
+    "stars_approx": "5900",
+    "what_it_cleans": "Privacy cleanup (history/telemetry leftovers), debloat, OS data-collection disable, security/privacy hardening scripts on Windows, macOS, and Linux",
+    "technique": "Data-driven YAML collections: categories to scripts with inline code/revertCode or shared function calls; templating compiles portable shell/batch scripts from a curated recipe DB (not filesystem junk heuristics)",
+    "safety": "Full visibility of generated scripts; optional reverse scripts (revertCode); web mode can export without running a local binary; recommendation levels (standard/strict)",
+    "steal": "Model every clean/harden action as an independently executable, documented, optionally reversible script unit instead of a black-box clean button"
+  },
+  {
+    "name": "nwipe",
+    "url_or_slug": "martijnvanbrummelen/nwipe",
+    "language": "C",
+    "stars_approx": "1200",
+    "what_it_cleans": "Entire block devices (full permanent erase of disks); OSS successor to DBAN dwipe, not a junk-file cleaner",
+    "technique": "Enumerates disks via parted/smartmontools/hdparm; multi-pass standards (zeros, DoD short/full, Gutmann, Schneier, HMG IS5, PRNG stream, BMB21-2019); parallel multi-disk wipe; optional verify; evolving ATA/NVMe firmware sanitize",
+    "safety": "Explicit device selection; --exclude by stable by-id paths; GUI or CLI; warns if optional tools missing; SSD guide documents flash overwrite limits",
+    "steal": "Post-wipe certificate/report (device identity, method, error counts) so users can prove what was erased"
+  },
+  {
+    "name": "THC Secure Delete (srm/sfill)",
+    "url_or_slug": "gordrs/thc-secure-delete",
+    "language": "C",
+    "stars_approx": "11",
+    "what_it_cleans": "User-chosen files (srm); free disk space (sfill); swap (sswap); unused RAM (smem). Classic secure-delete toolkit widely packaged as secure-delete on distros; low GitHub stars because this is a historical mirror of THC code",
+    "technique": "User supplies paths/mounts. Secure path: multi-pass overwrite (38 Gutmann-style default; -l/-ll fewer), truncate, rename, then unlink; large block writes plus sync; free-space wipe creates a fill file until the FS is full then deletes it",
+    "safety": "No junk dry-run scan (explicit targets only); -f/-v flags; documented limits (disk caches, journals, networks, SSDs). Destructive by design",
+    "steal": "Secure-delete pipeline of overwrite then truncate then random rename then unlink so name and size metadata do not survive"
+  },
+  {
+    "name": "Raider (File Shredder)",
+    "url_or_slug": "ADBeveridge/raider",
+    "language": "C",
+    "stars_approx": "83",
+    "what_it_cleans": "User-selected sensitive files/folders via GNOME File Shredder UI (permanent erase, not system junk discovery)",
+    "technique": "User picks files in a GTK4 app; overwrites file contents (shred-style) before deletion; documents that SSD wear-leveling makes perfect software shredding impossible",
+    "safety": "User-driven selection only (no automatic junk rules); Flathub/GNOME Circle packaging; honest SSD limitations in README",
+    "steal": "Ship permanent-erase as a small focused desktop action (pick files, shred, done) separate from bulk junk-cleaner UX"
+  },
+  {
+    "name": "kondo",
+    "url_or_slug": "tbillington/kondo",
+    "language": "Rust",
+    "stars_approx": "~2350",
+    "what_it_cleans": "Regenerable project dependencies and build artifacts (node_modules, target, build, etc.) across 20+ ecosystems (Cargo, Node, Python, Gradle, Unity, Unreal, Godot, Zig, .NET, ...)",
+    "technique": "Recursive directory walk; project-type detection via marker files/heuristics; map type to known artifact dirs; optional --older mtime filter so only stale projects are cleaned",
+    "safety": "Interactive confirmations before delete (guided rm -rf); multi-path roots; symlink/fs options; no trash/recycle by default; strong 'have backups' warnings",
+    "steal": "Ecosystem detector table: one walk, many project types via markers, plus age filter (only purge trees not modified for N months)"
+  },
+  {
+    "name": "mac-cleanup-py",
+    "url_or_slug": "mac-cleanup/mac-cleanup-py",
+    "language": "Python",
+    "stars_approx": "~2370",
+    "what_it_cleans": "macOS trash, system/user caches and logs, Homebrew, Xcode DerivedData/archives/simulators, Docker dangling images/stopped containers, npm/yarn/pnpm, pip/poetry/pyenv, browsers, JetBrains logs, Steam, Telegram, and many other app modules (Python rewrite of mac-cleanup-sh; OSS stand-in for CleanMyMac-class tools)",
+    "technique": "Composable named modules (brew, docker, xcode, npm, ...); each encodes known paths and/or package-manager CLI cleanup calls; configure which modules run",
+    "safety": "--dry-run; --force to accept warnings; interactive module configuration; --verbose lists folders to delete; custom module path support",
+    "steal": "Plugin-style cleaner modules with a configure screen: one module per app/ecosystem, user-toggleable, dry-run first"
+  },
+  {
+    "name": "CrunchyCleaner",
+    "url_or_slug": "Knuspii/CrunchyCleaner",
+    "language": "Go",
+    "stars_approx": "~140",
+    "what_it_cleans": "Windows/Linux software caches and temp: system temp/logs/thumbnails; browsers (Firefox/Chrome/Edge/Brave/Opera); VS Code/JetBrains/Slack; Steam/Epic; Discord/Spotify/Telegram; Go/pip/npm/yarn/cargo/NuGet/Gradle caches; Flatpak app paths on Linux",
+    "technique": "Hard-coded OS-specific path rules DB (env vars + globs like Profiles/*/cache2); TUI category selection; optional -a auto-clean all; path existence check then delete contents",
+    "safety": "-d simulation mode without deleting; categories labeled Admin/Root where needed; documents cache/temp-only scope; user-risk disclaimer",
+    "steal": "Single maintainable path-template table keyed by OS + env (LOCALAPPDATA, ~/.cache, Flatpak .var/app) for fast cross-platform cache coverage"
+  },
+  {
+    "name": "moonbit",
+    "url_or_slug": "Nomadcxx/moonbit",
+    "language": "Go",
+    "stars_approx": "~65",
+    "what_it_cleans": "Linux system junk: package-manager caches (pacman/apt/dnf/zypper, AUR helpers), temps, thumbnails, font caches, logs; deep app caches (IDE/Electron/AI/Bottles/Lutris); Docker images/containers/volumes/build cache; Plex/Jellyfin transcodes; orphans/old kernels; optional duplicate finder",
+    "technique": "Quick vs deep scan modes; category include/exclude filters; package-manager CLI/API cleanup; deep-scan discovery for app cache/log/temp paths; systemd timer and daemon automation",
+    "safety": "clean is dry-run unless --force; high-risk classes excluded by default (browser caches, Steam shaders/downloads, session/project data); backups list/restore; category filtering",
+    "steal": "Dry-run-by-default clean requiring explicit --force, plus quick/deep risk tiers and optional systemd scheduled scan/clean"
+  },
+  {
+    "name": "sifty",
+    "url_or_slug": "Vortrix5/sifty",
+    "language": "Python",
+    "stars_approx": "~90",
+    "what_it_cleans": "Windows junk/caches (user/system temp, thumbnails, browser caches, winget cache, crash dumps, Windows Update leftovers, Discord); opt-in Downloads installers and Windows.old; also node_modules/build purge, WSL2 VHD and git worktrees, duplicates, app leftovers after uninstall",
+    "technique": "Named junk categories with fixed Windows paths (admin-gated where needed); winget/registry for apps; SHA-256 duplicate scan; separate purge command for dev artifacts",
+    "safety": "Dry-run by default (requires --apply); Recycle Bin only via Send2Trash + sifty undo; protected paths (Windows, Program Files, profile root); audit log of applied deletes; AI advisory-only",
+    "steal": "Single trash() path with Recycle Bin + undo + audit log, combined with dry-run default and hard protected-path denylist"
+  },
+  {
+    "name": "free-disk-space",
+    "url_or_slug": "jlumbroso/free-disk-space",
+    "language": "Shell",
+    "stars_approx": "703",
+    "what_it_cleans": "Ubuntu GHA runner bulk: Android/.NET/Haskell toolchains, large apt packages, Docker images, optional AGENT_TOOLSDIRECTORY tool-cache and swap (~up to ~31 GB)",
+    "technique": "Category rule list of known large paths; rm -rf + apt remove + docker prune; per-category df before/after accounting",
+    "safety": "Per-category boolean toggles (tool-cache default off); destructive unlink only; safe on ephemeral hosted runners, dangerous if a needed toolchain is toggled on",
+    "steal": "Emit bytes-saved-per-category after each purge bucket so operators tune which junk classes are worth removing"
+  },
+  {
+    "name": "maximize-build-space",
+    "url_or_slug": "easimon/maximize-build-space",
+    "language": "Shell",
+    "stars_approx": "522",
+    "what_it_cleans": "Optional preinstalled SDKs (dotnet/android/haskell/codeql/docker) plus unused root and /mnt temp disk reclaimed into a large build volume (often 60+ GB)",
+    "technique": "Optional path-based rm -rf of large tool dirs; LVM loop images on / and /mnt concatenated into a VG, then mount over $GITHUB_WORKSPACE",
+    "safety": "root-reserve-mb/temp-reserve-mb/swap-size-mb knobs; software removal is opt-in; docs warn reverse-engineered runner layout may break jobs that need removed runtimes",
+    "steal": "Reclaim spare disks via LVM remount with explicit free-space reserves, not only delete-based reclaim"
+  },
+  {
+    "name": "gha-remove-artifacts",
+    "url_or_slug": "c-hive/gha-remove-artifacts",
+    "language": "JavaScript",
+    "stars_approx": "391",
+    "what_it_cleans": "Repository workflow artifacts that consume GitHub Actions artifact/log storage quota (scheduled purge beyond default retention)",
+    "technique": "GitHub REST Actions Artifacts API list/delete; age threshold parsed by Moment.js; optional keep of tagged-release and N most recent artifacts",
+    "safety": "age + skip-tags + skip-recent policies; Octokit rate-limit throttling; permanent delete via API (no trash/restore)",
+    "steal": "Layer keep-last-N and keep-tagged-releases on top of pure age-based deletion for monorepo release vs PR artifact policies"
+  },
+  {
+    "name": "gh-actions-cache",
+    "url_or_slug": "actions/gh-actions-cache",
+    "language": "Go",
+    "stars_approx": "332",
+    "what_it_cleans": "GitHub Actions dependency caches for a repo (by key/branch); archived OSS core whose model lives on as native gh cache",
+    "technique": "Actions Cache REST API; list with key-prefix and branch filters; sort by last-used/size/created-at; delete by cache key (multi-branch keys supported)",
+    "safety": "Interactive confirmation before delete (--confirm to skip); list-first UX; branch-scoped delete; no local filesystem trash",
+    "steal": "Sort candidates by size or last-used before prune so monorepos delete the largest/stale caches first (same UX as modern gh cache)"
+  },
+  {
+    "name": "delete-artifact",
+    "url_or_slug": "GeekyEggo/delete-artifact",
+    "language": "TypeScript",
+    "stars_approx": "232",
+    "what_it_cleans": "Artifacts within the current workflow run after they have been shared across jobs (immediate storage reclaim, not only retention expiry)",
+    "technique": "Actions artifact APIs scoped to the run; multi-name and glob patterns (e.g. artifact-*) matched against uploaded names",
+    "safety": "Explicit name/glob allowlist of what to delete; failOnError:false so optional cleanup does not fail the job; version matrix pinned to upload-artifact generations",
+    "steal": "Mid-pipeline ephemeral delete once an artifact is consumed by downstream jobs, instead of waiting for retention or a nightly bot"
+  },
+  {
+    "name": "rmlint",
+    "url_or_slug": "sahib/rmlint",
+    "language": "C",
+    "stars_approx": "2.4k",
+    "what_it_cleans": "Duplicate files/dirs, empty files/dirs, broken symlinks, non-stripped binaries, files with broken UID/GID",
+    "technique": "Recursive walk; group by size then hash; optional mtime filter and paranoia full-compare; BTRFS-aware; multi-format report",
+    "safety": "Non-interactive by design: writes inspectable shell script and JSON before any delete; caching/replay of prior scans",
+    "steal": "Emit a human-reviewable action plan (shell/JSON) as the default delete path instead of immediate unlink"
+  },
+  {
+    "name": "fclones",
+    "url_or_slug": "pkolaczk/fclones",
+    "language": "Rust",
+    "stars_approx": "2.9k",
+    "what_it_cleans": "Redundant identical files (remove, hard/soft link, or FS reflink dedupe)",
+    "technique": "Multi-stage pipeline: size group, inode collapse, prefix/suffix partial hash, full content hash; device-type-tuned I/O; optional hash cache",
+    "safety": "Separate group vs remove/link phases; --dry-run; keep-path/keep-name and priority (newest/oldest); inspect report before mutation",
+    "steal": "Hard split discovery (group report) from mutation, with priority and keep-path rules applied only at act time"
+  },
+  {
+    "name": "czkawka",
+    "url_or_slug": "qarmin/czkawka",
+    "language": "Rust",
+    "stars_approx": "32.5k",
+    "what_it_cleans": "Duplicates, empty folders/files, temp files, big files, similar images/videos/music, broken files, bad extensions, invalid symlinks, EXIF (GUI tools)",
+    "technique": "Walk + size/hash for dupes; specialized heuristics (perceptual image hash, audio tags/content, video frames); rescan cache; shared czkawka_core library",
+    "safety": "GUI/CLI selection before delete; offline/no telemetry; multi-frontend reuse of core; user chooses targets after scan",
+    "steal": "Modular multi-scanner core library (empty/temp/similar/broken) behind one API instead of a single junk category"
+  },
+  {
+    "name": "wipe-modules",
+    "url_or_slug": "bntzio/wipe-modules",
+    "language": "Shell",
+    "stars_approx": "358",
+    "what_it_cleans": "node_modules directories of inactive JS projects under a code root",
+    "technique": "Walk code tree for node_modules; mark inactive by project mtime older than user-specified days; cron-friendly agent",
+    "safety": "-D/--dry lists only; regenerable via package.json; no system paths; explicit path + days required",
+    "steal": "Inactivity-by-mtime threshold for regenerable build artifacts (not just directory name presence)"
+  },
+  {
+    "name": "mac-cleanup-go",
+    "url_or_slug": "2ykwang/mac-cleanup-go",
+    "language": "Go",
+    "stars_approx": "436",
+    "what_it_cleans": "macOS caches, logs, temp, browser/app data, Homebrew/Docker caches, old downloads (not full system optimizer/uninstaller)",
+    "technique": "Curated rules DB (~100+ known paths) scanned in parallel; brew/docker builtins; mtime filter for old downloads; SIP paths skipped",
+    "safety": "Preview-first TUI; default move to Trash; impact levels safe/moderate/risky/manual with risky unselected; CLI --dry-run; confirm before delete",
+    "steal": "Bake impact tiers into the rules DB so risky targets start excluded and only Trash after explicit include + confirm"
+  }
+]

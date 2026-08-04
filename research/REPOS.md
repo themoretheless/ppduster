@@ -1,0 +1,86 @@
+# Collected open-source tools (research)
+
+Total batch entries: 100
+Unique by slug: 79
+
+| Name | Slug | Language | Cleans | Steal |
+|------|------|----------|--------|-------|
+| mac-cleanup-go | 2ykwang/mac-cleanup-go | Go | macOS caches, logs, temp, browser/app data, Homebrew/Docker caches, old download | Bake impact tiers into the rules DB so risky targets start excluded and only Tra |
+| gh-actions-cache | actions/gh-actions-cache | Go | GitHub Actions dependency caches for a repo (by key/branch); archived OSS core w | Sort candidates by size or last-used before prune so monorepos delete the larges |
+| Raider (File Shredder) | ADBeveridge/raider | C | User-selected sensitive files/folders via GNOME File Shredder UI (permanent eras | Ship permanent-erase as a small focused desktop action (pick files, shred, done) |
+| fdupes | adrianlopezroche/fdupes | C | Content-identical duplicate files under given directories; interactive or batch  | Interactive per-group preserve prompts (pick which file numbers to keep) plus op |
+| Pearcleaner | alienator88/Pearcleaner | Swift | App bundles and leftovers (prefs, caches, containers, launch agents), orphaned f | Sentinel-style low-RAM watcher that cleans leftovers automatically when an app i |
+| trash-cli | andreafrancia/trash-cli | Python | User-specified files/dirs via soft-delete into the FreeDesktop.org trashcan (sha | Age-gated trash purge (trash-empty N) as a built-in retention policy for recover |
+| pacman-contrib (paccache) | archlinux/pacman-contrib | Shell | Pacman package cache (CacheDir from pacman.conf, typically /var/cache/pacman/pkg | Version-retention policy (keep last K versions per package) plus dry-run and mov |
+| dupeGuru | arsenetar/dupeguru | Python | Duplicate files by content or fuzzy filename match; specialized music-mode (tags | Reference folders: mark paths whose files are never deleted so the engine always |
+| Vinetto | AtesComp/Vinetto | Python | Parses legacy Windows Thumbs.db (OLE) and modern Thumbcache_*.db; optional ESEDB | Orphan policy: report or delete cache entries whose source file is gone instead  |
+| log2ram | azlux/log2ram | Shell | Does not bulk-delete logs; maintains /var/log (and optional PATH_DISK paths) on  | Journal-aware capacity guard: before committing logs to a constrained store, cal |
+| gomi | babarot/gomi | Go | User-specified files as an rm-compatible safer delete into XDG or legacy trash;  | Configurable forbidden_paths so delete/empty operations refuse critical system p |
+| Bulk Crap Uninstaller | BCUninstaller/Bulk-Crap-Uninstaller | C# | Unwanted Windows programs in bulk, leftover files/registry after uninstall, orph | Product-scoped leftover scanner that runs after uninstall (files + registry tied |
+| AndroidStudioCacheCleaner-mac | Blaze414/AndroidStudioCacheCleaner-mac | Swift | Android Studio caches/Application Support, ~/.gradle/caches, Flutter pub-cache;  | Two-layer model: shared global tool caches vs project-local clean that can invok |
+| BleachBit | bleachbit/bleachbit | Python | Application/browser caches, cookies, history, temp files, logs, package leftover | Ship junk definitions as external CleanerML-style rule packs so the engine stays |
+| CleanerML (BleachBit cleaners pack) | bleachbit/cleanerml | XML | Bonus/community cleaner definitions for apps and Linux paths not always shipped  | Split cleaner knowledge into a versioned rules pack with pending vs release lane |
+| wipe-modules | bntzio/wipe-modules | Shell | node_modules directories of inactive JS projects under a code root | Inactivity-by-mtime threshold for regenerable build artifacts (not just director |
+| dust | bootandy/dust | Rust | Nothing in-process (read-only du alternative); surfaces largest paths so the use | Largest-N hierarchy bar view that reveals buried large files even when parent di |
+| FluentCleaner | builtbybel/FluentCleaner | C# | Windows app and browser caches, temps, logs, and targeted registry traces descri | Thin native engine + multi-database winapp2 parser so community rules update ind |
+| dua-cli | Byron/dua-cli | Rust | User-marked unwanted files/directories in interactive mode (bulk delete optimize | Multi-stage TUI delete confirmations combined with ignore files that never enter |
+| ClearDisk | bysiber/cleardisk | Swift | 63+ global dev caches (Xcode DerivedData/Archives/simulators, JetBrains, Gradle, | Risk-tiered known-path catalog with one-line rebuild explanations and DerivedDat |
+| gha-remove-artifacts | c-hive/gha-remove-artifacts | JavaScript | Repository workflow artifacts that consume GitHub Actions artifact/log storage q | Layer keep-last-N and keep-tagged-releases on top of pure age-based deletion for |
+| Chocolatey CLI (choco) | chocolatey/choco | C# | Chocolatey HTTP download cache (user always; system HTTP cache when elevated) vi | Split list vs remove vs remove-expired, and separate user vs system cache by pri |
+| ncdu | code.blicky.net/yorhel/ncdu | Zig (2.x) / C (1.x LTS) | User-selected large files and directories found via interactive ncurses size bro | Pluggable --delete-command (trash vs unlink) plus export/import so scan and dest |
+| jdupes | codeberg.org/jbruchon/jdupes | C | Duplicate files; can delete, hardlink, symlink, or block-level dedupe; advanced  | Persistent hash database so re-scanning multi-million-file cold archives finishe |
+| osx-thumbnails | CoderCookE/osx-thumbnails | Go | Reconstructs images from macOS Quick Look thumbnail cache (forensic/privacy); ma | Model Quick Look as index.sqlite + thumbnails.data pair; optional export-then-cl |
+| Cookie AutoDelete | Cookie-AutoDelete/Cookie-AutoDelete | TypeScript | Cookies and optional site data (localStorage, IndexedDB, cache, plugin data) whe | Two-tier policy model (permanent whitelist + session greylist) so privacy cleani |
+| oxiclean | croaky-fx/oxiclean | Rust | Opt-in --dev language caches: npm/yarn/pnpm/bun/deno, pip/uv/poetry/conda, cargo | Safe-vs-deep tiering with package-manager-native prune instead of blind rm of ha |
+| Cache Cleaner | cssnr/cache-cleaner | Vue | User-selected cache and browsing data for the current site or the whole browser; | Site-scoped vs global clear matrix with one-key clear-and-reload for iterative p |
+| MacCleaner | dheerajbatra/MacCleaner | Python | Per-app Library remants (Preferences plists, Application Support, Caches, Contai | Orphan residual-plist pass: inventory installed bundle IDs, then flag reverse-DN |
+| maximize-build-space | easimon/maximize-build-space | Shell | Optional preinstalled SDKs (dotnet/android/haskell/codeql/docker) plus unused ro | Reclaim spare disks via LVM remount with explicit free-space reserves, not only  |
+| delete-artifact | GeekyEggo/delete-artifact | TypeScript | Artifacts within the current workflow run after they have been shared across job | Mid-pipeline ephemeral delete once an artifact is consumed by downstream jobs, i |
+| Ubuntu Cleaner | gerardpuig/ubuntu-cleaner | Python | APT deb cache, apt autoremove candidates, old kernel packages, residual package  | Category-tagged plugin modules with a shared scan/clean signal protocol so new c |
+| THC Secure Delete (srm/sfill) | gordrs/thc-secure-delete | C | User-chosen files (srm); free disk space (sfill); swap (sswap); unused RAM (smem | Secure-delete pipeline of overwrite then truncate then random rename then unlink |
+| Mac Sai | iliyami/MacSai | Swift | 16 system-junk categories, mail attachments, Trash, browser privacy data, malwar | Pre-scan cleanability filter so the UI never offers items the process cannot act |
+| diskonaut | imsnif/diskonaut | Rust | User-selected files and folders chosen from a terminal treemap navigator | Live treemap fill during scan plus a session space-freed counter that measures c |
+| WindowsClearCache | inode64/WindowsClearCache | PowerShell | Microsoft Teams (classic + MSTeams Store package), Slack, Discord, Steam htmlcac | Chromium template reuse for Electron apps plus protected-package allowlist so au |
+| free-disk-space | jlumbroso/free-disk-space | Shell | Ubuntu GHA runner bulk: Android/.NET/Haskell toolchains, large apt packages, Doc | Emit bytes-saved-per-category after each purge bucket so operators tune which ju |
+| spotify-cleaner | joseareia/spotify-cleaner | Lua | Spotify desktop Storage and Data dirs under ~/.cache/spotify (configurable paths | Per-app soft size cap: only clear large media caches when they exceed a configur |
+| Fix white or blank Icons (Windows 10/11) | K3V1991/Fix-white-or-blank-Icons-Windows-10-and-11 | Batch | Windows iconcache*.* and thumbcache*.* (plus optional full Explorer cache folder | Second-pass model for locked files (ThumbCacheToDelete + reboot) and separate mo |
+| Sweeper | KDE/sweeper | C++ | KDE/Plasma privacy traces: thumbnails, recent documents/apps, KRunner history, K | Desktop-integration cleaners that call official D-Bus/KConfig APIs and preserve  |
+| CrunchyCleaner | Knuspii/CrunchyCleaner | Go | Steam appcache/htmlcache, Discord Cache/Code/GPUCache, Spotify Storage, Slack Ca | Single rules table mapping each app to multiple platform-specific globs includin |
+| MS-Scripts Find-AppLeftovers | koki7o/MS-Scripts | PowerShell | Orphaned folders under %LOCALAPPDATA% and %APPDATA% left by uninstalled Windows  | Normalize display names and folder names before fuzzy match, then sort leftovers |
+| logrotate | logrotate/logrotate | C | Text/binary log files under admin-defined paths: rotates, compresses, mails, and | Per-path policy objects with OR triggers (size OR age) plus rotate-N retention a |
+| mac-cleanup-py | mac-cleanup/mac-cleanup-py | Python | Homebrew download/cache (brew cleanup -s, brew --cache path, brew tap --repair)  | Prefer calling the PM's own cleanup API then wiping residual cache from the PM-r |
+| mac-cleanup-sh | mac-cleanup/mac-cleanup-sh | Shell | macOS Apple System Logs (/private/var/log/asl/*.asl), /Library/Logs/DiagnosticRe | collect_paths / remove_paths batching: accumulate every candidate, optionally su |
+| nwipe | martijnvanbrummelen/nwipe | C | Entire block devices (full permanent erase of disks); OSS successor to DBAN dwip | Post-wipe certificate/report (device identity, method, error counts) so users ca |
+| cargo-cache | matthiaskrgr/cargo-cache | Rust | Cargo home cache (~/.cargo or $CARGO_HOME): registry crate archives, extracted s | Layered cache model: keep original archives, drop extracted checkouts, optional  |
+| decky-storage-cleaner | mcarlucci/decky-storage-cleaner | Python/TypeScript | Steam Deck steamapps/shadercache and steamapps/compatdata on a per-appid basis ( | Present junk as named games with human sizes by joining filesystem appid folders |
+| PureMac | momenbasel/PureMac | Swift | Full app uninstall + orphan finder; system/user caches, logs, temp; Xcode, Homeb | Strict/Enhanced/Deep leftover-match sensitivity tiers so users trade recall vs f |
+| Winapp2 | MoscaDotTo/Winapp2 | INI/C# | Not a cleaner binary: community database of declarative routines targeting per-a | Flavor + trim pipeline: one shared rules corpus, generate host-specific subsets  |
+| Cookie-Editor | Moustachauve/cookie-editor | JavaScript | Cookies for the current tab (create, edit, delete, mass-delete for that site); C | First-class Safari/WebKit packaging with per-browser manifests so macOS/iOS Safa |
+| mTTCleaner | mytech-today-now/mTTCleaner | PowerShell | Disk caches (Cache, Code Cache, GPU Cache, cache2, startupCache), SQLite compact | Detect running browsers, close them, then clean profile paths with dry-run size  |
+| rip (Rm ImProved) | nivekuil/rip | Rust | User-specified files/dirs by moving them into a private graveyard (not the deskt | Path-mirrored graveyard layout so undo restores by original absolute path withou |
+| moonbit | Nomadcxx/moonbit | Go | Linux system junk: package-manager caches (pacman/apt/dnf/zypper, AUR helpers),  | Dry-run-by-default clean requiring explicit --force, plus quick/deep risk tiers  |
+| trashy | oberblastmeister/trashy | Rust | User paths moved into the system trash (Linux FreeDesktop + Windows recycle); ma | fzf multi-select restore/empty pipeline over trashy list for interactive, filter |
+| Stacer | oguzhaninan/Stacer | C++ | Package caches, crash reports, application logs/caches, and trash (system cleane | Category dashboard with reclaimable size totals (package vs app cache vs trash)  |
+| rdfind | pauldreik/rdfind | C++ | Content-identical redundant files for cleanup or backup compression; optional re | Cheap staged elimination (size -> first bytes -> last bytes -> checksum) plus ar |
+| tmpwatch | pete4abw/tmpwatch | C | Aged files under temp-like directories (e.g. /tmp); empty dirs; optional shred.  | Age-gated temp reaping with dry-run, excludes, and skip-if-open (fuser) as the d |
+| FSlint | pixelb/fslint | Python | Filesystem lint: duplicates, empty directories, bad names, bad symlinks, temp fi | One small finder per junk class composed by a thin UI, so each heuristic is test |
+| fclones | pkolaczk/fclones | Rust | Redundant identical files (remove, hard/soft link, or FS reflink dedupe) | Hard split discovery (group report) from mutation, with priority and keep-path r |
+| Czkawka | qarmin/czkawka | Rust | Exact duplicate files (name/size/hash), empty folders and files, temporary files | Shared czkawka_core library plus on-disk hash cache so second scans of the same  |
+| rmlint | sahib/rmlint | C | Duplicate files and directories, empty files/dirs, broken symlinks, non-stripped | Plan-then-execute: emit an auditable delete plan (script/JSON) the user reviews  |
+| docker-reclaim-disk-space | samoshkin/docker-reclaim-disk-space | Shell | Stopped containers, orphan/dangling image layers, unused volumes, builder cache, | Two-phase reclaim: prune container objects, then compact the host VM disk image  |
+| Steam-Deck.Shader-Cache-Killer | scawp/Steam-Deck.Shader-Cache-Killer | Shell | Steam shadercache and compatdata per appid; companion mover relocates caches to  | Offer move/symlink of huge per-game caches to secondary storage instead of only  |
+| macos-trash | sindresorhus/macos-trash | Swift | User-specified files/folders by moving them into the macOS Trash (Finder-compati | Use platform trash APIs that preserve Finder Put Back metadata instead of raw fi |
+| docker-gc | spotify/docker-gc | Shell | Exited containers past grace period, unreferenced images (and optionally danglin | Grace period + exclude-list files + keep-N-most-recent-images-per-repo so aggres |
+| docuum | stepchowfun/docuum | Rust | Docker images only, until total image disk usage is under a configured threshold | Space-budget cleaner driven by real last-use from engine events, not created-at, |
+| kondo | tbillington/kondo | Rust | Per-project build/deps junk for 20+ types: Node node_modules, Cargo target, Grad | Project-type fingerprint table plus mtime age gate so only stale project artifac |
+| Thumbcache Viewer | thumbcacheviewer/thumbcacheviewer | C++ | Does not wipe live caches; extracts/views Windows Vista-11 thumbcache_*.db and i | Treat Windows thumbnails as size-tier database set (thumbcache_*.db), not a walk |
+| Mole | tw93/Mole | Shell/Go | User/system/browser caches, logs and temps, developer caches (Xcode, Node, etc.) | Persistent cleanup whitelist plus operation history so aggressive default rules  |
+| privacy.sexy | undergroundwires/privacy.sexy | TypeScript | Windows log maintenance scripts: %SYSTEMROOT%\Logs\CBS\CBS.log, DISM.log, Temp\C | Locked-log pattern: stop owning service -> grant ACL if needed -> delete CBS/ETL |
+| DevCleaner (xcode-dev-cleaner) | vashpan/xcode-dev-cleaner | Swift | Xcode Device Support symbols, Archives, DerivedData, documentation cache, old si | Per-category defaults that keep newest Device Support while offering older versi |
+| godu | viktomas/godu | Go | Marked large files/folders only when the user pipes stdout to rm, mv, or trash | Mark-then-print0 pipeline so cleanup is composable with external trash/dry-run/r |
+| npkill | voidcosmos/npkill | TypeScript | node_modules (and other named target dirs) under a scan root; npm/yarn/pnpm proj | Interactive list sorted by size/age with sensitive-path highlighting before any  |
+| sifty | Vortrix5/sifty | Python | Windows junk/caches (user/system temp, thumbnails, browser caches, winget cache, | Single trash() path with Recycle Bin + undo + audit log, combined with dry-run d |
+| WinDirStat | windirstat/windirstat | C++ | Disk space hogs (large files/folders), duplicates, empty folders; assists manual | Treemap + largest-files view as the primary UI for deciding what to remove befor |
+| Dusty | yagcioglutoprak/dusty | Swift | Menu-bar junk cleaner: Safe (user/browser/app caches, logs, Trash), Developer (X | Data-driven cleanup targets: one registry entry drives scan, UI, and safety auth |
+| docker-custodian | Yelp/docker-custodian | Python | Stopped containers and unused images older than max ages (dcgc); optionally stop | Label- and tag-pattern allowlists for compose projects so a host-wide age prune  |
+| docker-clean | ZZROTDesign/docker-clean | Shell | Stopped containers, untagged/dangling images, dangling volumes, empty networks;  | Compose cleanup as named intensity tiers (safe default vs images vs all) with a  |

@@ -1,0 +1,133 @@
+pack: dev
+rules:
+  - id: dev-npm-cache
+    name: npm cache
+    description: npm cache directory (regenerable).
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/.npm/_cacache"
+      - "$HOME/Library/Caches/npm"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-yarn-cache
+    name: Yarn cache
+    description: Yarn classic/berry cache locations.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/.cache/yarn"
+      - "$HOME/Library/Caches/Yarn"
+      - "$XDG_CACHE_HOME/yarn"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-pnpm-store-report
+    name: pnpm store (report-only)
+    description: Shared store; deleting breaks projects until re-fetch.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - "$HOME/.local/share/pnpm/store"
+      - "$HOME/Library/pnpm/store"
+    delete_mode: path
+    max_depth: 2
+
+  - id: dev-pip-cache
+    name: pip cache
+    description: Python pip HTTP cache.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/.cache/pip"
+      - "$HOME/Library/Caches/pip"
+      - "$XDG_CACHE_HOME/pip"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-cargo-registry-cache
+    name: Cargo registry cache
+    description: Downloaded crate sources/cache (not target/ build dirs).
+    category: package-cache
+    platform: any
+    risk: medium
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - "$HOME/.cargo/registry/cache"
+      - "$HOME/.cargo/git/db"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-go-mod-cache
+    name: Go module cache
+    description: $GOMODCACHE / default GOPATH pkg/mod.
+    category: package-cache
+    platform: any
+    risk: medium
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - "$HOME/go/pkg/mod/cache"
+      - "$HOME/Library/Caches/go-build"
+      - "$HOME/.cache/go-build"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-gradle-caches
+    name: Gradle caches
+    description: ~/.gradle/caches build caches.
+    category: package-cache
+    platform: any
+    risk: medium
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - "$HOME/.gradle/caches"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-jetbrains-caches
+    name: JetBrains IDE caches
+    description: IntelliJ / WebStorm system caches under Library or .cache.
+    category: dev
+    platform: any
+    risk: medium
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - "$HOME/Library/Caches/JetBrains"
+      - "$HOME/.cache/JetBrains"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-pycache-home
+    name: Python __pycache__ under home caches
+    description: Only under known cache trees, not full $HOME walk.
+    category: dev
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/.cache"
+      - "$XDG_CACHE_HOME"
+    include_globs:
+      - "**/__pycache__/**"
+      - "**/*.pyc"
+    delete_mode: contents
+    max_depth: 8
