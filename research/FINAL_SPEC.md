@@ -1,6 +1,9 @@
 # ppduster final MVP spec
 
-Synthesized from multi-agent research (8 commercial products, 100 repo batch entries / 79 unique, 6 platform taxonomies, 4 safety briefs) plus implementation constraints.
+Machine-readable source: [`final-spec.json`](final-spec.json)  
+Full multi-agent dump: [`research-report.md`](research-report.md)
+
+Produced by workflow **research-cleaner** (~41 agents): 8 commercial products, **100** open-source repo batch entries, 6 platform taxonomies, 4 safety briefs, 2 synthesizers + merge.
 
 ## Product
 
@@ -10,54 +13,50 @@ Synthesized from multi-agent research (8 commercial products, 100 repo batch ent
 | Form | Rust CLI + library |
 | Priority OS | macOS → Linux → Windows |
 | Core loop | `scan` → review → `clean --yes` (Trash) |
+| Repos covered | 100 |
 
-## CLI
+## Summary
+
+Local-first, open-source, rule-driven junk cleaner. Reclaims regenerable user caches, logs, temp files, package-manager download caches, thumbnails, saved application state, and selected app caches via versioned YAML packs.
+
+No scareware scores, telemetry, GUI, malware claims, registry cleaners, or silent bulk wipe.
+
+## CLI (target)
 
 ```
 ppduster doctor
 ppduster rules list|show
 ppduster categories
-ppduster scan [-c cat] [--all] [--min-age N] [-o table|json]
-ppduster clean [-c cat] [--yes] [--permanent] [--min-age N]
+ppduster scan [-c …] [--all] [--min-age N] [-o table|json]
+ppduster scan --plan plan.json
+ppduster clean …                 # dry-run
+ppduster clean … --yes           # Trash
+ppduster clean … --yes --permanent   # typed DELETE
+ppduster suggest                 # native-tool hints for report-only
 ```
 
-## Modules (shipped)
+## Safety model (binding)
 
-1. **rules** – YAML packs with platform/risk/age/paths/globs  
-2. **scan** – expand templates, walk, size, filter  
-3. **safety** – never-touch, symlink/root guards, age  
-4. **clean** – trash (default) or permanent + confirm  
-5. **report** – table / JSON  
+1. `scan` never mutates; `clean` without `--yes` is dry-run of the same pipeline  
+2. Default-enabled = **risk=low** only, with age floors  
+3. medium / high / report-only = inventory only on the normal clean path  
+4. Trash default; permanent needs typed `DELETE`  
+5. Hard never-touch denylist wins over rules and allowlists  
+6. Canonicalize + refuse symlink escapes  
+7. Prefer contents-only so rule roots stay  
+8. Honest measured bytes; no dirty-score meters  
+9. Exit codes: 0 success, 1 partial/ops failure, 2 usage/config  
 
-## Default-enabled categories (safe)
+## Shipped vs post-MVP
 
-- `caches` (user app caches; exclude heavy IDE/browser when shared with opt-in rules)  
-- `logs` (user logs, age ≥ 7d)  
-- `temp` (TMPDIR, age ≥ 2d)  
-- `leftovers` (Saved Application State, etc.)  
-- `package-cache` (Homebrew/npm/yarn/pip age-gated)  
-- `app-cache` (Spotify/Discord/Slack/Zoom)
+| Shipped in repo now | Spec still wants (next) |
+|---------------------|-------------------------|
+| rules / scan / safety / clean / report | plan export/import |
+| YAML packs macos/linux/windows/dev/apps | risk_gate hard-enforce medium+ |
+| doctor, rules, categories, scan, clean | suggest / native_hints |
+| Trash + permanent confirm | audit JSONL log |
+| tests for doctor/rules/scan dry-run | plan + schema tests, docs/safety.md |
 
-## Off by default / report-only
+## Explicitly out of MVP
 
-- Xcode DerivedData / Device Support  
-- JetBrains / Gradle / Cargo / Go caches  
-- Browser disk caches  
-- Prefetch, Windows.old, iOS backups, Xcode Archives, pnpm store  
-
-## Safety model
-
-1. Dry-run unless `--yes`  
-2. Trash over unlink  
-3. Permanent requires typed `DELETE`  
-4. Never-touch: Documents/Desktop/Downloads/media, `.ssh`, Keychains, `/System`, `/usr`, …  
-5. No scareware score, no telemetry, no registry “fixes”  
-6. Honest sizes from matched paths only  
-
-## Stack
-
-`clap`, `serde_yaml`, `walkdir`, `globset`, `trash`, `tabled`, `dirs`, `anyhow`
-
-## Out of MVP scope
-
-GUI, malware, secure free-space wipe, duplicate finder UI, docker prune execution, deep AppCleaner leftover graph, Windows registry.
+GUI, Smart Care upsell, registry, malware, shred/wipe, full AppCleaner leftover graph, duplicate engines, Docker/journal mutation, unbounded home walks, scheduled daemon, telemetry.
