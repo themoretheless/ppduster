@@ -315,3 +315,154 @@ rules:
       - "$HOME/Library/Application Support/MobileSync/Backup"
     delete_mode: path
     max_depth: 2
+
+  - id: macos-updater-caches
+    name: App updater download caches
+    description: Old updater downloads for various apps (ShipIt, cron, etc.).
+    category: caches
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Caches/com.microsoft.VSCode.ShipIt"
+      - "$HOME/Library/Caches/com.microsoft.VSCodeInsiders.ShipIt"
+      - "$HOME/Library/Caches/cron-updater"
+      - "$HOME/Library/Caches/com.todesktop.210203cqatirggu"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-jetbrains-app-support-caches
+    name: JetBrains IDE Application Support caches
+    description: Per-IDE index, caches and logs under Application Support/JetBrains (separate from Library/Caches).
+    category: dev
+    platform: macos
+    risk: medium
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - "$HOME/Library/Application Support/JetBrains"
+    include_globs:
+      - "*/log/**"
+      - "*/logs/**"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-jetbrains-old-versions
+    name: JetBrains old IDE versions (report-only)
+    description: Previous major versions of JetBrains IDEs under Application Support; review before deleting.
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 60
+    paths:
+      - "$HOME/Library/Application Support/JetBrains"
+    delete_mode: path
+    max_depth: 1
+
+  - id: macos-codex-runtimes-cache
+    name: Codex runtimes cache
+    description: OpenAI Codex downloaded language runtimes under ~/.cache/codex-runtimes.
+    category: dev
+    platform: macos
+    risk: medium
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - "$HOME/.cache/codex-runtimes"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-imazing-cache
+    name: iMazing emoji cache
+    description: iMazing downloaded emoji assets; safe to remove.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 30
+    paths:
+      - "$HOME/Library/Application Support/iMazing/Emojis"
+    delete_mode: contents
+    max_depth: 3
+
+  - id: macos-fontd-cache
+    name: Font daemon cache
+    description: macOS font rendering caches; rebuilt automatically.
+    category: caches
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Caches/com.apple.FontRegistry.user"
+    delete_mode: contents
+    max_depth: 3
+
+  - id: macos-metal-cache
+    name: Metal shader cache
+    description: macOS Metal pre-compiled shader cache; safe to remove.
+    category: caches
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Caches/com.apple.metal"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-helpd-cache
+    name: Help daemon cache
+    description: macOS Help Viewer content cache.
+    category: caches
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 30
+    paths:
+      - "$HOME/Library/Caches/com.apple.helpd"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-geoservices-cache
+    name: GeoServices cache
+    description: Maps and location services tile cache.
+    category: caches
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 30
+    paths:
+      - "$HOME/Library/Caches/GeoServices"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-nsurl-session-cache
+    name: NSURLSession daemon cache
+    description: Background URL session download cache files.
+    category: caches
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Caches/com.apple.nsurlsessiond"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-simulator-old-devices-report
+    name: CoreSimulator old devices (report-only)
+    description: Old simulator device images; review before deleting.
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 60
+    paths:
+      - "$HOME/Library/Developer/CoreSimulator/Devices"
+    delete_mode: path
+    max_depth: 1

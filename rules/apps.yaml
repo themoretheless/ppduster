@@ -101,3 +101,436 @@ rules:
       - "**/startupCache/**"
     delete_mode: contents
     max_depth: 8
+
+  - id: app-telegram-cache
+    name: Telegram cache
+    description: Telegram Desktop media and blob cache.
+    category: app-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Caches/ru.keepcoder.Telegram"
+      - "$HOME/.local/share/TelegramDesktop/tdata/user_data/cache"
+      - "%APPDATA%/Telegram Desktop/tdata/user_data/cache"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: app-claude-cache
+    name: Claude desktop cache
+    description: Claude Electron app Code Cache, GPU cache, and HTTP cache (not sessions/data).
+    category: app-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/Claude/Cache"
+      - "$HOME/Library/Application Support/Claude/Code Cache"
+      - "$HOME/Library/Application Support/Claude/GPUCache"
+      - "$HOME/Library/Application Support/Claude/DawnWebGPUCache"
+      - "$HOME/Library/Application Support/Claude/DawnGraphiteCache"
+      - "$HOME/.config/Claude/Cache"
+      - "$HOME/.config/Claude/Code Cache"
+      - "$HOME/.config/Claude/GPUCache"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-vscode-insiders-cache
+    name: VSCode Insiders cache
+    description: VSCode Insiders cached extension VSIXs, GPU cache, and Code Cache.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Application Support/Code - Insiders/CachedExtensionVSIXs"
+      - "$HOME/Library/Application Support/Code - Insiders/Cache"
+      - "$HOME/Library/Application Support/Code - Insiders/Code Cache"
+      - "$HOME/Library/Application Support/Code - Insiders/GPUCache"
+      - "$HOME/Library/Application Support/Code - Insiders/DawnWebGPUCache"
+      - "$HOME/Library/Application Support/Code - Insiders/DawnGraphiteCache"
+      - "$HOME/Library/Application Support/Code - Insiders/CachedData"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-vscode-insiders-logs
+    name: VSCode Insiders logs
+    description: VSCode Insiders log files.
+    category: logs
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Application Support/Code - Insiders/logs"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: app-vscode-cache
+    name: VSCode cache
+    description: VSCode cached extension VSIXs, GPU cache, and Code Cache.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Application Support/Code/CachedExtensionVSIXs"
+      - "$HOME/Library/Application Support/Code/Cache"
+      - "$HOME/Library/Application Support/Code/Code Cache"
+      - "$HOME/Library/Application Support/Code/GPUCache"
+      - "$HOME/Library/Application Support/Code/DawnWebGPUCache"
+      - "$HOME/Library/Application Support/Code/DawnGraphiteCache"
+      - "$HOME/Library/Application Support/Code/CachedData"
+      - "$HOME/.config/Code/Cache"
+      - "$HOME/.config/Code/Code Cache"
+      - "$HOME/.config/Code/GPUCache"
+      - "%APPDATA%/Code/Cache"
+      - "%APPDATA%/Code/Code Cache"
+      - "%APPDATA%/Code/GPUCache"
+      - "%APPDATA%/Code/CachedExtensionVSIXs"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-vscode-logs
+    name: VSCode logs
+    description: VSCode log files.
+    category: logs
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Application Support/Code/logs"
+      - "$HOME/.config/Code/logs"
+      - "%APPDATA%/Code/logs"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: app-copilot-agents-cache
+    name: GitHub Copilot Agents cache
+    description: Agents Insiders Electron app cache, GPU and Code Cache.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Application Support/Agents - Insiders/Cache"
+      - "$HOME/Library/Application Support/Agents - Insiders/Code Cache"
+      - "$HOME/Library/Application Support/Agents - Insiders/GPUCache"
+      - "$HOME/Library/Application Support/Agents - Insiders/DawnWebGPUCache"
+      - "$HOME/Library/Application Support/Agents - Insiders/DawnGraphiteCache"
+      - "$HOME/Library/Application Support/Agents - Insiders/CachedData"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-copilot-agents-logs
+    name: GitHub Copilot Agents logs
+    description: Agents Insiders log files.
+    category: logs
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Application Support/Agents - Insiders/Logs"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: app-kimi-cache
+    name: Kimi desktop cache
+    description: Kimi desktop Electron cache and updater downloads.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/kimi-desktop/Cache"
+      - "$HOME/Library/Application Support/kimi-desktop/Code Cache"
+      - "$HOME/Library/Application Support/kimi-desktop/GPUCache"
+      - "$HOME/Library/Caches/kimi-desktop-updater"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-yandex-music-cache
+    name: Yandex Music cache
+    description: Yandex Music desktop app cache and updater downloads.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/YandexMusic/Cache"
+      - "$HOME/Library/Application Support/YandexMusic/Code Cache"
+      - "$HOME/Library/Application Support/YandexMusic/GPUCache"
+      - "$HOME/Library/Caches/yandexmusic-updater"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-ktalk-cache
+    name: Ktalk cache
+    description: Ktalk (VK Teams) Electron app cache.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/ktalk/Cache"
+      - "$HOME/Library/Application Support/ktalk/Code Cache"
+      - "$HOME/Library/Application Support/ktalk/GPUCache"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-notion-calendar-cache
+    name: Notion Calendar cache
+    description: Notion Calendar Electron app cache.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/Notion Calendar/Cache"
+      - "$HOME/Library/Application Support/Notion Calendar/Code Cache"
+      - "$HOME/Library/Application Support/Notion Calendar/GPUCache"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-time-cache
+    name: Time (app) cache
+    description: Time desktop Electron app cache.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/Time/Cache"
+      - "$HOME/Library/Application Support/Time/Code Cache"
+      - "$HOME/Library/Application Support/Time/GPUCache"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-obsidian-cache
+    name: Obsidian cache
+    description: Obsidian Electron GPU and Code Cache.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/obsidian/Cache"
+      - "$HOME/Library/Application Support/obsidian/Code Cache"
+      - "$HOME/Library/Application Support/obsidian/GPUCache"
+      - "$HOME/.config/obsidian/Cache"
+      - "$HOME/.config/obsidian/GPUCache"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-postman-cache
+    name: Postman cache and logs
+    description: Postman Code Cache, GPU cache, and logs.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/Postman/Cache"
+      - "$HOME/Library/Application Support/Postman/Code Cache"
+      - "$HOME/Library/Application Support/Postman/GPUCache"
+      - "$HOME/Library/Application Support/Postman/logs"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-github-desktop-cache
+    name: GitHub Desktop cache and logs
+    description: GitHub Desktop Electron cache and log files.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/GitHub Desktop/Cache"
+      - "$HOME/Library/Application Support/GitHub Desktop/Code Cache"
+      - "$HOME/Library/Application Support/GitHub Desktop/GPUCache"
+      - "$HOME/Library/Application Support/GitHub Desktop/Logs"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-podman-desktop-cache
+    name: Podman Desktop cache
+    description: Podman Desktop Electron cache.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/Podman Desktop/Cache"
+      - "$HOME/Library/Application Support/Podman Desktop/Code Cache"
+      - "$HOME/Library/Application Support/Podman Desktop/GPUCache"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-steam-cache
+    name: Steam appcache and logs
+    description: Steam HTTP appcache and log files (not steamapps game data).
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/Steam/appcache"
+      - "$HOME/Library/Application Support/Steam/logs"
+      - "$HOME/Library/Caches/Steam"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-steam-depotcache
+    name: Steam depot cache (report-only)
+    description: Steam depot patch files; large but may speed up future updates.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - "$HOME/Library/Application Support/Steam/depotcache"
+    delete_mode: contents
+    max_depth: 2
+
+  - id: app-edge-cache
+    name: Microsoft Edge cache
+    description: Edge Code Cache, GPU cache, and shader cache.
+    category: browser-cache
+    platform: macos
+    risk: medium
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/Microsoft Edge/Default/Cache"
+      - "$HOME/Library/Application Support/Microsoft Edge/Default/Code Cache"
+      - "$HOME/Library/Application Support/Microsoft Edge/Default/GPUCache"
+      - "$HOME/Library/Application Support/Microsoft Edge/GrShaderCache"
+      - "$HOME/Library/Application Support/Microsoft Edge/ShaderCache"
+      - "$HOME/Library/Application Support/Microsoft Edge/GraphiteDawnCache"
+      - "$HOME/Library/Caches/Microsoft Edge"
+      - "%LOCALAPPDATA%/Microsoft/Edge/User Data/Default/Cache"
+      - "%LOCALAPPDATA%/Microsoft/Edge/User Data/Default/Code Cache"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: app-playwright-browsers
+    name: Playwright browser cache (report-only)
+    description: Playwright-downloaded browser binaries; can be re-fetched with npx playwright install.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - "$HOME/Library/Caches/ms-playwright"
+      - "$HOME/.cache/ms-playwright"
+    delete_mode: path
+    max_depth: 2
+
+  - id: app-node-gyp-cache
+    name: node-gyp cache
+    description: node-gyp downloaded headers and build cache.
+    category: dev
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 30
+    paths:
+      - "$HOME/Library/Caches/node-gyp"
+      - "$HOME/.cache/node-gyp"
+      - "%LOCALAPPDATA%/node-gyp"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-copilot-cache
+    name: GitHub Copilot CLI cache
+    description: GitHub Copilot CLI and SDK downloaded cache files.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Caches/copilot"
+      - "$HOME/Library/Caches/github-copilot-sdk"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: app-copilot-git-cache
+    name: GitHub Copilot bundled git cache (versioned)
+    description: Old versioned Copilot-bundled git distributions under Caches.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 30
+    paths:
+      - "$HOME/Library/Caches"
+    include_globs:
+      - "github-copilot-git-*/**"
+      - "copilot-desktop-*/**"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-colima-cache
+    name: Colima image cache
+    description: Colima container runtime image and layer cache.
+    category: app-cache
+    platform: macos
+    risk: medium
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - "$HOME/Library/Caches/colima"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: app-bambu-studio-cache
+    name: BambuStudio cache and logs
+    description: BambuStudio 3D slicer cache and log files.
+    category: app-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Application Support/BambuStudio/cache"
+      - "$HOME/Library/Application Support/BambuStudio/logs"
+      - "$HOME/Library/Application Support/BambuStudioBeta/cache"
+      - "$HOME/Library/Application Support/BambuStudioBeta/logs"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-uv-cache
+    name: uv Python package manager cache
+    description: uv downloaded wheel and sdist cache.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/.cache/uv"
+      - "$HOME/Library/Caches/uv"
+    delete_mode: contents
+    max_depth: 5

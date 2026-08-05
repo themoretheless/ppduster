@@ -131,3 +131,326 @@ rules:
       - "**/*.pyc"
     delete_mode: contents
     max_depth: 8
+
+  - id: dev-bun-cache
+    name: Bun cache
+    description: Bun JavaScript runtime package cache.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/.bun/install/cache"
+      - "$HOME/Library/Caches/bun"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-deno-cache
+    name: Deno cache
+    description: Deno remote module and compiled output cache.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/.cache/deno"
+      - "$HOME/Library/Caches/deno"
+      - "%LOCALAPPDATA%/deno"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-rustup-tmp
+    name: Rustup temp downloads
+    description: Rustup toolchain download temp files.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/.rustup/tmp"
+      - "$HOME/.rustup/downloads"
+    delete_mode: contents
+    max_depth: 3
+
+  - id: dev-dotnet-nuget-cache
+    name: NuGet package cache
+    description: .NET NuGet HTTP and global package cache.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 30
+    paths:
+      - "$HOME/.nuget/packages"
+      - "$HOME/Library/Caches/NuGet"
+      - "%LOCALAPPDATA%/NuGet/Cache"
+      - "%USERPROFILE%/.nuget/packages"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-maven-cache
+    name: Maven local repository cache
+    description: Maven downloaded JAR artifacts (report-only; large and safe but slow to re-fetch).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 60
+    paths:
+      - "$HOME/.m2/repository"
+    delete_mode: path
+    max_depth: 2
+
+  - id: dev-ruby-gem-cache
+    name: Ruby gem download cache
+    description: RubyGems and Bundler cached gem downloads.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 30
+    paths:
+      - "$HOME/.gem/cache"
+      - "$HOME/Library/Caches/gem"
+      - "$HOME/.bundle/cache"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-elm-cache
+    name: Elm package cache
+    description: Elm compiler downloaded packages cache.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 30
+    paths:
+      - "$HOME/.elm"
+    include_globs:
+      - "**/packages/**/*.zip"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: dev-swift-pm-cache
+    name: Swift Package Manager cache
+    description: Swift PM downloaded source and build artifacts cache.
+    category: package-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 30
+    paths:
+      - "$HOME/Library/Caches/org.swift.swiftpm"
+      - "$HOME/.swiftpm/cache"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-cocoapods-cache
+    name: CocoaPods cache
+    description: CocoaPods downloaded pod sources cache.
+    category: package-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 30
+    paths:
+      - "$HOME/Library/Caches/CocoaPods"
+      - "$HOME/.cocoapods/repos"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-gradle-build-cache
+    name: Gradle build output cache
+    description: Gradle local build cache separate from downloaded dependencies.
+    category: dev
+    platform: any
+    risk: medium
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - "$HOME/.gradle/build-cache"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-helm-cache
+    name: Helm chart repository cache
+    description: Helm downloaded chart index and chart archives.
+    category: dev
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/.cache/helm"
+      - "$HOME/Library/Caches/helm"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-docker-build-cache-report
+    name: Docker build cache (report-only)
+    description: Docker layer and build cache; use docker system prune to manage.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - "$HOME/Library/Containers/com.docker.docker/Data/vms"
+    delete_mode: path
+    max_depth: 1
+
+  - id: dev-terraform-plugin-cache
+    name: Terraform plugin cache
+    description: Terraform downloaded provider plugins cache.
+    category: dev
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 30
+    paths:
+      - "$HOME/.terraform.d/plugin-cache"
+      - "$HOME/Library/Caches/terraform"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-turbo-cache
+    name: Turborepo local task cache
+    description: Turborepo local build task cache entries.
+    category: dev
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/.turbo/cache"
+      - "$HOME/Library/Caches/turbo"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-nx-cache
+    name: Nx workspace cache
+    description: Nx monorepo local computation cache.
+    category: dev
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/.nx/cache"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-vite-cache
+    name: Vite dependency pre-bundle cache
+    description: Vite node_modules/.vite pre-bundled dep cache (per project; only in known dirs).
+    category: dev
+    platform: any
+    risk: low
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - "$HOME/.cache/vite"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-android-sdk-cache
+    name: Android SDK download cache
+    description: Android SDK manager cached download archives.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 30
+    paths:
+      - "$HOME/.android/cache"
+      - "$HOME/Library/Android/sdk/.temp"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-kotlin-native-cache
+    name: Kotlin/Native prebuilt cache
+    description: Kotlin Native compiler downloaded prebuilt libraries.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 60
+    paths:
+      - "$HOME/.konan/cache"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-pip-wheels-cache
+    name: pip wheels cache
+    description: pip locally-built wheel cache under ~/.cache/pip/wheels.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/.cache/pip/wheels"
+      - "$HOME/Library/Caches/pip/wheels"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: dev-poetry-cache
+    name: Poetry package cache
+    description: Poetry downloaded wheel cache.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Caches/pypoetry"
+      - "$HOME/.cache/pypoetry"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-hatch-cache
+    name: Hatch build cache
+    description: Hatch Python project manager cache.
+    category: package-cache
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Caches/hatch"
+      - "$HOME/.cache/hatch"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-k9s-cache
+    name: k9s Kubernetes dashboard cache
+    description: k9s downloaded schema and cache files.
+    category: dev
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/.cache/k9s"
+      - "$HOME/Library/Caches/k9s"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-gh-cli-cache
+    name: gh CLI cache
+    description: GitHub CLI cached data.
+    category: dev
+    platform: any
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/.cache/gh"
+      - "$HOME/Library/Caches/gh"
+    delete_mode: contents
+    max_depth: 4
