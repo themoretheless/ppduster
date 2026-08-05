@@ -25,6 +25,8 @@ rules:
       - "JetBrains/**"
       - "Google"
       - "Google/**"
+      - "Firefox"
+      - "Firefox/**"
       - "Homebrew"
       - "Homebrew/**"
     delete_mode: contents
@@ -40,6 +42,9 @@ rules:
     min_age_days: 7
     paths:
       - "$HOME/Library/Logs"
+    exclude_globs:
+      - "Homebrew"
+      - "Homebrew/**"
     delete_mode: contents
     max_depth: 8
 
@@ -122,6 +127,42 @@ rules:
     delete_mode: contents
     max_depth: 6
 
+  - id: macos-homebrew-logs
+    name: Homebrew logs
+    description: Build and install logs left by Homebrew under the user Library.
+    category: logs
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Logs/Homebrew"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-homebrew-downloads-report
+    name: Homebrew Downloads folder (report-only)
+    description: User-kept bottle/pkg/dmg downloads may be removable, but review before deleting.
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Downloads"
+    include_globs:
+      - "Homebrew/*.tar.gz"
+      - "Homebrew/*.zip"
+      - "Homebrew/*.pkg"
+      - "Homebrew/*.dmg"
+      - "brew-*.tar.gz"
+      - "brew-*.zip"
+      - "brew-*.pkg"
+      - "brew-*.dmg"
+    delete_mode: contents
+    max_depth: 2
+
   - id: macos-quicklook-cache
     name: Quick Look thumbnails cache
     description: qlmanage thumbnail cache if present.
@@ -135,6 +176,102 @@ rules:
       - "$HOME/Library/Caches/CloudKit/com.apple.QuickLook.thumbnailcache"
     delete_mode: path
     max_depth: 2
+
+  - id: macos-crash-reports-user
+    name: User crash and diagnostic reports
+    description: Per-user crash logs and diagnostic reports that apps regenerate.
+    category: logs
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Logs/CrashReporter"
+      - "$HOME/Library/Logs/DiagnosticReports"
+    delete_mode: contents
+
+  - id: macos-safari-favicon-cache
+    name: Safari favicon cache
+    description: Safari website icon cache; safe to rebuild.
+    category: browser-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Safari/Favicon Cache"
+    delete_mode: contents
+
+  - id: macos-safari-preview-cache
+    name: Safari webpage preview cache
+    description: Safari previews and touch icon cache files.
+    category: browser-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Safari"
+    include_globs:
+      - "**/Webpage Previews/**"
+      - "**/Touch Icons Cache/**"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-firefox-profile-caches
+    name: Firefox profile caches
+    description: Firefox cache2, startup cache, and jump-list cache under user profiles.
+    category: browser-cache
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Caches/Firefox/Profiles"
+    include_globs:
+      - "*/cache2/**"
+      - "*/startupCache/**"
+      - "*/jumpListCache/**"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-chromium-code-caches
+    name: Chromium-family code and GPU caches
+    description: Per-profile regenerable browser caches such as Code Cache, GPUCache, and Dawn/Shader caches.
+    category: browser-cache
+    platform: macos
+    risk: medium
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - "$HOME/Library/Application Support/Google/Chrome"
+      - "$HOME/Library/Application Support/Chromium"
+      - "$HOME/Library/Application Support/BraveSoftware/Brave-Browser"
+      - "$HOME/Library/Application Support/Microsoft Edge"
+      - "$HOME/Library/Application Support/Vivaldi"
+      - "$HOME/Library/Application Support/Arc"
+    include_globs:
+      - "**/Code Cache/**"
+      - "**/GPUCache/**"
+      - "**/DawnCache/**"
+      - "**/GrShaderCache/**"
+      - "**/GraphiteDawnCache/**"
+      - "**/ShaderCache/**"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-core-simulator-caches
+    name: CoreSimulator caches and logs
+    description: Simulator caches and logs outside device data; safe but can slow next simulator launch.
+    category: dev
+    platform: macos
+    risk: medium
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Developer/CoreSimulator/Caches"
+      - "$HOME/Library/Developer/CoreSimulator/Logs"
+    delete_mode: contents
 
   - id: macos-mail-downloads
     name: Mail Downloads
