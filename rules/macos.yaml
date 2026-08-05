@@ -42,6 +42,9 @@ rules:
     min_age_days: 7
     paths:
       - "$HOME/Library/Logs"
+    exclude_globs:
+      - "Homebrew"
+      - "Homebrew/**"
     delete_mode: contents
     max_depth: 8
 
@@ -134,24 +137,6 @@ rules:
     min_age_days: 14
     paths:
       - "$HOME/Library/Logs/Homebrew"
-    delete_mode: contents
-    max_depth: 5
-
-  - id: macos-homebrew-tmp
-    name: Homebrew temporary working files
-    description: Temporary Homebrew staging and cleanup leftovers under the user temp area.
-    category: temp
-    platform: macos
-    risk: low
-    default_enabled: true
-    min_age_days: 3
-    paths:
-      - "$TMPDIR"
-    include_globs:
-      - "**/homebrew*"
-      - "**/homebrew*/**"
-      - "**/brew-*"
-      - "**/brew-*/**"
     delete_mode: contents
     max_depth: 5
 
