@@ -228,9 +228,7 @@ rules:
     paths:
       - "$HOME/Library/Safari"
     include_globs:
-      - "**/Webpage Previews"
       - "**/Webpage Previews/**"
-      - "**/Touch Icons Cache"
       - "**/Touch Icons Cache/**"
     delete_mode: contents
     max_depth: 4
@@ -246,11 +244,8 @@ rules:
     paths:
       - "$HOME/Library/Caches/Firefox/Profiles"
     include_globs:
-      - "*/cache2"
       - "*/cache2/**"
-      - "*/startupCache"
       - "*/startupCache/**"
-      - "*/jumpListCache"
       - "*/jumpListCache/**"
     delete_mode: contents
     max_depth: 4
@@ -260,8 +255,8 @@ rules:
     description: Per-profile regenerable browser caches such as Code Cache, GPUCache, and Dawn/Shader caches.
     category: browser-cache
     platform: macos
-    risk: low
-    default_enabled: true
+    risk: medium
+    default_enabled: false
     min_age_days: 7
     paths:
       - "$HOME/Library/Application Support/Google/Chrome"
@@ -271,17 +266,11 @@ rules:
       - "$HOME/Library/Application Support/Vivaldi"
       - "$HOME/Library/Application Support/Arc"
     include_globs:
-      - "**/Code Cache"
       - "**/Code Cache/**"
-      - "**/GPUCache"
       - "**/GPUCache/**"
-      - "**/DawnCache"
       - "**/DawnCache/**"
-      - "**/GrShaderCache"
       - "**/GrShaderCache/**"
-      - "**/GraphiteDawnCache"
       - "**/GraphiteDawnCache/**"
-      - "**/ShaderCache"
       - "**/ShaderCache/**"
     delete_mode: contents
     max_depth: 5
