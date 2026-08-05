@@ -25,6 +25,8 @@ rules:
       - "JetBrains/**"
       - "Google"
       - "Google/**"
+      - "Firefox"
+      - "Firefox/**"
       - "Homebrew"
       - "Homebrew/**"
     delete_mode: contents
@@ -122,6 +124,60 @@ rules:
     delete_mode: contents
     max_depth: 6
 
+  - id: macos-homebrew-logs
+    name: Homebrew logs
+    description: Build and install logs left by Homebrew under the user Library.
+    category: logs
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Library/Logs/Homebrew"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-homebrew-tmp
+    name: Homebrew temporary working files
+    description: Temporary Homebrew staging and cleanup leftovers under the user temp area.
+    category: temp
+    platform: macos
+    risk: low
+    default_enabled: true
+    min_age_days: 3
+    paths:
+      - "$TMPDIR"
+    include_globs:
+      - "**/homebrew*"
+      - "**/homebrew*/**"
+      - "**/brew-*"
+      - "**/brew-*/**"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-homebrew-downloads-report
+    name: Homebrew Downloads folder (report-only)
+    description: User-kept bottle/pkg/dmg downloads may be removable, but review before deleting.
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 14
+    paths:
+      - "$HOME/Downloads"
+    include_globs:
+      - "Homebrew/*.tar.gz"
+      - "Homebrew/*.zip"
+      - "Homebrew/*.pkg"
+      - "Homebrew/*.dmg"
+      - "brew-*.tar.gz"
+      - "brew-*.zip"
+      - "brew-*.pkg"
+      - "brew-*.dmg"
+    delete_mode: contents
+    max_depth: 2
+
   - id: macos-quicklook-cache
     name: Quick Look thumbnails cache
     description: qlmanage thumbnail cache if present.
@@ -148,7 +204,6 @@ rules:
       - "$HOME/Library/Logs/CrashReporter"
       - "$HOME/Library/Logs/DiagnosticReports"
     delete_mode: contents
-    max_depth: 4
 
   - id: macos-safari-favicon-cache
     name: Safari favicon cache
@@ -161,7 +216,6 @@ rules:
     paths:
       - "$HOME/Library/Safari/Favicon Cache"
     delete_mode: contents
-    max_depth: 3
 
   - id: macos-safari-preview-cache
     name: Safari webpage preview cache
@@ -244,7 +298,6 @@ rules:
       - "$HOME/Library/Developer/CoreSimulator/Caches"
       - "$HOME/Library/Developer/CoreSimulator/Logs"
     delete_mode: contents
-    max_depth: 4
 
   - id: macos-mail-downloads
     name: Mail Downloads
