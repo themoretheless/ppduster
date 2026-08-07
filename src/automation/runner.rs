@@ -5,6 +5,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -38,6 +39,7 @@ pub enum StepStatus {
     Pending,
     Running,
     WaitingForAttention,
+    Skipped,
     Satisfied,
     Applied,
     Failed,
@@ -92,8 +94,26 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
     let mut steps = Vec::new();
     let mut errors = Vec::new();
     let mut auth_state = AuthState::default();
+    let mut halted = false;
 
     for step in &task.steps {
+        if halted {
+            let plan = plan_step(step)?;
+            plans.push(plan.clone());
+            outcomes.push(ActionOutcome::Blocked);
+            steps.push(StepReport {
+                step_id: step.id.clone(),
+                step_name: step_name(step),
+                summary: plan.summary.clone(),
+                status: StepStatus::Skipped,
+                prerequisites: plan.prerequisites.clone(),
+                logs: vec![StepLogEntry {
+                    step_id: step.id.clone(),
+                    message: "skipped after earlier failure".into(),
+                }],
+            });
+            continue;
+        }
         enforce_step_policy(step, opts)?;
         let satisfaction = is_satisfied(step, opts.apply)?;
         if let Some(reason) = satisfaction {
@@ -141,7 +161,8 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
                     });
                     errors.push(message.clone());
                     outcomes.push(ActionOutcome::Blocked);
-                    break;
+                    halted = true;
+                    continue;
                 }
                 steps[step_idx].logs.push(StepLogEntry {
                     step_id: step.id.clone(),
@@ -164,7 +185,8 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
                     });
                     errors.push(message.clone());
                     outcomes.push(ActionOutcome::Blocked);
-                    break;
+                    halted = true;
+                    continue;
                 }
             };
             steps[step_idx].status = StepStatus::Applied;
@@ -382,6 +404,11 @@ fn sudo_auth_ready() -> Result<bool> {
 }
 
 fn prompt_once(message: &str) -> Result<()> {
+    if !io::stdin().is_terminal() {
+        bail!(
+            "interactive authorization is required, but stdin is not a TTY; rerun in an interactive terminal"
+        );
+    }
     eprint!("{message}\nPress Enter to continue: ");
     io::stderr().flush().context("flush auth prompt")?;
     let mut line = String::new();
@@ -480,7 +507,7 @@ fn apply_run_command(
     args: &[String],
     cwd: Option<&str>,
     env: &BTreeMap<String, String>,
-    shell: ShellMode,
+    _shell: ShellMode,
 ) -> Result<String> {
     let mut command = Command::new(program);
     command.args(expand_args(args)?);
@@ -489,9 +516,6 @@ fn apply_run_command(
     }
     for (key, value) in env {
         command.env(key, expand_env_value(value)?);
-    }
-    if matches!(shell, ShellMode::Allow) && program != "bash" && program != "sh" && program != "zsh" {
-        bail!("shell-allowed step must use a shell program");
     }
     command
         .status()
@@ -850,5 +874,88 @@ mod tests {
         assert!(matches!(report.steps[0].status, StepStatus::Failed));
         assert_eq!(report.errors.len(), 1);
         assert!(matches!(report.outcomes[0], ActionOutcome::Blocked));
+    }
+
+    #[test]
+    fn successful_run_command_apply_is_reported() {
+        let task = base_task(Step {
+            id: "cmd".into(),
+            name: String::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            action: Action::RunCommand {
+                program: "true".into(),
+                args: vec![],
+                cwd: None,
+                env: Default::default(),
+                shell: ShellMode::Forbidden,
+            },
+        });
+        let report = run_task(
+            &task,
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(report.steps[0].status, StepStatus::Applied));
+        assert!(matches!(report.outcomes[0], ActionOutcome::Applied { .. }));
+    }
+
+    #[test]
+    fn steps_after_failure_are_still_reported() {
+        let task = Task {
+            id: "setup-dev".into(),
+            name: "Setup dev".into(),
+            description: String::new(),
+            platform: crate::rules::Platform::Any,
+            trust: TrustRequirement::BundledOnly,
+            steps: vec![
+                Step {
+                    id: "fail".into(),
+                    name: String::new(),
+                    auth: AuthPolicy::None,
+                    check: None,
+                    dangerous: false,
+                    allow_elevation: ElevationPolicy::Forbidden,
+                    action: Action::RunCommand {
+                        program: "false".into(),
+                        args: vec![],
+                        cwd: None,
+                        env: Default::default(),
+                        shell: ShellMode::Forbidden,
+                    },
+                },
+                Step {
+                    id: "later".into(),
+                    name: String::new(),
+                    auth: AuthPolicy::None,
+                    check: None,
+                    dangerous: false,
+                    allow_elevation: ElevationPolicy::Forbidden,
+                    action: Action::RunCommand {
+                        program: "true".into(),
+                        args: vec![],
+                        cwd: None,
+                        env: Default::default(),
+                        shell: ShellMode::Forbidden,
+                    },
+                },
+            ],
+        };
+        let report = run_task(
+            &task,
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.steps.len(), 2);
+        assert!(matches!(report.steps[0].status, StepStatus::Failed));
+        assert!(matches!(report.steps[1].status, StepStatus::Skipped));
     }
 }

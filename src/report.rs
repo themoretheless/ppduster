@@ -339,6 +339,7 @@ fn render_step_status(status: &StepStatus) -> String {
         StepStatus::Pending => "pending".into(),
         StepStatus::Running => "running".yellow().bold().to_string(),
         StepStatus::WaitingForAttention => "waiting".red().bold().to_string(),
+        StepStatus::Skipped => "skipped".dimmed().to_string(),
         StepStatus::Satisfied => "satisfied".green().to_string(),
         StepStatus::Applied => "applied".green().bold().to_string(),
         StepStatus::Failed => "failed".red().bold().to_string(),
