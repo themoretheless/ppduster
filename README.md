@@ -76,7 +76,7 @@ Current safety posture:
 
 - separate from `rules/` and the scan/clean pipeline
 - sealed typed actions only; no arbitrary YAML shell strings
-- dry-run planning only in the current implementation
+- dry-run planning only in the current implementation; command-based satisfaction checks are skipped until apply mode exists
 - shell-capable steps require `dangerous: true` and `--allow-shell`
 - elevated steps require `--allow-elevation`
 - external task packs require `--trust-external-packs`

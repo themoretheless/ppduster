@@ -45,12 +45,12 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
     let mut plans = Vec::new();
     let mut outcomes = Vec::new();
     for step in &task.steps {
-        let satisfaction = is_satisfied(step)?;
+        enforce_step_policy(step, opts)?;
+        let satisfaction = is_satisfied(step, opts.apply)?;
         if let Some(reason) = satisfaction {
             outcomes.push(ActionOutcome::AlreadySatisfied { reason });
             continue;
         }
-        enforce_step_policy(step, opts)?;
         let plan = plan_step(step, false)?;
         plans.push(plan.clone());
         if opts.apply {
@@ -167,7 +167,7 @@ fn plan_step(step: &Step, already_satisfied: bool) -> Result<ActionPlan> {
     })
 }
 
-fn is_satisfied(step: &Step) -> Result<Option<String>> {
+fn is_satisfied(step: &Step, run_command_checks: bool) -> Result<Option<String>> {
     let Some(check) = &step.check else {
         return Ok(None);
     };
@@ -178,7 +178,7 @@ fn is_satisfied(step: &Step) -> Result<Option<String>> {
         }
     }
     if let Some(cmd) = &check.command_succeeds {
-        if cmd.is_empty() {
+        if cmd.is_empty() || !run_command_checks {
             return Ok(None);
         }
         let status = std::process::Command::new(&cmd[0])
@@ -312,5 +312,25 @@ mod tests {
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    #[test]
+    fn planning_mode_skips_command_satisfaction_checks() {
+        let task = base_task(Step {
+            id: "brew".into(),
+            name: String::new(),
+            check: Some(crate::automation::task::Check {
+                path_exists: None,
+                command_succeeds: Some(vec!["true".into()]),
+            }),
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            action: Action::BrewInstall {
+                package: "git".into(),
+                cask: false,
+            },
+        });
+        let report = run_task(&task, &RunOptions::default()).unwrap();
+        assert!(matches!(report.outcomes[0], ActionOutcome::Planned { .. }));
     }
 }

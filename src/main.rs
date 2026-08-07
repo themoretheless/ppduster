@@ -313,12 +313,25 @@ fn flatten_categories(raw: Vec<String>) -> Vec<String> {
 
 fn load_tasks(action: &SetupCmd, trust_external_packs: bool) -> Result<TaskPack> {
     let mut sources = Vec::new();
-    let bundled = std::env::current_dir()?.join("tasks");
-    if bundled.is_dir() {
-        sources.push(TaskSource {
-            path: bundled,
-            trust: PackTrust::Bundled,
-        });
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let near = parent.join("tasks");
+            if near.is_dir() {
+                sources.push(TaskSource {
+                    path: near,
+                    trust: PackTrust::Bundled,
+                });
+            }
+            if let Some(root) = parent.parent().and_then(|p| p.parent()) {
+                let dev = root.join("tasks");
+                if dev.is_dir() {
+                    sources.push(TaskSource {
+                        path: dev,
+                        trust: PackTrust::Bundled,
+                    });
+                }
+            }
+        }
     }
     if let SetupCmd::Run { tasks_dir, .. } = action {
         for dir in tasks_dir {
@@ -327,6 +340,11 @@ fn load_tasks(action: &SetupCmd, trust_external_packs: bool) -> Result<TaskPack>
                 trust: PackTrust::External,
             });
         }
+    }
+    if sources.is_empty() {
+        anyhow::bail!(
+            "no tasks directory found; install bundled tasks near the binary or pass --tasks-dir with --trust-external-packs"
+        );
     }
     TaskPack::load_many(&sources, trust_external_packs)
 }
