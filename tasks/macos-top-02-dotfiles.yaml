@@ -1,0 +1,21 @@
+task:
+  id: macos-top-02-dotfiles
+  name: macOS dotfiles sync
+  description: Clone and verify a dotfiles repository used to configure shell and developer defaults.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: clone-dotfiles
+      name: Clone dotfiles repository
+      type: git-clone
+      repo: https://github.com/example/dotfiles.git
+      dest: $HOME/.local/share/dotfiles
+      check:
+        path_exists: $HOME/.local/share/dotfiles/.git
+    - id: verify-zsh-config
+      name: Verify shell config target
+      type: run-command
+      program: test
+      args: ["-f", "$HOME/.zshrc"]
+      dangerous: true
+      shell: allow

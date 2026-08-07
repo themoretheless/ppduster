@@ -1,0 +1,19 @@
+task:
+  id: macos-top-06-launchd
+  name: macOS launchd automation
+  description: Plan installation of LaunchAgents for cleanup, backup, and audit jobs.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: ensure-launchagents-dir
+      name: Ensure LaunchAgents directory exists
+      type: run-command
+      program: mkdir
+      args: ["-p", "$HOME/Library/LaunchAgents"]
+    - id: install-launchagent
+      name: Plan LaunchAgent install
+      type: run-command
+      program: bash
+      args: ["-lc", "launchctl bootstrap gui/$(id -u) \"$HOME/Library/LaunchAgents/com.example.macos.audit.plist\""]
+      dangerous: true
+      shell: allow

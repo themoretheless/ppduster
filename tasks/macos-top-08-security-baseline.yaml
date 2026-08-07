@@ -1,0 +1,23 @@
+task:
+  id: macos-top-08-security-baseline
+  name: macOS security baseline
+  description: Plan baseline security checks and configuration for FileVault, firewall, and remote access.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: filevault-status
+      name: Inspect FileVault status
+      type: run-command
+      program: fdesetup
+      args: ["status"]
+    - id: firewall-status
+      name: Inspect firewall status
+      type: run-command
+      program: /usr/libexec/ApplicationFirewall/socketfilterfw
+      args: ["--getglobalstate"]
+    - id: remote-login-status
+      name: Inspect remote login status
+      type: run-command
+      program: sudo
+      args: ["systemsetup", "-getremotelogin"]
+      allow_elevation: allow
