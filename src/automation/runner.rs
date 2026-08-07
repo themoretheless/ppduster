@@ -507,10 +507,18 @@ fn apply_run_command(
     args: &[String],
     cwd: Option<&str>,
     env: &BTreeMap<String, String>,
-    _shell: ShellMode,
+    shell: ShellMode,
 ) -> Result<String> {
-    let mut command = Command::new(program);
-    command.args(expand_args(args)?);
+    let mut command = if matches!(shell, ShellMode::Allow) {
+        let shell_command = render_shell_command(program, args);
+        let mut shell_runner = Command::new("sh");
+        shell_runner.arg("-lc").arg(shell_command);
+        shell_runner
+    } else {
+        let mut direct = Command::new(program);
+        direct.args(expand_args(args)?);
+        direct
+    };
     if let Some(cwd) = cwd {
         command.current_dir(expand_required_path(cwd)?);
     }
@@ -558,6 +566,23 @@ fn render_command(program: &str, args: &[String], cwd: Option<&str>) -> String {
         rendered.push(')');
     }
     rendered
+}
+
+fn render_shell_command(program: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(shell_escape(program));
+    for arg in args {
+        parts.push(shell_escape(arg));
+    }
+    parts.join(" ")
+}
+
+fn shell_escape(value: &str) -> String {
+    if value.is_empty() {
+        return "''".into();
+    }
+    let escaped = value.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
 }
 
 trait ExitStatusExt {
@@ -957,5 +982,35 @@ mod tests {
         assert_eq!(report.steps.len(), 2);
         assert!(matches!(report.steps[0].status, StepStatus::Failed));
         assert!(matches!(report.steps[1].status, StepStatus::Skipped));
+    }
+
+    #[test]
+    fn shell_mode_allow_runs_via_shell() {
+        let task = base_task(Step {
+            id: "cmd".into(),
+            name: String::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: true,
+            allow_elevation: ElevationPolicy::Forbidden,
+            action: Action::RunCommand {
+                program: "printf".into(),
+                args: vec!["%s".into(), "hello".into()],
+                cwd: None,
+                env: Default::default(),
+                shell: ShellMode::Allow,
+            },
+        });
+        let report = run_task(
+            &task,
+            &RunOptions {
+                apply: true,
+                allow_shell: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(report.steps[0].status, StepStatus::Applied));
+        assert!(matches!(report.outcomes[0], ActionOutcome::Applied { .. }));
     }
 }
