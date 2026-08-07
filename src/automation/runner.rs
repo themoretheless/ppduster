@@ -994,8 +994,8 @@ mod tests {
             dangerous: true,
             allow_elevation: ElevationPolicy::Forbidden,
             action: Action::RunCommand {
-                program: "printf".into(),
-                args: vec!["%s".into(), "hello".into()],
+                program: "sh".into(),
+                args: vec!["-lc".into(), ":".into()],
                 cwd: None,
                 env: Default::default(),
                 shell: ShellMode::Allow,
