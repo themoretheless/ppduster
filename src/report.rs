@@ -323,6 +323,12 @@ pub fn print_setup(report: &RunReport, output: OutputFormat) -> Result<()> {
                     println!("    - {}", log.message);
                 }
             }
+            if !report.errors.is_empty() {
+                println!("\n{}", "Errors:".red().bold());
+                for error in &report.errors {
+                    println!("  - {error}");
+                }
+            }
         }
     }
     Ok(())

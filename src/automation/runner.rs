@@ -76,6 +76,8 @@ pub struct RunReport {
     pub plans: Vec<ActionPlan>,
     pub outcomes: Vec<ActionOutcome>,
     pub steps: Vec<StepReport>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -88,8 +90,8 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
     let mut plans = Vec::new();
     let mut outcomes = Vec::new();
     let mut steps = Vec::new();
+    let mut errors = Vec::new();
     let mut auth_state = AuthState::default();
-    let mut pending_auth: Vec<(usize, &Step, usize)> = Vec::new();
 
     for step in &task.steps {
         enforce_step_policy(step, opts)?;
@@ -116,11 +118,7 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
             step_id: step.id.clone(),
             step_name: step_name(step),
             summary: plan.summary.clone(),
-            status: if opts.apply {
-                StepStatus::Pending
-            } else {
-                StepStatus::Pending
-            },
+            status: StepStatus::Pending,
             prerequisites: plan.prerequisites.clone(),
             logs: vec![StepLogEntry {
                 step_id: step.id.clone(),
@@ -134,16 +132,41 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
                     step_id: step.id.clone(),
                     message: "waiting for authorization".into(),
                 });
-                pending_auth.push((step_idx, step, outcomes.len()));
-                outcomes.push(ActionOutcome::Blocked);
-                continue;
+                if let Err(err) = ensure_auth(step, &mut auth_state) {
+                    let message = err.to_string();
+                    steps[step_idx].status = StepStatus::Failed;
+                    steps[step_idx].logs.push(StepLogEntry {
+                        step_id: step.id.clone(),
+                        message: format!("failed: {message}"),
+                    });
+                    errors.push(message.clone());
+                    outcomes.push(ActionOutcome::Blocked);
+                    break;
+                }
+                steps[step_idx].logs.push(StepLogEntry {
+                    step_id: step.id.clone(),
+                    message: "authorization granted; resuming".into(),
+                });
             }
             steps[step_idx].status = StepStatus::Running;
             steps[step_idx].logs.push(StepLogEntry {
                 step_id: step.id.clone(),
                 message: "running".into(),
             });
-            let summary = apply_step(step)?;
+            let summary = match apply_step(step) {
+                Ok(summary) => summary,
+                Err(err) => {
+                    let message = err.to_string();
+                    steps[step_idx].status = StepStatus::Failed;
+                    steps[step_idx].logs.push(StepLogEntry {
+                        step_id: step.id.clone(),
+                        message: format!("failed: {message}"),
+                    });
+                    errors.push(message.clone());
+                    outcomes.push(ActionOutcome::Blocked);
+                    break;
+                }
+            };
             steps[step_idx].status = StepStatus::Applied;
             steps[step_idx].logs.push(StepLogEntry {
                 step_id: step.id.clone(),
@@ -155,33 +178,12 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
         outcomes.push(ActionOutcome::Planned { action: plan });
     }
 
-    if opts.apply {
-        for (step_idx, step, _) in pending_auth {
-            ensure_auth(step, &mut auth_state)?;
-            steps[step_idx].logs.push(StepLogEntry {
-                step_id: step.id.clone(),
-                message: "authorization granted; resuming".into(),
-            });
-            steps[step_idx].status = StepStatus::Running;
-            let summary = apply_step(step)?;
-            let blocked_index = find_blocked_outcome_index(&outcomes)?;
-            outcomes[blocked_index] = ActionOutcome::Applied { summary };
-            steps[step_idx].status = StepStatus::Applied;
-            steps[step_idx].logs.push(StepLogEntry {
-                step_id: step.id.clone(),
-                message: match &outcomes[blocked_index] {
-                    ActionOutcome::Applied { summary } => summary.clone(),
-                    _ => "applied".into(),
-                },
-            });
-        }
-    }
-
     Ok(RunReport {
         task_id: task.id.clone(),
         plans,
         outcomes,
         steps,
+        errors,
     })
 }
 
@@ -534,13 +536,6 @@ fn render_command(program: &str, args: &[String], cwd: Option<&str>) -> String {
     rendered
 }
 
-fn find_blocked_outcome_index(outcomes: &[ActionOutcome]) -> Result<usize> {
-    outcomes
-        .iter()
-        .position(|outcome| matches!(outcome, ActionOutcome::Blocked))
-        .ok_or_else(|| anyhow!("internal error: blocked outcome not found"))
-}
-
 trait ExitStatusExt {
     fn exit_ok(self, action: &str) -> Result<()>;
 }
@@ -770,19 +765,20 @@ mod tests {
                 },
             },
         });
-        let err = run_task(
+        let report = run_task(
             &task,
             &RunOptions {
                 apply: true,
                 ..RunOptions::default()
             },
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("download apply mode is not implemented"));
+        .unwrap();
+        assert!(matches!(report.steps[0].status, StepStatus::Failed));
+        assert_eq!(report.errors[0], "download apply mode is not implemented yet");
     }
 
     #[test]
-    fn auth_steps_are_deferred_until_non_auth_steps_finish() {
+    fn planning_mode_keeps_auth_steps_in_order() {
         let task = Task {
             id: "setup-dev".into(),
             name: "Setup dev".into(),
@@ -822,5 +818,37 @@ mod tests {
         assert_eq!(report.plans.len(), 2);
         assert!(matches!(report.outcomes[0], ActionOutcome::Planned { .. }));
         assert!(matches!(report.outcomes[1], ActionOutcome::Planned { .. }));
+        assert_eq!(report.steps[0].step_id, "clone");
+        assert_eq!(report.steps[1].step_id, "brew");
+    }
+
+    #[test]
+    fn failed_step_is_reported_in_run_report() {
+        let task = base_task(Step {
+            id: "cmd".into(),
+            name: String::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            action: Action::RunCommand {
+                program: "false".into(),
+                args: vec![],
+                cwd: None,
+                env: Default::default(),
+                shell: ShellMode::Forbidden,
+            },
+        });
+        let report = run_task(
+            &task,
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(report.steps[0].status, StepStatus::Failed));
+        assert_eq!(report.errors.len(), 1);
+        assert!(matches!(report.outcomes[0], ActionOutcome::Blocked));
     }
 }
