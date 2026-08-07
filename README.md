@@ -20,6 +20,19 @@ Inspired by product lessons from **CleanMyMac**, **CCleaner**, **BleachBit**, **
 | Output | Human tables or `--output json` for scripting |
 | Categories | `caches`, `logs`, `temp`, `leftovers`, `dev`, `package-cache`, `app-cache`, `browser-cache`, … |
 
+## Top 10 product features
+
+1. **Rule-driven cleanup packs** — cleaner logic lives in YAML rule packs, so coverage can grow without hard-coding every path in Rust.
+2. **Read-only scanning** — `ppduster scan` never deletes and gives a safe first pass before any action.
+3. **Dry-run clean by default** — `ppduster clean` previews deletions unless `--yes` is explicitly passed.
+4. **Trash-first deletion** — normal cleanup goes to Trash / Recycle Bin instead of immediate permanent deletion.
+5. **Explicit permanent-delete confirmation** — `--permanent` requires a typed confirmation phrase before irreversible deletion.
+6. **Age-based cleanup controls** — each rule can enforce `min_age_days`, with a CLI override via `--min-age`.
+7. **Never-touch safety rails** — protected paths like documents, keys, and system locations are blocked from cleanup.
+8. **Report-only risky areas** — some large or sensitive targets can be surfaced in results but never auto-deleted.
+9. **Cross-platform and category coverage** — rule packs cover macOS, Linux, Windows, plus caches for apps, browsers, dev tools, and package managers.
+10. **Safe setup automation** — `ppduster setup` is isolated from cleanup and uses typed, trust-gated automation tasks instead of arbitrary shell YAML.
+
 ## Install / build
 
 ```bash
