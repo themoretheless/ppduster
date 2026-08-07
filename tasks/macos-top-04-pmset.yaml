@@ -1,0 +1,18 @@
+task:
+  id: macos-top-04-pmset
+  name: macOS power management baseline
+  description: Plan battery and sleep policy tuning through pmset.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-pmset
+      name: Inspect current power profile
+      type: run-command
+      program: pmset
+      args: ["-g", "custom"]
+    - id: apply-pmset-profile
+      name: Plan pmset profile apply
+      type: run-command
+      program: sudo
+      args: ["pmset", "-b", "sleep", "10", "displaysleep", "5"]
+      allow_elevation: allow

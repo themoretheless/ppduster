@@ -68,6 +68,11 @@ ppduster setup show dev-brew-bootstrap
 # Plan a task (default; no side effects)
 ppduster setup run dev-brew-bootstrap
 
+# Built-in macOS automation starters
+ppduster setup show macos-top-01-brew-bootstrap
+ppduster setup run macos-top-03-system-defaults --allow-shell
+ppduster setup run macos-top-08-security-baseline --allow-elevation
+
 # External task packs are blocked unless explicitly trusted
 ppduster --trust-external-packs setup run dev-brew-bootstrap --tasks-dir /path/to/tasks
 ```
@@ -82,6 +87,19 @@ Current safety posture:
 - external task packs require `--trust-external-packs`
 - download steps require `checksum.sha256`
 - archive handlers must use traversal-safe extraction primitives before apply-mode is enabled
+
+Bundled macOS setup starters currently cover the top 10 bootstrap areas:
+
+1. Brew bootstrap
+2. Dotfiles sync
+3. System defaults baseline
+4. Power management (`pmset`)
+5. Developer toolchains (`mise`)
+6. `launchd` automation
+7. Git / SSH / GPG baseline
+8. Security baseline
+9. Drift detection
+10. Rollback snapshot
 
 ## Rule format
 

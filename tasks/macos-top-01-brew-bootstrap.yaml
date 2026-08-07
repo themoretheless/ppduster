@@ -1,0 +1,19 @@
+task:
+  id: macos-top-01-brew-bootstrap
+  name: macOS Brew bootstrap
+  description: Bootstrap Homebrew package installation from a repo-managed Brewfile.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: verify-homebrew
+      name: Verify Homebrew is installed
+      type: run-command
+      program: brew
+      args: ["--version"]
+      check:
+        command_succeeds: ["brew", "--version"]
+    - id: brew-bundle
+      name: Plan Brew bundle apply
+      type: run-command
+      program: brew
+      args: ["bundle", "--file", "$HOME/.config/macos/Brewfile"]

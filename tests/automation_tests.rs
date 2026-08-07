@@ -37,6 +37,38 @@ task:
 }
 
 #[test]
+fn bundled_dev_setup_includes_macos_top_ten_tasks() {
+    let pack = TaskPack::load_many(
+        &[TaskSource {
+            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap();
+
+    let expected = [
+        "macos-top-01-brew-bootstrap",
+        "macos-top-02-dotfiles",
+        "macos-top-03-system-defaults",
+        "macos-top-04-pmset",
+        "macos-top-05-toolchains",
+        "macos-top-06-launchd",
+        "macos-top-07-git-ssh-gpg",
+        "macos-top-08-security-baseline",
+        "macos-top-09-drift-detection",
+        "macos-top-10-rollback-snapshot",
+    ];
+
+    for id in expected {
+        assert!(
+            pack.get(id).is_some(),
+            "expected bundled task pack to include {id}"
+        );
+    }
+}
+
+#[test]
 fn external_pack_requires_flag() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(

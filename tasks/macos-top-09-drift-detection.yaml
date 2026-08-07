@@ -1,0 +1,19 @@
+task:
+  id: macos-top-09-drift-detection
+  name: macOS drift detection
+  description: Plan a configuration drift snapshot for defaults, brew packages, and launchd state.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: dump-brew-state
+      name: Dump Brewfile snapshot
+      type: run-command
+      program: brew
+      args: ["bundle", "dump", "--describe", "--force", "--file", "$HOME/.config/macos/Brewfile.snapshot"]
+    - id: dump-defaults-state
+      name: Export defaults domains
+      type: run-command
+      program: bash
+      args: ["-lc", "defaults domains | tr ',' '\\n' > \"$HOME/.config/macos/defaults-domains.txt\""]
+      dangerous: true
+      shell: allow

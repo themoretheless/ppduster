@@ -1,0 +1,18 @@
+task:
+  id: macos-top-05-toolchains
+  name: macOS developer toolchains
+  description: Install and verify mise-based runtime management for language toolchains.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-mise
+      name: Install mise
+      type: brew-install
+      package: mise
+      check:
+        command_succeeds: ["brew", "list", "mise"]
+    - id: verify-tool-versions
+      name: Plan mise toolchain sync
+      type: run-command
+      program: mise
+      args: ["install"]

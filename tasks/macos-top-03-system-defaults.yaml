@@ -1,0 +1,21 @@
+task:
+  id: macos-top-03-system-defaults
+  name: macOS system defaults baseline
+  description: Plan application of Finder, Dock, screenshots, keyboard, and menu bar defaults.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: verify-defaults-tool
+      name: Verify defaults CLI exists
+      type: run-command
+      program: defaults
+      args: ["read", "NSGlobalDomain", "AppleInterfaceStyle"]
+      dangerous: true
+      shell: allow
+    - id: apply-defaults-script
+      name: Plan defaults baseline script
+      type: run-command
+      program: bash
+      args: ["-lc", "$HOME/.config/macos/apply-defaults.sh"]
+      dangerous: true
+      shell: allow

@@ -1,0 +1,26 @@
+task:
+  id: macos-top-07-git-ssh-gpg
+  name: macOS Git SSH GPG baseline
+  description: Plan developer identity bootstrap for git, SSH config, and commit signing.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: verify-git
+      name: Verify git is installed
+      type: run-command
+      program: git
+      args: ["--version"]
+      check:
+        command_succeeds: ["git", "--version"]
+    - id: verify-ssh-dir
+      name: Verify SSH directory
+      type: run-command
+      program: bash
+      args: ["-lc", "test -d \"$HOME/.ssh\""]
+      dangerous: true
+      shell: allow
+    - id: verify-gpg
+      name: Verify GPG is installed
+      type: run-command
+      program: gpg
+      args: ["--version"]

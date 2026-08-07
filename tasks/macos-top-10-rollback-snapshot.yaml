@@ -1,0 +1,21 @@
+task:
+  id: macos-top-10-rollback-snapshot
+  name: macOS rollback snapshot
+  description: Plan rollback artifacts before destructive or broad preference changes.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: create-rollback-dir
+      name: Create rollback directory
+      type: run-command
+      program: mkdir
+      args: ["-p", "$HOME/.local/state/macos-rollback"]
+      check:
+        path_exists: $HOME/.local/state/macos-rollback
+    - id: backup-preferences
+      name: Backup global preferences
+      type: run-command
+      program: bash
+      args: ["-lc", "defaults export NSGlobalDomain \"$HOME/.local/state/macos-rollback/nsglobaldomain.plist\""]
+      dangerous: true
+      shell: allow
