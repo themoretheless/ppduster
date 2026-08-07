@@ -53,6 +53,91 @@ ppduster clean -c caches --yes    # to Trash
 ppduster clean -c temp --yes --permanent   # asks you to type DELETE
 ```
 
+## Automation tasks
+
+ppduster supports declarative automation tasks — reproducible machine-setup recipes that can clone repos, install tools, run commands, download files, and more.
+
+```bash
+# List available tasks
+ppduster automate list
+
+# Preview a task (dry-run — nothing executes)
+ppduster automate show example
+ppduster automate run example
+
+# Execute a task (runner core required — see below)
+ppduster automate run example --yes
+
+# Tasks with install_dmg / install_pkg steps need an extra flag
+ppduster automate run my-setup --yes --allow-privileged
+
+# Load tasks from a custom directory
+ppduster automate --automations-dir ~/my-tasks list
+```
+
+### Task YAML format
+
+Tasks live in `./automations/*.yaml`. The file stem is the task id.
+
+```yaml
+name: "Set up dev environment"
+description: "Clone repos, install tools, run bootstrap"
+steps:
+  - kind: brew_install
+    packages: [git, ripgrep]
+
+  - kind: brew_install
+    label: "Install VS Code"
+    packages: [visual-studio-code]
+    cask: true
+
+  - kind: clone_repo
+    url: https://github.com/example/repo.git
+    destination: ~/src/repo
+    shallow: true
+
+  - kind: run_command
+    label: "Bootstrap"
+    command: make
+    args: [install]
+    working_dir: ~/src/repo
+    env:
+      MY_VAR: value
+
+  - kind: download_file
+    url: https://example.com/tool.tar.gz
+    destination: /tmp/tool.tar.gz
+
+  - kind: extract_archive
+    source: /tmp/tool.tar.gz
+    destination: /tmp/tool
+    strip_components: 1
+
+  # Requires --allow-privileged
+  - kind: install_dmg
+    source: /tmp/App.dmg
+    app_name: App.app
+    install_dir: /Applications
+
+  # Requires --allow-privileged
+  - kind: install_pkg
+    source: /tmp/package.pkg
+    target: /
+    sudo: true
+```
+
+### Automation safety model
+
+| Gate | Behaviour |
+|------|-----------|
+| **Dry-run by default** | `automate run` never executes unless `--yes` is passed |
+| **Privileged step gate** | Tasks with `install_dmg` or `install_pkg` steps require `--allow-privileged` |
+| **Arbitrary execution warning** | `run_command`, `clone_repo`, `brew_install` print a provenance warning when `--yes` is set |
+| **No implicit elevation** | `sudo` is only invoked when the task step explicitly requests it and `--allow-privileged` is passed |
+| **External pack trust** | `--trust-pack` flag reserved for future external task-pack verification |
+
+> **Note:** Live execution requires the `automation-runner-core` module to be merged. Until then, `--yes` exits with an informative error and `automate run` (without `--yes`) always works as a dry-run preview.
+
 ## Rule format
 
 See files under [`rules/`](rules/):

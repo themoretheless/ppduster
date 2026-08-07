@@ -1,0 +1,65 @@
+# Example automation task — ppduster automate
+#
+# File stem (example) is the task id used in CLI commands:
+#   ppduster automate show example
+#   ppduster automate run example          # dry-run
+#   ppduster automate run example --yes    # live (runner core required)
+#
+# YAML shape is canonical from themoretheless-automation-runner-core.
+# Supported step kinds: brew_install, clone_repo, run_command,
+#                       download_file, extract_archive, install_dmg, install_pkg
+
+name: "Example dev environment bootstrap"
+description: "Demonstrates all supported step kinds. Not meant to be run as-is."
+
+steps:
+  # Install Homebrew packages
+  - kind: brew_install
+    packages: [git, ripgrep, jq]
+
+  # Install a Homebrew cask (GUI app)
+  - kind: brew_install
+    label: "Install VS Code"
+    packages: [visual-studio-code]
+    cask: true
+
+  # Clone a repository
+  - kind: clone_repo
+    url: https://github.com/example/my-dotfiles.git
+    destination: ~/src/dotfiles
+    shallow: true
+
+  # Run an arbitrary shell command
+  - kind: run_command
+    label: "Bootstrap dotfiles"
+    command: make
+    args: [install]
+    working_dir: ~/src/dotfiles
+    env:
+      DOTFILES_ENV: ci
+
+  # Download a file
+  - kind: download_file
+    url: https://example.com/tools/mytool-1.0.tar.gz
+    destination: /tmp/mytool.tar.gz
+    overwrite: true
+
+  # Extract the downloaded archive
+  - kind: extract_archive
+    source: /tmp/mytool.tar.gz
+    destination: /tmp/mytool
+    strip_components: 1
+
+  # Install a macOS .dmg (requires --allow-privileged)
+  - kind: install_dmg
+    label: "Install SomeApp"
+    source: /tmp/SomeApp.dmg
+    app_name: SomeApp.app
+    install_dir: /Applications
+
+  # Install a macOS .pkg (requires --allow-privileged, uses sudo by default)
+  - kind: install_pkg
+    label: "Install CLI tools pkg"
+    source: /tmp/cli-tools.pkg
+    target: /
+    sudo: true
