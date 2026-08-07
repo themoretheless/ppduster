@@ -23,7 +23,6 @@ pub struct RunOptions {
 pub struct ActionPlan {
     pub step_id: String,
     pub summary: String,
-    pub already_satisfied: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,7 +50,7 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
             outcomes.push(ActionOutcome::AlreadySatisfied { reason });
             continue;
         }
-        let plan = plan_step(step, false)?;
+        let plan = plan_step(step)?;
         plans.push(plan.clone());
         if opts.apply {
             return Err(AutomationError::Message(
@@ -110,7 +109,7 @@ fn parent_or_self(path: &Path) -> &Path {
     path.parent().unwrap_or(path)
 }
 
-fn plan_step(step: &Step, already_satisfied: bool) -> Result<ActionPlan> {
+fn plan_step(step: &Step) -> Result<ActionPlan> {
     let summary = match &step.action {
         Action::GitClone { repo, dest, branch } => format!(
             "git clone {} {}{} with hooks disabled and no submodules",
@@ -163,7 +162,6 @@ fn plan_step(step: &Step, already_satisfied: bool) -> Result<ActionPlan> {
     Ok(ActionPlan {
         step_id: step.id.clone(),
         summary,
-        already_satisfied,
     })
 }
 
@@ -233,7 +231,6 @@ mod tests {
         let report = run_task(&task, &RunOptions::default()).unwrap();
         assert_eq!(report.plans.len(), 1);
         assert!(matches!(report.outcomes[0], ActionOutcome::Planned { .. }));
-        assert!(!report.plans[0].already_satisfied);
     }
 
     #[test]
