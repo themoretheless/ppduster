@@ -1,4 +1,6 @@
-use ppduster::automation::{AutomationPack, AutomationStep, StepOutcome, TaskResult};
+use ppduster::automation::{
+    AutomationPack, AutomationStep, PackTrust, StepOutcome, TaskResult,
+};
 use std::path::PathBuf;
 
 // ─── Round-trip parsing ───────────────────────────────────────────────────────
@@ -63,13 +65,12 @@ steps:
 }
 
 #[test]
-fn parses_run_command_with_env_and_workdir() {
+fn parses_run_command_argv() {
     let yaml = r#"
 pack: test-cmd
 steps:
   - type: run-command
-    command: cargo
-    args: ["test", "--workspace"]
+    argv: ["cargo", "test", "--workspace"]
     working_dir: /tmp/myrepo
     env:
       RUST_BACKTRACE: "1"
@@ -77,11 +78,11 @@ steps:
 "#;
     let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
     if let AutomationStep::RunCommand(r) = &pack.steps[0] {
-        assert_eq!(r.command, "cargo");
-        assert_eq!(r.args, vec!["test", "--workspace"]);
+        assert_eq!(r.argv, vec!["cargo", "test", "--workspace"]);
         assert_eq!(r.working_dir.as_deref(), Some("/tmp/myrepo"));
         assert_eq!(r.env.get("RUST_BACKTRACE").map(|s| s.as_str()), Some("1"));
         assert!(!r.ignore_failure);
+        assert!(!r.shell_expand); // default false
     } else {
         panic!("expected RunCommand");
     }
@@ -142,7 +143,7 @@ steps:
 }
 
 #[test]
-fn parses_install_dmg_default_dest() {
+fn parses_install_dmg_defaults_notarization() {
     let yaml = r#"
 pack: test-dmg
 steps:
@@ -153,6 +154,26 @@ steps:
     let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
     if let AutomationStep::InstallDmg(d) = &pack.steps[0] {
         assert_eq!(d.dest_dir, "/Applications");
+        assert!(d.require_notarized, "require_notarized must default to true");
+        assert!(d.expected_team_id.is_none());
+    } else {
+        panic!("expected InstallDmg");
+    }
+}
+
+#[test]
+fn parses_install_dmg_with_team_id() {
+    let yaml = r#"
+pack: test-dmg-teamid
+steps:
+  - type: install-dmg
+    src: /tmp/App.dmg
+    app_name: App.app
+    expected_team_id: ABCDE12345
+"#;
+    let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    if let AutomationStep::InstallDmg(d) = &pack.steps[0] {
+        assert_eq!(d.expected_team_id.as_deref(), Some("ABCDE12345"));
     } else {
         panic!("expected InstallDmg");
     }
@@ -177,7 +198,7 @@ steps:
 }
 
 #[test]
-fn parses_install_pkg_default_target() {
+fn parses_install_pkg_defaults_notarization() {
     let yaml = r#"
 pack: test-pkg
 steps:
@@ -187,6 +208,8 @@ steps:
     let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
     if let AutomationStep::InstallPkg(p) = &pack.steps[0] {
         assert_eq!(p.target, "/");
+        assert!(p.require_notarized, "require_notarized must default to true");
+        assert!(p.expected_team_id.is_none());
     } else {
         panic!("expected InstallPkg");
     }
@@ -434,4 +457,235 @@ fn sample_brew_bundle_yaml_parses() {
     for step in &pack.steps {
         assert_eq!(step.kind_label(), "brew-cask");
     }
+}
+
+// ─── Security model ───────────────────────────────────────────────────────────
+
+#[test]
+fn trust_enum_parses_all_variants() {
+    for (s, expected) in [
+        ("bundled", PackTrust::Bundled),
+        ("user", PackTrust::User),
+        ("external", PackTrust::External),
+    ] {
+        let parsed: PackTrust = serde_yaml::from_str(s).unwrap();
+        assert_eq!(parsed, expected);
+    }
+}
+
+#[test]
+fn trust_default_is_external() {
+    assert_eq!(PackTrust::default(), PackTrust::External);
+}
+
+#[test]
+fn load_many_assigns_external_trust_by_default() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("p.yaml"), "pack: p\nsteps: []\n").unwrap();
+    let packs = AutomationPack::load_many(&[tmp.path().to_path_buf()]).unwrap();
+    assert_eq!(packs[0].trust, PackTrust::External);
+}
+
+#[test]
+fn load_many_with_trust_assigns_bundled() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("p.yaml"), "pack: p\nsteps: []\n").unwrap();
+    let packs = AutomationPack::load_many_with_trust(
+        &[tmp.path().to_path_buf()],
+        PackTrust::Bundled,
+    )
+    .unwrap();
+    assert_eq!(packs[0].trust, PackTrust::Bundled);
+}
+
+#[test]
+fn external_download_without_sha256_fails_validation() {
+    let yaml = r#"
+pack: bad-dl
+steps:
+  - type: download
+    url: https://example.com/file.tar.gz
+    dest: /tmp/file.tar.gz
+"#;
+    let mut pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    pack.trust = PackTrust::External;
+    assert!(pack.validate().is_err(), "external download without sha256 must fail validation");
+}
+
+#[test]
+fn external_download_with_sha256_passes_validation() {
+    let yaml = r#"
+pack: good-dl
+steps:
+  - type: download
+    url: https://example.com/file.tar.gz
+    dest: /tmp/file.tar.gz
+    sha256: abc123def456
+"#;
+    let mut pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    pack.trust = PackTrust::External;
+    assert!(pack.validate().is_ok());
+}
+
+#[test]
+fn user_download_without_sha256_passes_validation() {
+    // User packs are warned but not blocked at validation time.
+    let yaml = r#"
+pack: user-dl
+steps:
+  - type: download
+    url: https://example.com/file.tar.gz
+    dest: /tmp/file.tar.gz
+"#;
+    let mut pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    pack.trust = PackTrust::User;
+    assert!(pack.validate().is_ok());
+}
+
+#[test]
+fn write_to_system_path_fails_validation() {
+    let yaml = r#"
+pack: bad-write
+steps:
+  - type: write-file
+    dest: /usr/local/bin/malware
+    content: "oops"
+"#;
+    let mut pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    pack.trust = PackTrust::Bundled; // even bundled packs can't write to /usr
+    assert!(pack.validate().is_err());
+}
+
+#[test]
+fn write_to_tmp_passes_validation() {
+    let yaml = r#"
+pack: safe-write
+steps:
+  - type: write-file
+    dest: /tmp/ppduster-test.txt
+    content: "hello"
+"#;
+    let mut pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    pack.trust = PackTrust::External;
+    assert!(pack.validate().is_ok());
+}
+
+#[test]
+fn symlink_to_system_path_fails_validation() {
+    let yaml = r#"
+pack: bad-sym
+steps:
+  - type: symlink
+    src: /tmp/evil
+    dest: /etc/cron.d/evil
+"#;
+    let mut pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    pack.trust = PackTrust::External;
+    assert!(pack.validate().is_err());
+}
+
+#[test]
+fn tilde_write_dest_passes_validation() {
+    let yaml = r#"
+pack: tilde-write
+steps:
+  - type: write-file
+    dest: ~/.config/foo/bar.toml
+    content: "cfg"
+"#;
+    let mut pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    pack.trust = PackTrust::External;
+    assert!(pack.validate().is_ok());
+}
+
+#[test]
+fn run_command_empty_argv_fails_validation() {
+    let yaml = r#"
+pack: empty-argv
+steps:
+  - type: run-command
+    argv: []
+"#;
+    let mut pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    pack.trust = PackTrust::User;
+    assert!(pack.validate().is_err());
+}
+
+#[test]
+fn run_command_shell_expand_blocked_for_external() {
+    let yaml = r#"
+pack: shell-expand
+steps:
+  - type: run-command
+    argv: ["sh", "-c", "rm -rf /"]
+    shell_expand: true
+"#;
+    let mut pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    pack.trust = PackTrust::External;
+    assert!(pack.validate().is_err(), "shell_expand must be blocked for External packs");
+}
+
+#[test]
+fn run_command_shell_expand_allowed_for_user() {
+    let yaml = r#"
+pack: shell-expand-user
+steps:
+  - type: run-command
+    argv: ["sh", "-c", "echo hello"]
+    shell_expand: true
+"#;
+    let mut pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    pack.trust = PackTrust::User;
+    assert!(pack.validate().is_ok());
+}
+
+#[test]
+fn dmg_require_notarized_defaults_true() {
+    let yaml = r#"
+pack: dmg-notarize
+steps:
+  - type: install-dmg
+    src: /tmp/App.dmg
+    app_name: App.app
+"#;
+    let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    if let AutomationStep::InstallDmg(d) = &pack.steps[0] {
+        assert!(d.require_notarized);
+    } else {
+        panic!("expected InstallDmg");
+    }
+}
+
+#[test]
+fn pkg_require_notarized_defaults_true() {
+    let yaml = r#"
+pack: pkg-notarize
+steps:
+  - type: install-pkg
+    src: /tmp/Installer.pkg
+"#;
+    let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    if let AutomationStep::InstallPkg(p) = &pack.steps[0] {
+        assert!(p.require_notarized);
+    } else {
+        panic!("expected InstallPkg");
+    }
+}
+
+#[test]
+fn pack_trust_not_overridable_from_yaml() {
+    // trust field is #[serde(skip)] — a pack cannot self-promote its trust level
+    let yaml = r#"
+pack: sneaky
+trust: bundled
+steps: []
+"#;
+    // Should parse fine (serde ignores unknown fields by default), and trust
+    // should remain External (the default), not Bundled.
+    let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(
+        pack.trust,
+        PackTrust::External,
+        "packs must not be able to set their own trust level via YAML"
+    );
 }

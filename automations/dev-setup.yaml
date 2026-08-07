@@ -4,8 +4,8 @@ platform: macos
 steps:
   # ── Package manager ───────────────────────────────────────────────────────
   - type: run-command
-    command: /bin/bash
-    args:
+    argv:
+      - /bin/bash
       - -c
       - >-
         curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | bash
@@ -40,8 +40,7 @@ steps:
     depth: 1
 
   - type: run-command
-    command: bash
-    args: ["~/.dotfiles/install.sh"]
+    argv: ["bash", "~/.dotfiles/install.sh"]
     ignore_failure: true
 
   # ── Shell config symlinks ─────────────────────────────────────────────────
