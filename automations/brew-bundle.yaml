@@ -1,0 +1,50 @@
+pack: brew-bundle
+description: Install a curated set of macOS GUI applications via Homebrew Cask.
+platform: macos
+steps:
+  # ── Browsers ──────────────────────────────────────────────────────────────
+  - type: brew-cask
+    package: firefox
+
+  - type: brew-cask
+    package: google-chrome
+
+  # ── Developer tools ───────────────────────────────────────────────────────
+  - type: brew-cask
+    package: visual-studio-code
+
+  - type: brew-cask
+    package: iterm2
+
+  - type: brew-cask
+    package: tableplus
+
+  - type: brew-cask
+    package: insomnia
+
+  # ── Productivity ──────────────────────────────────────────────────────────
+  - type: brew-cask
+    package: raycast
+
+  - type: brew-cask
+    package: 1password
+
+  - type: brew-cask
+    package: obsidian
+
+  # ── Media / communication ─────────────────────────────────────────────────
+  - type: brew-cask
+    package: spotify
+
+  - type: brew-cask
+    package: slack
+
+  - type: brew-cask
+    package: zoom
+
+  # ── Utilities ─────────────────────────────────────────────────────────────
+  - type: brew-cask
+    package: the-unarchiver
+
+  - type: brew-cask
+    package: appcleaner
