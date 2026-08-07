@@ -10,5 +10,8 @@
 pub mod runner;
 pub mod task;
 
-pub use runner::{run_task, AutomationError, RunContext, RunMode, RunOptions, RunReport, StepOutcome, StepResult};
+pub use runner::{
+    run_task, AutomationError, FakeProcessRunner, PlannedAction, ProcessOutcome, ProcessRunner,
+    RealProcessRunner, RunContext, RunMode, RunOptions, RunReport, StepOutcome, StepResult,
+};
 pub use task::{Step, StepKind, Task};

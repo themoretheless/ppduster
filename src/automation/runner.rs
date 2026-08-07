@@ -1,26 +1,35 @@
 //! Automation task runner — executes [`Task`] steps with dry-run support.
 //!
 //! # Modes
-//! - [`RunMode::DryRun`] — logs each step but never performs I/O or launches
-//!   processes. Safe to run at any time for previewing what would happen.
-//! - [`RunMode::Apply`] — actually executes each step in order, stopping on
-//!   the first error unless [`RunOptions::continue_on_error`] is set.
+//! - [`RunMode::DryRun`] — computes a [`PlannedAction`] for every step and
+//!   returns the full plan without performing any I/O or process execution.
+//! - [`RunMode::Apply`] — executes each step in order. Before executing, each
+//!   step handler checks [`is_satisfied`] and returns
+//!   [`StepOutcome::AlreadySatisfied`] if the desired state already holds
+//!   (idempotency). Stops on the first error unless
+//!   [`RunOptions::continue_on_error`] is set.
+//!
+//! # Testability
+//! All process execution is routed through the [`ProcessRunner`] trait so
+//! unit tests can inject a [`FakeProcessRunner`] instead of spawning real
+//! child processes.
 //!
 //! # Step implementation status
-//! | Step kind       | Status     |
-//! |-----------------|------------|
-//! | `run_command`   | Implemented |
-//! | `download_file` | Implemented |
-//! | `extract_archive` | Implemented |
-//! | `brew_install`  | Stub (explicit error) |
-//! | `clone_repo`    | Stub (explicit error) |
-//! | `install_dmg`   | Stub (explicit error) |
-//! | `install_pkg`   | Stub (explicit error) |
+//! | Step kind         | Status                 |
+//! |-------------------|------------------------|
+//! | `run_command`     | Implemented            |
+//! | `download_file`   | Implemented            |
+//! | `extract_archive` | Implemented            |
+//! | `brew_install`    | Stub (explicit error)  |
+//! | `clone_repo`      | Stub (explicit error)  |
+//! | `install_dmg`     | Stub (explicit error)  |
+//! | `install_pkg`     | Stub (explicit error)  |
 
 use crate::automation::task::{
     DownloadFileParams, ExtractArchiveParams, RunCommandParams, Step, StepKind, Task,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -41,13 +50,112 @@ pub enum AutomationError {
     NoSteps,
 }
 
+// ── Process runner abstraction ────────────────────────────────────────────────
+
+/// Outcome of spawning a process through [`ProcessRunner`].
+#[derive(Debug, Clone)]
+pub struct ProcessOutcome {
+    pub exit_code: Option<i32>,
+    pub success: bool,
+}
+
+/// Abstraction over process execution, enabling test injection.
+pub trait ProcessRunner: Send + Sync {
+    /// Spawn `program` with `args`, `cwd`, and extra `env`, wait for it to
+    /// finish, and return its outcome. Returns `Err` only if the process
+    /// could not be spawned at all (e.g., binary not found).
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        cwd: &std::path::Path,
+        env: &HashMap<String, String>,
+    ) -> Result<ProcessOutcome, std::io::Error>;
+}
+
+/// Production implementation — wraps [`std::process::Command`].
+pub struct RealProcessRunner;
+
+impl ProcessRunner for RealProcessRunner {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        cwd: &std::path::Path,
+        env: &HashMap<String, String>,
+    ) -> Result<ProcessOutcome, std::io::Error> {
+        let status = std::process::Command::new(program)
+            .args(args)
+            .current_dir(cwd)
+            .envs(env)
+            .status()?;
+        Ok(ProcessOutcome {
+            exit_code: status.code(),
+            success: status.success(),
+        })
+    }
+}
+
+/// Test double — returns configurable outcomes without spawning any process.
+///
+/// By default all commands succeed. Entries in `failures` are matched by
+/// program name; matching programs return a non-zero exit.
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct FakeProcessRunner {
+    /// Program names that should be reported as failures (exit code 1).
+    pub failures: Vec<String>,
+    /// Record of every (program, args) call made.
+    pub calls: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl FakeProcessRunner {
+    pub fn new() -> Self {
+        FakeProcessRunner {
+            failures: vec![],
+            calls: std::sync::Mutex::new(vec![]),
+        }
+    }
+
+    pub fn with_failures(failures: Vec<&str>) -> Self {
+        FakeProcessRunner {
+            failures: failures.into_iter().map(String::from).collect(),
+            calls: std::sync::Mutex::new(vec![]),
+        }
+    }
+
+    pub fn recorded_calls(&self) -> Vec<(String, Vec<String>)> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl ProcessRunner for FakeProcessRunner {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        _cwd: &std::path::Path,
+        _env: &HashMap<String, String>,
+    ) -> Result<ProcessOutcome, std::io::Error> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((program.to_string(), args.iter().map(|s| s.to_string()).collect()));
+        let success = !self.failures.iter().any(|f| f == program);
+        Ok(ProcessOutcome {
+            exit_code: if success { Some(0) } else { Some(1) },
+            success,
+        })
+    }
+}
+
 // ── Run context ───────────────────────────────────────────────────────────────
 
-/// Controls whether steps are actually executed or just previewed.
+/// Controls whether steps are actually executed or only planned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {
-    /// Log what would happen; perform no I/O or process execution.
+    /// Compute the plan for every step; perform no I/O or process execution.
     DryRun,
     /// Execute steps for real.
     Apply,
@@ -69,12 +177,13 @@ impl std::fmt::Display for RunMode {
 }
 
 /// Shared context passed to every step handler.
-#[derive(Debug, Clone)]
 pub struct RunContext {
-    /// Whether to actually execute (Apply) or only preview (DryRun).
+    /// Whether to actually execute (Apply) or only plan (DryRun).
     pub mode: RunMode,
     /// Default working directory for steps that don't specify one.
     pub working_dir: PathBuf,
+    /// Process runner — inject [`FakeProcessRunner`] in tests.
+    pub proc: Box<dyn ProcessRunner>,
 }
 
 impl RunContext {
@@ -82,11 +191,17 @@ impl RunContext {
         RunContext {
             mode,
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            proc: Box::new(RealProcessRunner),
         }
     }
 
     pub fn with_working_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.working_dir = dir.into();
+        self
+    }
+
+    pub fn with_runner(mut self, runner: Box<dyn ProcessRunner>) -> Self {
+        self.proc = runner;
         self
     }
 }
@@ -101,14 +216,26 @@ pub struct RunOptions {
 
 // ── Results ───────────────────────────────────────────────────────────────────
 
+/// Human-readable description of what a step *would* do, produced in dry-run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannedAction {
+    /// Short verb phrase: "run echo hello", "download https://… -> /tmp/f"
+    pub description: String,
+    /// True if `is_satisfied()` returned true at planning time — the step
+    /// would be a no-op even in apply mode.
+    pub already_satisfied: bool,
+}
+
 /// Outcome of a single step execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum StepOutcome {
     /// Step was executed and succeeded.
     Ok { message: Option<String> },
-    /// Step was skipped because the runner is in DryRun mode.
-    Skipped { preview: String },
+    /// Dry-run mode: step was not executed; contains what *would* happen.
+    Planned { action: PlannedAction },
+    /// Step was skipped because `is_satisfied()` returned true (idempotent).
+    AlreadySatisfied { reason: String },
     /// Step failed with an error message.
     Err { message: String },
 }
@@ -120,8 +247,11 @@ impl StepOutcome {
     pub fn is_err(&self) -> bool {
         matches!(self, StepOutcome::Err { .. })
     }
-    pub fn is_skipped(&self) -> bool {
-        matches!(self, StepOutcome::Skipped { .. })
+    pub fn is_planned(&self) -> bool {
+        matches!(self, StepOutcome::Planned { .. })
+    }
+    pub fn is_already_satisfied(&self) -> bool {
+        matches!(self, StepOutcome::AlreadySatisfied { .. })
     }
 }
 
@@ -156,7 +286,7 @@ pub struct RunReport {
 }
 
 impl RunReport {
-    /// True when every step completed without an error.
+    /// True when every step completed without an error (planned/satisfied are not errors).
     pub fn success(&self) -> bool {
         !self.steps.iter().any(|s| s.outcome.is_err())
     }
@@ -165,12 +295,30 @@ impl RunReport {
         self.steps.iter().filter(|s| s.outcome.is_ok()).count()
     }
 
-    pub fn skipped_count(&self) -> usize {
-        self.steps.iter().filter(|s| s.outcome.is_skipped()).count()
+    pub fn planned_count(&self) -> usize {
+        self.steps.iter().filter(|s| s.outcome.is_planned()).count()
+    }
+
+    pub fn already_satisfied_count(&self) -> usize {
+        self.steps.iter().filter(|s| s.outcome.is_already_satisfied()).count()
     }
 
     pub fn error_count(&self) -> usize {
         self.steps.iter().filter(|s| s.outcome.is_err()).count()
+    }
+
+    /// Convenience: list the planned actions when mode is DryRun.
+    pub fn planned_actions(&self) -> Vec<&PlannedAction> {
+        self.steps
+            .iter()
+            .filter_map(|s| {
+                if let StepOutcome::Planned { action } = &s.outcome {
+                    Some(action)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -178,10 +326,16 @@ impl RunReport {
 
 /// Execute all steps in `task` according to `ctx` and `opts`.
 ///
-/// Returns a [`RunReport`] regardless of whether steps succeed; individual
-/// step errors are recorded in the report. Returns `Err` only for structural
-/// problems (empty step list, unrecoverable setup failures).
-pub fn run_task(task: &Task, ctx: &RunContext, opts: &RunOptions) -> Result<RunReport, AutomationError> {
+/// In [`RunMode::DryRun`] every step produces a [`StepOutcome::Planned`]
+/// describing what *would* happen — no I/O is performed.
+///
+/// Returns a [`RunReport`] regardless of step success; individual errors are
+/// recorded in the report. Returns `Err` only for structural problems.
+pub fn run_task(
+    task: &Task,
+    ctx: &RunContext,
+    opts: &RunOptions,
+) -> Result<RunReport, AutomationError> {
     if task.steps.is_empty() {
         return Err(AutomationError::NoSteps);
     }
@@ -202,7 +356,6 @@ pub fn run_task(task: &Task, ctx: &RunContext, opts: &RunOptions) -> Result<RunR
         eprintln!("[automation] step {idx}: {kind_label} — {label}");
 
         let outcome = dispatch_step(idx, step, ctx);
-
         let elapsed = step_start.elapsed();
         let failed = outcome.is_err();
 
@@ -211,7 +364,8 @@ pub fn run_task(task: &Task, ctx: &RunContext, opts: &RunOptions) -> Result<RunR
             elapsed.as_secs_f64(),
             match &outcome {
                 StepOutcome::Ok { .. } => "ok".to_string(),
-                StepOutcome::Skipped { .. } => "skipped (dry-run)".to_string(),
+                StepOutcome::Planned { action } => format!("planned: {}", action.description),
+                StepOutcome::AlreadySatisfied { reason } => format!("already satisfied: {reason}"),
                 StepOutcome::Err { message } => format!("ERROR: {message}"),
             }
         );
@@ -238,10 +392,11 @@ pub fn run_task(task: &Task, ctx: &RunContext, opts: &RunOptions) -> Result<RunR
     };
 
     eprintln!(
-        "[automation] task '{}' complete: ok={} skipped={} errors={}",
+        "[automation] task '{}' complete: ok={} planned={} satisfied={} errors={}",
         task.name,
         report.ok_count(),
-        report.skipped_count(),
+        report.planned_count(),
+        report.already_satisfied_count(),
         report.error_count()
     );
 
@@ -255,24 +410,51 @@ fn dispatch_step(idx: usize, step: &Step, ctx: &RunContext) -> StepOutcome {
         StepKind::RunCommand(p) => handle_run_command(idx, p, ctx),
         StepKind::DownloadFile(p) => handle_download_file(idx, p, ctx),
         StepKind::ExtractArchive(p) => handle_extract_archive(idx, p, ctx),
-        StepKind::BrewInstall(_) => stub_outcome(idx, "brew_install"),
-        StepKind::CloneRepo(_) => stub_outcome(idx, "clone_repo"),
-        StepKind::InstallDmg(_) => stub_outcome(idx, "install_dmg"),
-        StepKind::InstallPkg(_) => stub_outcome(idx, "install_pkg"),
+        StepKind::BrewInstall(_) => stub_outcome("brew_install"),
+        StepKind::CloneRepo(_) => stub_outcome("clone_repo"),
+        StepKind::InstallDmg(_) => stub_outcome("install_dmg"),
+        StepKind::InstallPkg(_) => stub_outcome("install_pkg"),
     }
 }
 
 /// Returns the standard "not yet implemented" error outcome for stub steps.
-fn stub_outcome(_idx: usize, kind: &str) -> StepOutcome {
+fn stub_outcome(kind: &str) -> StepOutcome {
     StepOutcome::Err {
         message: format!("step kind '{kind}' is not yet implemented"),
     }
 }
 
+// ── Idempotency helpers ───────────────────────────────────────────────────────
+
+/// Returns `Some(reason)` if `download_file` is already satisfied.
+fn download_satisfied(p: &DownloadFileParams) -> Option<String> {
+    let dest = expand_tilde(&p.destination);
+    if !p.overwrite && dest.exists() {
+        Some(format!("file already exists: {}", dest.display()))
+    } else {
+        None
+    }
+}
+
+/// Returns `Some(reason)` if `extract_archive` is already satisfied.
+/// Heuristic: destination directory exists and is non-empty.
+fn extract_satisfied(p: &ExtractArchiveParams) -> Option<String> {
+    let dest = expand_tilde(&p.destination);
+    if dest.is_dir() {
+        let non_empty = std::fs::read_dir(&dest)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
+        if non_empty {
+            return Some(format!("destination already populated: {}", dest.display()));
+        }
+    }
+    None
+}
+
 // ── Implemented step handlers ─────────────────────────────────────────────────
 
 fn handle_run_command(idx: usize, p: &RunCommandParams, ctx: &RunContext) -> StepOutcome {
-    let preview = format!(
+    let action_desc = format!(
         "run: {} {}{}",
         p.command,
         p.args.join(" "),
@@ -283,7 +465,14 @@ fn handle_run_command(idx: usize, p: &RunCommandParams, ctx: &RunContext) -> Ste
     );
 
     if ctx.mode.is_dry_run() {
-        return StepOutcome::Skipped { preview };
+        // run_command has no structural is_satisfied check (commands are
+        // inherently not idempotent by default), so always_satisfied = false.
+        return StepOutcome::Planned {
+            action: PlannedAction {
+                description: action_desc,
+                already_satisfied: false,
+            },
+        };
     }
 
     let work_dir: PathBuf = p
@@ -292,21 +481,20 @@ fn handle_run_command(idx: usize, p: &RunCommandParams, ctx: &RunContext) -> Ste
         .map(expand_tilde)
         .unwrap_or_else(|| ctx.working_dir.clone());
 
-    let mut cmd = std::process::Command::new(&p.command);
-    cmd.args(&p.args).current_dir(&work_dir);
-    for (k, v) in &p.env {
-        cmd.env(k, v);
-    }
+    let args: Vec<&str> = p.args.iter().map(String::as_str).collect();
 
-    match cmd.status() {
-        Ok(status) if status.success() => StepOutcome::Ok {
-            message: Some(format!("exit code 0")),
+    match ctx.proc.run(&p.command, &args, &work_dir, &p.env) {
+        Ok(outcome) if outcome.success => StepOutcome::Ok {
+            message: Some("exit code 0".into()),
         },
-        Ok(status) => StepOutcome::Err {
+        Ok(outcome) => StepOutcome::Err {
             message: format!(
                 "step {idx} (run_command): command '{}' exited with {}",
                 p.command,
-                status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
+                outcome
+                    .exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into())
             ),
         },
         Err(e) => StepOutcome::Err {
@@ -317,17 +505,21 @@ fn handle_run_command(idx: usize, p: &RunCommandParams, ctx: &RunContext) -> Ste
 
 fn handle_download_file(idx: usize, p: &DownloadFileParams, ctx: &RunContext) -> StepOutcome {
     let dest = expand_tilde(&p.destination);
-    let preview = format!("download {} -> {}", p.url, dest.display());
+    let action_desc = format!("download {} -> {}", p.url, dest.display());
 
     if ctx.mode.is_dry_run() {
-        return StepOutcome::Skipped { preview };
+        let already_satisfied = download_satisfied(p).is_some();
+        return StepOutcome::Planned {
+            action: PlannedAction {
+                description: action_desc,
+                already_satisfied,
+            },
+        };
     }
 
-    // Check existing file
-    if dest.exists() && !p.overwrite {
-        return StepOutcome::Ok {
-            message: Some(format!("skipped (already exists): {}", dest.display())),
-        };
+    // Idempotency check
+    if let Some(reason) = download_satisfied(p) {
+        return StepOutcome::AlreadySatisfied { reason };
     }
 
     // Create parent directories
@@ -339,20 +531,20 @@ fn handle_download_file(idx: usize, p: &DownloadFileParams, ctx: &RunContext) ->
         }
     }
 
-    // Use curl (universally available on macOS and most Linux)
-    let mut cmd = std::process::Command::new("curl");
-    cmd.args(["--fail", "--silent", "--show-error", "--location", "-o"])
-        .arg(&dest)
-        .arg(&p.url);
-
-    match cmd.status() {
-        Ok(s) if s.success() => StepOutcome::Ok {
+    let dest_str = dest.to_string_lossy().to_string();
+    match ctx.proc.run(
+        "curl",
+        &["--fail", "--silent", "--show-error", "--location", "-o", &dest_str, &p.url],
+        &ctx.working_dir,
+        &HashMap::new(),
+    ) {
+        Ok(o) if o.success => StepOutcome::Ok {
             message: Some(format!("downloaded to {}", dest.display())),
         },
-        Ok(s) => StepOutcome::Err {
+        Ok(o) => StepOutcome::Err {
             message: format!(
                 "step {idx} (download_file): curl exited with {}",
-                s.code().unwrap_or(-1)
+                o.exit_code.unwrap_or(-1)
             ),
         },
         Err(e) => StepOutcome::Err {
@@ -364,10 +556,21 @@ fn handle_download_file(idx: usize, p: &DownloadFileParams, ctx: &RunContext) ->
 fn handle_extract_archive(idx: usize, p: &ExtractArchiveParams, ctx: &RunContext) -> StepOutcome {
     let source = expand_tilde(&p.source);
     let dest = expand_tilde(&p.destination);
-    let preview = format!("extract {} -> {}", source.display(), dest.display());
+    let action_desc = format!("extract {} -> {}", source.display(), dest.display());
 
     if ctx.mode.is_dry_run() {
-        return StepOutcome::Skipped { preview };
+        let already_satisfied = extract_satisfied(p).is_some();
+        return StepOutcome::Planned {
+            action: PlannedAction {
+                description: action_desc,
+                already_satisfied,
+            },
+        };
+    }
+
+    // Idempotency check
+    if let Some(reason) = extract_satisfied(p) {
+        return StepOutcome::AlreadySatisfied { reason };
     }
 
     if !source.exists() {
@@ -382,9 +585,7 @@ fn handle_extract_archive(idx: usize, p: &ExtractArchiveParams, ctx: &RunContext
         };
     }
 
-    let ext = source
-        .to_string_lossy()
-        .to_lowercase();
+    let ext = source.to_string_lossy().to_lowercase();
     let is_zip = ext.ends_with(".zip");
     let is_tar = ext.ends_with(".tar.gz")
         || ext.ends_with(".tgz")
@@ -392,32 +593,34 @@ fn handle_extract_archive(idx: usize, p: &ExtractArchiveParams, ctx: &RunContext
         || ext.ends_with(".tar.xz")
         || ext.ends_with(".tar");
 
+    let dest_str = dest.to_string_lossy().to_string();
+    let source_str = source.to_string_lossy().to_string();
+
     if is_zip {
-        let mut cmd = std::process::Command::new("unzip");
-        cmd.arg("-q").arg(&source).arg("-d").arg(&dest);
-        match cmd.status() {
-            Ok(s) if s.success() => StepOutcome::Ok {
+        let args = ["-q", &source_str, "-d", &dest_str];
+        match ctx.proc.run("unzip", &args, &ctx.working_dir, &HashMap::new()) {
+            Ok(o) if o.success => StepOutcome::Ok {
                 message: Some(format!("extracted to {}", dest.display())),
             },
-            Ok(s) => StepOutcome::Err {
-                message: format!("step {idx} (extract_archive): unzip exited with {}", s.code().unwrap_or(-1)),
+            Ok(o) => StepOutcome::Err {
+                message: format!("step {idx} (extract_archive): unzip exited with {}", o.exit_code.unwrap_or(-1)),
             },
             Err(e) => StepOutcome::Err {
                 message: format!("step {idx} (extract_archive): failed to spawn unzip: {e}"),
             },
         }
     } else if is_tar {
-        let mut cmd = std::process::Command::new("tar");
-        cmd.arg("-xf").arg(&source).arg("-C").arg(&dest);
+        let strip = format!("--strip-components={}", p.strip_components);
+        let mut args: Vec<&str> = vec!["-xf", &source_str, "-C", &dest_str];
         if p.strip_components > 0 {
-            cmd.arg(format!("--strip-components={}", p.strip_components));
+            args.push(&strip);
         }
-        match cmd.status() {
-            Ok(s) if s.success() => StepOutcome::Ok {
+        match ctx.proc.run("tar", &args, &ctx.working_dir, &HashMap::new()) {
+            Ok(o) if o.success => StepOutcome::Ok {
                 message: Some(format!("extracted to {}", dest.display())),
             },
-            Ok(s) => StepOutcome::Err {
-                message: format!("step {idx} (extract_archive): tar exited with {}", s.code().unwrap_or(-1)),
+            Ok(o) => StepOutcome::Err {
+                message: format!("step {idx} (extract_archive): tar exited with {}", o.exit_code.unwrap_or(-1)),
             },
             Err(e) => StepOutcome::Err {
                 message: format!("step {idx} (extract_archive): failed to spawn tar: {e}"),
@@ -450,8 +653,10 @@ fn expand_tilde(path: &str) -> PathBuf {
 mod tests {
     use super::*;
     use crate::automation::task::{
-        DownloadFileParams, ExtractArchiveParams, RunCommandParams, Step, StepKind, Task,
+        BrewInstallParams, CloneRepoParams, DownloadFileParams, ExtractArchiveParams,
+        InstallDmgParams, InstallPkgParams, RunCommandParams, Step, StepKind, Task,
     };
+    use tempfile::TempDir;
 
     fn make_task(steps: Vec<Step>) -> Task {
         Task {
@@ -481,48 +686,202 @@ mod tests {
         RunContext::new(RunMode::Apply)
     }
 
-    // ── Dry-run: no side effects ──────────────────────────────────────────────
+    fn fake_apply(failures: Vec<&str>) -> RunContext {
+        RunContext::new(RunMode::Apply)
+            .with_runner(Box::new(FakeProcessRunner::with_failures(failures)))
+    }
+
+    // ── Dry-run: produces Planned outcomes, no I/O ────────────────────────────
 
     #[test]
-    fn dry_run_run_command_is_skipped() {
+    fn dry_run_run_command_is_planned() {
         let task = make_task(vec![run_command_step("false", vec![])]);
         let report = run_task(&task, &dry_ctx(), &Default::default()).unwrap();
-        assert!(report.success(), "dry-run should not count skipped as failure");
-        assert_eq!(report.skipped_count(), 1);
+        assert!(report.success(), "dry-run planned steps are not failures");
+        assert_eq!(report.planned_count(), 1);
         assert_eq!(report.ok_count(), 0);
         assert_eq!(report.error_count(), 0);
+        assert!(matches!(
+            &report.steps[0].outcome,
+            StepOutcome::Planned { action } if action.description.contains("false")
+        ));
     }
 
     #[test]
-    fn dry_run_download_file_is_skipped() {
-        let step = Step {
+    fn dry_run_produces_planned_action_description() {
+        let task = make_task(vec![run_command_step("echo", vec!["hello", "world"])]);
+        let report = run_task(&task, &dry_ctx(), &Default::default()).unwrap();
+        let actions = report.planned_actions();
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].description.contains("echo"));
+        assert!(actions[0].description.contains("hello"));
+    }
+
+    #[test]
+    fn dry_run_download_file_is_planned() {
+        let task = make_task(vec![Step {
             label: None,
             kind: StepKind::DownloadFile(DownloadFileParams {
                 url: "https://example.com/file".into(),
-                destination: "/tmp/ppduster_test_dl".into(),
+                destination: "/tmp/ppduster_test_dl_planned".into(),
                 overwrite: false,
             }),
-        };
-        let task = make_task(vec![step]);
+        }]);
         let report = run_task(&task, &dry_ctx(), &Default::default()).unwrap();
-        assert_eq!(report.skipped_count(), 1);
+        assert_eq!(report.planned_count(), 1);
         // Ensure file was NOT created
-        assert!(!std::path::Path::new("/tmp/ppduster_test_dl").exists());
+        assert!(!std::path::Path::new("/tmp/ppduster_test_dl_planned").exists());
     }
 
     #[test]
-    fn dry_run_extract_archive_is_skipped() {
+    fn dry_run_extract_archive_is_planned() {
         let step = Step {
             label: None,
             kind: StepKind::ExtractArchive(ExtractArchiveParams {
                 source: "/tmp/nonexistent.tar.gz".into(),
-                destination: "/tmp/ppduster_test_extract".into(),
+                destination: "/tmp/ppduster_test_extract_planned".into(),
                 strip_components: 0,
             }),
         };
         let task = make_task(vec![step]);
         let report = run_task(&task, &dry_ctx(), &Default::default()).unwrap();
-        assert_eq!(report.skipped_count(), 1);
+        assert_eq!(report.planned_count(), 1);
+    }
+
+    // ── Dry-run: already_satisfied flag in PlannedAction ─────────────────────
+
+    #[test]
+    fn dry_run_download_flags_already_satisfied_when_file_exists() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("existing.tar.gz");
+        std::fs::write(&dest, b"data").unwrap();
+
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::DownloadFile(DownloadFileParams {
+                url: "https://example.com/file".into(),
+                destination: dest.to_string_lossy().into_owned(),
+                overwrite: false,
+            }),
+        }]);
+        let report = run_task(&task, &dry_ctx(), &Default::default()).unwrap();
+        if let StepOutcome::Planned { action } = &report.steps[0].outcome {
+            assert!(action.already_satisfied, "should flag file already exists");
+        } else {
+            panic!("expected Planned outcome");
+        }
+    }
+
+    #[test]
+    fn dry_run_extract_flags_already_satisfied_when_dest_populated() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("out");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::write(dest.join("file.txt"), b"content").unwrap();
+
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::ExtractArchive(ExtractArchiveParams {
+                source: "/tmp/archive.tar.gz".into(),
+                destination: dest.to_string_lossy().into_owned(),
+                strip_components: 0,
+            }),
+        }]);
+        let report = run_task(&task, &dry_ctx(), &Default::default()).unwrap();
+        if let StepOutcome::Planned { action } = &report.steps[0].outcome {
+            assert!(action.already_satisfied);
+        } else {
+            panic!("expected Planned outcome");
+        }
+    }
+
+    // ── Idempotency (apply mode) ──────────────────────────────────────────────
+
+    #[test]
+    fn download_file_apply_already_satisfied() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("existing.tar.gz");
+        std::fs::write(&dest, b"data").unwrap();
+
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::DownloadFile(DownloadFileParams {
+                url: "https://example.com/should-not-fetch".into(),
+                destination: dest.to_string_lossy().into_owned(),
+                overwrite: false,
+            }),
+        }]);
+        // Use fake runner that would fail any curl call — if curl is invoked the test fails
+        let ctx = fake_apply(vec!["curl"]);
+        let report = run_task(&task, &ctx, &Default::default()).unwrap();
+        assert!(report.success());
+        assert_eq!(report.already_satisfied_count(), 1);
+    }
+
+    #[test]
+    fn extract_archive_apply_already_satisfied() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("out");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::write(dest.join("marker"), b"x").unwrap();
+
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::ExtractArchive(ExtractArchiveParams {
+                source: "/tmp/archive.tar.gz".into(),
+                destination: dest.to_string_lossy().into_owned(),
+                strip_components: 0,
+            }),
+        }]);
+        let ctx = fake_apply(vec!["tar"]); // tar would fail if called
+        let report = run_task(&task, &ctx, &Default::default()).unwrap();
+        assert!(report.success());
+        assert_eq!(report.already_satisfied_count(), 1);
+    }
+
+    // ── ProcessRunner injection (FakeProcessRunner) ───────────────────────────
+
+    #[test]
+    fn fake_runner_success_for_run_command() {
+        let fake = FakeProcessRunner::new();
+        let ctx = RunContext::new(RunMode::Apply).with_runner(Box::new(fake));
+        let task = make_task(vec![run_command_step("my-tool", vec!["--flag"])]);
+        let report = run_task(&task, &ctx, &Default::default()).unwrap();
+        assert!(report.success());
+        assert_eq!(report.ok_count(), 1);
+    }
+
+    #[test]
+    fn fake_runner_records_calls() {
+        use std::sync::Arc;
+        // Use Arc<FakeProcessRunner> to read calls after run
+        let fake = Arc::new(FakeProcessRunner::new());
+        struct ArcRunner(Arc<FakeProcessRunner>);
+        impl ProcessRunner for ArcRunner {
+            fn run(&self, p: &str, a: &[&str], c: &std::path::Path, e: &HashMap<String, String>) -> Result<ProcessOutcome, std::io::Error> {
+                self.0.run(p, a, c, e)
+            }
+        }
+        let fake_clone = Arc::clone(&fake);
+        let ctx = RunContext::new(RunMode::Apply).with_runner(Box::new(ArcRunner(fake_clone)));
+        let task = make_task(vec![
+            run_command_step("echo", vec!["a"]),
+            run_command_step("echo", vec!["b"]),
+        ]);
+        run_task(&task, &ctx, &Default::default()).unwrap();
+        let calls = fake.recorded_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "echo");
+        assert_eq!(calls[1].0, "echo");
+    }
+
+    #[test]
+    fn fake_runner_failure_for_run_command() {
+        let ctx = fake_apply(vec!["my-failing-tool"]);
+        let task = make_task(vec![run_command_step("my-failing-tool", vec![])]);
+        let report = run_task(&task, &ctx, &Default::default()).unwrap();
+        assert!(!report.success());
+        assert_eq!(report.error_count(), 1);
     }
 
     // ── Report accumulation ───────────────────────────────────────────────────
@@ -536,14 +895,11 @@ mod tests {
         ]);
         let report = run_task(&task, &dry_ctx(), &Default::default()).unwrap();
         assert_eq!(report.steps.len(), 3);
-        assert_eq!(report.skipped_count(), 3);
+        assert_eq!(report.planned_count(), 3);
     }
 
     #[test]
     fn report_stops_at_first_error_by_default() {
-        // Step 0 succeeds; step 1 will be a stub (brew_install = error);
-        // step 2 should not be reached.
-        use crate::automation::task::BrewInstallParams;
         let task = make_task(vec![
             run_command_step("echo", vec!["ok"]),
             Step {
@@ -556,7 +912,7 @@ mod tests {
             run_command_step("echo", vec!["should not run"]),
         ]);
         let opts = RunOptions { continue_on_error: false };
-        let report = run_task(&task, &apply_ctx(), &opts).unwrap();
+        let report = run_task(&task, &fake_apply(vec![]), &opts).unwrap();
         // Steps 0 (ok) and 1 (err); step 2 not reached
         assert_eq!(report.steps.len(), 2);
         assert_eq!(report.error_count(), 1);
@@ -565,21 +921,14 @@ mod tests {
 
     #[test]
     fn continue_on_error_runs_all_steps() {
-        use crate::automation::task::BrewInstallParams;
         let task = make_task(vec![
             Step {
                 label: None,
-                kind: StepKind::BrewInstall(BrewInstallParams {
-                    packages: vec!["git".into()],
-                    cask: false,
-                }),
+                kind: StepKind::BrewInstall(BrewInstallParams { packages: vec!["git".into()], cask: false }),
             },
             Step {
                 label: None,
-                kind: StepKind::BrewInstall(BrewInstallParams {
-                    packages: vec!["curl".into()],
-                    cask: false,
-                }),
+                kind: StepKind::BrewInstall(BrewInstallParams { packages: vec!["curl".into()], cask: false }),
             },
         ]);
         let opts = RunOptions { continue_on_error: true };
@@ -592,13 +941,9 @@ mod tests {
 
     #[test]
     fn brew_install_is_stub() {
-        use crate::automation::task::BrewInstallParams;
         let task = make_task(vec![Step {
             label: None,
-            kind: StepKind::BrewInstall(BrewInstallParams {
-                packages: vec!["git".into()],
-                cask: false,
-            }),
+            kind: StepKind::BrewInstall(BrewInstallParams { packages: vec!["git".into()], cask: false }),
         }]);
         let report = run_task(&task, &apply_ctx(), &Default::default()).unwrap();
         assert!(report.steps[0].outcome.is_err());
@@ -609,7 +954,6 @@ mod tests {
 
     #[test]
     fn clone_repo_is_stub() {
-        use crate::automation::task::CloneRepoParams;
         let task = make_task(vec![Step {
             label: None,
             kind: StepKind::CloneRepo(CloneRepoParams {
@@ -625,7 +969,6 @@ mod tests {
 
     #[test]
     fn install_dmg_is_stub() {
-        use crate::automation::task::InstallDmgParams;
         let task = make_task(vec![Step {
             label: None,
             kind: StepKind::InstallDmg(InstallDmgParams {
@@ -640,7 +983,6 @@ mod tests {
 
     #[test]
     fn install_pkg_is_stub() {
-        use crate::automation::task::InstallPkgParams;
         let task = make_task(vec![Step {
             label: None,
             kind: StepKind::InstallPkg(InstallPkgParams {
@@ -653,23 +995,40 @@ mod tests {
         assert!(matches!(&report.steps[0].outcome, StepOutcome::Err { message } if message.contains("not yet implemented")));
     }
 
-    // ── Dispatch: run_command apply ───────────────────────────────────────────
+    // ── Dispatch: run_command apply via fake runner ───────────────────────────
 
     #[test]
-    fn run_command_apply_success() {
+    fn run_command_apply_success_via_fake() {
+        let ctx = fake_apply(vec![]);
         let task = make_task(vec![run_command_step("echo", vec!["hello"])]);
-        let report = run_task(&task, &apply_ctx(), &Default::default()).unwrap();
+        let report = run_task(&task, &ctx, &Default::default()).unwrap();
         assert_eq!(report.ok_count(), 1);
         assert!(report.success());
     }
 
     #[test]
-    fn run_command_apply_failure() {
-        // `false` always exits with code 1
+    fn run_command_apply_failure_via_fake() {
+        let ctx = fake_apply(vec!["false"]);
+        let task = make_task(vec![run_command_step("false", vec![])]);
+        let report = run_task(&task, &ctx, &Default::default()).unwrap();
+        assert!(report.steps[0].outcome.is_err());
+        assert!(!report.success());
+    }
+
+    // ── Apply: run_command via real process (integration) ────────────────────
+
+    #[test]
+    fn run_command_real_echo_succeeds() {
+        let task = make_task(vec![run_command_step("echo", vec!["hello"])]);
+        let report = run_task(&task, &apply_ctx(), &Default::default()).unwrap();
+        assert_eq!(report.ok_count(), 1);
+    }
+
+    #[test]
+    fn run_command_real_false_fails() {
         let task = make_task(vec![run_command_step("false", vec![])]);
         let report = run_task(&task, &apply_ctx(), &Default::default()).unwrap();
         assert!(report.steps[0].outcome.is_err());
-        assert!(!report.success());
     }
 
     // ── Empty task ────────────────────────────────────────────────────────────
@@ -722,7 +1081,6 @@ mod tests {
         let report = run_task(&task, &apply_ctx(), &Default::default()).unwrap();
         assert!(report.steps[0].outcome.is_err());
         if let StepOutcome::Err { message } = &report.steps[0].outcome {
-            // Either "not found" or "unrecognised format"
             assert!(
                 message.contains("not found") || message.contains("unrecognised"),
                 "got: {message}"
