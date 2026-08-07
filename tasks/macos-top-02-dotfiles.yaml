@@ -7,6 +7,7 @@ task:
   steps:
     - id: clone-dotfiles
       name: Clone dotfiles repository
+      auth: git-credential
       type: git-clone
       repo: https://github.com/example/dotfiles.git
       dest: $HOME/.local/share/dotfiles

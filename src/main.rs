@@ -251,14 +251,7 @@ fn run() -> Result<()> {
                             allow_elevation,
                         },
                     )?;
-                    if matches!(output, OutputFormat::Json) {
-                        println!("{}", serde_json::to_string_pretty(&report)?);
-                    } else {
-                        println!("setup task: {}", report.task_id);
-                        for plan in report.plans {
-                            println!("- {}", plan.summary);
-                        }
-                    }
+                    report::print_setup(&report, output)?;
                 }
             }
         }

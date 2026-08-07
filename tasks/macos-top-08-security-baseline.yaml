@@ -17,6 +17,7 @@ task:
       args: ["--getglobalstate"]
     - id: remote-login-status
       name: Inspect remote login status
+      auth: sudo
       type: run-command
       program: sudo
       args: ["systemsetup", "-getremotelogin"]

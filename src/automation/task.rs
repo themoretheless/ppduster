@@ -81,6 +81,8 @@ pub struct Step {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
+    pub auth: AuthPolicy,
+    #[serde(default)]
     pub check: Option<Check>,
     #[serde(default)]
     pub dangerous: bool,
@@ -88,6 +90,20 @@ pub struct Step {
     pub allow_elevation: ElevationPolicy,
     #[serde(flatten)]
     pub action: Action,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthPolicy {
+    None,
+    GitCredential,
+    Sudo,
+}
+
+impl Default for AuthPolicy {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

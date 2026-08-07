@@ -197,3 +197,51 @@ fn dev_layout_detection_requires_target_debug_shape() {
         Some("debug")
     );
 }
+
+#[test]
+fn task_pack_parses_auth_prerequisites() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("auth.yaml"),
+        r#"
+task:
+  id: auth-demo
+  name: Auth demo
+  platform: any
+  trust: bundled-only
+  steps:
+    - id: clone
+      auth: git-credential
+      type: git-clone
+      repo: https://github.com/example/repo.git
+      dest: $HOME/Library/Caches/repo
+    - id: inspect
+      auth: sudo
+      allow_elevation: allow
+      type: run-command
+      program: sudo
+      args: ["true"]
+"#,
+    )
+    .unwrap();
+
+    let pack = TaskPack::load_many(
+        &[TaskSource {
+            path: dir.path().to_path_buf(),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap();
+    let report = run_task(
+        pack.get("auth-demo").unwrap(),
+        &RunOptions {
+            allow_elevation: true,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(report.plans.len(), 2);
+    assert_eq!(report.plans[0].prerequisites.len(), 1);
+    assert_eq!(report.plans[1].prerequisites.len(), 1);
+}
