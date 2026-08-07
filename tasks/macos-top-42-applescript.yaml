@@ -1,0 +1,17 @@
+task:
+  id: macos-top-42-applescript
+  name: macOS AppleScript automation
+  description: Plan UI automation scripts for apps without stable CLIs.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-osascript
+      name: Verify osascript availability
+      type: run-command
+      program: osascript
+      args: ["-e", "return \"ok\""]
+    - id: plan-ui-automation
+      name: Plan AppleScript runner
+      type: run-command
+      program: osascript
+      args: ["$HOME/.config/macos/ui-automation.scpt"]

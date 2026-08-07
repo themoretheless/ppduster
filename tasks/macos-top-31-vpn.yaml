@@ -1,0 +1,17 @@
+task:
+  id: macos-top-31-vpn
+  name: macOS VPN baseline
+  description: Plan VPN profile installation and verification.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-network-services
+      name: Inspect network services
+      type: run-command
+      program: networksetup
+      args: ["-listallnetworkservices"]
+    - id: plan-vpn-profile
+      name: Plan VPN configuration profile install
+      type: run-command
+      program: profiles
+      args: ["install", "-path", "$HOME/.config/macos/vpn.mobileconfig"]

@@ -1,0 +1,19 @@
+task:
+  id: macos-top-14-trackpad
+  name: macOS trackpad baseline
+  description: Plan tap-to-click and tracking speed preferences.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-trackpad
+      name: Inspect tap-to-click
+      type: run-command
+      program: defaults
+      args: ["read", "com.apple.AppleMultitouchTrackpad", "Clicking"]
+      dangerous: true
+      shell: allow
+    - id: plan-trackpad
+      name: Plan tap-to-click baseline
+      type: run-command
+      program: defaults
+      args: ["write", "com.apple.AppleMultitouchTrackpad", "Clicking", "-bool", "true"]

@@ -1,0 +1,21 @@
+task:
+  id: macos-top-46-window-management
+  name: macOS window management
+  description: Plan tiling or shortcut-based window management setup.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-rectangle
+      name: Install Rectangle
+      type: brew-install
+      package: rectangle
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "rectangle"]
+    - id: plan-window-shortcuts
+      name: Plan window management shortcuts
+      type: run-command
+      program: defaults
+      args: ["read", "com.knollsoft.Rectangle"]
+      dangerous: true
+      shell: allow

@@ -1,0 +1,19 @@
+task:
+  id: macos-top-36-audio
+  name: macOS audio routing
+  description: Plan default input and output audio device setup.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-audio-devices
+      name: Inspect audio devices
+      type: run-command
+      program: system_profiler
+      args: ["SPAudioDataType"]
+    - id: plan-audio-profile
+      name: Plan audio routing profile script
+      type: run-command
+      program: bash
+      args: ["-lc", "$HOME/.config/macos/audio-profile.sh"]
+      dangerous: true
+      shell: allow

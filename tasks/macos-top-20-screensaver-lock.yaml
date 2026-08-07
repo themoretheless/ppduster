@@ -1,0 +1,19 @@
+task:
+  id: macos-top-20-screensaver-lock
+  name: macOS screensaver and lock
+  description: Plan idle lock and screensaver timing preferences.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-screensaver
+      name: Inspect screensaver timeout
+      type: run-command
+      program: defaults
+      args: ["-currentHost", "read", "com.apple.screensaver", "idleTime"]
+      dangerous: true
+      shell: allow
+    - id: plan-require-password
+      name: Plan immediate password requirement
+      type: run-command
+      program: defaults
+      args: ["write", "com.apple.screensaver", "askForPassword", "-int", "1"]

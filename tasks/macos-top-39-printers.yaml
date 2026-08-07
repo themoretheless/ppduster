@@ -1,0 +1,17 @@
+task:
+  id: macos-top-39-printers
+  name: macOS printers and scanners
+  description: Plan printer queue bootstrap and default printer setup.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-printers
+      name: Inspect printer queues
+      type: run-command
+      program: lpstat
+      args: ["-p"]
+    - id: plan-default-printer
+      name: Plan default printer assignment
+      type: run-command
+      program: lpoptions
+      args: ["-d", "Office-Printer"]

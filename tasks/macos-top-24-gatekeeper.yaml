@@ -1,0 +1,18 @@
+task:
+  id: macos-top-24-gatekeeper
+  name: macOS Gatekeeper baseline
+  description: Plan Gatekeeper and notarization policy inspection.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-gatekeeper
+      name: Inspect Gatekeeper status
+      type: run-command
+      program: spctl
+      args: ["--status"]
+    - id: plan-gatekeeper-assess
+      name: Plan Gatekeeper enforcement
+      type: run-command
+      program: sudo
+      args: ["spctl", "--master-enable"]
+      allow_elevation: allow

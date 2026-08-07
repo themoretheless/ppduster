@@ -1,0 +1,18 @@
+task:
+  id: macos-top-37-default-apps
+  name: macOS default apps
+  description: Plan default browser, terminal, and file association mappings.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-duti
+      name: Install duti
+      type: brew-install
+      package: duti
+      check:
+        command_succeeds: ["brew", "list", "duti"]
+    - id: plan-default-browser
+      name: Plan default browser mapping
+      type: run-command
+      program: duti
+      args: ["-s", "com.google.Chrome", "http", "all"]

@@ -1,0 +1,19 @@
+task:
+  id: macos-top-21-privacy-tcc
+  name: macOS privacy and TCC
+  description: Plan PPPC and TCC-oriented privacy baseline checks.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-tcc-db
+      name: Inspect TCC database presence
+      type: run-command
+      program: bash
+      args: ["-lc", "test -f \"$HOME/Library/Application Support/com.apple.TCC/TCC.db\""]
+      dangerous: true
+      shell: allow
+    - id: plan-pppc-profile
+      name: Plan PPPC profile install
+      type: run-command
+      program: profiles
+      args: ["show", "-type", "configuration"]

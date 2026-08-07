@@ -1,0 +1,18 @@
+task:
+  id: macos-top-11-network-identity
+  name: macOS network identity
+  description: Plan computer naming and primary network identity setup.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-scutil-name
+      name: Inspect current host names
+      type: run-command
+      program: scutil
+      args: ["--get", "ComputerName"]
+    - id: plan-computername
+      name: Plan computer name apply
+      type: run-command
+      program: sudo
+      args: ["scutil", "--set", "ComputerName", "Managed-Mac"]
+      allow_elevation: allow

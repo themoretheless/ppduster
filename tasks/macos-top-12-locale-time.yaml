@@ -1,0 +1,18 @@
+task:
+  id: macos-top-12-locale-time
+  name: macOS locale and time
+  description: Plan locale, timezone, and 24-hour clock preferences.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-timezone
+      name: Inspect timezone
+      type: run-command
+      program: systemsetup
+      args: ["-gettimezone"]
+      allow_elevation: allow
+    - id: plan-clock-format
+      name: Plan 24-hour clock preference
+      type: run-command
+      program: defaults
+      args: ["write", "NSGlobalDomain", "AppleICUForce24HourTime", "-bool", "true"]

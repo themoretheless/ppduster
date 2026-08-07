@@ -1,0 +1,17 @@
+task:
+  id: macos-top-30-certificates
+  name: macOS certificates baseline
+  description: Plan certificate trust and keychain imports.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-login-keychain
+      name: Inspect login keychain
+      type: run-command
+      program: security
+      args: ["list-keychains"]
+    - id: plan-cert-import
+      name: Plan certificate import
+      type: run-command
+      program: security
+      args: ["import", "$HOME/.config/macos/certs/org-root.cer", "-k", "$HOME/Library/Keychains/login.keychain-db"]

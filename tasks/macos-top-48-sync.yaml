@@ -1,0 +1,18 @@
+task:
+  id: macos-top-48-sync
+  name: macOS sync services
+  description: Plan cloud sync or Syncthing-based file synchronization.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-syncthing
+      name: Install Syncthing
+      type: brew-install
+      package: syncthing
+      check:
+        command_succeeds: ["brew", "list", "syncthing"]
+    - id: plan-sync-service
+      name: Plan sync service bootstrap
+      type: run-command
+      program: brew
+      args: ["services", "start", "syncthing"]

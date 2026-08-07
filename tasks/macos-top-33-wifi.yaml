@@ -1,0 +1,17 @@
+task:
+  id: macos-top-33-wifi
+  name: macOS Wi-Fi baseline
+  description: Plan preferred wireless network ordering and autojoin behavior.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-preferred-wifi
+      name: Inspect preferred wireless networks
+      type: run-command
+      program: networksetup
+      args: ["-listpreferredwirelessnetworks", "en0"]
+    - id: plan-wifi-priority
+      name: Plan Wi-Fi network priority update
+      type: run-command
+      program: networksetup
+      args: ["-addpreferredwirelessnetworkatindex", "en0", "OfficeWifi", "0", "WPA2E"]

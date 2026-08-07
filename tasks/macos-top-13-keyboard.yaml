@@ -1,0 +1,19 @@
+task:
+  id: macos-top-13-keyboard
+  name: macOS keyboard baseline
+  description: Plan key repeat and input behavior preferences.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-keyrepeat
+      name: Inspect key repeat
+      type: run-command
+      program: defaults
+      args: ["read", "NSGlobalDomain", "KeyRepeat"]
+      dangerous: true
+      shell: allow
+    - id: plan-keyrepeat
+      name: Plan key repeat tuning
+      type: run-command
+      program: defaults
+      args: ["write", "NSGlobalDomain", "KeyRepeat", "-int", "2"]

@@ -1,0 +1,19 @@
+task:
+  id: macos-top-49-observability
+  name: macOS observability baseline
+  description: Plan system health, log, and audit collection helpers.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-unified-log
+      name: Inspect unified log access
+      type: run-command
+      program: log
+      args: ["show", "--last", "1m", "--style", "compact"]
+    - id: plan-health-audit
+      name: Plan system health audit script
+      type: run-command
+      program: bash
+      args: ["-lc", "$HOME/.config/macos/health-audit.sh"]
+      dangerous: true
+      shell: allow

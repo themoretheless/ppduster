@@ -1,0 +1,18 @@
+task:
+  id: macos-top-23-firewall
+  name: macOS firewall management
+  description: Plan firewall and stealth mode enforcement.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-firewall
+      name: Inspect firewall state
+      type: run-command
+      program: /usr/libexec/ApplicationFirewall/socketfilterfw
+      args: ["--getglobalstate"]
+    - id: plan-firewall-enable
+      name: Plan firewall enablement
+      type: run-command
+      program: sudo
+      args: ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--setglobalstate", "on"]
+      allow_elevation: allow

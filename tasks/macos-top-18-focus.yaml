@@ -1,0 +1,19 @@
+task:
+  id: macos-top-18-focus
+  name: macOS focus mode baseline
+  description: Plan Focus and Do Not Disturb automation preferences.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-focus
+      name: Inspect focus status
+      type: run-command
+      program: defaults
+      args: ["read", "com.apple.ncprefs", "dnd_prefs"]
+      dangerous: true
+      shell: allow
+    - id: plan-focus-shortcut
+      name: Plan focus automation script
+      type: run-command
+      program: shortcuts
+      args: ["list"]

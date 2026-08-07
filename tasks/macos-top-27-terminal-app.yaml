@@ -1,0 +1,19 @@
+task:
+  id: macos-top-27-terminal-app
+  name: macOS terminal app profiles
+  description: Plan Terminal.app or iTerm profile bootstrap.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-terminal-prefs
+      name: Inspect Terminal preferences
+      type: run-command
+      program: defaults
+      args: ["read", "com.apple.Terminal"]
+      dangerous: true
+      shell: allow
+    - id: plan-terminal-theme
+      name: Plan terminal theme import
+      type: run-command
+      program: open
+      args: ["$HOME/.config/macos/terminal-profile.terminal"]

@@ -1,0 +1,18 @@
+task:
+  id: macos-top-16-spotlight
+  name: macOS Spotlight baseline
+  description: Plan Spotlight indexing preferences and category scope.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-spotlight
+      name: Inspect Spotlight status
+      type: run-command
+      program: mdutil
+      args: ["-sa"]
+    - id: plan-spotlight-reindex
+      name: Plan Spotlight reindex
+      type: run-command
+      program: sudo
+      args: ["mdutil", "-E", "/"]
+      allow_elevation: allow
