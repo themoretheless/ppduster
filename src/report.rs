@@ -1,3 +1,4 @@
+use crate::automation::{RunReport, StepStatus};
 use crate::clean::CleanResult;
 use crate::rules::{host_platform_name, RulePack};
 use crate::scan::ScanReport;
@@ -281,4 +282,66 @@ pub fn print_doctor(pack: &RulePack) -> Result<()> {
     println!("  safety:       dry-run default, trash delete, never-touch guards, age filters");
     println!("{}", "ok".green().bold());
     Ok(())
+}
+
+pub fn print_setup(report: &RunReport, output: OutputFormat) -> Result<()> {
+    match output {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(report)?);
+        }
+        OutputFormat::Table => {
+            println!("{} {}", "setup task:".bold(), report.task_id);
+            #[derive(Tabled)]
+            struct Row {
+                step: String,
+                status: String,
+                summary: String,
+            }
+
+            let rows: Vec<Row> = report
+                .steps
+                .iter()
+                .map(|step| Row {
+                    step: step.step_name.clone(),
+                    status: render_step_status(&step.status),
+                    summary: step.summary.clone(),
+                })
+                .collect();
+
+            let mut table = Table::new(rows);
+            table.with(Style::rounded());
+            table.with(Modify::new(Columns::single(2)).with(Width::wrap(72).keep_words(true)));
+            println!("{table}");
+
+            println!("\n{}", "Logs:".bold());
+            for step in &report.steps {
+                println!("  {} [{}]", step.step_name, render_step_status(&step.status));
+                for prerequisite in &step.prerequisites {
+                    println!("    prerequisite: {prerequisite}");
+                }
+                for log in &step.logs {
+                    println!("    - {}", log.message);
+                }
+            }
+            if !report.errors.is_empty() {
+                println!("\n{}", "Errors:".red().bold());
+                for error in &report.errors {
+                    println!("  - {error}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_step_status(status: &StepStatus) -> String {
+    match status {
+        StepStatus::Pending => "pending".into(),
+        StepStatus::Running => "running".yellow().bold().to_string(),
+        StepStatus::WaitingForAttention => "waiting".red().bold().to_string(),
+        StepStatus::Skipped => "skipped".dimmed().to_string(),
+        StepStatus::Satisfied => "satisfied".green().to_string(),
+        StepStatus::Applied => "applied".green().bold().to_string(),
+        StepStatus::Failed => "failed".red().bold().to_string(),
+    }
 }
