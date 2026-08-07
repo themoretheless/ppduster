@@ -1,0 +1,19 @@
+task:
+  id: macos-top-15-menu-bar
+  name: macOS menu bar baseline
+  description: Plan battery percentage and clock display preferences.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-menubar-clock
+      name: Inspect clock settings
+      type: run-command
+      program: defaults
+      args: ["read", "com.apple.menuextra.clock"]
+      dangerous: true
+      shell: allow
+    - id: plan-battery-percent
+      name: Plan battery percentage display
+      type: run-command
+      program: defaults
+      args: ["write", "com.apple.controlcenter", "BatteryShowPercentage", "-bool", "true"]

@@ -1,0 +1,18 @@
+task:
+  id: macos-top-26-app-store
+  name: macOS App Store baseline
+  description: Plan App Store and mas-based application management.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-mas
+      name: Install mas CLI
+      type: brew-install
+      package: mas
+      check:
+        command_succeeds: ["brew", "list", "mas"]
+    - id: inspect-mas-account
+      name: Inspect App Store sign-in status
+      type: run-command
+      program: mas
+      args: ["account"]

@@ -1,0 +1,17 @@
+task:
+  id: macos-top-45-hazel
+  name: macOS Hazel automation
+  description: Plan Hazel watched-folder rules and file sorting workflows.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-downloads
+      name: Inspect Downloads folder
+      type: run-command
+      program: ls
+      args: ["-la", "$HOME/Downloads"]
+    - id: plan-hazel-rules
+      name: Plan Hazel rules import
+      type: run-command
+      program: open
+      args: ["$HOME/.config/macos/Hazel.hazelrules"]

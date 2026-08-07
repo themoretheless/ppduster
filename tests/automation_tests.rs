@@ -37,7 +37,7 @@ task:
 }
 
 #[test]
-fn bundled_dev_setup_includes_macos_top_ten_tasks() {
+fn bundled_dev_setup_includes_macos_top_fifty_tasks() {
     let pack = TaskPack::load_many(
         &[TaskSource {
             path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
@@ -58,6 +58,46 @@ fn bundled_dev_setup_includes_macos_top_ten_tasks() {
         "macos-top-08-security-baseline",
         "macos-top-09-drift-detection",
         "macos-top-10-rollback-snapshot",
+        "macos-top-11-network-identity",
+        "macos-top-12-locale-time",
+        "macos-top-13-keyboard",
+        "macos-top-14-trackpad",
+        "macos-top-15-menu-bar",
+        "macos-top-16-spotlight",
+        "macos-top-17-notifications",
+        "macos-top-18-focus",
+        "macos-top-19-wallpaper",
+        "macos-top-20-screensaver-lock",
+        "macos-top-21-privacy-tcc",
+        "macos-top-22-filevault",
+        "macos-top-23-firewall",
+        "macos-top-24-gatekeeper",
+        "macos-top-25-softwareupdate",
+        "macos-top-26-app-store",
+        "macos-top-27-terminal-app",
+        "macos-top-28-tmux",
+        "macos-top-29-cli-ux",
+        "macos-top-30-certificates",
+        "macos-top-31-vpn",
+        "macos-top-32-proxy",
+        "macos-top-33-wifi",
+        "macos-top-34-bluetooth",
+        "macos-top-35-airdrop",
+        "macos-top-36-audio",
+        "macos-top-37-default-apps",
+        "macos-top-38-browsers",
+        "macos-top-39-printers",
+        "macos-top-40-fonts",
+        "macos-top-41-shortcuts",
+        "macos-top-42-applescript",
+        "macos-top-43-hammerspoon",
+        "macos-top-44-raycast",
+        "macos-top-45-hazel",
+        "macos-top-46-window-management",
+        "macos-top-47-backup",
+        "macos-top-48-sync",
+        "macos-top-49-observability",
+        "macos-top-50-recovery",
     ];
 
     for id in expected {

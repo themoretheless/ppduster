@@ -1,0 +1,17 @@
+task:
+  id: macos-top-41-shortcuts
+  name: macOS Shortcuts automation
+  description: Plan import and validation of Shortcuts-based automations.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-shortcuts
+      name: Inspect installed shortcuts
+      type: run-command
+      program: shortcuts
+      args: ["list"]
+    - id: plan-shortcut-run
+      name: Plan shortcut smoke test
+      type: run-command
+      program: shortcuts
+      args: ["run", "Daily Mac Bootstrap"]

@@ -1,0 +1,18 @@
+task:
+  id: macos-top-25-softwareupdate
+  name: macOS software update policy
+  description: Plan automatic update baseline and pending update checks.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-software-updates
+      name: Inspect available software updates
+      type: run-command
+      program: softwareupdate
+      args: ["--list"]
+    - id: plan-auto-update
+      name: Plan auto update enablement
+      type: run-command
+      program: sudo
+      args: ["softwareupdate", "--schedule", "on"]
+      allow_elevation: allow

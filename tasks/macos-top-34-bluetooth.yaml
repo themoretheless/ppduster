@@ -1,0 +1,19 @@
+task:
+  id: macos-top-34-bluetooth
+  name: macOS Bluetooth baseline
+  description: Plan Bluetooth visibility and pairing defaults.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-bluetooth
+      name: Inspect Bluetooth settings
+      type: run-command
+      program: defaults
+      args: ["read", "/Library/Preferences/com.apple.Bluetooth"]
+      dangerous: true
+      shell: allow
+    - id: plan-bluetooth-menubar
+      name: Plan Bluetooth menu bar visibility
+      type: run-command
+      program: defaults
+      args: ["write", "com.apple.controlcenter", "Bluetooth", "-int", "18"]

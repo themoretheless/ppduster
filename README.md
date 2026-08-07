@@ -88,7 +88,7 @@ Current safety posture:
 - download steps require `checksum.sha256`
 - archive handlers must use traversal-safe extraction primitives before apply-mode is enabled
 
-Bundled macOS setup starters currently cover the top 10 bootstrap areas:
+Bundled macOS setup starters currently cover the top 50 bootstrap areas, starting with:
 
 1. Brew bootstrap
 2. Dotfiles sync
@@ -100,6 +100,14 @@ Bundled macOS setup starters currently cover the top 10 bootstrap areas:
 8. Security baseline
 9. Drift detection
 10. Rollback snapshot
+
+Additional built-in tasks cover network identity, locale/time, keyboard and trackpad
+preferences, menu bar and Spotlight, notifications and Focus, wallpaper and lock
+screen, privacy/TCC, FileVault, firewall, Gatekeeper, software updates, App Store,
+terminal UX, tmux, CLI tools, certificates, VPN/proxy/Wi-Fi/Bluetooth, AirDrop,
+audio, default apps, browsers, printers, fonts, Shortcuts, AppleScript,
+Hammerspoon, Raycast, Hazel, window management, backup, sync, observability, and
+recovery workflows.
 
 ## Rule format
 

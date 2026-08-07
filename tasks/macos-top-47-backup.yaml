@@ -1,0 +1,19 @@
+task:
+  id: macos-top-47-backup
+  name: macOS backup baseline
+  description: Plan Time Machine or restic backup posture.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-timemachine
+      name: Inspect Time Machine destination
+      type: run-command
+      program: tmutil
+      args: ["destinationinfo"]
+    - id: plan-backup-script
+      name: Plan backup runner
+      type: run-command
+      program: bash
+      args: ["-lc", "$HOME/.config/macos/run-backup.sh"]
+      dangerous: true
+      shell: allow

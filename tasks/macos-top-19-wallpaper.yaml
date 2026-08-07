@@ -1,0 +1,21 @@
+task:
+  id: macos-top-19-wallpaper
+  name: macOS wallpaper baseline
+  description: Plan wallpaper and desktop background setup.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-wallpaper
+      name: Inspect desktop picture configuration
+      type: run-command
+      program: defaults
+      args: ["read", "com.apple.desktop"]
+      dangerous: true
+      shell: allow
+    - id: plan-wallpaper-script
+      name: Plan wallpaper apply script
+      type: run-command
+      program: osascript
+      args: ["-e", "tell application \"System Events\" to tell every desktop to set picture to POSIX file \"/Library/Desktop Pictures/Solid Colors/Solid Gray Pro Dark.png\""]
+      dangerous: true
+      shell: allow

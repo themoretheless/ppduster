@@ -1,0 +1,17 @@
+task:
+  id: macos-top-32-proxy
+  name: macOS proxy baseline
+  description: Plan corporate proxy or PAC configuration.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-web-proxy
+      name: Inspect web proxy settings
+      type: run-command
+      program: networksetup
+      args: ["-getwebproxy", "Wi-Fi"]
+    - id: plan-pac-url
+      name: Plan PAC URL apply
+      type: run-command
+      program: networksetup
+      args: ["-setautoproxyurl", "Wi-Fi", "https://proxy.example.com/proxy.pac"]

@@ -1,0 +1,21 @@
+task:
+  id: macos-top-38-browsers
+  name: macOS browser policy
+  description: Plan browser profiles, extensions, and managed preferences.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-chrome
+      name: Install Google Chrome
+      type: brew-install
+      package: google-chrome
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "google-chrome"]
+    - id: plan-browser-policies
+      name: Plan managed browser policies
+      type: run-command
+      program: defaults
+      args: ["read", "com.google.Chrome"]
+      dangerous: true
+      shell: allow

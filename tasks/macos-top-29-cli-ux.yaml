@@ -1,0 +1,19 @@
+task:
+  id: macos-top-29-cli-ux
+  name: macOS CLI UX tools
+  description: Plan installation of modern shell productivity tools.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-fzf
+      name: Install fzf
+      type: brew-install
+      package: fzf
+      check:
+        command_succeeds: ["brew", "list", "fzf"]
+    - id: install-ripgrep
+      name: Install ripgrep
+      type: brew-install
+      package: ripgrep
+      check:
+        command_succeeds: ["brew", "list", "ripgrep"]

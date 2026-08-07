@@ -1,0 +1,19 @@
+task:
+  id: macos-top-17-notifications
+  name: macOS notifications baseline
+  description: Plan notification center defaults and summary behavior.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-dnd
+      name: Inspect notification center settings
+      type: run-command
+      program: defaults
+      args: ["read", "com.apple.ncprefs"]
+      dangerous: true
+      shell: allow
+    - id: plan-notification-summary
+      name: Plan notification summary preference
+      type: run-command
+      program: defaults
+      args: ["write", "com.apple.ncprefs", "dnd_prefs", "-dict"]

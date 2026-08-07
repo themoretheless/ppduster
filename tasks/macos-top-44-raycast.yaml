@@ -1,0 +1,21 @@
+task:
+  id: macos-top-44-raycast
+  name: macOS Raycast automation
+  description: Plan Raycast installation and script command bootstrap.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-raycast
+      name: Install Raycast
+      type: brew-install
+      package: raycast
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "raycast"]
+    - id: plan-raycast-scripts
+      name: Plan Raycast script commands sync
+      type: run-command
+      program: bash
+      args: ["-lc", "test -d \"$HOME/.config/raycast/scripts\""]
+      dangerous: true
+      shell: allow

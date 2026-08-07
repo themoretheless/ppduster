@@ -1,0 +1,20 @@
+task:
+  id: macos-top-28-tmux
+  name: macOS tmux baseline
+  description: Plan tmux installation and config sync.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-tmux
+      name: Install tmux
+      type: brew-install
+      package: tmux
+      check:
+        command_succeeds: ["brew", "list", "tmux"]
+    - id: verify-tmux-config
+      name: Verify tmux config target
+      type: run-command
+      program: bash
+      args: ["-lc", "test -f \"$HOME/.tmux.conf\""]
+      dangerous: true
+      shell: allow

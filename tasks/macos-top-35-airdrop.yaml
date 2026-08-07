@@ -1,0 +1,19 @@
+task:
+  id: macos-top-35-airdrop
+  name: macOS AirDrop and continuity
+  description: Plan AirDrop and continuity feature defaults.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-airdrop
+      name: Inspect AirDrop discoverability
+      type: run-command
+      program: defaults
+      args: ["read", "com.apple.NetworkBrowser", "BrowseAllInterfaces"]
+      dangerous: true
+      shell: allow
+    - id: plan-airdrop-contacts
+      name: Plan AirDrop contacts-only mode
+      type: run-command
+      program: defaults
+      args: ["write", "com.apple.NetworkBrowser", "BrowseAllInterfaces", "-bool", "false"]

@@ -1,0 +1,19 @@
+task:
+  id: macos-top-43-hammerspoon
+  name: macOS Hammerspoon automation
+  description: Plan Hammerspoon installation and config reload workflow.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-hammerspoon
+      name: Install Hammerspoon
+      type: brew-install
+      package: hammerspoon
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "hammerspoon"]
+    - id: plan-hs-reload
+      name: Plan Hammerspoon config reload
+      type: run-command
+      program: open
+      args: ["-a", "Hammerspoon"]

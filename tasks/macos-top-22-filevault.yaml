@@ -1,0 +1,18 @@
+task:
+  id: macos-top-22-filevault
+  name: macOS FileVault management
+  description: Plan FileVault enablement and recovery posture.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: inspect-filevault
+      name: Inspect FileVault status
+      type: run-command
+      program: fdesetup
+      args: ["status"]
+    - id: plan-filevault-enable
+      name: Plan FileVault enablement
+      type: run-command
+      program: sudo
+      args: ["fdesetup", "enable"]
+      allow_elevation: allow
