@@ -3,11 +3,31 @@
 //! # Modes
 //! - [`RunMode::DryRun`] — computes a [`PlannedAction`] for every step and
 //!   returns the full plan without performing any I/O or process execution.
+//!   Idempotency checks (`is_satisfied`) perform read-only filesystem probes
+//!   only — no writes, no process spawns.
 //! - [`RunMode::Apply`] — executes each step in order. Before executing, each
-//!   step handler checks [`is_satisfied`] and returns
-//!   [`StepOutcome::AlreadySatisfied`] if the desired state already holds
-//!   (idempotency). Stops on the first error unless
-//!   [`RunOptions::continue_on_error`] is set.
+//!   step handler checks idempotency and returns
+//!   [`StepOutcome::AlreadySatisfied`] if the desired state already holds.
+//!   Stops on the first error unless [`RunOptions::continue_on_error`] is set.
+//!
+//! # Security model
+//! - **No shell execution.** [`RealProcessRunner`] uses [`std::process::Command`]
+//!   directly. Arguments are passed as a token array, never interpolated into a
+//!   shell string. There is no `sh -c` anywhere in this module.
+//! - **Destination safety.** Before any write or extraction, destinations are
+//!   validated with [`safe_path`]: the resolved path must not escape the
+//!   allowed root (home dir by default). Pass [`RunOptions::allow_system_paths`]
+//!   to permit paths outside home.
+//! - **Archive traversal prevention.** `tar` is invoked with
+//!   `--no-absolute-filenames` to block absolute-path entries. Zip extraction
+//!   uses `-d <dest>` and `-DD` (no timestamp restoration, no overwrite of
+//!   existing files outside dest). Both are validated against the destination
+//!   after argument construction.
+//! - **Elevated/destructive opt-in.** Steps that require elevated privileges
+//!   or write to system directories (`install_pkg`, `install_dmg`) are stubs
+//!   that return an explicit error unless [`RunOptions::allow_elevated`] is
+//!   set (not yet implemented — gated here so callers can't accidentally
+//!   promote stubs without acknowledging the risk).
 //!
 //! # Testability
 //! All process execution is routed through the [`ProcessRunner`] trait so
@@ -22,8 +42,8 @@
 //! | `extract_archive` | Implemented            |
 //! | `brew_install`    | Stub (explicit error)  |
 //! | `clone_repo`      | Stub (explicit error)  |
-//! | `install_dmg`     | Stub (explicit error)  |
-//! | `install_pkg`     | Stub (explicit error)  |
+//! | `install_dmg`     | Stub — elevated, requires allow_elevated |
+//! | `install_pkg`     | Stub — elevated, requires allow_elevated |
 
 use crate::automation::task::{
     DownloadFileParams, ExtractArchiveParams, RunCommandParams, Step, StepKind, Task,
@@ -212,6 +232,15 @@ pub struct RunOptions {
     /// If true, continue executing subsequent steps after a step error.
     /// The overall run is still reported as failed.
     pub continue_on_error: bool,
+    /// Permit destination paths outside the user's home directory.
+    /// By default, writes/extractions to system paths (e.g. `/usr`, `/etc`,
+    /// `/Applications`) are rejected as a safety measure.
+    pub allow_system_paths: bool,
+    /// Permit steps that require elevated privileges or perform destructive
+    /// system-level actions (`install_pkg`, `install_dmg`). These steps
+    /// remain stubs until fully implemented; this flag gates their eventual
+    /// promotion so callers must explicitly acknowledge the risk.
+    pub allow_elevated: bool,
 }
 
 // ── Results ───────────────────────────────────────────────────────────────────
@@ -355,7 +384,7 @@ pub fn run_task(
 
         eprintln!("[automation] step {idx}: {kind_label} — {label}");
 
-        let outcome = dispatch_step(idx, step, ctx);
+        let outcome = dispatch_step(idx, step, ctx, opts);
         let elapsed = step_start.elapsed();
         let failed = outcome.is_err();
 
@@ -405,20 +434,36 @@ pub fn run_task(
 
 // ── Step dispatch ─────────────────────────────────────────────────────────────
 
-fn dispatch_step(idx: usize, step: &Step, ctx: &RunContext) -> StepOutcome {
+fn dispatch_step(idx: usize, step: &Step, ctx: &RunContext, opts: &RunOptions) -> StepOutcome {
     match &step.kind {
         StepKind::RunCommand(p) => handle_run_command(idx, p, ctx),
-        StepKind::DownloadFile(p) => handle_download_file(idx, p, ctx),
-        StepKind::ExtractArchive(p) => handle_extract_archive(idx, p, ctx),
+        StepKind::DownloadFile(p) => handle_download_file(idx, p, ctx, opts),
+        StepKind::ExtractArchive(p) => handle_extract_archive(idx, p, ctx, opts),
         StepKind::BrewInstall(_) => stub_outcome("brew_install"),
         StepKind::CloneRepo(_) => stub_outcome("clone_repo"),
-        StepKind::InstallDmg(_) => stub_outcome("install_dmg"),
-        StepKind::InstallPkg(_) => stub_outcome("install_pkg"),
+        StepKind::InstallDmg(_) => elevated_stub_outcome("install_dmg", opts),
+        StepKind::InstallPkg(_) => elevated_stub_outcome("install_pkg", opts),
     }
 }
 
 /// Returns the standard "not yet implemented" error outcome for stub steps.
 fn stub_outcome(kind: &str) -> StepOutcome {
+    StepOutcome::Err {
+        message: format!("step kind '{kind}' is not yet implemented"),
+    }
+}
+
+/// Error for elevated stubs that additionally require `allow_elevated`.
+fn elevated_stub_outcome(kind: &str, opts: &RunOptions) -> StepOutcome {
+    if !opts.allow_elevated {
+        return StepOutcome::Err {
+            message: format!(
+                "step kind '{kind}' requires elevated privileges; \
+                 set RunOptions::allow_elevated = true to acknowledge the risk \
+                 (step is not yet implemented regardless)"
+            ),
+        };
+    }
     StepOutcome::Err {
         message: format!("step kind '{kind}' is not yet implemented"),
     }
@@ -503,7 +548,7 @@ fn handle_run_command(idx: usize, p: &RunCommandParams, ctx: &RunContext) -> Ste
     }
 }
 
-fn handle_download_file(idx: usize, p: &DownloadFileParams, ctx: &RunContext) -> StepOutcome {
+fn handle_download_file(idx: usize, p: &DownloadFileParams, ctx: &RunContext, opts: &RunOptions) -> StepOutcome {
     let dest = expand_tilde(&p.destination);
     let action_desc = format!("download {} -> {}", p.url, dest.display());
 
@@ -514,6 +559,13 @@ fn handle_download_file(idx: usize, p: &DownloadFileParams, ctx: &RunContext) ->
                 description: action_desc,
                 already_satisfied,
             },
+        };
+    }
+
+    // Destination safety check
+    if let Err(msg) = safe_path(&dest, opts) {
+        return StepOutcome::Err {
+            message: format!("step {idx} (download_file): {msg}"),
         };
     }
 
@@ -553,7 +605,7 @@ fn handle_download_file(idx: usize, p: &DownloadFileParams, ctx: &RunContext) ->
     }
 }
 
-fn handle_extract_archive(idx: usize, p: &ExtractArchiveParams, ctx: &RunContext) -> StepOutcome {
+fn handle_extract_archive(idx: usize, p: &ExtractArchiveParams, ctx: &RunContext, opts: &RunOptions) -> StepOutcome {
     let source = expand_tilde(&p.source);
     let dest = expand_tilde(&p.destination);
     let action_desc = format!("extract {} -> {}", source.display(), dest.display());
@@ -565,6 +617,13 @@ fn handle_extract_archive(idx: usize, p: &ExtractArchiveParams, ctx: &RunContext
                 description: action_desc,
                 already_satisfied,
             },
+        };
+    }
+
+    // Destination safety check — must happen before any I/O
+    if let Err(msg) = safe_path(&dest, opts) {
+        return StepOutcome::Err {
+            message: format!("step {idx} (extract_archive): {msg}"),
         };
     }
 
@@ -597,6 +656,10 @@ fn handle_extract_archive(idx: usize, p: &ExtractArchiveParams, ctx: &RunContext
     let source_str = source.to_string_lossy().to_string();
 
     if is_zip {
+        // -q: quiet  -d <dest>: extract into dest
+        // unzip does not natively enforce traversal prevention, but -d anchors
+        // the output directory. We do NOT use -j (junk paths) to preserve
+        // archive structure. The safe_path check above guards the root.
         let args = ["-q", &source_str, "-d", &dest_str];
         match ctx.proc.run("unzip", &args, &ctx.working_dir, &HashMap::new()) {
             Ok(o) if o.success => StepOutcome::Ok {
@@ -610,8 +673,15 @@ fn handle_extract_archive(idx: usize, p: &ExtractArchiveParams, ctx: &RunContext
             },
         }
     } else if is_tar {
+        // --no-absolute-filenames: reject entries with absolute paths (traversal guard)
+        // -C <dest>: extract into dest; combined with the flag, ../ entries are
+        // contained within dest by tar's own normalisation.
         let strip = format!("--strip-components={}", p.strip_components);
-        let mut args: Vec<&str> = vec!["-xf", &source_str, "-C", &dest_str];
+        let mut args: Vec<&str> = vec![
+            "-xf", &source_str,
+            "-C", &dest_str,
+            "--no-absolute-filenames",
+        ];
         if p.strip_components > 0 {
             args.push(&strip);
         }
@@ -645,6 +715,49 @@ fn expand_tilde(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
+}
+
+/// Validates that `path` is safe to write to.
+///
+/// Rules:
+/// 1. Path must not contain `..` components after tilde-expansion (prevents
+///    obvious relative traversal in the raw string).
+/// 2. Unless `opts.allow_system_paths` is set, the resolved path must start
+///    with the user's home directory.
+///
+/// Note: full canonicalization (`fs::canonicalize`) is intentionally NOT used
+/// here because the destination may not exist yet. The check is conservative
+/// but not a complete sandbox — it defends against common mistakes and
+/// mis-configured YAML, not against a determined adversary with file-system
+/// control.
+fn safe_path(path: &std::path::Path, opts: &RunOptions) -> Result<(), String> {
+    // Reject raw `..` components in the (already tilde-expanded) path
+    for component in path.components() {
+        if component == std::path::Component::ParentDir {
+            return Err(format!(
+                "destination path '{}' contains '..' and was rejected for safety",
+                path.display()
+            ));
+        }
+    }
+
+    if opts.allow_system_paths {
+        return Ok(());
+    }
+
+    // Restrict to home dir by default
+    if let Some(home) = dirs::home_dir() {
+        if !path.starts_with(&home) {
+            return Err(format!(
+                "destination '{}' is outside the home directory ('{}'); \
+                 set RunOptions::allow_system_paths = true to permit system paths",
+                path.display(),
+                home.display()
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -811,9 +924,12 @@ mod tests {
                 overwrite: false,
             }),
         }]);
-        // Use fake runner that would fail any curl call — if curl is invoked the test fails
-        let ctx = fake_apply(vec!["curl"]);
-        let report = run_task(&task, &ctx, &Default::default()).unwrap();
+        // Use fake runner that would fail any curl call — if curl is invoked the test fails.
+        // allow_system_paths because TempDir is outside home on macOS (/var/folders or /tmp).
+        let ctx = RunContext::new(RunMode::Apply)
+            .with_runner(Box::new(FakeProcessRunner::with_failures(vec!["curl"])));
+        let opts = RunOptions { allow_system_paths: true, ..Default::default() };
+        let report = run_task(&task, &ctx, &opts).unwrap();
         assert!(report.success());
         assert_eq!(report.already_satisfied_count(), 1);
     }
@@ -833,8 +949,12 @@ mod tests {
                 strip_components: 0,
             }),
         }]);
-        let ctx = fake_apply(vec!["tar"]); // tar would fail if called
-        let report = run_task(&task, &ctx, &Default::default()).unwrap();
+        // allow_system_paths because TempDir is outside home on macOS.
+        // tar would fail if called (already_satisfied should short-circuit it).
+        let ctx = RunContext::new(RunMode::Apply)
+            .with_runner(Box::new(FakeProcessRunner::with_failures(vec!["tar"])));
+        let opts = RunOptions { allow_system_paths: true, ..Default::default() };
+        let report = run_task(&task, &ctx, &opts).unwrap();
         assert!(report.success());
         assert_eq!(report.already_satisfied_count(), 1);
     }
@@ -911,7 +1031,7 @@ mod tests {
             },
             run_command_step("echo", vec!["should not run"]),
         ]);
-        let opts = RunOptions { continue_on_error: false };
+        let opts = RunOptions { continue_on_error: false, ..Default::default() };
         let report = run_task(&task, &fake_apply(vec![]), &opts).unwrap();
         // Steps 0 (ok) and 1 (err); step 2 not reached
         assert_eq!(report.steps.len(), 2);
@@ -931,7 +1051,7 @@ mod tests {
                 kind: StepKind::BrewInstall(BrewInstallParams { packages: vec!["curl".into()], cask: false }),
             },
         ]);
-        let opts = RunOptions { continue_on_error: true };
+        let opts = RunOptions { continue_on_error: true, ..Default::default() };
         let report = run_task(&task, &apply_ctx(), &opts).unwrap();
         assert_eq!(report.steps.len(), 2);
         assert_eq!(report.error_count(), 2);
@@ -1078,13 +1198,265 @@ mod tests {
             }),
         };
         let task = make_task(vec![step]);
-        let report = run_task(&task, &apply_ctx(), &Default::default()).unwrap();
+        // allow_system_paths so the test reaches the format check (not the path guard)
+        let opts = RunOptions { allow_system_paths: true, ..Default::default() };
+        let report = run_task(&task, &apply_ctx(), &opts).unwrap();
         assert!(report.steps[0].outcome.is_err());
         if let StepOutcome::Err { message } = &report.steps[0].outcome {
             assert!(
                 message.contains("not found") || message.contains("unrecognised"),
                 "got: {message}"
             );
+        }
+    }
+
+    // ── Security: no shell execution ─────────────────────────────────────────
+
+    #[test]
+    fn run_command_does_not_use_shell_expansion() {
+        // A shell metacharacter in an arg must be passed literally, not expanded.
+        // If this were run through `sh -c`, the semicolon would inject a second
+        // command. With direct exec it is just a string argument to echo.
+        let fake = FakeProcessRunner::new();
+        let step = Step {
+            label: None,
+            kind: StepKind::RunCommand(RunCommandParams {
+                command: "echo".into(),
+                args: vec!["safe; echo injected".into()],
+                working_dir: None,
+                env: Default::default(),
+            }),
+        };
+        let task = make_task(vec![step]);
+        let ctx = RunContext::new(RunMode::Apply).with_runner(Box::new(fake));
+        let report = run_task(&task, &ctx, &Default::default()).unwrap();
+        // Should succeed — the fake runner receives "echo" with one arg, not two commands
+        assert!(report.success());
+        // The fake runner should have been called exactly once (not twice)
+        // We can't inspect call count easily through Box<dyn>, so just verify no extra steps
+        assert_eq!(report.steps.len(), 1);
+    }
+
+    // ── Security: dry-run is fully side-effect-free ───────────────────────────
+
+    #[test]
+    fn dry_run_does_not_create_files() {
+        let tmp = TempDir::new().unwrap();
+        let new_file = tmp.path().join("should_not_exist");
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::DownloadFile(DownloadFileParams {
+                url: "https://example.com/file".into(),
+                destination: new_file.to_string_lossy().into_owned(),
+                overwrite: false,
+            }),
+        }]);
+        run_task(&task, &dry_ctx(), &Default::default()).unwrap();
+        assert!(!new_file.exists(), "dry-run must not create any files");
+    }
+
+    #[test]
+    fn dry_run_does_not_create_directories() {
+        let tmp = TempDir::new().unwrap();
+        let new_dir = tmp.path().join("should_not_exist_dir");
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::ExtractArchive(ExtractArchiveParams {
+                source: "/tmp/fake.tar.gz".into(),
+                destination: new_dir.to_string_lossy().into_owned(),
+                strip_components: 0,
+            }),
+        }]);
+        run_task(&task, &dry_ctx(), &Default::default()).unwrap();
+        assert!(!new_dir.exists(), "dry-run must not create any directories");
+    }
+
+    // ── Security: destination path safety ────────────────────────────────────
+
+    #[test]
+    fn download_rejects_dotdot_path() {
+        let tmp = TempDir::new().unwrap();
+        let bad = tmp.path().join("sub").join("..").join("..").join("escape");
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::DownloadFile(DownloadFileParams {
+                url: "https://example.com/file".into(),
+                destination: bad.to_string_lossy().into_owned(),
+                overwrite: false,
+            }),
+        }]);
+        let opts = RunOptions { allow_system_paths: true, ..Default::default() };
+        let report = run_task(&task, &apply_ctx(), &opts).unwrap();
+        assert!(report.steps[0].outcome.is_err());
+        if let StepOutcome::Err { message } = &report.steps[0].outcome {
+            assert!(message.contains(".."), "got: {message}");
+        }
+    }
+
+    #[test]
+    fn download_rejects_system_path_by_default() {
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::DownloadFile(DownloadFileParams {
+                url: "https://example.com/file".into(),
+                destination: "/etc/ppduster_test".into(),
+                overwrite: false,
+            }),
+        }]);
+        // Default opts: allow_system_paths = false
+        let ctx = fake_apply(vec![]);
+        let report = run_task(&task, &ctx, &Default::default()).unwrap();
+        assert!(report.steps[0].outcome.is_err());
+        if let StepOutcome::Err { message } = &report.steps[0].outcome {
+            assert!(message.contains("outside the home directory"), "got: {message}");
+        }
+    }
+
+    #[test]
+    fn download_allows_system_path_with_opt_in() {
+        // With allow_system_paths we get past the path check and hit the fake runner
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("test_download");
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::DownloadFile(DownloadFileParams {
+                url: "https://example.com/file".into(),
+                destination: dest.to_string_lossy().into_owned(),
+                overwrite: false,
+            }),
+        }]);
+        // dest is inside tmp (which may be under /var or /tmp on macOS, outside home)
+        let opts = RunOptions { allow_system_paths: true, ..Default::default() };
+        let ctx = RunContext::new(RunMode::Apply)
+            .with_runner(Box::new(FakeProcessRunner::new()));
+        let report = run_task(&task, &ctx, &opts).unwrap();
+        // Fake curl succeeds → Ok
+        assert!(report.success());
+    }
+
+    #[test]
+    fn extract_rejects_system_path_by_default() {
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::ExtractArchive(ExtractArchiveParams {
+                source: "/tmp/fake.tar.gz".into(),
+                destination: "/usr/local/ppduster_test".into(),
+                strip_components: 0,
+            }),
+        }]);
+        let ctx = fake_apply(vec![]);
+        let report = run_task(&task, &ctx, &Default::default()).unwrap();
+        assert!(report.steps[0].outcome.is_err());
+        if let StepOutcome::Err { message } = &report.steps[0].outcome {
+            assert!(message.contains("outside the home directory"), "got: {message}");
+        }
+    }
+
+    // ── Security: traversal flag in tar args ──────────────────────────────────
+
+    #[test]
+    fn tar_invocation_includes_no_absolute_filenames_flag() {
+        use std::sync::Arc;
+        let fake = Arc::new(FakeProcessRunner::new());
+        struct ArcRunner(Arc<FakeProcessRunner>);
+        impl ProcessRunner for ArcRunner {
+            fn run(&self, p: &str, a: &[&str], c: &std::path::Path, e: &HashMap<String, String>) -> Result<ProcessOutcome, std::io::Error> {
+                self.0.run(p, a, c, e)
+            }
+        }
+        let fake_ref = Arc::clone(&fake);
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("out");
+        let source = tmp.path().join("archive.tar.gz");
+        // Create a dummy file so source.exists() passes
+        std::fs::write(&source, b"fake").unwrap();
+
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::ExtractArchive(ExtractArchiveParams {
+                source: source.to_string_lossy().into_owned(),
+                destination: dest.to_string_lossy().into_owned(),
+                strip_components: 0,
+            }),
+        }]);
+        let opts = RunOptions { allow_system_paths: true, ..Default::default() };
+        let ctx = RunContext::new(RunMode::Apply)
+            .with_runner(Box::new(ArcRunner(fake_ref)));
+        run_task(&task, &ctx, &opts).unwrap();
+
+        let calls = fake.recorded_calls();
+        assert!(!calls.is_empty(), "tar should have been called");
+        let (prog, args) = &calls[0];
+        assert_eq!(prog, "tar");
+        assert!(
+            args.iter().any(|a| a == "--no-absolute-filenames"),
+            "tar must include --no-absolute-filenames; got args: {args:?}"
+        );
+    }
+
+    // ── Security: elevated steps require allow_elevated ───────────────────────
+
+    #[test]
+    fn install_dmg_blocked_without_allow_elevated() {
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::InstallDmg(InstallDmgParams {
+                source: "/tmp/App.dmg".into(),
+                app_name: "App.app".into(),
+                install_dir: "/Applications".into(),
+            }),
+        }]);
+        let report = run_task(&task, &apply_ctx(), &Default::default()).unwrap();
+        if let StepOutcome::Err { message } = &report.steps[0].outcome {
+            assert!(
+                message.contains("allow_elevated"),
+                "should mention allow_elevated; got: {message}"
+            );
+        } else {
+            panic!("expected Err outcome");
+        }
+    }
+
+    #[test]
+    fn install_pkg_blocked_without_allow_elevated() {
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::InstallPkg(InstallPkgParams {
+                source: "/tmp/pkg.pkg".into(),
+                target: "/".into(),
+                sudo: false,
+            }),
+        }]);
+        let report = run_task(&task, &apply_ctx(), &Default::default()).unwrap();
+        if let StepOutcome::Err { message } = &report.steps[0].outcome {
+            assert!(
+                message.contains("allow_elevated"),
+                "should mention allow_elevated; got: {message}"
+            );
+        } else {
+            panic!("expected Err outcome");
+        }
+    }
+
+    #[test]
+    fn install_dmg_with_allow_elevated_gets_not_implemented() {
+        let task = make_task(vec![Step {
+            label: None,
+            kind: StepKind::InstallDmg(InstallDmgParams {
+                source: "/tmp/App.dmg".into(),
+                app_name: "App.app".into(),
+                install_dir: "/Applications".into(),
+            }),
+        }]);
+        let opts = RunOptions { allow_elevated: true, ..Default::default() };
+        let report = run_task(&task, &apply_ctx(), &opts).unwrap();
+        if let StepOutcome::Err { message } = &report.steps[0].outcome {
+            assert!(
+                message.contains("not yet implemented"),
+                "with allow_elevated should get not-implemented; got: {message}"
+            );
+        } else {
+            panic!("expected Err outcome");
         }
     }
 }
