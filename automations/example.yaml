@@ -1,65 +1,86 @@
-# Example automation task — ppduster automate
+# Example automation pack — ppduster setup
 #
-# File stem (example) is the task id used in CLI commands:
-#   ppduster automate show example
-#   ppduster automate run example          # dry-run
-#   ppduster automate run example --yes    # live (runner core required)
+# The `pack:` field is the id used in CLI commands:
+#   ppduster setup list
+#   ppduster setup show example
+#   ppduster setup run example          # dry-run
+#   ppduster setup run example --yes    # live (runner core required)
 #
-# YAML shape is canonical from themoretheless-automation-runner-core.
-# Supported step kinds: brew_install, clone_repo, run_command,
-#                       download_file, extract_archive, install_dmg, install_pkg
+# Step kinds use the `type:` discriminant (kebab-case).
+# Supported: git-clone, brew-install, brew-cask, run-command,
+#            download, extract, install-dmg, install-pkg,
+#            symlink, write-file, set-env-hint
 
-name: "Example dev environment bootstrap"
+pack: example
 description: "Demonstrates all supported step kinds. Not meant to be run as-is."
+platform: macos
 
 steps:
-  # Install Homebrew packages
-  - kind: brew_install
-    packages: [git, ripgrep, jq]
+  # Install a Homebrew formula
+  - type: brew-install
+    package: git
+
+  # Install a Homebrew formula with a tap
+  - type: brew-install
+    package: act
+    tap: nektos/tap
 
   # Install a Homebrew cask (GUI app)
-  - kind: brew_install
-    label: "Install VS Code"
-    packages: [visual-studio-code]
-    cask: true
+  - type: brew-cask
+    package: visual-studio-code
 
-  # Clone a repository
-  - kind: clone_repo
-    url: https://github.com/example/my-dotfiles.git
-    destination: ~/src/dotfiles
-    shallow: true
+  # Clone a repository (shallow)
+  - type: git-clone
+    url: https://github.com/example/dotfiles.git
+    dest: ~/.dotfiles
+    depth: 1
 
-  # Run an arbitrary shell command
-  - kind: run_command
-    label: "Bootstrap dotfiles"
-    command: make
-    args: [install]
-    working_dir: ~/src/dotfiles
-    env:
-      DOTFILES_ENV: ci
+  # Run a command (argv list — no shell expansion by default)
+  - type: run-command
+    argv: [bash, ~/.dotfiles/install.sh]
+    ignore_failure: true
 
-  # Download a file
-  - kind: download_file
+  # Download a file (sha256 required for External packs)
+  - type: download
     url: https://example.com/tools/mytool-1.0.tar.gz
-    destination: /tmp/mytool.tar.gz
-    overwrite: true
+    dest: /tmp/mytool.tar.gz
+    sha256: "abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
 
-  # Extract the downloaded archive
-  - kind: extract_archive
-    source: /tmp/mytool.tar.gz
-    destination: /tmp/mytool
+  # Extract an archive
+  - type: extract
+    src: /tmp/mytool.tar.gz
+    dest: /tmp/mytool
     strip_components: 1
 
-  # Install a macOS .dmg (requires --allow-privileged)
-  - kind: install_dmg
-    label: "Install SomeApp"
-    source: /tmp/SomeApp.dmg
-    app_name: SomeApp.app
-    install_dir: /Applications
+  # Create a symlink
+  - type: symlink
+    src: ~/.dotfiles/zshrc
+    dest: ~/.zshrc
+    force: true
 
-  # Install a macOS .pkg (requires --allow-privileged, uses sudo by default)
-  - kind: install_pkg
-    label: "Install CLI tools pkg"
-    source: /tmp/cli-tools.pkg
+  # Write a config file
+  - type: write-file
+    dest: ~/.config/starship.toml
+    content: |
+      [character]
+      success_symbol = "[›](bold green)"
+    create_parents: true
+
+  # Set an environment variable hint (does not modify env; prints guidance)
+  - type: set-env-hint
+    var: EDITOR
+    value: vim
+    note: Override with your preferred editor
+
+  # Install a .dmg (requires --allow-privileged)
+  - type: install-dmg
+    src: /tmp/SomeApp.dmg
+    app_name: SomeApp.app
+    dest_dir: /Applications
+    require_notarized: true
+
+  # Install a .pkg (requires --allow-privileged)
+  - type: install-pkg
+    src: /tmp/cli-tools.pkg
     target: /
-    sudo: true
+    require_notarized: true

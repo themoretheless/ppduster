@@ -53,90 +53,118 @@ ppduster clean -c caches --yes    # to Trash
 ppduster clean -c temp --yes --permanent   # asks you to type DELETE
 ```
 
-## Automation tasks
+## Automation / setup tasks
 
-ppduster supports declarative automation tasks — reproducible machine-setup recipes that can clone repos, install tools, run commands, download files, and more.
+ppduster supports declarative automation packs — reproducible machine-setup recipes that can clone repos, install tools, run commands, download files, and more.
 
 ```bash
-# List available tasks
+# List available packs
+ppduster setup list
+
+# Preview a pack (dry-run — nothing executes)
+ppduster setup show example
+ppduster setup run example
+
+# Execute a pack (runner core required — see note below)
+ppduster setup run example --yes
+
+# Packs with install-dmg / install-pkg steps require an extra flag
+ppduster setup run my-setup --yes --allow-privileged
+
+# Load packs from a custom directory (with explicit trust level)
+ppduster setup --automations-dir ~/my-packs --trust-pack user list
+
+# `automate` is accepted as an alias for backwards compat
 ppduster automate list
-
-# Preview a task (dry-run — nothing executes)
-ppduster automate show example
-ppduster automate run example
-
-# Execute a task (runner core required — see below)
-ppduster automate run example --yes
-
-# Tasks with install_dmg / install_pkg steps need an extra flag
-ppduster automate run my-setup --yes --allow-privileged
-
-# Load tasks from a custom directory
-ppduster automate --automations-dir ~/my-tasks list
 ```
 
-### Task YAML format
+### Pack YAML format
 
-Tasks live in `./automations/*.yaml`. The file stem is the task id.
+Packs live in `./automations/*.yaml`. The `pack:` field is the id used in CLI commands.
 
 ```yaml
-name: "Set up dev environment"
-description: "Clone repos, install tools, run bootstrap"
+pack: dev-setup
+description: "Bootstrap a macOS dev machine"
+platform: macos   # macos | linux | windows | any (default: any)
+
 steps:
-  - kind: brew_install
-    packages: [git, ripgrep]
+  - type: brew-install
+    package: git
 
-  - kind: brew_install
-    label: "Install VS Code"
-    packages: [visual-studio-code]
-    cask: true
+  - type: brew-install
+    package: act
+    tap: nektos/tap        # optional tap to add first
 
-  - kind: clone_repo
-    url: https://github.com/example/repo.git
-    destination: ~/src/repo
-    shallow: true
+  - type: brew-cask
+    package: visual-studio-code
 
-  - kind: run_command
-    label: "Bootstrap"
-    command: make
-    args: [install]
-    working_dir: ~/src/repo
-    env:
-      MY_VAR: value
+  - type: git-clone
+    url: https://github.com/example/dotfiles.git
+    dest: ~/.dotfiles
+    depth: 1               # 0 = full clone
 
-  - kind: download_file
+  - type: run-command
+    argv: [bash, ~/.dotfiles/install.sh]
+    ignore_failure: true   # non-zero exit is not fatal
+    # shell_expand: true   # explicit opt-in; blocked for external packs
+
+  - type: download
     url: https://example.com/tool.tar.gz
-    destination: /tmp/tool.tar.gz
+    dest: /tmp/tool.tar.gz
+    sha256: "abc123..."    # required for external packs
 
-  - kind: extract_archive
-    source: /tmp/tool.tar.gz
-    destination: /tmp/tool
+  - type: extract
+    src: /tmp/tool.tar.gz
+    dest: /tmp/tool
     strip_components: 1
 
-  # Requires --allow-privileged
-  - kind: install_dmg
-    source: /tmp/App.dmg
-    app_name: App.app
-    install_dir: /Applications
+  - type: symlink
+    src: ~/.dotfiles/zshrc
+    dest: ~/.zshrc
+    force: true
+
+  - type: write-file
+    dest: ~/.config/starship.toml
+    content: |
+      [character]
+      success_symbol = "[›](bold green)"
+    create_parents: true
+
+  - type: set-env-hint
+    var: EDITOR
+    value: vim
+    note: Override with your preferred editor
 
   # Requires --allow-privileged
-  - kind: install_pkg
-    source: /tmp/package.pkg
+  - type: install-dmg
+    src: /tmp/App.dmg
+    app_name: App.app
+    dest_dir: /Applications
+    require_notarized: true
+
+  # Requires --allow-privileged
+  - type: install-pkg
+    src: /tmp/package.pkg
     target: /
-    sudo: true
+    require_notarized: true
 ```
 
 ### Automation safety model
 
 | Gate | Behaviour |
 |------|-----------|
-| **Dry-run by default** | `automate run` never executes unless `--yes` is passed |
-| **Privileged step gate** | Tasks with `install_dmg` or `install_pkg` steps require `--allow-privileged` |
-| **Arbitrary execution warning** | `run_command`, `clone_repo`, `brew_install` print a provenance warning when `--yes` is set |
-| **No implicit elevation** | `sudo` is only invoked when the task step explicitly requests it and `--allow-privileged` is passed |
-| **External pack trust** | `--trust-pack` flag reserved for future external task-pack verification |
+| **Dry-run by default** | `setup run` never executes unless `--yes` is passed |
+| **Pack validation** | `pack.validate()` checks security constraints against trust level before any display or execution |
+| **Privileged step gate** | Packs with `install-dmg` or `install-pkg` require `--allow-privileged` |
+| **Arbitrary execution warning** | `run-command`, `git-clone`, `brew-install`, `brew-cask` print a provenance warning when `--yes` is set |
+| **No implicit elevation** | Elevation (installer, codesign) is only invoked when the step requests it and `--allow-privileged` is passed |
+| **External pack restrictions** | `PackTrust::External` blocks `run-command` with `shell_expand`, blocks downloads without sha256 |
+| **Forbidden write paths** | `write-file` and `symlink` destinations are checked against system path blocklist |
+| **Trust assignment** | Trust is set by the loader based on directory provenance — pack files cannot self-promote trust |
+| **`--trust-pack` flag** | Override trust level for a specific invocation (`bundled` \| `user` \| `external`; default: `user`) |
 
-> **Note:** Live execution requires the `automation-runner-core` module to be merged. Until then, `--yes` exits with an informative error and `automate run` (without `--yes`) always works as a dry-run preview.
+> **Note on live execution:** Full execution requires the `automation-runner-core` module to merge. Until then, `setup run --yes` exits with an informative error and `setup run` (without `--yes`) always works as a dry-run preview.
+
 
 ## Rule format
 
