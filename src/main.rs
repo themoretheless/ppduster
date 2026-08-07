@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
+use ppduster::automation::{run_task, PackTrust, RunOptions, TaskPack, TaskSource};
 use ppduster::clean;
 use ppduster::report::{self, OutputFormat};
 use ppduster::rules::RulePack;
@@ -39,6 +40,10 @@ struct Cli {
     /// Output format
     #[arg(long, short = 'o', global = true, value_enum, default_value = "table")]
     output: CliOutput,
+
+    /// Allow loading automation task packs from external directories.
+    #[arg(long, global = true)]
+    trust_external_packs: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -102,6 +107,28 @@ enum Commands {
     },
     /// Environment and safety self-check
     Doctor,
+    /// Safe-by-default setup automation tasks
+    Setup {
+        #[command(subcommand)]
+        action: SetupCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SetupCmd {
+    List,
+    Show { id: String },
+    Run {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        allow_shell: bool,
+        #[arg(long)]
+        allow_elevation: bool,
+        #[arg(long)]
+        tasks_dir: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -192,6 +219,49 @@ fn run() -> Result<()> {
         },
         Commands::Categories { all } => report::print_categories(&pack, all, output)?,
         Commands::Doctor => report::print_doctor(&pack)?,
+        Commands::Setup { action } => {
+            let tasks = load_tasks(&action, cli.trust_external_packs)?;
+            match action {
+                SetupCmd::List => {
+                    for task in &tasks.tasks {
+                        println!("{}\t{}", task.id, task.name);
+                    }
+                }
+                SetupCmd::Show { id } => {
+                    let task = tasks
+                        .get(&id)
+                        .ok_or_else(|| anyhow::anyhow!("unknown task id {}", id))?;
+                    println!("{}", serde_yaml::to_string(task)?);
+                }
+                SetupCmd::Run {
+                    id,
+                    yes,
+                    allow_shell,
+                    allow_elevation,
+                    ..
+                } => {
+                    let task = tasks
+                        .get(&id)
+                        .ok_or_else(|| anyhow::anyhow!("unknown task id {}", id))?;
+                    let report = run_task(
+                        task,
+                        &RunOptions {
+                            apply: yes,
+                            allow_shell,
+                            allow_elevation,
+                        },
+                    )?;
+                    if matches!(output, OutputFormat::Json) {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        println!("setup task: {}", report.task_id);
+                        for plan in report.plans {
+                            println!("- {}", plan.summary);
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -239,4 +309,51 @@ fn flatten_categories(raw: Vec<String>) -> Vec<String> {
         }
     }
     out
+}
+
+fn load_tasks(action: &SetupCmd, trust_external_packs: bool) -> Result<TaskPack> {
+    let mut sources = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let near = parent.join("tasks");
+            if near.is_dir() {
+                sources.push(TaskSource {
+                    path: near,
+                    trust: PackTrust::Bundled,
+                });
+            }
+            if cfg!(debug_assertions)
+                && parent.file_name().and_then(|n| n.to_str()) == Some("debug")
+                && parent
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    == Some("target")
+            {
+                if let Some(root) = parent.parent().and_then(|p| p.parent()) {
+                    let dev = root.join("tasks");
+                    if dev.is_dir() {
+                        sources.push(TaskSource {
+                            path: dev,
+                            trust: PackTrust::Bundled,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if let SetupCmd::Run { tasks_dir, .. } = action {
+        for dir in tasks_dir {
+            sources.push(TaskSource {
+                path: dir.clone(),
+                trust: PackTrust::External,
+            });
+        }
+    }
+    if sources.is_empty() {
+        anyhow::bail!(
+            "no tasks directory found; install bundled tasks near the binary or pass --tasks-dir with --trust-external-packs"
+        );
+    }
+    TaskPack::load_many(&sources, trust_external_packs)
 }

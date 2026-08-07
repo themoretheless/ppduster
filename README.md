@@ -53,6 +53,36 @@ ppduster clean -c caches --yes    # to Trash
 ppduster clean -c temp --yes --permanent   # asks you to type DELETE
 ```
 
+## Setup automation
+
+`ppduster setup` is a separate, safe-by-default task subsystem for constructive automation
+such as cloning a repo, planning a brew install, or verifying command sequences.
+
+```bash
+# List bundled setup tasks
+ppduster setup list
+
+# Show one task
+ppduster setup show dev-brew-bootstrap
+
+# Plan a task (default; no side effects)
+ppduster setup run dev-brew-bootstrap
+
+# External task packs are blocked unless explicitly trusted
+ppduster --trust-external-packs setup run dev-brew-bootstrap --tasks-dir /path/to/tasks
+```
+
+Current safety posture:
+
+- separate from `rules/` and the scan/clean pipeline
+- sealed typed actions only; no arbitrary YAML shell strings
+- dry-run planning only in the current implementation; command-based satisfaction checks are skipped until apply mode exists
+- shell-capable steps require `dangerous: true` and `--allow-shell`
+- elevated steps require `--allow-elevation`
+- external task packs require `--trust-external-packs`
+- download steps require `checksum.sha256`
+- archive handlers must use traversal-safe extraction primitives before apply-mode is enabled
+
 ## Rule format
 
 See files under [`rules/`](rules/):

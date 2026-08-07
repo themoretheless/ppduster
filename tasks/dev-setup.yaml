@@ -1,0 +1,26 @@
+task:
+  id: dev-brew-bootstrap
+  name: Dev brew bootstrap
+  description: Example safe-by-default setup task that only plans actions.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: clone-repo
+      name: Clone repository
+      type: git-clone
+      repo: https://github.com/themoretheless/ppduster.git
+      dest: $HOME/Library/Caches/ppduster-bootstrap
+      check:
+        path_exists: $HOME/Library/Caches/ppduster-bootstrap/.git
+    - id: install-ripgrep
+      name: Install ripgrep
+      type: brew-install
+      package: ripgrep
+      check:
+        command_succeeds: ["brew", "list", "ripgrep"]
+    - id: verify-repo
+      name: Verify repository state
+      type: run-command
+      program: git
+      args: ["status", "--short"]
+      cwd: $HOME/Library/Caches/ppduster-bootstrap
