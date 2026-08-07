@@ -322,13 +322,22 @@ fn load_tasks(action: &SetupCmd, trust_external_packs: bool) -> Result<TaskPack>
                     trust: PackTrust::Bundled,
                 });
             }
-            if let Some(root) = parent.parent().and_then(|p| p.parent()) {
-                let dev = root.join("tasks");
-                if dev.is_dir() {
-                    sources.push(TaskSource {
-                        path: dev,
-                        trust: PackTrust::Bundled,
-                    });
+            if cfg!(debug_assertions)
+                && parent.file_name().and_then(|n| n.to_str()) == Some("debug")
+                && parent
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    == Some("target")
+            {
+                if let Some(root) = parent.parent().and_then(|p| p.parent()) {
+                    let dev = root.join("tasks");
+                    if dev.is_dir() {
+                        sources.push(TaskSource {
+                            path: dev,
+                            trust: PackTrust::Bundled,
+                        });
+                    }
                 }
             }
         }

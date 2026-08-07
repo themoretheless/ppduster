@@ -2,6 +2,7 @@ use ppduster::automation::{
     run_task, PackTrust, RunOptions, TaskPack, TaskSource,
 };
 use std::fs;
+use std::path::Path;
 
 #[test]
 fn loads_bundled_task_pack() {
@@ -101,4 +102,26 @@ task:
 
     let err = run_task(pack.get("shell-demo").unwrap(), &RunOptions::default()).unwrap_err();
     assert!(err.to_string().contains("--allow-shell"));
+}
+
+#[test]
+fn dev_layout_detection_requires_target_debug_shape() {
+    let target_debug = Path::new("/tmp/example/target/debug");
+    let cargo_bin = Path::new("/Users/test/.cargo/bin");
+
+    assert_eq!(
+        target_debug.file_name().and_then(|n| n.to_str()),
+        Some("debug")
+    );
+    assert_eq!(
+        target_debug
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str()),
+        Some("target")
+    );
+    assert_ne!(
+        cargo_bin.file_name().and_then(|n| n.to_str()),
+        Some("debug")
+    );
 }
