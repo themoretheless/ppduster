@@ -137,6 +137,11 @@ pub struct RunCommandStep {
     /// Setting this to `true` is a security boundary weakening. Document why.
     #[serde(default)]
     pub shell_expand: bool,
+    /// Whether this command needs elevated privileges (sudo/root).
+    /// If true the executor MUST obtain explicit user consent before escalating.
+    /// External packs cannot silence this gate.
+    #[serde(default)]
+    pub requires_elevation: bool,
 }
 
 /// Download a file from a URL.
@@ -171,6 +176,13 @@ impl DownloadStep {
 }
 
 /// Extract an archive (tar, zip, etc.) to a destination directory.
+///
+/// # Security note — archive traversal (zip-slip)
+/// The executor MUST canonicalize every entry path after prepending `dest`
+/// and reject any entry whose resolved path does not begin with `dest`.
+/// This prevents zip-slip / tar-slip path traversal attacks.
+/// `allow_absolute_paths` is an explicit opt-in that the executor should
+/// warn about; it must be `false` for External packs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractStep {
     pub src: String,
@@ -178,6 +190,22 @@ pub struct ExtractStep {
     /// Number of leading path components to strip (like tar --strip-components).
     #[serde(default)]
     pub strip_components: u32,
+    /// Permit archive entries with absolute paths. Must be false for External
+    /// packs; the executor rejects absolute-path entries when this is false.
+    #[serde(default)]
+    pub allow_absolute_paths: bool,
+}
+
+impl ExtractStep {
+    pub fn validate(&self, trust: PackTrust) -> Result<()> {
+        if self.allow_absolute_paths && trust == PackTrust::External {
+            bail!(
+                "extract step has allow_absolute_paths: true, \
+                 which is not permitted for External packs"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Mount a DMG and copy the contained .app bundle to /Applications.
@@ -187,6 +215,10 @@ pub struct ExtractStep {
 /// `require_notarized` is true (the default). `expected_team_id` is an
 /// additional assertion: if set, the executor must confirm the signing
 /// certificate's Team ID matches before proceeding.
+///
+/// `requires_elevation` signals that the copy to `dest_dir` needs privilege
+/// escalation (e.g. sudo / AuthorizationExecuteWithPrivileges). The executor
+/// must gate this behind explicit user confirmation before elevating.
 ///
 /// **UNIMPLEMENTED SAFETY HOOK**: actual `spctl`/`codesign` verification is
 /// not performed at parse time; the executor layer is responsible for calling
@@ -206,6 +238,12 @@ pub struct InstallDmgStep {
     /// If set, the executor asserts the DMG's signing Team ID equals this value.
     #[serde(default)]
     pub expected_team_id: Option<String>,
+    /// Whether this step needs elevated privileges. If true the executor MUST
+    /// obtain explicit user consent before proceeding; it must never silently
+    /// escalate. External packs cannot set this to false (it defaults to true
+    /// since /Applications writes typically need it).
+    #[serde(default = "default_true")]
+    pub requires_elevation: bool,
 }
 
 fn default_applications_dir() -> String {
@@ -217,6 +255,8 @@ fn default_applications_dir() -> String {
 /// # Security note
 /// Same notarization contract as `InstallDmgStep`. The executor must run
 /// `pkgutil --check-signature` or equivalent before calling `installer`.
+/// `installer` always requires root; the executor MUST gate this behind
+/// explicit user consent.
 ///
 /// **UNIMPLEMENTED SAFETY HOOK**: signature verification is not performed at
 /// parse time; the executor layer must implement it.
@@ -232,6 +272,10 @@ pub struct InstallPkgStep {
     /// If set, the executor asserts the pkg's signing Team ID equals this value.
     #[serde(default)]
     pub expected_team_id: Option<String>,
+    /// Whether this step needs elevated privileges (always true for pkg installs).
+    /// The executor MUST obtain explicit user consent before escalating.
+    #[serde(default = "default_true")]
+    pub requires_elevation: bool,
 }
 
 fn default_pkg_target() -> String {
@@ -320,6 +364,7 @@ impl AutomationStep {
     pub fn validate(&self, trust: PackTrust) -> Result<()> {
         match self {
             AutomationStep::Download(d) => d.validate(trust)?,
+            AutomationStep::Extract(e) => e.validate(trust)?,
             AutomationStep::WriteFile(w) => validate_write_dest(&w.dest)?,
             AutomationStep::Symlink(s) => validate_write_dest(&s.dest)?,
             AutomationStep::RunCommand(r) => {
@@ -335,6 +380,17 @@ impl AutomationStep {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Returns true if this step requires elevated privileges (root/sudo).
+    /// The executor MUST gate elevation behind explicit user consent.
+    pub fn requires_elevation(&self) -> bool {
+        match self {
+            AutomationStep::InstallDmg(d) => d.requires_elevation,
+            AutomationStep::InstallPkg(p) => p.requires_elevation,
+            AutomationStep::RunCommand(r) => r.requires_elevation,
+            _ => false,
+        }
     }
 }
 
@@ -434,6 +490,101 @@ impl AutomationPack {
         } else {
             &[]
         }
+    }
+
+    /// Return (index, step) pairs for steps that require elevated privileges.
+    /// The executor MUST present these to the user for confirmation before
+    /// proceeding; it must never silently escalate.
+    pub fn steps_requiring_elevation(&self) -> Vec<(usize, &AutomationStep)> {
+        self.steps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.requires_elevation())
+            .collect()
+    }
+
+    /// Produce a dry-run description of what this pack *would* do, without
+    /// executing any step or touching the filesystem.
+    ///
+    /// Returns a list of `(step_index, kind_label, description)` tuples
+    /// suitable for display. This is the model-layer contract; the executor
+    /// must call this (or an equivalent) before any side-effecting operation
+    /// when running in dry-run mode.
+    ///
+    /// **BLOCKER — partial implementation**: the description string is a
+    /// best-effort human summary derived from typed fields. Full side-effect
+    /// analysis (e.g. which paths would be written, which processes spawned)
+    /// requires the executor layer; this method intentionally performs no I/O.
+    pub fn dry_run_plan(&self) -> Vec<(usize, &'static str, String)> {
+        self.steps
+            .iter()
+            .enumerate()
+            .map(|(i, step)| {
+                let desc = match step {
+                    AutomationStep::GitClone(g) => {
+                        format!("clone {} → {}", g.url, g.dest)
+                    }
+                    AutomationStep::BrewInstall(b) => {
+                        format!(
+                            "brew install {}{}",
+                            b.package,
+                            b.tap.as_deref().map(|t| format!(" (tap: {t})")).unwrap_or_default()
+                        )
+                    }
+                    AutomationStep::BrewCask(c) => {
+                        format!("brew install --cask {}", c.package)
+                    }
+                    AutomationStep::RunCommand(r) => {
+                        format!(
+                            "exec {}{}",
+                            r.argv.join(" "),
+                            if r.requires_elevation { " [ELEVATED]" } else { "" }
+                        )
+                    }
+                    AutomationStep::Download(d) => {
+                        format!(
+                            "download {} → {}{}",
+                            d.url,
+                            d.dest,
+                            d.sha256
+                                .as_deref()
+                                .map(|h| format!(" (sha256: {h})"))
+                                .unwrap_or_default()
+                        )
+                    }
+                    AutomationStep::Extract(e) => {
+                        format!("extract {} → {}", e.src, e.dest)
+                    }
+                    AutomationStep::InstallDmg(d) => {
+                        format!(
+                            "install dmg {} ({}) → {} [ELEVATED, notarized={}]",
+                            d.src, d.app_name, d.dest_dir, d.require_notarized
+                        )
+                    }
+                    AutomationStep::InstallPkg(p) => {
+                        format!(
+                            "installer -pkg {} -target {} [ELEVATED, notarized={}]",
+                            p.src, p.target, p.require_notarized
+                        )
+                    }
+                    AutomationStep::Symlink(s) => {
+                        format!(
+                            "symlink {} → {}{}",
+                            s.src,
+                            s.dest,
+                            if s.force { " (force)" } else { "" }
+                        )
+                    }
+                    AutomationStep::WriteFile(w) => {
+                        format!("write {} ({} bytes)", w.dest, w.content.len())
+                    }
+                    AutomationStep::SetEnvHint(e) => {
+                        format!("env hint: {}={}", e.var, e.value)
+                    }
+                };
+                (i, step.kind_label(), desc)
+            })
+            .collect()
     }
 }
 

@@ -689,3 +689,177 @@ steps: []
         "packs must not be able to set their own trust level via YAML"
     );
 }
+
+// ─── Archive traversal defence ────────────────────────────────────────────────
+
+#[test]
+fn extract_allow_absolute_paths_blocked_for_external() {
+    let yaml = r#"
+pack: trav-ext
+steps:
+  - type: extract
+    src: /tmp/evil.tar.gz
+    dest: /tmp/safe
+    allow_absolute_paths: true
+"#;
+    let mut pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    pack.trust = PackTrust::External;
+    assert!(
+        pack.validate().is_err(),
+        "allow_absolute_paths must be blocked for External packs"
+    );
+}
+
+#[test]
+fn extract_allow_absolute_paths_default_false() {
+    let yaml = r#"
+pack: trav-default
+steps:
+  - type: extract
+    src: /tmp/archive.tar.gz
+    dest: /tmp/out
+"#;
+    let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    if let AutomationStep::Extract(e) = &pack.steps[0] {
+        assert!(!e.allow_absolute_paths, "must default to false");
+    } else {
+        panic!("expected Extract");
+    }
+}
+
+#[test]
+fn extract_allow_absolute_paths_permitted_for_bundled() {
+    let yaml = r#"
+pack: trav-bundled
+steps:
+  - type: extract
+    src: /tmp/archive.tar.gz
+    dest: /tmp/out
+    allow_absolute_paths: true
+"#;
+    let mut pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    pack.trust = PackTrust::Bundled;
+    assert!(pack.validate().is_ok());
+}
+
+// ─── Elevation gating ─────────────────────────────────────────────────────────
+
+#[test]
+fn install_dmg_defaults_requires_elevation() {
+    let yaml = r#"
+pack: elev-dmg
+steps:
+  - type: install-dmg
+    src: /tmp/App.dmg
+    app_name: App.app
+"#;
+    let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    assert!(
+        pack.steps[0].requires_elevation(),
+        "install-dmg must require elevation by default"
+    );
+}
+
+#[test]
+fn install_pkg_defaults_requires_elevation() {
+    let yaml = r#"
+pack: elev-pkg
+steps:
+  - type: install-pkg
+    src: /tmp/installer.pkg
+"#;
+    let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    assert!(
+        pack.steps[0].requires_elevation(),
+        "install-pkg must require elevation by default"
+    );
+}
+
+#[test]
+fn run_command_elevation_opt_in() {
+    let yaml = r#"
+pack: elev-cmd
+steps:
+  - type: run-command
+    argv: ["sudo", "make", "install"]
+    requires_elevation: true
+"#;
+    let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    assert!(pack.steps[0].requires_elevation());
+}
+
+#[test]
+fn run_command_elevation_default_false() {
+    let yaml = r#"
+pack: no-elev
+steps:
+  - type: run-command
+    argv: ["echo", "hello"]
+"#;
+    let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    assert!(!pack.steps[0].requires_elevation());
+}
+
+#[test]
+fn steps_requiring_elevation_returns_correct_indices() {
+    let yaml = r#"
+pack: mixed
+steps:
+  - type: brew-install
+    package: git
+  - type: install-dmg
+    src: /tmp/App.dmg
+    app_name: App.app
+  - type: brew-cask
+    package: iterm2
+  - type: install-pkg
+    src: /tmp/Installer.pkg
+"#;
+    let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    let elevated: Vec<usize> = pack.steps_requiring_elevation()
+        .into_iter()
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(elevated, vec![1, 3]);
+}
+
+// ─── Dry-run plan ─────────────────────────────────────────────────────────────
+
+#[test]
+fn dry_run_plan_covers_all_steps() {
+    let yaml = r#"
+pack: dr
+steps:
+  - type: git-clone
+    url: https://github.com/example/repo.git
+    dest: /tmp/repo
+  - type: brew-install
+    package: ripgrep
+  - type: download
+    url: https://example.com/file.tar.gz
+    dest: /tmp/file.tar.gz
+    sha256: abc123
+  - type: install-dmg
+    src: /tmp/App.dmg
+    app_name: App.app
+  - type: set-env-hint
+    var: FOO
+    value: bar
+"#;
+    let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    let plan = pack.dry_run_plan();
+    assert_eq!(plan.len(), 5);
+    // DMG entry should mention ELEVATED
+    let (_, _, dmg_desc) = &plan[3];
+    assert!(dmg_desc.contains("ELEVATED"), "DMG dry-run must flag elevation");
+    // Download entry should include sha256
+    let (_, _, dl_desc) = &plan[2];
+    assert!(dl_desc.contains("sha256"), "download dry-run must include checksum");
+}
+
+#[test]
+fn dry_run_plan_empty_pack() {
+    let yaml = "pack: empty\nsteps: []\n";
+    let pack: AutomationPack = serde_yaml::from_str(yaml).unwrap();
+    assert!(pack.dry_run_plan().is_empty());
+}
