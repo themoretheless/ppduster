@@ -90,6 +90,10 @@ ppduster setup show macos-top-01-brew-bootstrap
 ppduster setup run macos-top-03-system-defaults --allow-shell
 ppduster setup run macos-top-08-security-baseline --allow-elevation
 
+# LightBurn 2.1.03: inspect the plan, then download/install/confirm activation
+ppduster setup run macos-lightburn-install-activate
+ppduster setup run macos-lightburn-install-activate --yes
+
 # External task packs are blocked unless explicitly trusted
 ppduster --trust-external-packs setup run dev-brew-bootstrap --tasks-dir /path/to/tasks
 ```
@@ -98,12 +102,27 @@ Current safety posture:
 
 - separate from `rules/` and the scan/clean pipeline
 - sealed typed actions only; no arbitrary YAML shell strings
-- dry-run planning only in the current implementation; command-based satisfaction checks are skipped until apply mode exists
+- dry-run planning by default; `--yes` is required to apply a setup task
 - shell-capable steps require `dangerous: true` and `--allow-shell`
 - elevated steps require `--allow-elevation`
 - external task packs require `--trust-external-packs`
 - download steps require `checksum.sha256`
-- archive handlers must use traversal-safe extraction primitives before apply-mode is enabled
+- DMG installation verifies the image, mounts it read-only, validates the app signature and Gatekeeper assessment, stages the bundle in `~/Applications`, and refuses elevation or overwriting an existing app
+- the sealed `activate-license` action accepts only a provider and method, and task loading rejects `license_key` / `license-key` fields at any nesting level; enter the key directly in the vendor UI
+
+The bundled LightBurn task pins the official macOS 2.1.03 DMG and an independently
+computed SHA-256 (LightBurn does not publish a SHA-256 manifest for this release). It
+requires macOS 12 or newer; Apple Silicon also requires Rosetta. After installation,
+the task verifies the pinned bundle ID, signing team, and exact version before it
+launches a new LightBurn instance from `~/Applications` (any running LightBurn must be
+closed first). An unactivated copy shows the License Page automatically;
+otherwise use **Help → License Management**. Paste the key exactly, including dashes,
+complete activation, then type `ACTIVATED` in the terminal. `ppduster` does not see the
+key. Version 2.1.03 must also fall within the key's update-validity period.
+
+LightBurn's documented `-l` command is intentionally not used: after normal activation
+it converts a closed installation to System Locked mode (and is also the first step for
+a specially tagged Floating key), while exposing the key in the process argument list.
 
 Bundled macOS setup starters currently cover the top 50 bootstrap areas, starting with:
 

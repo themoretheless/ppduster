@@ -1,0 +1,34 @@
+task:
+  id: macos-lightburn-install-activate
+  name: Install LightBurn 2.1.03 and guide activation
+  description: Download the pinned official LightBurn DMG, install its signed app bundle for the current user, and open the vendor license UI for user-confirmed activation. Requires macOS 12 or newer; Apple Silicon requires Rosetta.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: verify-lightburn-requirements
+      name: Verify macOS and Rosetta requirements
+      type: macos-requirements
+      minimum_version: "12.0"
+      require_rosetta_on_apple_silicon: true
+    - id: download-lightburn
+      name: Download LightBurn 2.1.03
+      type: download-file
+      url: https://release.lightburnsoftware.com/LightBurn/Release/LightBurn-v2.1.03/LightBurn.V2.1.03.dmg
+      dest: $HOME/Library/Caches/ppduster/downloads/LightBurn.V2.1.03.dmg
+      checksum:
+        sha256: 18bf0b4882cd40704593cc60c04e76b0407213826b7c5923e15a602d306a674c
+    - id: install-lightburn
+      name: Install signed LightBurn app
+      type: install-dmg
+      dmg: $HOME/Library/Caches/ppduster/downloads/LightBurn.V2.1.03.dmg
+      app_name: LightBurn.app
+      target: $HOME/Applications
+      identity:
+        bundle_identifier: com.LightBurnSoftware.LightBurn
+        team_identifier: UWZQ3LL82C
+        version: "2.1.03"
+    - id: activate-lightburn
+      name: Confirm LightBurn activation in its official UI
+      type: activate-license
+      provider: light-burn
+      method: vendor-ui

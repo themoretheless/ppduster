@@ -287,7 +287,15 @@ fn run() -> Result<()> {
                         },
                     )?;
                     report::print_setup(&report, output)?;
-                    Ok(())
+                    if report.errors.is_empty() {
+                        Ok(())
+                    } else {
+                        anyhow::bail!(
+                            "setup task {} failed in {} step(s)",
+                            report.task_id,
+                            report.errors.len()
+                        )
+                    }
                 }
             }
         }

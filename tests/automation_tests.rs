@@ -1,6 +1,16 @@
-use ppduster::automation::{run_task, PackTrust, RunOptions, TaskPack, TaskSource};
+use ppduster::automation::{
+    run_task, Action, LicenseMethod, LicenseProvider, PackTrust, RunOptions, TaskFile, TaskPack,
+    TaskSource,
+};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn bin() -> PathBuf {
+    std::env::var("CARGO_BIN_EXE_ppduster")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/ppduster"))
+}
 
 #[test]
 fn loads_bundled_task_pack() {
@@ -104,6 +114,141 @@ fn bundled_dev_setup_includes_macos_top_fifty_tasks() {
             "expected bundled task pack to include {id}"
         );
     }
+
+    assert!(
+        pack.get("macos-lightburn-install-activate").is_some(),
+        "expected bundled task pack to include the LightBurn scenario"
+    );
+}
+
+#[test]
+fn lightburn_task_downloads_installs_then_uses_vendor_ui() {
+    let pack = TaskPack::load_many(
+        &[TaskSource {
+            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap();
+    let task = pack.get("macos-lightburn-install-activate").unwrap();
+
+    assert_eq!(task.steps.len(), 4);
+    assert!(matches!(
+        &task.steps[0].action,
+        Action::MacosRequirements { .. }
+    ));
+    assert!(matches!(&task.steps[1].action, Action::DownloadFile { .. }));
+    assert!(matches!(
+        &task.steps[2].action,
+        Action::InstallDmg {
+            identity: Some(identity),
+            ..
+        } if identity.bundle_identifier == "com.LightBurnSoftware.LightBurn"
+            && identity.team_identifier == "UWZQ3LL82C"
+            && identity.version == "2.1.03"
+    ));
+    assert!(matches!(
+        &task.steps[3].action,
+        Action::ActivateLicense(action)
+            if action.provider == LicenseProvider::LightBurn
+                && action.method == LicenseMethod::VendorUi
+    ));
+
+    let rendered = serde_yaml::to_string(task).unwrap();
+    assert!(!rendered.contains("license_key"));
+    assert!(!rendered.contains("license-key"));
+}
+
+#[test]
+fn activate_license_rejects_embedded_secret_fields() {
+    let yaml = r#"
+task:
+  id: unsafe-license
+  name: Unsafe license
+  platform: macos
+  steps:
+    - id: activate
+      type: activate-license
+      provider: light-burn
+      method: vendor-ui
+      license_key: CANARY-SECRET
+"#;
+
+    let err = serde_yaml::from_str::<TaskFile>(yaml).unwrap_err();
+    assert!(err.to_string().contains("unknown field"));
+    assert!(!format!("{err:?}").contains("CANARY-SECRET"));
+}
+
+#[test]
+fn task_pack_rejects_license_key_fields_at_any_yaml_level() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("unsafe-license.yaml"),
+        r#"
+task:
+  id: unsafe-license
+  name: Unsafe license
+  platform: any
+  steps:
+    - id: activate
+      check:
+        license-key: CANARY-NESTED-SECRET
+      type: activate-license
+      provider: light-burn
+      method: vendor-ui
+"#,
+    )
+    .unwrap();
+
+    let err = TaskPack::load_many(
+        &[TaskSource {
+            path: dir.path().to_path_buf(),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("forbidden field license-key"));
+    assert!(!format!("{err:?}").contains("CANARY-NESTED-SECRET"));
+}
+
+#[test]
+fn setup_cli_returns_failure_when_an_applied_step_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("failing.yaml"),
+        r#"
+task:
+  id: failing-setup
+  name: Failing setup
+  platform: any
+  trust: external-allowed
+  steps:
+    - id: fail
+      type: run-command
+      program: /usr/bin/false
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(bin())
+        .args([
+            "--trust-external-packs",
+            "setup",
+            "run",
+            "failing-setup",
+            "--yes",
+            "--tasks-dir",
+        ])
+        .arg(dir.path())
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run failing setup task");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("setup task failing-setup failed"));
 }
 
 #[test]

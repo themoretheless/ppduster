@@ -106,6 +106,33 @@ impl Default for AuthPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LicenseProvider {
+    LightBurn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LicenseMethod {
+    VendorUi,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivateLicenseAction {
+    pub provider: LicenseProvider,
+    pub method: LicenseMethod,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppBundleIdentity {
+    pub bundle_identifier: String,
+    pub team_identifier: String,
+    pub version: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Action {
@@ -144,12 +171,22 @@ pub enum Action {
         dmg: String,
         #[serde(default)]
         app_name: Option<String>,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        identity: Option<AppBundleIdentity>,
     },
     InstallPkg {
         pkg: String,
         #[serde(default)]
         target: Option<String>,
     },
+    MacosRequirements {
+        minimum_version: String,
+        #[serde(default)]
+        require_rosetta_on_apple_silicon: bool,
+    },
+    ActivateLicense(ActivateLicenseAction),
 }
 
 impl Task {
@@ -214,9 +251,60 @@ impl Step {
                     return Err(format!("step {} requires src and dest", self.id));
                 }
             }
-            Action::InstallDmg { dmg, .. } => {
+            Action::InstallDmg {
+                dmg,
+                app_name,
+                target,
+                identity,
+            } => {
                 if dmg.trim().is_empty() {
                     return Err(format!("step {} requires dmg", self.id));
+                }
+                if let Some(app_name) = app_name {
+                    let path = std::path::Path::new(app_name);
+                    if app_name.trim().is_empty()
+                        || path.components().count() != 1
+                        || path.extension().and_then(|ext| ext.to_str()) != Some("app")
+                    {
+                        return Err(format!(
+                            "step {} app_name must be a single .app bundle name",
+                            self.id
+                        ));
+                    }
+                }
+                if target
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                {
+                    return Err(format!("step {} target must not be empty", self.id));
+                }
+                if let Some(identity) = identity {
+                    if app_name.is_none() {
+                        return Err(format!(
+                            "step {} requires app_name when identity is set",
+                            self.id
+                        ));
+                    }
+                    if !valid_bundle_identifier(&identity.bundle_identifier) {
+                        return Err(format!(
+                            "step {} identity.bundle_identifier is invalid",
+                            self.id
+                        ));
+                    }
+                    if identity.team_identifier.is_empty()
+                        || !identity
+                            .team_identifier
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric())
+                    {
+                        return Err(format!(
+                            "step {} identity.team_identifier is invalid",
+                            self.id
+                        ));
+                    }
+                    if !valid_version(&identity.version) {
+                        return Err(format!("step {} identity.version is invalid", self.id));
+                    }
                 }
             }
             Action::InstallPkg { pkg, .. } => {
@@ -224,7 +312,32 @@ impl Step {
                     return Err(format!("step {} requires pkg", self.id));
                 }
             }
+            Action::MacosRequirements {
+                minimum_version, ..
+            } => {
+                if !valid_version(minimum_version) {
+                    return Err(format!(
+                        "step {} minimum_version must contain dot-separated integers",
+                        self.id
+                    ));
+                }
+            }
+            Action::ActivateLicense(_) => {}
         }
         Ok(())
     }
+}
+
+fn valid_version(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn valid_bundle_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-'))
 }
