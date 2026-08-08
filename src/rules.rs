@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -166,8 +166,15 @@ impl RulePack {
                     .with_context(|| format!("read {}", file.display()))?;
                 let parsed: RuleFile = serde_yaml::from_str(&text)
                     .with_context(|| format!("parse {}", file.display()))?;
-                sources.push(file);
-                for rule in parsed.rules {
+                sources.push(file.clone());
+                for mut rule in parsed.rules {
+                    rule.id = rule.id.trim().to_string();
+                    rule.name = rule.name.trim().to_string();
+                    rule.category = rule.category.trim().to_string();
+                    validate_rule(&rule, &file)?;
+                    if by_id.contains_key(&rule.id) {
+                        bail!("{}: duplicate rule id '{}'", file.display(), rule.id);
+                    }
                     by_id.insert(rule.id.clone(), rule);
                 }
             }
@@ -214,6 +221,44 @@ impl RulePack {
     }
 }
 
+fn validate_rule(rule: &Rule, source: &PathBuf) -> Result<()> {
+    let rule_id = rule.id.trim();
+    if rule_id.is_empty() {
+        bail!("{}: rule missing non-empty id", source.display());
+    }
+    if rule.name.trim().is_empty() {
+        bail!(
+            "{}: rule '{}' missing non-empty name",
+            source.display(),
+            rule_id
+        );
+    }
+    if rule.category.trim().is_empty() {
+        bail!(
+            "{}: rule '{}' missing non-empty category",
+            source.display(),
+            rule_id
+        );
+    }
+    if rule.paths.is_empty() {
+        bail!(
+            "{}: rule '{}' must define at least one path",
+            source.display(),
+            rule_id
+        );
+    }
+    for path in &rule.paths {
+        if path.trim().is_empty() {
+            bail!(
+                "{}: rule '{}' contains an empty path entry",
+                source.display(),
+                rule_id
+            );
+        }
+    }
+    Ok(())
+}
+
 fn path_list(dirs: &[PathBuf]) -> String {
     dirs.iter()
         .map(|d| d.display().to_string())
@@ -230,18 +275,9 @@ pub fn expand_path_template(template: &str) -> Option<PathBuf> {
         let mut v = vec![
             ("$HOME", home.clone()),
             ("~", home.clone()),
-            (
-                "$TMPDIR",
-                std::env::temp_dir(),
-            ),
-            (
-                "$TEMP",
-                std::env::temp_dir(),
-            ),
-            (
-                "$TMP",
-                std::env::temp_dir(),
-            ),
+            ("$TMPDIR", std::env::temp_dir()),
+            ("$TEMP", std::env::temp_dir()),
+            ("$TMP", std::env::temp_dir()),
         ];
         if let Some(cache) = dirs::cache_dir() {
             v.push(("$XDG_CACHE_HOME", cache.clone()));
@@ -253,7 +289,10 @@ pub fn expand_path_template(template: &str) -> Option<PathBuf> {
             v.push(("$LOCALAPPDATA", data));
         }
         if let Some(data) = dirs::data_dir() {
-            v.push(("$XDG_CONFIG_HOME", dirs::config_dir().unwrap_or(data.clone())));
+            v.push((
+                "$XDG_CONFIG_HOME",
+                dirs::config_dir().unwrap_or(data.clone()),
+            ));
             v.push(("%APPDATA%", data.clone()));
             v.push(("$APPDATA", data));
         }
@@ -313,5 +352,27 @@ mod tests {
     fn expands_home() {
         let p = expand_path_template("$HOME/Library/Caches").unwrap();
         assert!(p.to_string_lossy().contains("Library"));
+    }
+
+    #[test]
+    fn rejects_rule_without_required_fields() {
+        let rule = Rule {
+            id: "   ".into(),
+            name: "   ".into(),
+            description: "".into(),
+            category: "".into(),
+            platform: Platform::Any,
+            risk: Risk::Low,
+            default_enabled: true,
+            min_age_days: 0,
+            paths: vec![],
+            include_globs: vec![],
+            exclude_globs: vec![],
+            max_depth: 12,
+            delete_mode: DeleteMode::Contents,
+            report_only: false,
+        };
+        let err = validate_rule(&rule, &PathBuf::from("rules.yaml")).unwrap_err();
+        assert!(err.to_string().contains("missing non-empty id"));
     }
 }
