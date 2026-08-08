@@ -194,8 +194,14 @@ impl Step {
                     ));
                 }
             }
-            Action::DownloadFile { url, dest, checksum } => {
-                if url.trim().is_empty() || dest.trim().is_empty() || checksum.sha256.trim().is_empty()
+            Action::DownloadFile {
+                url,
+                dest,
+                checksum,
+            } => {
+                if url.trim().is_empty()
+                    || dest.trim().is_empty()
+                    || checksum.sha256.trim().is_empty()
                 {
                     return Err(format!(
                         "step {} requires url, dest, and checksum.sha256",

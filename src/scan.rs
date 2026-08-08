@@ -110,11 +110,7 @@ fn collect_under(
     // so sizes are not double-counted across parents and children.
     // If include_globs are set, walk deeper and emit matching files only.
     let deep = !rule.include_globs.is_empty();
-    let max_depth = if deep {
-        rule.max_depth
-    } else {
-        1
-    };
+    let max_depth = if deep { rule.max_depth } else { 1 };
 
     let walker = WalkDir::new(root)
         .follow_links(false)
@@ -186,11 +182,7 @@ fn consider_path(
     }
 
     let is_dir = meta.is_dir();
-    let bytes = if is_dir {
-        dir_size(path)
-    } else {
-        meta.len()
-    };
+    let bytes = if is_dir { dir_size(path) } else { meta.len() };
 
     // Skip empty noise
     if bytes == 0 && !is_dir {

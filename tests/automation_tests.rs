@@ -1,6 +1,4 @@
-use ppduster::automation::{
-    run_task, PackTrust, RunOptions, TaskPack, TaskSource,
-};
+use ppduster::automation::{run_task, PackTrust, RunOptions, TaskPack, TaskSource};
 use std::fs;
 use std::path::Path;
 
