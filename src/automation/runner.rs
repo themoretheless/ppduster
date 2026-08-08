@@ -3,11 +3,13 @@ use crate::rules::expand_path_template;
 use crate::safety::{is_safe_rule_root, stays_under_root};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::fs;
 use std::io::IsTerminal;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use thiserror::Error;
 
@@ -278,7 +280,11 @@ fn plan_summary(step: &Step) -> Result<String> {
                 .unwrap_or_default()
         ),
         Action::BrewInstall { package, cask } => {
-            format!("brew install {}{}", if *cask { "--cask " } else { "" }, package)
+            format!(
+                "brew install {}{}",
+                if *cask { "--cask " } else { "" },
+                package
+            )
         }
         Action::RunCommand {
             program,
@@ -391,7 +397,9 @@ fn git_has_credential_helper() -> bool {
     Command::new("git")
         .args(["config", "--get-all", "credential.helper"])
         .output()
-        .map(|output| output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty())
+        .map(|output| {
+            output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+        })
         .unwrap_or(false)
 }
 
@@ -429,22 +437,14 @@ fn apply_step(step: &Step) -> Result<String> {
             env,
             shell,
         } => apply_run_command(program, args, cwd.as_deref(), env, *shell),
-        Action::DownloadFile { .. } => Err(AutomationError::Message(
-            "download apply mode is not implemented yet".into(),
-        )
-        .into()),
-        Action::ExtractArchive { .. } => Err(AutomationError::Message(
-            "archive extraction apply mode is not implemented yet".into(),
-        )
-        .into()),
-        Action::InstallDmg { .. } => Err(AutomationError::Message(
-            "dmg install apply mode is not implemented yet".into(),
-        )
-        .into()),
-        Action::InstallPkg { .. } => Err(AutomationError::Message(
-            "pkg install apply mode is not implemented yet".into(),
-        )
-        .into()),
+        Action::DownloadFile {
+            url,
+            dest,
+            checksum,
+        } => apply_download_file(url, dest, checksum),
+        Action::ExtractArchive { src, dest } => apply_extract_archive(src, dest),
+        Action::InstallDmg { dmg, app_name } => apply_install_dmg(dmg, app_name.as_deref()),
+        Action::InstallPkg { pkg, target } => apply_install_pkg(pkg, target.as_deref()),
     }
 }
 
@@ -502,6 +502,168 @@ fn apply_brew_install(package: &str, cask: bool) -> Result<String> {
     Ok(format!("installed brew package {}", package))
 }
 
+fn apply_download_file(
+    url: &str,
+    dest: &str,
+    checksum: &crate::automation::task::Checksum,
+) -> Result<String> {
+    let dest_path = expand_required_path(dest)?;
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create download parent {}", parent.display()))?;
+    }
+    let temp_path = unique_temp_path(&dest_path)?;
+    let status = Command::new("curl")
+        .args([
+            "-L",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--output",
+            &temp_path.to_string_lossy(),
+            url,
+        ])
+        .status()
+        .with_context(|| format!("download {}", url))?;
+    status.exit_ok("curl download")?;
+    if !checksum.sha256.trim().is_empty() {
+        let expected = checksum.sha256.trim();
+        let actual = sha256_file(&temp_path)?;
+        if actual != expected {
+            fs::remove_file(&temp_path).ok();
+            bail!(
+                "checksum mismatch for {}: expected {}, got {}",
+                url,
+                expected,
+                actual
+            );
+        }
+    }
+    if dest_path.exists() {
+        fs::remove_file(&dest_path)
+            .with_context(|| format!("replace existing destination {}", dest_path.display()))?;
+    }
+    fs::rename(&temp_path, &dest_path)
+        .with_context(|| format!("move downloaded file to {}", dest_path.display()))?;
+    Ok(format!("downloaded {} to {}", url, dest_path.display()))
+}
+
+fn apply_extract_archive(src: &str, dest: &str) -> Result<String> {
+    let src_path = expand_required_path(src)?;
+    let dest_path = expand_required_path(dest)?;
+    if !src_path.exists() {
+        bail!("archive source not found: {}", src_path.display());
+    }
+    if dest_path.exists() && !dest_path.is_dir() {
+        bail!(
+            "archive destination exists and is not a directory: {}",
+            dest_path.display()
+        );
+    }
+    fs::create_dir_all(&dest_path)
+        .with_context(|| format!("create archive destination {}", dest_path.display()))?;
+
+    let manifest = Command::new("tar")
+        .arg("-tf")
+        .arg(&src_path)
+        .output()
+        .with_context(|| format!("list archive contents {}", src_path.display()))?;
+    if !manifest.status.success() {
+        bail!("failed to inspect archive {}", src_path.display());
+    }
+    for line in String::from_utf8_lossy(&manifest.stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let rel = Path::new(trimmed);
+        if rel.is_absolute() || rel.components().any(|c| matches!(c, Component::ParentDir)) {
+            bail!("archive entry {} escapes the destination", trimmed);
+        }
+        let candidate = dest_path.join(rel);
+        if !candidate.starts_with(&dest_path) {
+            bail!("archive entry {} escapes the destination", trimmed);
+        }
+    }
+
+    let status = Command::new("tar")
+        .args(["-xf", &src_path.to_string_lossy()])
+        .current_dir(&dest_path)
+        .status()
+        .with_context(|| format!("extract archive {}", src_path.display()))?;
+    status.exit_ok("tar extract")?;
+    Ok(format!(
+        "extracted {} into {}",
+        src_path.display(),
+        dest_path.display()
+    ))
+}
+
+fn apply_install_dmg(dmg: &str, app_name: Option<&str>) -> Result<String> {
+    let dmg_path = expand_required_path(dmg)?;
+    if !dmg_path.exists() {
+        bail!("dmg not found: {}", dmg_path.display());
+    }
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("home directory unavailable"))?;
+    let install_root = home.join("Applications");
+    fs::create_dir_all(&install_root)
+        .with_context(|| format!("create install root {}", install_root.display()))?;
+    let app_label = app_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            dmg_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("app")
+        });
+    let install_dir = install_root.join(app_label);
+    fs::create_dir_all(&install_dir)
+        .with_context(|| format!("create install dir {}", install_dir.display()))?;
+    let target_path = install_dir.join(dmg_path.file_name().unwrap_or_default());
+    fs::copy(&dmg_path, &target_path).with_context(|| {
+        format!(
+            "copy dmg {} to {}",
+            dmg_path.display(),
+            target_path.display()
+        )
+    })?;
+    Ok(format!(
+        "staged dmg {} into {}",
+        dmg_path.display(),
+        target_path.display()
+    ))
+}
+
+fn apply_install_pkg(pkg: &str, target: Option<&str>) -> Result<String> {
+    let pkg_path = expand_required_path(pkg)?;
+    if !pkg_path.exists() {
+        bail!("pkg not found: {}", pkg_path.display());
+    }
+    let target_path = if let Some(target) = target {
+        expand_required_path(target)?
+    } else {
+        dirs::home_dir()
+            .map(|home| home.join("Library/Packages"))
+            .ok_or_else(|| anyhow!("home directory unavailable"))?
+    };
+    fs::create_dir_all(&target_path)
+        .with_context(|| format!("create pkg target {}", target_path.display()))?;
+    let destination = target_path.join(pkg_path.file_name().unwrap_or_default());
+    fs::copy(&pkg_path, &destination).with_context(|| {
+        format!(
+            "copy pkg {} to {}",
+            pkg_path.display(),
+            destination.display()
+        )
+    })?;
+    Ok(format!(
+        "staged pkg {} into {}",
+        pkg_path.display(),
+        destination.display()
+    ))
+}
+
 fn apply_run_command(
     program: &str,
     args: &[String],
@@ -530,6 +692,31 @@ fn apply_run_command(
         .with_context(|| format!("run command {}", program))?
         .exit_ok(program)?;
     Ok(format!("ran {}", render_command(program, args, cwd)))
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("read {} for checksum", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn unique_temp_path(dest: &Path) -> Result<PathBuf> {
+    let mut index = 0u64;
+    loop {
+        let candidate = if let Some(ext) = dest.extension() {
+            let mut path = dest.to_path_buf();
+            let new_ext = format!("{}.{}.part", ext.to_string_lossy(), index);
+            path.set_extension(new_ext);
+            path
+        } else {
+            dest.with_extension(format!("part.{}", index))
+        };
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+        index += 1;
+    }
 }
 
 fn expand_required_path(raw: &str) -> Result<PathBuf> {
@@ -606,7 +793,8 @@ fn is_satisfied(step: &Step, run_command_checks: bool) -> Result<Option<String>>
         return Ok(None);
     };
     if let Some(path) = &check.path_exists {
-        let expanded = expand_path_template(&path.to_string_lossy()).unwrap_or_else(|| path.clone());
+        let expanded =
+            expand_path_template(&path.to_string_lossy()).unwrap_or_else(|| path.clone());
         if expanded.exists() {
             return Ok(Some(format!("path exists: {}", expanded.display())));
         }
@@ -697,6 +885,49 @@ mod tests {
         let root = PathBuf::from("/tmp/root");
         assert!(extracted_path_is_safe(&root, Path::new("dir/file.txt")));
         assert!(!extracted_path_is_safe(&root, Path::new("../escape.txt")));
+    }
+
+    #[test]
+    fn download_action_writes_file_and_verifies_checksum() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source.bin");
+        fs::write(&source, b"hello").unwrap();
+        let dest = tmp.path().join("downloaded.bin");
+        let checksum = crate::automation::task::Checksum {
+            sha256: sha256_file(&source).unwrap(),
+        };
+        let summary = apply_download_file(
+            &format!("file://{}", source.display()),
+            &dest.to_string_lossy(),
+            &checksum,
+        )
+        .unwrap();
+        assert!(dest.exists());
+        assert!(summary.contains("downloaded"));
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "hello");
+    }
+
+    #[test]
+    fn archive_action_extracts_only_safe_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("archive.tar");
+        let dest = tmp.path().join("out");
+        fs::write(tmp.path().join("payload.txt"), b"payload").unwrap();
+        let status = Command::new("tar")
+            .args([
+                "-cf",
+                &archive.to_string_lossy(),
+                "-C",
+                &tmp.path().to_string_lossy(),
+                "payload.txt",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let summary =
+            apply_extract_archive(&archive.to_string_lossy(), &dest.to_string_lossy()).unwrap();
+        assert!(summary.contains("extracted"));
+        assert!(dest.join("payload.txt").exists());
     }
 
     #[test]
@@ -798,7 +1029,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_mode_blocks_unimplemented_downloads() {
+    fn apply_mode_downloads_to_a_local_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("app.tgz");
+        fs::write(&source, b"payload").unwrap();
         let task = base_task(Step {
             id: "download".into(),
             name: String::new(),
@@ -807,10 +1041,14 @@ mod tests {
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
             action: Action::DownloadFile {
-                url: "https://example.com/app.tgz".into(),
-                dest: "$HOME/Library/Caches/app.tgz".into(),
+                url: format!("file://{}", source.display()),
+                dest: tmp
+                    .path()
+                    .join("downloaded.tgz")
+                    .to_string_lossy()
+                    .into_owned(),
                 checksum: Checksum {
-                    sha256: "abc".into(),
+                    sha256: sha256_file(&source).unwrap(),
                 },
             },
         });
@@ -822,8 +1060,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(matches!(report.steps[0].status, StepStatus::Failed));
-        assert_eq!(report.errors[0], "download apply mode is not implemented yet");
+        assert!(matches!(report.steps[0].status, StepStatus::Applied));
+        assert!(report.errors.is_empty());
     }
 
     #[test]

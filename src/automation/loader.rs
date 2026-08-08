@@ -82,17 +82,23 @@ fn validate_trust(task: &Task, trust: PackTrust, allow_external: bool, path: &Pa
     match (task.trust, trust) {
         (_, PackTrust::Bundled) => Ok(()),
         (TrustRequirement::BundledOnly, _) => {
-            anyhow::bail!("task {} in {} requires bundled trust", task.id, path.display())
+            anyhow::bail!(
+                "task {} in {} requires bundled trust",
+                task.id,
+                path.display()
+            )
         }
         (TrustRequirement::UserConfigAllowed, PackTrust::External) => anyhow::bail!(
             "task {} in {} requires user-config or bundled trust",
             task.id,
             path.display()
         ),
-        (TrustRequirement::ExternalAllowed, PackTrust::External) if !allow_external => anyhow::bail!(
-            "external task pack {} blocked; pass --trust-external-packs to allow it",
-            path.display()
-        ),
+        (TrustRequirement::ExternalAllowed, PackTrust::External) if !allow_external => {
+            anyhow::bail!(
+                "external task pack {} blocked; pass --trust-external-packs to allow it",
+                path.display()
+            )
+        }
         _ => Ok(()),
     }
 }
