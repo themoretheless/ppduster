@@ -117,7 +117,9 @@ enum Commands {
 #[derive(Subcommand, Debug)]
 enum SetupCmd {
     List,
-    Show { id: String },
+    Show {
+        id: String,
+    },
     Run {
         id: String,
         #[arg(long)]
@@ -151,7 +153,8 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let pack = load_pack(cli.rules_dir.as_ref())?;
+    let rule_dirs = discover_rule_dirs(cli.rules_dir.as_ref())?;
+    let pack = load_pack_from_dirs(&rule_dirs)?;
     let output = OutputFormat::from(cli.output);
 
     match cli.command {
@@ -218,7 +221,7 @@ fn run() -> Result<()> {
             RulesCmd::Show { id } => report::print_rule(&pack, &id, output)?,
         },
         Commands::Categories { all } => report::print_categories(&pack, all, output)?,
-        Commands::Doctor => report::print_doctor(&pack)?,
+        Commands::Doctor => report::print_doctor(&pack, &rule_dirs, output)?,
         Commands::Setup { action } => {
             let tasks = load_tasks(&action, cli.trust_external_packs)?;
             match action {
@@ -259,7 +262,7 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn load_pack(extra: Option<&PathBuf>) -> Result<RulePack> {
+fn discover_rule_dirs(extra: Option<&PathBuf>) -> Result<Vec<PathBuf>> {
     let mut dirs = Vec::new();
     let cwd_rules = std::env::current_dir()?.join("rules");
     if cwd_rules.is_dir() {
@@ -282,13 +285,26 @@ fn load_pack(extra: Option<&PathBuf>) -> Result<RulePack> {
     if let Some(extra) = extra {
         dirs.push(extra.clone());
     }
-    if dirs.is_empty() {
+
+    let mut unique_dirs = Vec::new();
+    for dir in dirs {
+        let canon = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+        if unique_dirs.iter().any(|d| d == &canon) {
+            continue;
+        }
+        unique_dirs.push(canon);
+    }
+    Ok(unique_dirs)
+}
+
+fn load_pack_from_dirs(rule_dirs: &[PathBuf]) -> Result<RulePack> {
+    if rule_dirs.is_empty() {
         anyhow::bail!(
             "no rules directory found; create ./rules or pass --rules-dir. \
              Run from the ppduster repo root or install rule packs."
         );
     }
-    RulePack::load_many(&dirs)
+    RulePack::load_many(rule_dirs)
 }
 
 fn flatten_categories(raw: Vec<String>) -> Vec<String> {

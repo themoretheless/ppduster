@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use bytesize::ByteSize;
 use colored::Colorize;
 use serde::Serialize;
+use std::path::PathBuf;
 use tabled::{
     settings::{object::Columns, Modify, Style, Width},
     Table, Tabled,
@@ -202,11 +203,24 @@ pub fn print_rules(pack: &RulePack, all: bool, output: OutputFormat) -> Result<(
             let mut table = Table::new(trows);
             table.with(Style::rounded());
             println!("{table}");
-            println!(
-                "{} rule(s) from {} file(s)",
-                rows.len(),
-                pack.sources.len()
-            );
+            let mut by_platform = std::collections::BTreeMap::<String, usize>::new();
+            let mut by_risk = std::collections::BTreeMap::<String, usize>::new();
+            for row in &rows {
+                *by_platform.entry(row.platform.to_string()).or_insert(0) += 1;
+                *by_risk.entry(row.risk.to_string()).or_insert(0) += 1;
+            }
+            println!("{} rule(s) from {} file(s)", rows.len(), pack.sources.len());
+            if !by_platform.is_empty() {
+                println!("{}", "Summary:".bold());
+                for (platform, count) in by_platform {
+                    println!("  platform {platform}: {count} rule(s)");
+                }
+            }
+            if !by_risk.is_empty() {
+                for (risk, count) in by_risk {
+                    println!("  risk {risk}: {count} rule(s)");
+                }
+            }
         }
     }
     Ok(())
@@ -256,31 +270,93 @@ pub fn print_categories(pack: &RulePack, all: bool, output: OutputFormat) -> Res
     Ok(())
 }
 
-pub fn print_doctor(pack: &RulePack) -> Result<()> {
-    println!("{}", "ppduster doctor".bold());
-    println!("  platform:     {}", host_platform_name());
-    println!(
-        "  home:         {}",
-        dirs::home_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(none)".into())
-    );
-    println!(
-        "  cache_dir:    {}",
-        dirs::cache_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(none)".into())
-    );
-    println!("  temp_dir:     {}", std::env::temp_dir().display());
-    println!("  rules loaded: {}", pack.rules.len());
-    println!("  rule files:   {}", pack.sources.len());
-    for s in &pack.sources {
-        println!("    - {}", s.display());
+#[derive(Serialize)]
+struct DoctorReport {
+    platform: String,
+    home: String,
+    cache_dir: String,
+    temp_dir: String,
+    rules_dirs: Vec<String>,
+    rules_loaded: usize,
+    rule_files: usize,
+    active_rules: usize,
+    active_by_platform: std::collections::BTreeMap<String, usize>,
+    active_by_risk: std::collections::BTreeMap<String, usize>,
+    safety: Vec<String>,
+}
+
+pub fn print_doctor(pack: &RulePack, rule_dirs: &[PathBuf], output: OutputFormat) -> Result<()> {
+    let active_rules = pack.active_rules(&[], false);
+    let mut active_by_platform = std::collections::BTreeMap::<String, usize>::new();
+    let mut active_by_risk = std::collections::BTreeMap::<String, usize>::new();
+    for rule in &active_rules {
+        *active_by_platform
+            .entry(rule.platform.as_str().to_string())
+            .or_insert(0) += 1;
+        *active_by_risk
+            .entry(rule.risk.as_str().to_string())
+            .or_insert(0) += 1;
     }
-    let active = pack.active_rules(&[], false).len();
-    println!("  active rules: {active} (default_enabled on this OS)");
-    println!("  safety:       dry-run default, trash delete, never-touch guards, age filters");
-    println!("{}", "ok".green().bold());
+    let report = DoctorReport {
+        platform: host_platform_name().to_string(),
+        home: dirs::home_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none)".into()),
+        cache_dir: dirs::cache_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none)".into()),
+        temp_dir: std::env::temp_dir().display().to_string(),
+        rules_dirs: rule_dirs.iter().map(|d| d.display().to_string()).collect(),
+        rules_loaded: pack.rules.len(),
+        rule_files: pack.sources.len(),
+        active_rules: active_rules.len(),
+        active_by_platform,
+        active_by_risk,
+        safety: vec![
+            "dry-run default".to_string(),
+            "trash delete".to_string(),
+            "never-touch guards".to_string(),
+            "age filters".to_string(),
+        ],
+    };
+
+    match output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        OutputFormat::Table => {
+            println!("{}", "ppduster doctor".bold());
+            println!("  platform:     {}", report.platform);
+            println!("  home:         {}", report.home);
+            println!("  cache_dir:    {}", report.cache_dir);
+            println!("  temp_dir:     {}", report.temp_dir);
+            println!("  rules dirs:   {}", report.rules_dirs.len());
+            for dir in &report.rules_dirs {
+                println!("    - {dir}");
+            }
+            println!("  rules loaded: {}", report.rules_loaded);
+            println!("  rule files:   {}", report.rule_files);
+            println!(
+                "  active rules: {} (default_enabled on this OS)",
+                report.active_rules
+            );
+            if !report.active_by_platform.is_empty() {
+                println!("  active by platform:");
+                for (platform, count) in report.active_by_platform {
+                    println!("    - {platform}: {count}");
+                }
+            }
+            if !report.active_by_risk.is_empty() {
+                println!("  active by risk:");
+                for (risk, count) in report.active_by_risk {
+                    println!("    - {risk}: {count}");
+                }
+            }
+            println!("  safety:");
+            for item in &report.safety {
+                println!("    - {item}");
+            }
+            println!("{}", "ok".green().bold());
+        }
+    }
     Ok(())
 }
 
@@ -315,7 +391,11 @@ pub fn print_setup(report: &RunReport, output: OutputFormat) -> Result<()> {
 
             println!("\n{}", "Logs:".bold());
             for step in &report.steps {
-                println!("  {} [{}]", step.step_name, render_step_status(&step.status));
+                println!(
+                    "  {} [{}]",
+                    step.step_name,
+                    render_step_status(&step.status)
+                );
                 for prerequisite in &step.prerequisites {
                     println!("    prerequisite: {prerequisite}");
                 }
