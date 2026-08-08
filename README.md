@@ -91,8 +91,8 @@ ppduster setup run macos-top-03-system-defaults --allow-shell
 ppduster setup run macos-top-08-security-baseline --allow-elevation
 
 # LightBurn 2.1.03: inspect the plan, then download/install/confirm activation
-ppduster setup run macos-lightburn-install-activate
-ppduster setup run macos-lightburn-install-activate --yes
+ppduster setup run lightburn-install-activate
+ppduster setup run lightburn-install-activate --yes
 
 # External task packs are blocked unless explicitly trusted
 ppduster --trust-external-packs setup run dev-brew-bootstrap --tasks-dir /path/to/tasks

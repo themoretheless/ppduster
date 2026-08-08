@@ -1,5 +1,5 @@
 task:
-  id: macos-lightburn-install-activate
+  id: lightburn-install-activate
   name: Install LightBurn 2.1.03 and guide activation
   description: Download the pinned official LightBurn DMG, install its signed app bundle for the current user, and open the vendor license UI for user-confirmed activation. Requires macOS 12 or newer; Apple Silicon requires Rosetta.
   platform: macos

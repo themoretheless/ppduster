@@ -116,7 +116,7 @@ fn bundled_dev_setup_includes_macos_top_fifty_tasks() {
     }
 
     assert!(
-        pack.get("macos-lightburn-install-activate").is_some(),
+        pack.get("lightburn-install-activate").is_some(),
         "expected bundled task pack to include the LightBurn scenario"
     );
 }
@@ -131,7 +131,7 @@ fn lightburn_task_downloads_installs_then_uses_vendor_ui() {
         false,
     )
     .unwrap();
-    let task = pack.get("macos-lightburn-install-activate").unwrap();
+    let task = pack.get("lightburn-install-activate").unwrap();
 
     assert_eq!(task.steps.len(), 4);
     assert!(matches!(
