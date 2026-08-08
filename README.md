@@ -60,6 +60,10 @@ ppduster scan -c caches,logs
 ppduster scan -c temp --min-age 0 --limit 50
 ppduster scan -o json > report.json
 
+# Audit trail for CLI operations
+ppduster --audit-log /tmp/ppduster-audit.log scan
+ppduster audit --limit 10
+
 # Clean: always review scan first
 ppduster clean -c caches          # dry-run
 ppduster clean -c caches --yes    # to Trash

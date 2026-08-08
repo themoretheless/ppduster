@@ -1,4 +1,5 @@
 //! Library surface for unit tests and embedding.
+pub mod audit;
 pub mod automation;
 pub mod clean;
 pub mod report;
