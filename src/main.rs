@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
+use ppduster::audit;
 use ppduster::automation::{run_task, PackTrust, RunOptions, TaskPack, TaskSource};
 use ppduster::clean;
 use ppduster::report::{self, OutputFormat};
@@ -44,6 +45,10 @@ struct Cli {
     /// Allow loading automation task packs from external directories.
     #[arg(long, global = true)]
     trust_external_packs: bool,
+
+    /// Write CLI activity to a JSONL audit log (defaults to ~/.local/share/ppduster/audit.log)
+    #[arg(long, global = true)]
+    audit_log: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Commands,
@@ -112,6 +117,11 @@ enum Commands {
         #[command(subcommand)]
         action: SetupCmd,
     },
+    /// Show recent audit entries
+    Audit {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -156,8 +166,14 @@ fn run() -> Result<()> {
     let rule_dirs = discover_rule_dirs(cli.rules_dir.as_ref())?;
     let pack = load_pack_from_dirs(&rule_dirs)?;
     let output = OutputFormat::from(cli.output);
+    let audit_path = audit::resolve_log_path(cli.audit_log.as_ref());
+    let log_audit = |action: &str, outcome: &str, detail: Option<&str>| {
+        if let Some(path) = audit_path.as_ref() {
+            let _ = audit::append_event(path, action, outcome, detail);
+        }
+    };
 
-    match cli.command {
+    let result: Result<()> = match cli.command {
         Commands::Scan {
             category,
             all,
@@ -171,6 +187,7 @@ fn run() -> Result<()> {
             };
             let report = scan::scan(&pack, &opts)?;
             report::print_scan(&report, output, limit)?;
+            Ok(())
         }
         Commands::Clean {
             category,
@@ -215,13 +232,26 @@ fn run() -> Result<()> {
             }
             let result = clean::clean(&report, permanent)?;
             report::print_clean(&result, output)?;
+            Ok(())
         }
         Commands::Rules { action } => match action {
-            RulesCmd::List { all } => report::print_rules(&pack, all, output)?,
-            RulesCmd::Show { id } => report::print_rule(&pack, &id, output)?,
+            RulesCmd::List { all } => {
+                report::print_rules(&pack, all, output)?;
+                Ok(())
+            }
+            RulesCmd::Show { id } => {
+                report::print_rule(&pack, &id, output)?;
+                Ok(())
+            }
         },
-        Commands::Categories { all } => report::print_categories(&pack, all, output)?,
-        Commands::Doctor => report::print_doctor(&pack, &rule_dirs, output)?,
+        Commands::Categories { all } => {
+            report::print_categories(&pack, all, output)?;
+            Ok(())
+        }
+        Commands::Doctor => {
+            report::print_doctor(&pack, &rule_dirs, output)?;
+            Ok(())
+        }
         Commands::Setup { action } => {
             let tasks = load_tasks(&action, cli.trust_external_packs)?;
             match action {
@@ -229,12 +259,14 @@ fn run() -> Result<()> {
                     for task in &tasks.tasks {
                         println!("{}\t{}", task.id, task.name);
                     }
+                    Ok(())
                 }
                 SetupCmd::Show { id } => {
                     let task = tasks
                         .get(&id)
                         .ok_or_else(|| anyhow::anyhow!("unknown task id {}", id))?;
                     println!("{}", serde_yaml::to_string(task)?);
+                    Ok(())
                 }
                 SetupCmd::Run {
                     id,
@@ -255,11 +287,48 @@ fn run() -> Result<()> {
                         },
                     )?;
                     report::print_setup(&report, output)?;
+                    Ok(())
                 }
             }
         }
+        Commands::Audit { limit } => {
+            let path = audit::resolve_log_path(cli.audit_log.as_ref()).unwrap_or_else(|| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(".ppduster-audit.log")
+            });
+            let entries = audit::read_events(&path)?;
+            if entries.is_empty() {
+                println!("No audit entries found.");
+            } else {
+                for entry in entries.iter().rev().take(limit) {
+                    println!(
+                        "{} {} {}{}",
+                        entry.timestamp,
+                        entry.action,
+                        entry.outcome,
+                        entry
+                            .detail
+                            .as_deref()
+                            .map(|detail| format!(" :: {detail}"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+            Ok(())
+        }
+    };
+
+    match result {
+        Ok(()) => {
+            log_audit("command", "completed", Some("cli command completed"));
+            Ok(())
+        }
+        Err(err) => {
+            log_audit("command", "failed", Some(&err.to_string()));
+            Err(err)
+        }
     }
-    Ok(())
 }
 
 fn discover_rule_dirs(extra: Option<&PathBuf>) -> Result<Vec<PathBuf>> {
