@@ -1,6 +1,6 @@
 use ppduster::automation::{
-    run_task, Action, LicenseMethod, LicenseProvider, PackTrust, RunOptions, TaskFile, TaskPack,
-    TaskSource,
+    run_task, Action, AppStoreOperation, LicenseMethod, LicenseProvider, PackTrust, RunOptions,
+    TaskFile, TaskPack, TaskSource,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -119,6 +119,93 @@ fn bundled_dev_setup_includes_macos_top_fifty_tasks() {
         pack.get("lightburn-install-activate").is_some(),
         "expected bundled task pack to include the LightBurn scenario"
     );
+    assert!(
+        pack.get("bambu-studio-install").is_some(),
+        "expected bundled task pack to include the Bambu Studio scenario"
+    );
+    assert!(
+        pack.get("app-store-bootstrap").is_some(),
+        "expected bundled task pack to include the App Store bootstrap scenario"
+    );
+}
+
+#[test]
+fn bambu_studio_task_pins_official_dmg_and_identity() {
+    let pack = TaskPack::load_many(
+        &[TaskSource {
+            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap();
+    let task = pack.get("bambu-studio-install").unwrap();
+
+    assert_eq!(task.steps.len(), 3);
+    assert!(matches!(
+        &task.steps[0].action,
+        Action::MacosRequirements { minimum_version, .. } if minimum_version == "10.15"
+    ));
+    assert!(matches!(
+        &task.steps[1].action,
+        Action::DownloadFile { checksum, .. }
+            if checksum.sha256 == "1e54c25aefc5249d56b63711cf773bed56f14430aafcc34340cd4894aef15896"
+    ));
+    assert!(matches!(
+        &task.steps[2].action,
+        Action::InstallDmg {
+            app_name: Some(app_name),
+            identity: Some(identity),
+            ..
+        } if app_name == "BambuStudio.app"
+            && identity.bundle_identifier == "com.bambulab.bambu-studio"
+            && identity.team_identifier == "T3UBR9Y3B2"
+            && identity.version == "02.07.01.62"
+    ));
+}
+
+#[test]
+fn app_store_install_action_is_typed_and_requires_elevation() {
+    let yaml = r#"
+task:
+  id: app-store-demo
+  name: App Store demo
+  platform: macos
+  steps:
+    - id: install
+      auth: sudo
+      allow_elevation: allow
+      type: app-store-install
+      app_id: 497799835
+      operation: install
+"#;
+
+    let task_file = serde_yaml::from_str::<TaskFile>(yaml).unwrap();
+    task_file.task.validate().unwrap();
+    assert!(matches!(
+        &task_file.task.steps[0].action,
+        Action::AppStoreInstall(action)
+            if action.app_id == 497799835
+                && action.operation == AppStoreOperation::Install
+    ));
+}
+
+#[test]
+fn app_store_install_rejects_missing_elevation_declaration() {
+    let yaml = r#"
+task:
+  id: unsafe-app-store
+  name: Unsafe App Store task
+  platform: macos
+  steps:
+    - id: install
+      type: app-store-install
+      app_id: 497799835
+"#;
+
+    let task_file = serde_yaml::from_str::<TaskFile>(yaml).unwrap();
+    let err = task_file.task.validate().unwrap_err();
+    assert!(err.contains("auth: sudo plus allow_elevation: allow"));
 }
 
 #[test]
@@ -249,6 +336,51 @@ task:
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("setup task failing-setup failed"));
+}
+
+#[test]
+fn setup_cli_plans_typed_app_store_install() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("app-store.yaml"),
+        r#"
+task:
+  id: app-store-cli-demo
+  name: App Store CLI demo
+  platform: macos
+  trust: external-allowed
+  steps:
+    - id: install-xcode
+      auth: sudo
+      allow_elevation: allow
+      type: app-store-install
+      app_id: 497799835
+      operation: install
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(bin())
+        .args([
+            "--trust-external-packs",
+            "setup",
+            "run",
+            "app-store-cli-demo",
+            "--allow-elevation",
+            "--tasks-dir",
+        ])
+        .arg(dir.path())
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("plan App Store setup task");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("mas install Mac App Store application 497799835"));
 }
 
 #[test]

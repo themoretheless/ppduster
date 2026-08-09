@@ -133,6 +133,22 @@ pub struct AppBundleIdentity {
     pub version: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppStoreOperation {
+    #[default]
+    Install,
+    Get,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppStoreInstallAction {
+    pub app_id: u64,
+    #[serde(default)]
+    pub operation: AppStoreOperation,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Action {
@@ -186,6 +202,7 @@ pub enum Action {
         #[serde(default)]
         require_rosetta_on_apple_silicon: bool,
     },
+    AppStoreInstall(AppStoreInstallAction),
     ActivateLicense(ActivateLicenseAction),
 }
 
@@ -318,6 +335,19 @@ impl Step {
                 if !valid_version(minimum_version) {
                     return Err(format!(
                         "step {} minimum_version must contain dot-separated integers",
+                        self.id
+                    ));
+                }
+            }
+            Action::AppStoreInstall(action) => {
+                if action.app_id == 0 {
+                    return Err(format!("step {} app_id must be greater than zero", self.id));
+                }
+                if !matches!(self.auth, AuthPolicy::Sudo)
+                    || !matches!(self.allow_elevation, ElevationPolicy::Allow)
+                {
+                    return Err(format!(
+                        "step {} app-store-install requires auth: sudo plus allow_elevation: allow",
                         self.id
                     ));
                 }

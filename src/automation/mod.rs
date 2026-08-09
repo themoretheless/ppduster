@@ -8,6 +8,7 @@ pub use runner::{
     StepReport, StepStatus,
 };
 pub use task::{
-    Action, ActivateLicenseAction, AppBundleIdentity, AuthPolicy, Check, Checksum, ElevationPolicy,
-    LicenseMethod, LicenseProvider, ShellMode, Step, Task, TaskFile, TrustRequirement,
+    Action, ActivateLicenseAction, AppBundleIdentity, AppStoreInstallAction, AppStoreOperation,
+    AuthPolicy, Check, Checksum, ElevationPolicy, LicenseMethod, LicenseProvider, ShellMode, Step,
+    Task, TaskFile, TrustRequirement,
 };

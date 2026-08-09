@@ -94,6 +94,14 @@ ppduster setup run macos-top-08-security-baseline --allow-elevation
 ppduster setup run lightburn-install-activate
 ppduster setup run lightburn-install-activate --yes
 
+# Bambu Studio 2.7.1.62: inspect the plan, then download/install
+ppduster setup run bambu-studio-install
+ppduster setup run bambu-studio-install --yes
+
+# Install/refresh the mas CLI used by app-store-install actions
+ppduster setup run app-store-bootstrap
+ppduster setup run app-store-bootstrap --yes
+
 # External task packs are blocked unless explicitly trusted
 ppduster --trust-external-packs setup run dev-brew-bootstrap --tasks-dir /path/to/tasks
 ```
@@ -108,7 +116,26 @@ Current safety posture:
 - external task packs require `--trust-external-packs`
 - download steps require `checksum.sha256`
 - DMG installation verifies the image, mounts it read-only, validates the app signature and Gatekeeper assessment, stages the bundle in `~/Applications`, and refuses elevation or overwriting an existing app
+- typed `app-store-install` steps use a numeric App Store ID through a standard Homebrew `mas` installation; they require explicit elevation permission and an App Store account that owns the app
 - the sealed `activate-license` action accepts only a provider and method, and task loading rejects `license_key` / `license-key` fields at any nesting level; enter the key directly in the vendor UI
+
+An App Store installation step looks like this:
+
+```yaml
+- id: install-xcode
+  name: Install Xcode
+  auth: sudo
+  allow_elevation: allow
+  type: app-store-install
+  app_id: 497799835
+  operation: install
+```
+
+Use `operation: install` for an app already obtained or purchased by the signed-in
+Apple Account. Use `operation: get` to obtain and install a free app. Apply the task
+with `--yes --allow-elevation`; Apple Account authentication remains in Apple's UI.
+The bundled bootstrap installs the current Homebrew Core `mas` and therefore requires
+macOS 14 or newer.
 
 The bundled LightBurn task pins the official macOS 2.1.03 DMG and an independently
 computed SHA-256 (LightBurn does not publish a SHA-256 manifest for this release). It
@@ -123,6 +150,11 @@ key. Version 2.1.03 must also fall within the key's update-validity period.
 LightBurn's documented `-l` command is intentionally not used: after normal activation
 it converts a closed installation to System Locked mode (and is also the first step for
 a specially tagged Floating key), while exposing the key in the process argument list.
+
+The bundled Bambu Studio task pins the official GitHub release DMG and its
+publisher-provided SHA-256. It requires macOS 10.15 or newer and verifies the exact
+`com.bambulab.bambu-studio` bundle, signing team, and version before installing it in
+`~/Applications`.
 
 Bundled macOS setup starters currently cover the top 50 bootstrap areas, starting with:
 

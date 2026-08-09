@@ -1,6 +1,6 @@
 use crate::automation::task::{
-    Action, AppBundleIdentity, AuthPolicy, ElevationPolicy, LicenseMethod, LicenseProvider,
-    ShellMode, Step, Task,
+    Action, AppBundleIdentity, AppStoreOperation, AuthPolicy, ElevationPolicy, LicenseMethod,
+    LicenseProvider, ShellMode, Step, Task,
 };
 use crate::rules::expand_path_template;
 use crate::safety::{is_safe_rule_root, stays_under_root};
@@ -187,11 +187,22 @@ fn run_task_with_interactivity(
                     message: "authorization granted; resuming".into(),
                 });
             }
-            if matches!(&step.action, Action::ActivateLicense(_)) {
+            if matches!(
+                &step.action,
+                Action::ActivateLicense(_) | Action::AppStoreInstall(_)
+            ) {
                 steps[step_idx].status = StepStatus::WaitingForAttention;
                 steps[step_idx].logs.push(StepLogEntry {
                     step_id: step.id.clone(),
-                    message: "waiting for license activation in the vendor UI".into(),
+                    message: match &step.action {
+                        Action::ActivateLicense(_) => {
+                            "waiting for license activation in the vendor UI".into()
+                        }
+                        Action::AppStoreInstall(_) => {
+                            "waiting for any required App Store authentication".into()
+                        }
+                        _ => unreachable!(),
+                    },
                 });
             } else {
                 steps[step_idx].status = StepStatus::Running;
@@ -437,6 +448,11 @@ fn plan_summary(step: &Step) -> Result<String> {
                 ""
             }
         ),
+        Action::AppStoreInstall(action) => format!(
+            "mas {} Mac App Store application {}",
+            app_store_operation_name(action.operation),
+            action.app_id
+        ),
         Action::ActivateLicense(action) => match (&action.provider, &action.method) {
             (LicenseProvider::LightBurn, LicenseMethod::VendorUi) =>
                 "launch LightBurn and wait for user-confirmed activation in its License Page; the license key is entered only in LightBurn"
@@ -463,6 +479,18 @@ fn prerequisites_for_step(step: &Step) -> Vec<String> {
             "enter the license key only in the vendor application; ppduster does not read, store, or log it"
                 .into(),
         );
+    }
+    if let Action::AppStoreInstall(action) = &step.action {
+        prerequisites.push(
+            "sign in to the Mac App Store with the Apple Account that owns the application; authentication stays in Apple's UI"
+                .into(),
+        );
+        if matches!(action.operation, AppStoreOperation::Install) {
+            prerequisites.push(
+                "the application must already be obtained or purchased; use operation: get for a free app that is not yet associated with the account"
+                    .into(),
+            );
+        }
     }
     prerequisites
 }
@@ -586,6 +614,7 @@ fn apply_step(step: &Step) -> Result<String> {
             minimum_version,
             require_rosetta_on_apple_silicon,
         } => apply_macos_requirements(minimum_version, *require_rosetta_on_apple_silicon),
+        Action::AppStoreInstall(action) => apply_app_store_install(action.app_id, action.operation),
         Action::ActivateLicense(action) => apply_activate_license(action.provider, action.method),
     }
 }
@@ -1249,6 +1278,105 @@ fn parse_version(value: &str) -> Result<Vec<u64>> {
         .collect()
 }
 
+fn app_store_operation_name(operation: AppStoreOperation) -> &'static str {
+    match operation {
+        AppStoreOperation::Install => "install",
+        AppStoreOperation::Get => "get",
+    }
+}
+
+fn app_store_command_arguments(app_id: u64, operation: AppStoreOperation) -> Vec<OsString> {
+    vec![
+        app_store_operation_name(operation).into(),
+        app_id.to_string().into(),
+    ]
+}
+
+fn resolve_mas_binary() -> Result<PathBuf> {
+    let candidates = ["/opt/homebrew/bin/mas", "/usr/local/bin/mas"];
+    let allowed_roots = ["/opt/homebrew/Cellar/mas", "/usr/local/Cellar/mas"];
+    for candidate in candidates {
+        let path = Path::new(candidate);
+        let Ok(canonical) = path.canonicalize() else {
+            continue;
+        };
+        if canonical.is_file()
+            && allowed_roots
+                .iter()
+                .any(|root| canonical.starts_with(Path::new(root)))
+        {
+            return Ok(canonical);
+        }
+    }
+    bail!(
+        "mas is unavailable from a standard Homebrew installation; run the bundled app-store-bootstrap task first"
+    )
+}
+
+fn mas_list_contains_app(output: &str, app_id: u64) -> bool {
+    let expected = app_id.to_string();
+    output.lines().any(|line| {
+        line.split_whitespace()
+            .next()
+            .is_some_and(|value| value == expected)
+    })
+}
+
+fn app_store_app_is_installed(mas: &Path, app_id: u64) -> Result<bool> {
+    let output = Command::new(mas)
+        .args(["list", &app_id.to_string()])
+        .output()
+        .with_context(|| format!("check Mac App Store application {}", app_id))?;
+    if !output.status.success() {
+        bail!(
+            "mas list failed while checking application {}: {}",
+            app_id,
+            command_error_detail(&output)
+        );
+    }
+    Ok(mas_list_contains_app(
+        &String::from_utf8_lossy(&output.stdout),
+        app_id,
+    ))
+}
+
+fn apply_app_store_install(app_id: u64, operation: AppStoreOperation) -> Result<String> {
+    if !cfg!(target_os = "macos") {
+        bail!("app-store-install is only supported on macOS");
+    }
+    let mas = resolve_mas_binary()?;
+    if app_store_app_is_installed(&mas, app_id)? {
+        return Ok(format!(
+            "Mac App Store application {} is already installed",
+            app_id
+        ));
+    }
+    let arguments = app_store_command_arguments(app_id, operation);
+    let output = Command::new(&mas)
+        .args(arguments)
+        .output()
+        .with_context(|| {
+            format!(
+                "mas {} Mac App Store application {}",
+                app_store_operation_name(operation),
+                app_id
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "mas {} failed for Mac App Store application {}: {}",
+            app_store_operation_name(operation),
+            app_id,
+            command_error_detail(&output)
+        );
+    }
+    Ok(format!(
+        "mas {} completed for Mac App Store application {}",
+        app_store_operation_name(operation),
+        app_id
+    ))
+}
+
 fn apply_install_pkg(pkg: &str, target: Option<&str>) -> Result<String> {
     let pkg_path = expand_required_path(pkg)?;
     if !pkg_path.exists() {
@@ -1560,6 +1688,15 @@ impl ExitStatusExt for ExitStatus {
 
 fn is_satisfied(step: &Step, run_command_checks: bool) -> Result<Option<String>> {
     if run_command_checks {
+        if let Action::AppStoreInstall(action) = &step.action {
+            let mas = resolve_mas_binary()?;
+            if app_store_app_is_installed(&mas, action.app_id)? {
+                return Ok(Some(format!(
+                    "Mac App Store application {} is already installed",
+                    action.app_id
+                )));
+            }
+        }
         if let Action::InstallDmg {
             app_name: Some(app_name),
             target,
@@ -1615,7 +1752,8 @@ pub fn extracted_path_is_safe(root: &Path, rel: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::automation::task::{
-        ActivateLicenseAction, AppBundleIdentity, Checksum, Task, TrustRequirement,
+        ActivateLicenseAction, AppBundleIdentity, AppStoreInstallAction, Checksum, Task,
+        TrustRequirement,
     };
     use std::path::PathBuf;
 
@@ -2197,6 +2335,59 @@ mod tests {
         assert!(requirement.contains("identifier \"com.LightBurnSoftware.LightBurn\""));
         assert!(requirement.contains("subject.OU] = \"UWZQ3LL82C\""));
         assert!(requirement.contains("CFBundleShortVersionString] = \"2.1.03\""));
+    }
+
+    #[test]
+    fn app_store_install_plan_is_typed_and_reports_prerequisites() {
+        let task = base_task(Step {
+            id: "install-xcode".into(),
+            name: String::new(),
+            auth: AuthPolicy::Sudo,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Allow,
+            action: Action::AppStoreInstall(AppStoreInstallAction {
+                app_id: 497_799_835,
+                operation: AppStoreOperation::Install,
+            }),
+        });
+
+        let report = run_task(
+            &task,
+            &RunOptions {
+                allow_elevation: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(report.plans[0]
+            .summary
+            .contains("mas install Mac App Store application 497799835"));
+        assert!(report.plans[0]
+            .prerequisites
+            .iter()
+            .any(|item| item.contains("Mac App Store")));
+        assert!(report.plans[0]
+            .prerequisites
+            .iter()
+            .any(|item| item.contains("operation: get")));
+    }
+
+    #[test]
+    fn mas_list_parser_and_command_arguments_use_exact_app_id() {
+        assert!(mas_list_contains_app(
+            "497799835 Xcode (26.4)\n",
+            497_799_835
+        ));
+        assert!(!mas_list_contains_app(
+            "497799835 Xcode (26.4)\n",
+            409_183_694
+        ));
+        assert_eq!(
+            app_store_command_arguments(497_799_835, AppStoreOperation::Get),
+            vec![OsString::from("get"), OsString::from("497799835")]
+        );
     }
 
     #[cfg(unix)]
