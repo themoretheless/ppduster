@@ -73,6 +73,11 @@ blocks under `<destination root>/<owner>/<repository>`, so plans, statuses, and 
 stay separate. Private, archived,
 empty, and no-`main` repositories cannot be selected; SSH is not offered in the GUI.
 
+The visual constructor also provides a read-only **Get account repositories** GitHub
+block. Its typed output contains `github.account.login` and `github.repositories[]`.
+Each repository exposes `id`, `owner`, `name`, `full_name`, `https_url`, `ssh_url`,
+`default_branch`, `private`, and `archived`.
+
 ppduster does not request or store a GitHub token. If `gh` is not authenticated, the
 picker offers **Sign in with GitHub** and starts `gh auth login --web --clipboard` in the
 background. GitHub CLI opens the browser, copies its one-time device code to the

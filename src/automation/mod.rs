@@ -6,7 +6,8 @@ pub mod task;
 
 pub use loader::{PackTrust, TaskPack, TaskSource};
 pub use runner::{
-    describe_step, run_task, ActionOutcome, ActionPlan, AutomationError, PathMetadataOutput,
+    describe_step, run_task, ActionOutcome, ActionPlan, AutomationError, GithubAccountOutput,
+    GithubContextOutput, GithubRepositoriesOutput, GithubRepositoryOutput, PathMetadataOutput,
     ProcessExitOutput, RunOptions, RunReport, StepLogEntry, StepOutput, StepReport, StepStatus,
 };
 pub use task::{
