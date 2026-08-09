@@ -29,6 +29,7 @@ const GH_LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const ACCESSIBLE_REPOSITORIES_QUERY: &str = r#"
 query($endCursor: String) {
   viewer {
+    login
     repositories(
       first: 100
       after: $endCursor
@@ -87,6 +88,13 @@ pub struct GithubRepository {
     pub owner_name: Option<String>,
 }
 
+/// Authenticated GitHub account together with every repository visible to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubAccountRepositories {
+    pub login: String,
+    pub repositories: Vec<GithubRepository>,
+}
+
 /// List repositories visible to the user authenticated through GitHub CLI.
 ///
 /// The call is noninteractive and asks `gh api graphql` to paginate all
@@ -94,7 +102,12 @@ pub struct GithubRepository {
 /// organization membership. GitHub CLI remains solely responsible for its
 /// credentials; this function never reads or stores a token.
 pub fn list_accessible_repositories() -> Result<Vec<GithubRepository>> {
-    list_accessible_repositories_inner().map_err(|error| {
+    Ok(get_account_repositories()?.repositories)
+}
+
+/// Return the authenticated account login and its accessible repositories.
+pub fn get_account_repositories() -> Result<GithubAccountRepositories> {
+    get_account_repositories_inner().map_err(|error| {
         anyhow::anyhow!(sanitize_command_detail(
             &format!("{error:#}"),
             GH_DISPLAY_ERROR_LIMIT,
@@ -154,7 +167,7 @@ fn run_login_via_web_command(gh: &Path, limits: CommandLimits) -> Result<Bounded
     run_bounded_command(command, limits, "GitHub authorization")
 }
 
-fn list_accessible_repositories_inner() -> Result<Vec<GithubRepository>> {
+fn get_account_repositories_inner() -> Result<GithubAccountRepositories> {
     let gh = discover_gh().ok_or_else(|| {
         anyhow::anyhow!(
             "GitHub CLI (`gh`) was not found in PATH, /opt/homebrew/bin, or /usr/local/bin. Install it and authenticate with `gh auth login`."
@@ -189,7 +202,7 @@ fn list_accessible_repositories_inner() -> Result<Vec<GithubRepository>> {
         );
     }
 
-    parse_accessible_repositories(&output.stdout)
+    parse_account_repositories(&output.stdout)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -510,11 +523,12 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-fn parse_accessible_repositories(input: &[u8]) -> Result<Vec<GithubRepository>> {
+fn parse_account_repositories(input: &[u8]) -> Result<GithubAccountRepositories> {
     let pages: Vec<GraphqlPage> =
         serde_json::from_slice(input).context("parse paginated GitHub repository response")?;
     let mut repositories: Vec<GithubRepository> = Vec::new();
     let mut seen_ids = HashSet::new();
+    let mut account_login: Option<String> = None;
 
     for page in pages {
         if !page.errors.is_empty() {
@@ -535,7 +549,18 @@ fn parse_accessible_repositories(input: &[u8]) -> Result<Vec<GithubRepository>> 
                 "GitHub API returned no repository data. Check `gh auth status`; authenticate or refresh access with `gh auth login`."
             )
         })?;
-        for repository in data.viewer.repositories.nodes.into_iter().flatten() {
+        let viewer = data.viewer;
+        if viewer.login.trim().is_empty() {
+            bail!("GitHub API returned an empty viewer login");
+        }
+        if let Some(login) = &account_login {
+            if login != &viewer.login {
+                bail!("GitHub API returned inconsistent viewer logins across pages");
+            }
+        } else {
+            account_login = Some(viewer.login.clone());
+        }
+        for repository in viewer.repositories.nodes.into_iter().flatten() {
             if seen_ids.insert(repository.id.clone()) {
                 repositories.push(repository.into());
             }
@@ -549,7 +574,10 @@ fn parse_accessible_repositories(input: &[u8]) -> Result<Vec<GithubRepository>> 
             .then_with(|| left.name_with_owner.cmp(&right.name_with_owner))
             .then_with(|| left.id.cmp(&right.id))
     });
-    Ok(repositories)
+    Ok(GithubAccountRepositories {
+        login: account_login.ok_or_else(|| anyhow::anyhow!("GitHub API returned no pages"))?,
+        repositories,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -571,6 +599,7 @@ struct GraphqlData {
 
 #[derive(Debug, Deserialize)]
 struct GraphqlViewer {
+    login: String,
     repositories: GraphqlRepositories,
 }
 
@@ -632,6 +661,7 @@ mod tests {
   {
     "data": {
       "viewer": {
+        "login": "octocat",
         "repositories": {
           "nodes": [
             {
@@ -668,6 +698,7 @@ mod tests {
   {
     "data": {
       "viewer": {
+        "login": "octocat",
         "repositories": {
           "nodes": [
             {
@@ -693,8 +724,10 @@ mod tests {
 
     #[test]
     fn parses_flattens_deduplicates_and_sorts_repository_pages() {
-        let repositories = parse_accessible_repositories(REPOSITORY_PAGES.as_bytes()).unwrap();
+        let account = parse_account_repositories(REPOSITORY_PAGES.as_bytes()).unwrap();
+        let repositories = account.repositories;
 
+        assert_eq!(account.login, "octocat");
         assert_eq!(repositories.len(), 2);
         assert_eq!(repositories[0].name_with_owner, "Acme/alpha");
         assert_eq!(repositories[0].name, "alpha");
@@ -711,7 +744,7 @@ mod tests {
 
     #[test]
     fn graphql_errors_include_an_authentication_recovery_hint() {
-        let error = parse_accessible_repositories(
+        let error = parse_account_repositories(
             br#"[{"data":null,"errors":[{"message":"Resource not accessible"}]}]"#,
         )
         .unwrap_err()
@@ -728,7 +761,7 @@ mod tests {
             "data": null,
             "errors": [{ "message": message }]
         }]);
-        let error = parse_accessible_repositories(response.to_string().as_bytes())
+        let error = parse_account_repositories(response.to_string().as_bytes())
             .unwrap_err()
             .to_string();
 
@@ -739,6 +772,7 @@ mod tests {
 
     #[test]
     fn query_requests_all_accessible_affiliations_and_picker_fields() {
+        assert!(ACCESSIBLE_REPOSITORIES_QUERY.contains("viewer {\n    login"));
         for expected in [
             "OWNER",
             "COLLABORATOR",

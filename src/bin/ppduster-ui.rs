@@ -129,6 +129,7 @@ fn project_entry_mut<'a>(
 
 #[derive(Debug, Clone, Copy)]
 enum ComposerBlockKind {
+    GithubListRepositories,
     GitInspect,
     GitCloneIfMissing,
     GitFetch,
@@ -142,7 +143,8 @@ enum ComposerBlockKind {
 }
 
 impl ComposerBlockKind {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
+        Self::GithubListRepositories,
         Self::GitInspect,
         Self::GitCloneIfMissing,
         Self::GitFetch,
@@ -157,6 +159,7 @@ impl ComposerBlockKind {
 
     fn title(self) -> &'static str {
         match self {
+            Self::GithubListRepositories => "Получить репозитории аккаунта",
             Self::GitInspect => "Проверить Git-репозиторий",
             Self::GitCloneIfMissing => "Клонировать, если отсутствует",
             Self::GitFetch => "Получить remote-ветку",
@@ -172,6 +175,7 @@ impl ComposerBlockKind {
 
     fn category(self) -> &'static str {
         match self {
+            Self::GithubListRepositories => "GITHUB",
             Self::GitInspect | Self::GitCloneIfMissing | Self::GitFetch | Self::GitFastForward => {
                 "GIT"
             }
@@ -309,19 +313,31 @@ impl ScenarioApp {
             .selected_task()
             .ok_or_else(|| anyhow::anyhow!("сценарий не выбран"))?;
         if self.custom_project.is_some() {
-            return Ok(task.clone());
+            if github_picker_source_steps(task).is_none() {
+                return Ok(task.clone());
+            }
+            return materialize_github_repositories(
+                task.clone(),
+                &self.github_picker.repositories,
+                &self.github_picker.selected_ids,
+                &self.github_picker.destination_root,
+            );
         }
         let resolved = self
             .task_pack
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("библиотека сценариев не загружена"))?
             .resolve(&task.id)?;
-        materialize_github_repositories(
-            resolved,
-            &self.github_picker.repositories,
-            &self.github_picker.selected_ids,
-            &self.github_picker.destination_root,
-        )
+        if github_picker_source_steps(&resolved).is_some() {
+            materialize_github_repositories(
+                resolved,
+                &self.github_picker.repositories,
+                &self.github_picker.selected_ids,
+                &self.github_picker.destination_root,
+            )
+        } else {
+            Ok(resolved)
+        }
     }
 
     fn invalidate_plan(&mut self) {
@@ -596,6 +612,25 @@ impl ScenarioApp {
         scenario_path.push(entries.len() - 1);
         self.selected_project_scenario = Some(scenario_path);
         self.selected_step = None;
+        self.invalidate_plan();
+    }
+
+    fn add_github_project_scenario(&mut self) {
+        let path = self.selected_project_group.clone();
+        let Some(project) = self.custom_project.as_mut() else {
+            return;
+        };
+        let Some(entries) = project_group_entries_mut(project, &path) else {
+            return;
+        };
+        let ordinal = entries.len() + 1;
+        entries.push(ProjectEntry::Scenario {
+            task: github_repository_composer_task(ordinal),
+        });
+        let mut scenario_path = path;
+        scenario_path.push(entries.len() - 1);
+        self.selected_project_scenario = Some(scenario_path);
+        self.selected_step = Some(0);
         self.invalidate_plan();
     }
 
@@ -1399,6 +1434,16 @@ impl ScenarioApp {
                 self.add_project_scenario();
             }
         });
+        if ui
+            .add_enabled(
+                !self.running,
+                egui::Button::new("＋ GitHub · репозитории аккаунта")
+                    .min_size(Vec2::new(ui.available_width(), 30.0)),
+            )
+            .clicked()
+        {
+            self.add_github_project_scenario();
+        }
         ui.add_space(4.0);
         let project = self.custom_project.clone().expect("project checked above");
         let mut tree_action = None;
@@ -1993,6 +2038,53 @@ impl ScenarioApp {
         }
         if let Some(index) = remove {
             self.remove_composer_step(index);
+        }
+
+        let is_github_repository_scenario = self
+            .selected_task()
+            .is_some_and(|task| github_picker_source_steps(task).is_some());
+        if is_github_repository_scenario {
+            ui.add_space(14.0);
+            section_label(ui, "УЧЁТНАЯ ЗАПИСЬ GITHUB");
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Загрузите репозитории, доступные текущей сессии GitHub CLI, и выберите нужные для этого сценария.",
+                    )
+                    .size(9.0)
+                    .color(MUTED),
+                )
+                .wrap(),
+            );
+            ui.add_space(6.0);
+            let selected_count = self.github_picker.selected_ids.len();
+            if ui
+                .add_enabled(
+                    !self.running,
+                    egui::Button::new(if selected_count == 0 {
+                        "Получить список репозиториев…".into()
+                    } else {
+                        format!("Выбрано {selected_count} · изменить…")
+                    })
+                    .min_size(Vec2::new(ui.available_width(), 32.0)),
+                )
+                .clicked()
+            {
+                self.github_picker.open = true;
+                if self.github_picker.repositories.is_empty() && !self.github_picker.loading {
+                    self.start_github_repository_load(ui.ctx());
+                }
+            }
+            if selected_count > 0 {
+                ui.label(
+                    RichText::new(format!(
+                        "Ветка: main · папка: {}",
+                        self.github_picker.destination_root
+                    ))
+                    .size(8.0)
+                    .color(PURPLE),
+                );
+            }
         }
 
         ui.add_space(14.0);
@@ -2785,6 +2877,23 @@ fn default_github_destination_root() -> String {
         .unwrap_or_else(|| "$HOME/Developer".into())
 }
 
+fn github_repository_composer_task(ordinal: usize) -> Task {
+    let steps = vec![composer_step(
+        ComposerBlockKind::GithubListRepositories,
+        "list-repositories".into(),
+    )];
+    Task {
+        id: format!("github-repositories-{ordinal}"),
+        name: "Получить репозитории GitHub".into(),
+        description: "Получить логин текущей учётной записи GitHub CLI и массив полной метаинформации о доступных репозиториях.".into(),
+        platform: ppduster::rules::Platform::Macos,
+        trust: TrustRequirement::ExternalAllowed,
+        scenarios: Vec::new(),
+        resolved_scenarios: Vec::new(),
+        steps,
+    }
+}
+
 fn materialize_github_repositories(
     mut task: Task,
     repositories: &[GithubRepository],
@@ -2994,6 +3103,7 @@ fn github_step_slug(repository: &GithubRepository) -> String {
 
 fn composer_block_id(kind: ComposerBlockKind) -> &'static str {
     match kind {
+        ComposerBlockKind::GithubListRepositories => "list-github-repositories",
         ComposerBlockKind::GitInspect => "inspect-repository",
         ComposerBlockKind::GitCloneIfMissing => "clone-repository",
         ComposerBlockKind::GitFetch => "fetch-repository",
@@ -3009,6 +3119,9 @@ fn composer_block_id(kind: ComposerBlockKind) -> &'static str {
 
 fn composer_output_context(kind: ComposerBlockKind) -> &'static str {
     match kind {
+        ComposerBlockKind::GithubListRepositories => {
+            "github.account.login, github.repositories[]: { id, owner, name, full_name, https_url, ssh_url, default_branch, private, archived }"
+        }
         ComposerBlockKind::GitInspect => {
             "repository.exists, repository.path, repository.remote_url"
         }
@@ -3034,6 +3147,9 @@ fn composer_output_context(kind: ComposerBlockKind) -> &'static str {
 
 fn composer_step_output_context(step: &Step) -> &'static str {
     match &step.action {
+        Action::GithubListRepositories => {
+            composer_output_context(ComposerBlockKind::GithubListRepositories)
+        }
         Action::GitInspect { .. } => composer_output_context(ComposerBlockKind::GitInspect),
         Action::GitCloneIfMissing { .. } => {
             composer_output_context(ComposerBlockKind::GitCloneIfMissing)
@@ -3054,6 +3170,7 @@ fn composer_step(kind: ComposerBlockKind, id: String) -> Step {
     let repository = "https://github.com/owner/repository.git".to_owned();
     let destination = "$HOME/Developer/owner/repository".to_owned();
     let action = match kind {
+        ComposerBlockKind::GithubListRepositories => Action::GithubListRepositories,
         ComposerBlockKind::GitInspect => Action::GitInspect {
             repo: repository,
             dest: destination,
@@ -3269,6 +3386,15 @@ fn paint_composer_step_editor(ui: &mut egui::Ui, step: &mut Step, dark: bool) ->
     changed |= ui.text_edit_singleline(&mut step.id).changed();
     ui.add_space(8.0);
     match &mut step.action {
+        Action::GithubListRepositories => {
+            ui.label(
+                RichText::new(
+                    "Блок использует текущую учётную запись GitHub CLI и не требует параметров.",
+                )
+                .size(9.0)
+                .color(MUTED),
+            );
+        }
         Action::GitInspect { repo, dest } => {
             changed |= composer_text_field(ui, "Repository URL", repo);
             changed |= composer_text_field(ui, "Локальная папка", dest);
@@ -3705,6 +3831,7 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, dark: bool) {
 
 fn action_color(action: &Action) -> Color32 {
     match action {
+        Action::GithubListRepositories => PURPLE,
         Action::CreateDirectory(_) | Action::InspectPath(_) | Action::WriteFile(_) => CYAN,
         Action::CopyPath(_)
         | Action::DownloadFile { .. }
@@ -3728,6 +3855,7 @@ fn action_color(action: &Action) -> Color32 {
 
 fn action_icon(action: &Action) -> &'static str {
     match action {
+        Action::GithubListRepositories => "GH",
         Action::CreateDirectory(_) => "+DIR",
         Action::InspectPath(_) => "INFO",
         Action::CopyPath(_) => "COPY",
@@ -3757,6 +3885,7 @@ fn action_icon(action: &Action) -> &'static str {
 
 fn action_eyebrow(action: &Action) -> &'static str {
     match action {
+        Action::GithubListRepositories => "Репозитории GitHub",
         Action::CreateDirectory(_) => "Папка",
         Action::InspectPath(_) => "Метаданные",
         Action::CopyPath(_) => "Копирование",
@@ -3858,7 +3987,8 @@ fn action_supports_gui_run(action: &Action) -> bool {
         | Action::AppStoreInstall(_)
         | Action::RunScript { .. }
         | Action::ConfigurePackageRegistryFiles { .. } => false,
-        Action::CreateDirectory(_)
+        Action::GithubListRepositories
+        | Action::CreateDirectory(_)
         | Action::InspectPath(_)
         | Action::CopyPath(_)
         | Action::WriteFile(_)
@@ -4409,6 +4539,35 @@ project:
         for kind in ComposerBlockKind::ALL {
             assert!(!composer_output_context(kind).trim().is_empty());
         }
+    }
+
+    #[test]
+    fn github_composer_scenario_publishes_repository_array_contract() {
+        let task = github_repository_composer_task(3);
+
+        assert_eq!(task.id, "github-repositories-3");
+        assert_eq!(task.name, "Получить репозитории GitHub");
+        assert_eq!(task.steps.len(), 1);
+        assert!(matches!(
+            task.steps[0].action,
+            Action::GithubListRepositories
+        ));
+        assert_eq!(
+            composer_step_output_context(&task.steps[0]),
+            "github.account.login, github.repositories[]: { id, owner, name, full_name, https_url, ssh_url, default_branch, private, archived }"
+        );
+        assert!(task
+            .steps
+            .iter()
+            .all(|step| matches!(step.auth, AuthPolicy::None)));
+        task.validate().unwrap();
+        let yaml = serde_yaml::to_string(&TaskFile { task }).unwrap();
+        assert!(yaml.contains("type: github-list-repositories"));
+        let round_trip: TaskFile = serde_yaml::from_str(&yaml).unwrap();
+        assert!(matches!(
+            round_trip.task.steps[0].action,
+            Action::GithubListRepositories
+        ));
     }
 
     fn standalone_github_picker_task(pack: &TaskPack) -> Task {

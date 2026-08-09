@@ -4,6 +4,7 @@ use crate::automation::task::{
     InspectPathAction, LicenseMethod, LicenseProvider, PathExpectation, PathKind, ReleaseChannel,
     ScriptInterpreter, ShellMode, Step, StepCondition, Task, WriteConflictPolicy,
 };
+use crate::github::get_account_repositories;
 use crate::ppstore::{self, InstallOutcome};
 use crate::rules::expand_path_template;
 use crate::safety::{is_safe_rule_root, stays_under_root};
@@ -80,8 +81,38 @@ pub struct StepReport {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "kebab-case")]
 pub enum StepOutput {
+    GithubRepositories(GithubRepositoriesOutput),
     PathMetadata(PathMetadataOutput),
     ProcessExit(ProcessExitOutput),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GithubRepositoriesOutput {
+    pub github: GithubContextOutput,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GithubContextOutput {
+    pub account: GithubAccountOutput,
+    pub repositories: Vec<GithubRepositoryOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GithubAccountOutput {
+    pub login: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GithubRepositoryOutput {
+    pub id: String,
+    pub owner: String,
+    pub name: String,
+    pub full_name: String,
+    pub https_url: String,
+    pub ssh_url: String,
+    pub default_branch: Option<String>,
+    pub private: bool,
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -967,6 +998,9 @@ fn plan_step(step: &Step, opts: &RunOptions) -> Result<ActionPlan> {
 /// sees the same technical description before and during execution.
 pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
     let summary = match &step.action {
+        Action::GithubListRepositories => {
+            "list repositories visible to the GitHub CLI account and return the account login plus typed GitHub repository metadata".into()
+        }
         Action::CreateDirectory(action) => format!(
             "create directory {} and missing parents; leave an existing real directory unchanged and never replace a file or symlink",
             action.path
@@ -1194,6 +1228,12 @@ fn prerequisites_for_step(step: &Step) -> Vec<String> {
             "authenticate with sudo once if the session does not already have an active sudo timestamp; later elevated steps can reuse it until the sudo timeout expires"
                 .into(),
         ),
+    }
+    if matches!(&step.action, Action::GithubListRepositories) {
+        prerequisites.push(
+            "GitHub CLI must be installed and authenticated for github.com; credentials remain owned by GitHub CLI"
+                .into(),
+        );
     }
     if matches!(&step.action, Action::ActivateLicense(_)) {
         prerequisites.push(
@@ -1478,6 +1518,7 @@ fn prompt_once(message: &str) -> Result<()> {
 
 fn apply_step(step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
     match &step.action {
+        Action::GithubListRepositories => apply_github_list_repositories(),
         Action::CreateDirectory(action) => apply_create_directory(&action.path),
         Action::InspectPath(action) => {
             let metadata = inspect_path(action)?;
@@ -1575,6 +1616,36 @@ fn apply_step(step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
             apply_activate_license(action.provider, action.method).map(ApplyStepResult::Applied)
         }
     }
+}
+
+fn apply_github_list_repositories() -> Result<ApplyStepResult> {
+    let account = get_account_repositories()?;
+    let login = account.login;
+    let repositories = account
+        .repositories
+        .into_iter()
+        .map(|repository| GithubRepositoryOutput {
+            id: repository.id,
+            owner: repository.owner,
+            name: repository.name,
+            full_name: repository.name_with_owner,
+            https_url: repository.url,
+            ssh_url: repository.ssh_url,
+            default_branch: repository.default_branch,
+            private: repository.is_private,
+            archived: repository.is_archived,
+        })
+        .collect::<Vec<_>>();
+    let summary = format!("found {} GitHub repositories", repositories.len());
+    Ok(ApplyStepResult::AppliedWithOutput {
+        summary,
+        output: StepOutput::GithubRepositories(GithubRepositoriesOutput {
+            github: GithubContextOutput {
+                account: GithubAccountOutput { login },
+                repositories,
+            },
+        }),
+    })
 }
 
 fn apply_create_directory(raw_path: &str) -> Result<ApplyStepResult> {
@@ -7467,6 +7538,45 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
         )
         .unwrap();
         assert!(report.plans[0].summary.contains("latest Bambu Studio beta"));
+    }
+
+    #[test]
+    fn github_repository_output_serializes_full_typed_context() {
+        let output = StepOutput::GithubRepositories(GithubRepositoriesOutput {
+            github: GithubContextOutput {
+                account: GithubAccountOutput {
+                    login: "octocat".into(),
+                },
+                repositories: vec![GithubRepositoryOutput {
+                    id: "R_123".into(),
+                    owner: "owner".into(),
+                    name: "repository".into(),
+                    full_name: "owner/repository".into(),
+                    https_url: "https://github.com/owner/repository".into(),
+                    ssh_url: "git@github.com:owner/repository.git".into(),
+                    default_branch: Some("main".into()),
+                    private: true,
+                    archived: false,
+                }],
+            },
+        });
+
+        let json = serde_json::to_value(output).unwrap();
+        assert_eq!(json["type"], "github-repositories");
+        assert_eq!(json["value"]["github"]["account"]["login"], "octocat");
+        let repository = &json["value"]["github"]["repositories"][0];
+        assert_eq!(repository["id"], "R_123");
+        assert_eq!(repository["owner"], "owner");
+        assert_eq!(repository["name"], "repository");
+        assert_eq!(repository["full_name"], "owner/repository");
+        assert_eq!(
+            repository["https_url"],
+            "https://github.com/owner/repository"
+        );
+        assert_eq!(repository["ssh_url"], "git@github.com:owner/repository.git");
+        assert_eq!(repository["default_branch"], "main");
+        assert_eq!(repository["private"], true);
+        assert_eq!(repository["archived"], false);
     }
 
     #[test]

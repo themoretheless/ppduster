@@ -499,6 +499,7 @@ fn default_script_success_exit_codes() -> Vec<u32> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Action {
+    GithubListRepositories,
     CreateDirectory(CreateDirectoryAction),
     InspectPath(InspectPathAction),
     CopyPath(CopyPathAction),
@@ -749,6 +750,17 @@ impl Step {
             condition.validate(&self.id)?;
         }
         match &self.action {
+            Action::GithubListRepositories => {
+                if !matches!(self.auth, AuthPolicy::None)
+                    || !matches!(self.allow_elevation, ElevationPolicy::Forbidden)
+                    || self.dangerous
+                {
+                    return Err(format!(
+                        "step {} github-list-repositories must be read-only and must not request authentication or elevation",
+                        self.id
+                    ));
+                }
+            }
             Action::CreateDirectory(action) => {
                 if action.path.trim().is_empty() {
                     return Err(format!("step {} requires path", self.id));
