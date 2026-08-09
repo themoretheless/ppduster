@@ -906,7 +906,7 @@ fn app_store_install_rejects_privilege_declarations() {
 task:
   id: overprivileged-app-store
   name: Overprivileged App Store task
-  description: Demonstrates that native App Store steps reject unnecessary privileges.
+  description: Demonstrates that delegated ppstore steps reject unnecessary privileges.
   platform: macos
   steps:
     - id: install
@@ -1094,7 +1094,7 @@ task:
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout)
-        .contains("native App Store install download for application 497799835"));
+        .contains("App Store install request for application 497799835"));
 }
 
 #[test]
@@ -1688,6 +1688,79 @@ fn encrypted_vault_rejects_repo_paths_and_audit_aliases_before_reading_secrets()
         "unread-token-canary",
         "unread-password-canary",
     ] {
+        assert!(!rendered.contains(secret));
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn encrypted_vault_unicode_alias_is_rejected_after_creation_without_audit_append() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let vault_dir = dir.path().join("vault");
+    fs::create_dir(&repo).unwrap();
+    fs::create_dir(repo.join(".git")).unwrap();
+    fs::create_dir(&vault_dir).unwrap();
+    fs::set_permissions(&vault_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    // APFS is normalization-insensitive even on its case-sensitive variant.
+    // Skip only when a macOS test workspace is hosted on a different filesystem.
+    let probe_composed = vault_dir.join("probe-\u{00e9}");
+    let probe_decomposed = vault_dir.join("probe-e\u{0301}");
+    fs::write(&probe_composed, b"probe").unwrap();
+    let normalization_insensitive = probe_decomposed.exists();
+    fs::remove_file(&probe_composed).unwrap();
+    if !normalization_insensitive {
+        return;
+    }
+
+    let vault = vault_dir.join("packages-\u{00e9}.age");
+    let audit_alias = vault_dir.join("packages-e\u{0301}.age");
+    assert_ne!(vault, audit_alias);
+    let username = "unicode-alias-user-canary";
+    let token = "unicode-alias-token-canary";
+    let password = "unicode-alias-password-canary";
+    let input = serde_json::json!({
+        "username": username,
+        "token": token,
+        "password": password,
+        "password_confirmation": password,
+    })
+    .to_string();
+
+    let mut init = Command::new(env!("CARGO_BIN_EXE_ppduster"));
+    init.current_dir(&repo).args([
+        "--audit-log",
+        audit_alias.to_str().unwrap(),
+        "setup",
+        "secrets",
+        "init",
+        "dev-dodopizza-package-registries",
+        "--file",
+        vault.to_str().unwrap(),
+        "--input-json-stdin",
+    ]);
+    let output = output_with_stdin(init, input.as_bytes());
+
+    assert!(!output.status.success());
+    assert!(vault.is_file());
+    assert!(same_file::is_same_file(&vault, &audit_alias).unwrap());
+    let ciphertext = fs::read(&vault).unwrap();
+    assert!(ciphertext.starts_with(b"age-encryption.org/v1\n"));
+    assert!(!ciphertext
+        .windows(b"\"outcome\"".len())
+        .any(|window| window == b"\"outcome\""));
+    assert!(!ciphertext
+        .windows(b"\"timestamp\"".len())
+        .any(|window| window == b"\"timestamp\""));
+
+    let rendered = [output.stdout, output.stderr, ciphertext].concat();
+    let rendered = String::from_utf8_lossy(&rendered);
+    assert!(rendered.contains("encrypted vault was created"));
+    assert!(rendered.contains("audit write suppressed"));
+    for secret in [username, token, password] {
         assert!(!rendered.contains(secret));
     }
 }

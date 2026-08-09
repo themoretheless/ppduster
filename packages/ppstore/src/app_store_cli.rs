@@ -9,7 +9,7 @@ use crate::app_store::{
     self, CatalogApp, InstalledApp, InstalledReport, SearchReport, UpdateCandidate, UpdateReport,
 };
 use crate::app_store_installer::{self, InstallerBackendStatus, QueueStatus, StoreOperation};
-use crate::report::OutputFormat;
+use crate::OutputFormat;
 use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -23,7 +23,7 @@ use tabled::{
     Table, Tabled,
 };
 
-const COUNTRY_ENV: &str = "PPDUSTER_APP_STORE_COUNTRY";
+const COUNTRY_ENV: &str = "PPSTORE_COUNTRY";
 const APPLE_LOCALE_ENV: &str = "AppleLocale";
 const DEFAULT_COUNTRY: &str = "US";
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -32,7 +32,7 @@ const MAX_QUEUE_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 /// Resolve the App Store storefront in CLI precedence order.
 ///
 /// An explicit `--country` wins, followed by
-/// `PPDUSTER_APP_STORE_COUNTRY`, the region embedded in `AppleLocale`, and
+/// `PPSTORE_COUNTRY`, the region embedded in `AppleLocale`, and
 /// finally `US`. Explicit/configured country codes are validated instead of
 /// silently falling through to another storefront.
 pub fn resolve_country(explicit: Option<&str>) -> Result<String> {
@@ -312,8 +312,13 @@ pub struct MutationResult {
     pub message: String,
 }
 
+/// Current machine-readable contract version for install and upgrade reports.
+pub const MUTATION_PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MutationReport {
+    /// Version of the JSON mutation-report contract.
+    pub protocol_version: u32,
     pub country: String,
     pub operation: StoreOperation,
     pub apply: bool,
@@ -337,6 +342,7 @@ impl MutationReport {
         requested_count: usize,
     ) -> Self {
         Self {
+            protocol_version: MUTATION_PROTOCOL_VERSION,
             country: country.to_owned(),
             operation,
             apply,
@@ -585,11 +591,7 @@ pub fn upgrade_apps(
                 report.results.push(skipped_incompatible_result(candidate));
             }
             for installed in &updates.unmatched {
-                report.results.push(result_for_installed(
-                    installed,
-                    MutationStatus::Skipped,
-                    "skipped because no matching catalog application was found".into(),
-                ));
+                report.results.push(skipped_unmatched_result(installed));
             }
             report.requested_count = report.results.len();
         }
@@ -671,6 +673,15 @@ fn mutate_catalog_app(
     operation: StoreOperation,
     execution: MutationExecution<'_>,
 ) -> MutationResult {
+    if matches!(operation, StoreOperation::Install | StoreOperation::Get) && installed.is_some() {
+        return result_for_catalog(
+            catalog,
+            installed,
+            MutationStatus::AlreadyInstalled,
+            "application is already installed with an App Store receipt".into(),
+        );
+    }
+
     if !app_store::is_macos_compatible(current_macos, catalog.minimum_macos_version.as_deref()) {
         return result_for_catalog(
             catalog,
@@ -716,14 +727,6 @@ fn mutate_catalog_app(
     }
 
     match operation {
-        StoreOperation::Install | StoreOperation::Get if installed.is_some() => {
-            return result_for_catalog(
-                catalog,
-                installed,
-                MutationStatus::AlreadyInstalled,
-                "application is already installed with an App Store receipt".into(),
-            )
-        }
         StoreOperation::Update if installed.is_none() => {
             return result_for_catalog(
                 catalog,
@@ -898,6 +901,14 @@ fn skipped_incompatible_result(candidate: &UpdateCandidate) -> MutationResult {
                 .as_deref()
                 .unwrap_or("a newer release")
         ),
+    )
+}
+
+fn skipped_unmatched_result(installed: &InstalledApp) -> MutationResult {
+    result_for_installed(
+        installed,
+        MutationStatus::Skipped,
+        "skipped because no matching catalog application was found".into(),
     )
 }
 
@@ -1236,6 +1247,50 @@ fn print_warnings(warnings: &[String]) {
 mod tests {
     use super::*;
 
+    fn catalog_for_idempotency(price: Option<f64>, minimum_macos: Option<&str>) -> CatalogApp {
+        CatalogApp {
+            adam_id: 123_456,
+            bundle_id: "example.already-installed".into(),
+            name: "Already Installed".into(),
+            version: "2.0".into(),
+            minimum_macos_version: minimum_macos.map(str::to_owned),
+            seller_name: None,
+            description: None,
+            release_notes: None,
+            release_date: None,
+            store_url: None,
+            artwork_url: None,
+            price,
+            formatted_price: price.map(|value| format!("${value:.2}")),
+            currency: Some("USD".into()),
+            genres: Vec::new(),
+            file_size_bytes: None,
+        }
+    }
+
+    fn installed_for_idempotency() -> InstalledApp {
+        InstalledApp {
+            path: PathBuf::from("/Applications/Already Installed.app"),
+            receipt_path: PathBuf::from(
+                "/Applications/Already Installed.app/Contents/_MASReceipt/receipt",
+            ),
+            name: "Already Installed".into(),
+            bundle_id: "example.already-installed".into(),
+            version: "1.0".into(),
+            build_version: Some("1".into()),
+            adam_id: Some(123_456),
+        }
+    }
+
+    fn applying_without_backend() -> MutationExecution<'static> {
+        MutationExecution {
+            apply: true,
+            wait: true,
+            timeout: Duration::from_secs(30),
+            backend: None,
+        }
+    }
+
     #[test]
     fn apple_locale_country_parsing_handles_common_variants() {
         assert_eq!(country_from_apple_locale("en_US"), Some("US".into()));
@@ -1283,5 +1338,96 @@ mod tests {
         assert!(MutationStatus::NotInstalled.is_failure());
         assert!(MutationStatus::NotFound.is_failure());
         assert!(MutationStatus::Failed.is_failure());
+    }
+
+    #[test]
+    fn mutation_reports_serialize_stable_protocol_version() {
+        for (operation, operation_name) in [
+            (StoreOperation::Install, "install"),
+            (StoreOperation::Update, "update"),
+        ] {
+            let report =
+                MutationReport::new("US", operation, false, true, Duration::from_secs(30), 2);
+            let encoded = serde_json::to_string(&report).expect("serialize mutation report");
+            assert!(
+                encoded.starts_with(r#"{"protocol_version":1,"country":"US","operation":"#),
+                "protocol_version must be the first serialized mutation-report field: {encoded}"
+            );
+
+            let value: serde_json::Value =
+                serde_json::from_str(&encoded).expect("parse mutation report JSON");
+            assert_eq!(
+                value["protocol_version"],
+                serde_json::json!(MUTATION_PROTOCOL_VERSION)
+            );
+            assert_eq!(value["operation"], serde_json::json!(operation_name));
+            assert_eq!(value["apply"], serde_json::json!(false));
+            assert_eq!(value["requested_count"], serde_json::json!(2));
+            assert!(value["results"].as_array().is_some_and(Vec::is_empty));
+        }
+    }
+
+    #[test]
+    fn get_of_installed_paid_app_is_idempotent_before_price_check() {
+        let catalog = catalog_for_idempotency(Some(19.99), Some("1.0"));
+        let installed = installed_for_idempotency();
+
+        let result = mutate_catalog_app(
+            &catalog,
+            Some(&installed),
+            "26.0",
+            StoreOperation::Get,
+            applying_without_backend(),
+        );
+
+        assert_eq!(result.status, MutationStatus::AlreadyInstalled);
+        assert_eq!(result.installed_version.as_deref(), Some("1.0"));
+        assert!(result.message.contains("already installed"));
+    }
+
+    #[test]
+    fn install_of_installed_app_is_idempotent_before_compatibility_check() {
+        let catalog = catalog_for_idempotency(Some(0.0), Some("99.0"));
+        let installed = installed_for_idempotency();
+
+        let result = mutate_catalog_app(
+            &catalog,
+            Some(&installed),
+            "26.0",
+            StoreOperation::Install,
+            applying_without_backend(),
+        );
+
+        assert_eq!(result.status, MutationStatus::AlreadyInstalled);
+        assert_ne!(result.status, MutationStatus::Incompatible);
+        assert!(result.message.contains("already installed"));
+    }
+
+    #[test]
+    fn upgrade_all_unmatched_apps_are_skipped_without_failing_the_batch() {
+        let installed = InstalledApp {
+            path: PathBuf::from("/Applications/Unavailable.app"),
+            receipt_path: PathBuf::from(
+                "/Applications/Unavailable.app/Contents/_MASReceipt/receipt",
+            ),
+            name: "Unavailable".into(),
+            bundle_id: "example.unavailable".into(),
+            version: "1.0".into(),
+            build_version: Some("1".into()),
+            adam_id: None,
+        };
+        let result = skipped_unmatched_result(&installed);
+        let mut report = MutationReport::new(
+            "US",
+            StoreOperation::Update,
+            true,
+            false,
+            Duration::from_secs(30),
+            1,
+        );
+        report.results.push(result);
+
+        assert_eq!(report.results[0].status, MutationStatus::Skipped);
+        assert!(!report.has_failures());
     }
 }

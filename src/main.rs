@@ -1,9 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
-use ppduster::app_store;
-use ppduster::app_store_cli;
-use ppduster::app_store_installer::StoreOperation;
 use ppduster::audit;
 use ppduster::automation::package_secrets::{
     exec_for_task as exec_with_package_secrets, init_for_task as init_package_secrets,
@@ -11,13 +8,13 @@ use ppduster::automation::package_secrets::{
 };
 use ppduster::automation::{run_task, PackTrust, ReleaseChannel, RunOptions, TaskPack, TaskSource};
 use ppduster::clean;
+use ppduster::ppstore;
 use ppduster::report::{self, OutputFormat};
 use ppduster::rules::RulePack;
 use ppduster::scan::{self, ScanOptions};
 use std::cell::Cell;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliOutput {
@@ -53,10 +50,10 @@ impl From<CliOutput> for OutputFormat {
 #[command(
     name = "ppduster",
     version,
-    about = "Safe cleaner, setup automation, and Mac App Store CLI",
+    about = "Safe cleaner and setup automation with an optional ppstore proxy",
     long_about = "ppduster scans known junk locations using versioned YAML rule packs.\n\
                   Default is always safe: dry-run, age filters, never-touch paths, trash delete.\n\
-                  On macOS it can also search, inventory, install, and update App Store apps.\n\
+                  On macOS it can proxy App Store commands to a separately installed ppstore.\n\
                   Inspired by lessons from BleachBit, CleanMyMac, CCleaner and 100+ OSS tools."
 )]
 struct Cli {
@@ -504,6 +501,21 @@ fn run() -> Result<()> {
                             SecretInitMode::Interactive
                         };
                         let path = init_package_secrets(task, file.as_deref(), mode)?;
+                        // A custom vault name can acquire a filesystem identity only
+                        // after creation. Re-check now so normalization-insensitive
+                        // filesystems (notably APFS) cannot make two byte-distinct
+                        // path spellings alias and turn the new vault into the audit
+                        // log when the command-level completion event is appended.
+                        if audit_path
+                            .as_deref()
+                            .is_some_and(|audit| paths_collide(audit, &path))
+                        {
+                            suppress_audit.set(true);
+                            anyhow::bail!(
+                                "encrypted vault was created at {}, but the audit log path resolves to the same file; audit write suppressed",
+                                path.display()
+                            );
+                        }
                         println!("Created encrypted package secret vault: {}", path.display());
                         Ok(())
                     }
@@ -538,6 +550,18 @@ fn run() -> Result<()> {
                             tool,
                             &args,
                         )?;
+                        // Re-check after the child exits as well. Besides preserving
+                        // the normalization guard above, this closes the interval in
+                        // which an audit pathname could be changed to alias the vault.
+                        if audit_path
+                            .as_deref()
+                            .is_some_and(|audit| paths_collide(audit, &vault_path))
+                        {
+                            suppress_audit.set(true);
+                            anyhow::bail!(
+                                "audit log path resolves to the encrypted vault after package execution; audit write suppressed"
+                            );
+                        }
                         if status.success() {
                             Ok(())
                         } else {
@@ -596,26 +620,43 @@ fn run() -> Result<()> {
 }
 
 fn run_app_store(action: AppStoreCmd, output: OutputFormat) -> Result<()> {
+    let args = app_store_args(action, output);
+    let status = ppstore::run_passthrough(&args)?;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("ppstore exited with status {status}")
+    }
+}
+
+fn app_store_args(action: AppStoreCmd, output: OutputFormat) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("--output"),
+        OsString::from(match output {
+            OutputFormat::Table => "table",
+            OutputFormat::Json => "json",
+        }),
+    ];
     match action {
         AppStoreCmd::Search {
             query,
             country,
             limit,
         } => {
-            let country = app_store_cli::resolve_country(country.as_deref())?;
-            let report = app_store::search(&query.join(" "), &country, limit)?;
-            app_store_cli::print_search(&report, output)
+            args.push("search".into());
+            args.extend(query.into_iter().map(OsString::from));
+            append_app_store_country(&mut args, country);
+            args.push("--limit".into());
+            args.push(limit.to_string().into());
         }
         AppStoreCmd::List { app_roots } => {
-            let report = app_store::scan_installed(&app_roots)?;
-            app_store_cli::print_installed(&report, output)
+            args.push("list".into());
+            append_app_roots(&mut args, app_roots);
         }
         AppStoreCmd::Outdated { country, app_roots } => {
-            let country = app_store_cli::resolve_country(country.as_deref())?;
-            let inventory = app_store::scan_installed(&app_roots)?;
-            let mut report = app_store::check_updates(&inventory.apps, &country)?;
-            report.warnings.extend(inventory.warnings);
-            app_store_cli::print_updates(&report, output)
+            args.push("outdated".into());
+            append_app_store_country(&mut args, country);
+            append_app_roots(&mut args, app_roots);
         }
         AppStoreCmd::Install {
             app_ids,
@@ -625,28 +666,20 @@ fn run_app_store(action: AppStoreCmd, output: OutputFormat) -> Result<()> {
             no_wait,
             timeout,
         } => {
-            let country = app_store_cli::resolve_country(country.as_deref())?;
-            let operation = if get {
-                StoreOperation::Get
-            } else {
-                StoreOperation::Install
-            };
-            let report = app_store_cli::install_apps(
-                &app_ids,
-                &country,
-                operation,
-                yes,
-                !no_wait,
-                Duration::from_secs(timeout),
-            );
-            app_store_cli::print_mutation(&report, output)?;
-            if report.has_failures() {
-                anyhow::bail!(
-                    "{} App Store installation request(s) failed",
-                    report.failed_count()
-                );
+            args.push("install".into());
+            args.extend(app_ids.into_iter().map(|id| id.to_string().into()));
+            append_app_store_country(&mut args, country);
+            if get {
+                args.push("--get".into());
             }
-            Ok(())
+            if yes {
+                args.push("--yes".into());
+            }
+            if no_wait {
+                args.push("--no-wait".into());
+            }
+            args.push("--timeout".into());
+            args.push(timeout.to_string().into());
         }
         AppStoreCmd::Upgrade {
             app_ids,
@@ -655,32 +688,41 @@ fn run_app_store(action: AppStoreCmd, output: OutputFormat) -> Result<()> {
             no_wait,
             timeout,
         } => {
-            let country = app_store_cli::resolve_country(country.as_deref())?;
-            let selected = (!app_ids.is_empty()).then_some(app_ids.as_slice());
-            let report = app_store_cli::upgrade_apps(
-                selected,
-                &country,
-                yes,
-                !no_wait,
-                Duration::from_secs(timeout),
-            );
-            app_store_cli::print_mutation(&report, output)?;
-            if report.has_failures() {
-                anyhow::bail!(
-                    "{} App Store update request(s) failed",
-                    report.failed_count()
-                );
+            args.push("upgrade".into());
+            args.extend(app_ids.into_iter().map(|id| id.to_string().into()));
+            append_app_store_country(&mut args, country);
+            if yes {
+                args.push("--yes".into());
             }
-            Ok(())
+            if no_wait {
+                args.push("--no-wait".into());
+            }
+            args.push("--timeout".into());
+            args.push(timeout.to_string().into());
         }
         AppStoreCmd::Doctor { app_roots } => {
-            let report = app_store_cli::doctor(&app_roots);
-            app_store_cli::print_doctor(&report, output)?;
-            if !report.is_healthy() {
-                anyhow::bail!("Mac App Store integration is not healthy");
-            }
-            Ok(())
+            args.push("doctor".into());
+            append_app_roots(&mut args, app_roots);
         }
+    }
+    args
+}
+
+fn append_app_store_country(args: &mut Vec<OsString>, explicit: Option<String>) {
+    let country = explicit
+        .map(OsString::from)
+        .or_else(|| std::env::var_os("PPDUSTER_APP_STORE_COUNTRY"))
+        .filter(|country| !country.is_empty());
+    if let Some(country) = country {
+        args.push("--country".into());
+        args.push(country);
+    }
+}
+
+fn append_app_roots(args: &mut Vec<OsString>, app_roots: Vec<PathBuf>) {
+    for root in app_roots {
+        args.push("--app-root".into());
+        args.push(root.into_os_string());
     }
 }
 

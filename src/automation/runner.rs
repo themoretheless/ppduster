@@ -4,9 +4,9 @@ use crate::automation::task::{
     InspectPathAction, LicenseMethod, LicenseProvider, PathExpectation, PathKind, ReleaseChannel,
     ScriptInterpreter, ShellMode, Step, StepCondition, Task, WriteConflictPolicy,
 };
+use crate::ppstore::{self, InstallOutcome};
 use crate::rules::expand_path_template;
 use crate::safety::{is_safe_rule_root, stays_under_root};
-use crate::{app_store, app_store_installer};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,6 @@ use std::io::IsTerminal;
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::time::Duration;
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -1089,7 +1088,7 @@ pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
             }
         ),
         Action::AppStoreInstall(action) => format!(
-            "queue a native App Store {} download for application {} through Apple's system services",
+            "delegate an App Store {} request for application {} to standalone ppstore 0.1.x",
             app_store_operation_name(action.operation),
             action.app_id
         ),
@@ -1129,6 +1128,10 @@ fn prerequisites_for_step(step: &Step) -> Vec<String> {
         );
     }
     if let Action::AppStoreInstall(action) = &step.action {
+        prerequisites.push(
+            "install a trusted ppstore 0.1.x executable separately; optionally select it with the absolute PPDUSTER_PPSTORE_PATH override"
+                .into(),
+        );
         prerequisites.push(
             "sign in to the Mac App Store with the Apple Account that owns the application; authentication stays in Apple's UI"
                 .into(),
@@ -1483,9 +1486,7 @@ fn apply_step(step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
             require_rosetta_on_apple_silicon,
         } => apply_macos_requirements(minimum_version, *require_rosetta_on_apple_silicon)
             .map(ApplyStepResult::Applied),
-        Action::AppStoreInstall(action) => {
-            apply_app_store_install(action.app_id, action.operation).map(ApplyStepResult::Applied)
-        }
+        Action::AppStoreInstall(action) => apply_app_store_install(action.app_id, action.operation),
         Action::BambuStudioRelease(action) => {
             apply_bambu_studio_release(opts.release_channel.unwrap_or(action.channel))
                 .map(ApplyStepResult::Applied)
@@ -1602,32 +1603,34 @@ fn apply_write_file(
     on_conflict: WriteConflictPolicy,
 ) -> Result<ApplyStepResult> {
     let path = validate_safe_mutation_path(raw_path, "write-file")?;
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            bail!(
-                "write-file destination is not a regular file: {}",
-                path.display()
-            )
+    let existing_permissions = match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!(
+                    "write-file destination is not a regular file: {}",
+                    path.display()
+                );
+            }
+            if file_matches_bytes(&path, content.as_bytes())? {
+                return Ok(ApplyStepResult::AlreadySatisfied(format!(
+                    "file already has the requested content: {}",
+                    path.display()
+                )));
+            }
+            if matches!(on_conflict, WriteConflictPolicy::Fail) {
+                bail!(
+                    "write-file destination has different content (set on_conflict: replace to replace it): {}",
+                    path.display()
+                );
+            }
+            Some(metadata.permissions())
         }
-        Ok(_) if file_matches_bytes(&path, content.as_bytes())? => {
-            return Ok(ApplyStepResult::AlreadySatisfied(format!(
-                "file already has the requested content: {}",
-                path.display()
-            )))
-        }
-        Ok(_) if matches!(on_conflict, WriteConflictPolicy::Fail) => {
-            bail!(
-                "write-file destination has different content (set on_conflict: replace to replace it): {}",
-                path.display()
-            )
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => {
             return Err(error)
                 .with_context(|| format!("inspect write destination {}", path.display()))
         }
-    }
+    };
 
     let parent = ensure_destination_parent(&path)?;
     let mut staged = tempfile::NamedTempFile::new_in(parent)
@@ -1635,6 +1638,12 @@ fn apply_write_file(
     staged
         .write_all(content.as_bytes())
         .with_context(|| format!("write staged content for {}", path.display()))?;
+    if let Some(permissions) = existing_permissions {
+        staged
+            .as_file()
+            .set_permissions(permissions)
+            .with_context(|| format!("preserve permissions for {}", path.display()))?;
+    }
     staged
         .as_file_mut()
         .sync_all()
@@ -1649,6 +1658,7 @@ fn apply_write_file(
             anyhow!(error.error).context(format!("atomically replace {}", path.display()))
         })?,
     };
+    sync_parent_directory(parent)?;
     if !file_matches_bytes(&path, content.as_bytes())? {
         bail!(
             "written file failed content verification: {}",
@@ -1697,6 +1707,13 @@ fn apply_copy_path(raw_src: &str, raw_dest: &str) -> Result<ApplyStepResult> {
 }
 
 fn apply_remove_path(raw_path: &str) -> Result<ApplyStepResult> {
+    apply_remove_path_with(raw_path, move_to_system_trash)
+}
+
+fn apply_remove_path_with<F>(raw_path: &str, move_to_trash: F) -> Result<ApplyStepResult>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
     let path = validate_safe_mutation_path(raw_path, "remove-path")?;
     if !path_entry_exists(&path)? {
         return Ok(ApplyStepResult::AlreadySatisfied(format!(
@@ -1706,8 +1723,7 @@ fn apply_remove_path(raw_path: &str) -> Result<ApplyStepResult> {
     }
     // `trash` canonicalizes the parent but deliberately retains the final file
     // name, so a final symlink is moved as a link rather than followed.
-    move_to_system_trash(&path)
-        .with_context(|| format!("move {} to the system Trash", path.display()))?;
+    move_to_trash(&path).with_context(|| format!("move {} to the system Trash", path.display()))?;
     if path_entry_exists(&path)? {
         bail!(
             "path still exists after moving it to Trash: {}",
@@ -1855,6 +1871,7 @@ fn copy_file_noclobber(src: &Path, dest: &Path, parent: &Path) -> Result<()> {
     staged.persist_noclobber(dest).map_err(|error| {
         anyhow!(error.error).context(format!("commit copy without replacing {}", dest.display()))
     })?;
+    sync_parent_directory(parent)?;
     Ok(())
 }
 
@@ -1893,6 +1910,20 @@ fn copy_directory_noclobber(src: &Path, dest: &Path, parent: &Path) -> Result<()
         let _ = fs::remove_dir_all(&staging_path);
         return Err(error).with_context(|| format!("commit directory copy {}", dest.display()));
     }
+    sync_parent_directory(parent)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> Result<()> {
+    File::open(parent)
+        .with_context(|| format!("open destination parent {} for sync", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("sync destination parent {}", parent.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -4140,86 +4171,42 @@ fn app_store_operation_name(operation: AppStoreOperation) -> &'static str {
     }
 }
 
-fn native_app_store_operation(operation: AppStoreOperation) -> app_store_installer::StoreOperation {
-    match operation {
-        AppStoreOperation::Install => app_store_installer::StoreOperation::Install,
-        AppStoreOperation::Get => app_store_installer::StoreOperation::Get,
+fn app_store_country_override() -> Result<Option<String>> {
+    let country = match std::env::var("PPDUSTER_APP_STORE_COUNTRY") {
+        Ok(country) if country.trim().is_empty() => return Ok(None),
+        Ok(country) => country,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("PPDUSTER_APP_STORE_COUNTRY contains non-Unicode data")
+        }
+    };
+    let country = country.trim();
+    if country.len() != 2 || !country.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        bail!("PPDUSTER_APP_STORE_COUNTRY must be a two-letter country code");
     }
+    Ok(Some(country.to_ascii_uppercase()))
 }
 
-fn app_store_country() -> String {
-    std::env::var("PPDUSTER_APP_STORE_COUNTRY").unwrap_or_else(|_| "US".into())
-}
-
-fn app_store_identity_matches(
-    installed_adam_id: Option<u64>,
-    installed_bundle_id: &str,
-    target_adam_id: u64,
-    target_bundle_id: &str,
-) -> bool {
-    installed_adam_id == Some(target_adam_id)
-        || (!installed_bundle_id.is_empty()
-            && !target_bundle_id.is_empty()
-            && installed_bundle_id == target_bundle_id)
-}
-
-fn app_store_app_is_installed(app_id: u64) -> Result<bool> {
-    let installed = app_store::scan_installed(&[])
-        .with_context(|| format!("scan installed Mac App Store applications for {app_id}"))?;
-    let catalog = app_store::lookup_by_adam_id(app_id, &app_store_country())
-        .with_context(|| format!("look up Mac App Store application {app_id}"))?;
-
-    Ok(installed.apps.iter().any(|local| {
-        catalog.apps.iter().any(|available| {
-            available.adam_id == app_id
-                && app_store_identity_matches(
-                    local.adam_id,
-                    &local.bundle_id,
-                    app_id,
-                    &available.bundle_id,
-                )
-        }) || local.adam_id == Some(app_id)
-    }))
-}
-
-fn apply_app_store_install(app_id: u64, operation: AppStoreOperation) -> Result<String> {
+fn apply_app_store_install(app_id: u64, operation: AppStoreOperation) -> Result<ApplyStepResult> {
     if !cfg!(target_os = "macos") {
         bail!("app-store-install is only supported on macOS");
     }
-    if app_store_app_is_installed(app_id)? {
-        return Ok(format!(
-            "Mac App Store application {} is already installed",
-            app_id
-        ));
-    }
-    const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-    let queued = app_store_installer::queue(
+    let country = app_store_country_override()?;
+    let outcome = ppstore::install(
         app_id,
-        native_app_store_operation(operation),
-        INITIAL_REQUEST_TIMEOUT,
+        matches!(operation, AppStoreOperation::Get),
+        country.as_deref(),
     )
     .with_context(|| {
         format!(
-            "queue native App Store {} download for application {}",
+            "run ppstore {} for App Store application {}",
             app_store_operation_name(operation),
             app_id
         )
     })?;
-    match &queued.status {
-        app_store_installer::QueueStatus::Queued => Ok(format!(
-            "native App Store download queued for application {} ({} download{})",
-            app_id,
-            queued.downloads_queued,
-            if queued.downloads_queued == 1 {
-                ""
-            } else {
-                "s"
-            }
-        )),
-        app_store_installer::QueueStatus::Pending { detail } => Ok(format!(
-            "native App Store request for application {} is pending; do not retry before rescanning: {}",
-            app_id, detail
-        )),
+    match outcome {
+        InstallOutcome::Applied(summary) => Ok(ApplyStepResult::Applied(summary)),
+        InstallOutcome::AlreadySatisfied(summary) => Ok(ApplyStepResult::AlreadySatisfied(summary)),
     }
 }
 
@@ -4845,14 +4832,6 @@ fn is_satisfied(step: &Step, run_command_checks: bool) -> Result<Option<String>>
         {
             if let Some(reason) = package_registry::is_satisfied(secrets, npm, nuget)? {
                 return Ok(Some(reason));
-            }
-        }
-        if let Action::AppStoreInstall(action) = &step.action {
-            if app_store_app_is_installed(action.app_id)? {
-                return Ok(Some(format!(
-                    "Mac App Store application {} is already installed",
-                    action.app_id
-                )));
             }
         }
         if let Action::InstallDmg {
@@ -5515,6 +5494,51 @@ mod tests {
             report.outcomes[0],
             ActionOutcome::AlreadySatisfied { .. }
         ));
+    }
+
+    #[test]
+    fn remove_path_delegates_once_without_permanent_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("obsolete.txt");
+        let moved = temp.path().join("fake-trash.txt");
+        fs::write(&source, "recoverable").unwrap();
+        let mut calls = 0usize;
+
+        let result = apply_remove_path_with(&source.to_string_lossy(), |path| {
+            calls += 1;
+            fs::rename(path, &moved).context("fake Trash move")?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(matches!(result, ApplyStepResult::Applied(_)));
+        assert_eq!(calls, 1);
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(moved).unwrap(), "recoverable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_path_moves_a_final_symlink_without_touching_its_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("valuable.txt");
+        let link = temp.path().join("obsolete-link");
+        let moved_link = temp.path().join("fake-trash-link");
+        fs::write(&target, "valuable").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        apply_remove_path_with(&link.to_string_lossy(), |path| {
+            fs::rename(path, &moved_link).context("fake Trash symlink move")?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(fs::symlink_metadata(&link).is_err());
+        assert!(fs::symlink_metadata(&moved_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(target).unwrap(), "valuable");
     }
 
     #[test]
@@ -6930,7 +6954,11 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
 
         assert!(report.plans[0]
             .summary
-            .contains("native App Store install download for application 497799835"));
+            .contains("App Store install request for application 497799835"));
+        assert!(report.plans[0]
+            .prerequisites
+            .iter()
+            .any(|item| item.contains("ppstore 0.1.x")));
         assert!(report.plans[0]
             .prerequisites
             .iter()
@@ -6939,36 +6967,6 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
             .prerequisites
             .iter()
             .any(|item| item.contains("operation: get")));
-    }
-
-    #[test]
-    fn app_store_identity_matching_and_native_operations_are_exact() {
-        assert!(app_store_identity_matches(
-            Some(497_799_835),
-            "com.apple.dt.Xcode",
-            497_799_835,
-            "com.example.unrelated",
-        ));
-        assert!(app_store_identity_matches(
-            None,
-            "com.apple.dt.Xcode",
-            497_799_835,
-            "com.apple.dt.Xcode",
-        ));
-        assert!(!app_store_identity_matches(
-            Some(409_183_694),
-            "com.example.unrelated",
-            497_799_835,
-            "com.apple.dt.Xcode",
-        ));
-        assert_eq!(
-            native_app_store_operation(AppStoreOperation::Install),
-            app_store_installer::StoreOperation::Install
-        );
-        assert_eq!(
-            native_app_store_operation(AppStoreOperation::Get),
-            app_store_installer::StoreOperation::Get
-        );
     }
 
     #[cfg(unix)]

@@ -1,12 +1,12 @@
 task:
   id: app-store-bootstrap
   name: Prepare Mac App Store automation
-  description: Verify the macOS baseline used by native App Store automation and safely inspect Spotlight metadata for installed App Store applications. Requires macOS 14 or newer and does not install third-party tooling.
+  description: Verify the macOS baseline used by the separately installed ppstore client and safely inspect Spotlight metadata for installed App Store applications. Requires macOS 14 or newer; this task does not install ppstore or other third-party tooling.
   platform: macos
   trust: bundled-only
   steps:
     - id: verify-app-store-requirements
-      name: Verify native App Store macOS requirements
+      name: Verify ppstore macOS requirements
       type: macos-requirements
       minimum_version: "14.0"
     - id: inspect-app-store-metadata
