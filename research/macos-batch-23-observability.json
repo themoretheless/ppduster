@@ -1,0 +1,605 @@
+{
+  "batch": "23-observability",
+  "platform": "macos",
+  "description": "macOS monitoring and observability agent logs, desktop app caches, local TSDB/state, and user logarchives. Prefer contents-only deletes, age gates, and never-touch for secrets (API keys, license files, agent conf). Exclude htop. Prometheus local TSDB and Activity Monitor process samples are report-only. Console .logarchive under user Library/Logs or temp is reclaimable when aged; never target Desktop/Documents/Downloads.",
+  "path_count": 134,
+  "risk_policy": {
+    "agent_logs": "low (regenerable diagnostic logs)",
+    "agent_run_state_registry": "medium (positions/registry may re-ship logs; safe after stop)",
+    "prometheus_tsdb": "report-only (local metrics history)",
+    "sentry_cli_config_dir": "report-only (cli.db holds credentials + cache)",
+    "desktop_monitor_caches": "low",
+    "credentials_license_conf": "never-touch (excluded)",
+    "htop": "out of scope (excluded per batch brief)"
+  },
+  "rules": [
+    {
+      "id": "obs-datadog-agent-logs",
+      "name": "Datadog Agent logs (macOS)",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "/opt/datadog-agent/logs",
+        "/var/log/datadog"
+      ],
+      "notes": "Official Agent log dirs: v6.28+/v7.28+ use /opt/datadog-agent/logs; older agents use /var/log/datadog. Rollover files agent.log, process-agent.log, trace-agent.log, system-probe.log, dogstatsd.log. Stop agent before mass delete if in use."
+    },
+    {
+      "id": "obs-datadog-agent-run-cache",
+      "name": "Datadog Agent run and install temp",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "/opt/datadog-agent/run",
+        "/tmp/dd_agent.log"
+      ],
+      "notes": "Runtime sockets/state under run/; install log at /tmp/dd_agent.log. Do not delete /opt/datadog-agent/etc (config)."
+    },
+    {
+      "id": "obs-datadog-user-sdk-cache",
+      "name": "Datadog user Library cache (SDK/agent UI)",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/com.datadoghq",
+        "$HOME/Library/Logs/Datadog",
+        "$HOME/Library/Logs/com.datadoghq.agent"
+      ],
+      "notes": "User-space Datadog caches (e.g. RUM/SDK logging intermediate store under Caches/com.datadoghq/v2/*/logging). Regenerable."
+    },
+    {
+      "id": "obs-newrelic-infra-agent-dir",
+      "name": "New Relic infrastructure agent data dir",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "/usr/local/var/db/newrelic-infra",
+        "/opt/homebrew/var/db/newrelic-infra",
+        "/var/db/newrelic-infra"
+      ],
+      "include_globs": [
+        "**/data/**",
+        "**/tmp/**",
+        "**/cache/**",
+        "**/*.log",
+        "**/*.log.*"
+      ],
+      "notes": "MacOS agent_dir default /usr/local/var/db/newrelic-infra (Homebrew Apple Silicon often /opt/homebrew/var/db/...). Inventory cache under data/; logging plugin bits under newrelic-integrations/logging. Prefer clearing logs/tmp/data only; leave integrations binaries. Stop newrelic-infra first."
+    },
+    {
+      "id": "obs-newrelic-infra-logs",
+      "name": "New Relic infrastructure agent logs",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "/var/log/newrelic-infra",
+        "/usr/local/var/log/newrelic-infra",
+        "/opt/homebrew/var/log/newrelic-infra",
+        "$HOME/Library/Logs/NewRelic",
+        "$HOME/Library/Logs/New Relic"
+      ],
+      "notes": "Agent log_file defaults vary; Homebrew may place logs under var/log/newrelic-infra. User Library Logs used by some NR desktop/APM sidecars."
+    },
+    {
+      "id": "obs-newrelic-user-caches",
+      "name": "New Relic user caches",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Caches/com.newrelic.NewRelic",
+        "$HOME/Library/Caches/com.newrelic",
+        "$HOME/Library/Caches/New Relic"
+      ],
+      "notes": "Desktop/helper caches if present. Never delete license_key from conf files under etc/newrelic-infra."
+    },
+    {
+      "id": "obs-dynatrace-oneagent-logs",
+      "name": "Dynatrace OneAgent logs",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "/var/log/dynatrace/oneagent",
+        "/var/log/dynatrace",
+        "/Library/Logs/dynatrace",
+        "/Library/Application Support/dynatrace/oneagent/log",
+        "$HOME/Library/Logs/dynatrace"
+      ],
+      "notes": "OneAgent host agent is not officially supported on modern macOS for production host monitoring; paths mirror Linux/Windows layout and community macOS install leftovers. Only agent self-logs; do not touch agent config under /Library/Application Support/dynatrace/oneagent/agent."
+    },
+    {
+      "id": "obs-elastic-beats-data",
+      "name": "Elastic Beats path.data (registry)",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "/usr/local/var/lib/filebeat",
+        "/opt/homebrew/var/lib/filebeat",
+        "/usr/local/var/lib/metricbeat",
+        "/opt/homebrew/var/lib/metricbeat",
+        "/usr/local/var/lib/packetbeat",
+        "/opt/homebrew/var/lib/packetbeat",
+        "/usr/local/var/lib/heartbeat",
+        "/opt/homebrew/var/lib/heartbeat",
+        "/usr/local/var/lib/auditbeat",
+        "/opt/homebrew/var/lib/auditbeat"
+      ],
+      "notes": "Homebrew Beats store registry/state under var/lib/<beat>. Clearing registry can re-ingest old log tails. Stop the beat first. Config under etc/ is never-touch."
+    },
+    {
+      "id": "obs-elastic-beats-logs",
+      "name": "Elastic Beats path.logs",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "/usr/local/var/log/filebeat",
+        "/opt/homebrew/var/log/filebeat",
+        "/usr/local/var/log/metricbeat",
+        "/opt/homebrew/var/log/metricbeat",
+        "/usr/local/var/log/packetbeat",
+        "/opt/homebrew/var/log/packetbeat",
+        "/usr/local/var/log/heartbeat",
+        "/opt/homebrew/var/log/heartbeat",
+        "/usr/local/var/log/auditbeat",
+        "/opt/homebrew/var/log/auditbeat",
+        "$HOME/Library/Logs/filebeat",
+        "$HOME/Library/Logs/metricbeat"
+      ],
+      "notes": "Self-logs of shippers. Safe regenerable diagnostics."
+    },
+    {
+      "id": "obs-grafana-alloy-agent-logs",
+      "name": "Grafana Alloy and Agent Flow logs",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 2,
+      "paths": [
+        "/opt/homebrew/var/log",
+        "/usr/local/var/log"
+      ],
+      "include_globs": [
+        "alloy.log",
+        "alloy.err.log",
+        "alloy*.log",
+        "grafana-agent*.log",
+        "grafana-agent-flow.log",
+        "grafana-agent-flow.err.log"
+      ],
+      "notes": "Alloy default: $(brew --prefix)/var/log/alloy.log and alloy.err.log. Legacy Agent Flow: grafana-agent-flow.log / .err. Scoped globs only; do not wipe whole var/log."
+    },
+    {
+      "id": "obs-grafana-alloy-data",
+      "name": "Grafana Alloy/Agent data and positions",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "/opt/homebrew/var/lib/alloy",
+        "/usr/local/var/lib/alloy",
+        "/opt/homebrew/var/lib/grafana-agent",
+        "/usr/local/var/lib/grafana-agent",
+        "/opt/homebrew/var/lib/grafana-agent-flow",
+        "/usr/local/var/lib/grafana-agent-flow"
+      ],
+      "notes": "WAL/positions/data if formula uses var/lib. Re-read risk on log sources after wipe."
+    },
+    {
+      "id": "obs-grafana-desktop-user",
+      "name": "Grafana desktop / user logs and caches",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Logs/Grafana",
+        "$HOME/Library/Caches/com.grafana.Grafana",
+        "$HOME/Library/Caches/grafana",
+        "$HOME/Library/Application Support/Grafana/log",
+        "$HOME/Library/Application Support/Grafana/logs"
+      ],
+      "notes": "User-level Grafana UI/desktop leftovers. Server data under /opt/homebrew/var/lib/grafana is separate (dashboards/plugins; higher risk, not default-enabled here)."
+    },
+    {
+      "id": "obs-prometheus-tsdb-report",
+      "name": "Prometheus local TSDB (report-only)",
+      "category": "tsdb",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "/opt/homebrew/var/prometheus",
+        "/usr/local/var/prometheus",
+        "/opt/homebrew/var/lib/prometheus",
+        "/usr/local/var/lib/prometheus",
+        "$HOME/prometheus/data",
+        "$HOME/.prometheus/data"
+      ],
+      "notes": "Local --storage.tsdb.path (default data/). Report size only; deleting loses historical samples. Prefer retention flags or promtool. Never default-enable."
+    },
+    {
+      "id": "obs-jaeger-local-storage",
+      "name": "Jaeger local/badger storage and logs",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/.jaeger",
+        "$HOME/Library/Caches/jaeger",
+        "/opt/homebrew/var/jaeger",
+        "/usr/local/var/jaeger",
+        "/opt/homebrew/var/lib/jaeger",
+        "/usr/local/var/lib/jaeger",
+        "$HOME/Library/Logs/jaeger"
+      ],
+      "notes": "Dev all-in-one Badger dirs and local caches. Default memory storage leaves little on disk; badger paths vary by flags."
+    },
+    {
+      "id": "obs-zipkin-local",
+      "name": "Zipkin local data and logs",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/.zipkin",
+        "$HOME/Library/Caches/zipkin",
+        "/opt/homebrew/var/zipkin",
+        "/usr/local/var/zipkin",
+        "$HOME/Library/Logs/zipkin"
+      ],
+      "notes": "Zipkin often runs in Docker with external store; these cover rare native/Homebrew local leftovers."
+    },
+    {
+      "id": "obs-sentry-sdk-caches",
+      "name": "Sentry SDK and SentryCrash caches",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/io.sentry",
+        "$HOME/Library/Caches/SentryCrash",
+        "$HOME/Library/Caches/io.sentry.Sentry",
+        "$HOME/Library/Caches/Sentry",
+        "$HOME/Library/Logs/Sentry"
+      ],
+      "notes": "Desktop/Electron/native Sentry offline event queues and SentryCrash reports under Library/Caches. Regenerable; may drop unsent crash reports."
+    },
+    {
+      "id": "obs-sentry-cli-config-report",
+      "name": "Sentry CLI config dir (report-only)",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "$HOME/.sentry"
+      ],
+      "notes": "SENTRY_CONFIG_DIR default ~/.sentry holds cli.db (auth tokens + caches). Report size only; do not auto-delete credentials."
+    },
+    {
+      "id": "obs-honeycomb-local",
+      "name": "Honeycomb CLI/agent local cache and logs",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/.honeycomb",
+        "$HOME/.config/honeycomb",
+        "$HOME/Library/Caches/honeycomb",
+        "$HOME/Library/Logs/honeycomb",
+        "/opt/homebrew/var/log/refinery",
+        "/usr/local/var/log/refinery"
+      ],
+      "notes": "Honeycomb CLI/schema caches and Refinery process logs if installed via Homebrew. API keys in keychain are never-touch."
+    },
+    {
+      "id": "obs-lightstep-local",
+      "name": "Lightstep / OpenTelemetry Lightstep local",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/.lightstep",
+        "$HOME/Library/Caches/lightstep",
+        "$HOME/Library/Logs/lightstep",
+        "/opt/homebrew/var/log/lightstep",
+        "/usr/local/var/log/lightstep",
+        "/var/log/lightstep"
+      ],
+      "notes": "Legacy Lightstep satellite/CLI leftovers. Modern path is often OTel collector to Lightstep/ServiceNow Cloud Observability."
+    },
+    {
+      "id": "obs-otel-collector-logs",
+      "name": "OpenTelemetry Collector logs and data",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "/opt/homebrew/var/log/otelcol",
+        "/usr/local/var/log/otelcol",
+        "/var/log/otelcol",
+        "/opt/homebrew/var/lib/otelcol",
+        "/usr/local/var/lib/otelcol",
+        "$HOME/.otelcol",
+        "$HOME/.config/otelcol",
+        "$HOME/Library/Logs/opentelemetry",
+        "$HOME/Library/Logs/otelcol",
+        "$HOME/Library/Caches/opentelemetry"
+      ],
+      "notes": "otelcol/otelcol-contrib self-logs and optional file storage/exporter dirs. Do not delete user config YAML under etc or intentional STORAGE_DIR with needed telemetry history without review."
+    },
+    {
+      "id": "obs-statsd-dogstatsd",
+      "name": "StatsD / DogStatsD logs",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "/opt/homebrew/var/log/statsd",
+        "/usr/local/var/log/statsd",
+        "$HOME/Library/Logs/statsd",
+        "/tmp/statsd"
+      ],
+      "notes": "Standalone StatsD rarely persists large caches (UDP aggregate in-memory). DogStatsD logs usually live under Datadog Agent logs (dogstatsd.log). These cover rare native installs."
+    },
+    {
+      "id": "obs-netdata-cache-logs",
+      "name": "Netdata cache and logs",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "/opt/homebrew/var/cache/netdata",
+        "/usr/local/var/cache/netdata",
+        "/opt/homebrew/var/log/netdata",
+        "/usr/local/var/log/netdata",
+        "/usr/local/netdata/var/cache/netdata",
+        "/usr/local/netdata/var/log/netdata",
+        "$HOME/.netdata"
+      ],
+      "notes": "Homebrew Netdata conf under etc/netdata; cache holds dbengine/metrics history. Clearing cache loses local charts history. Conf and claim tokens never-touch."
+    },
+    {
+      "id": "obs-glances-cache-logs",
+      "name": "Glances cache and logs",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "$HOME/.cache/glances",
+        "$HOME/Library/Caches/glances",
+        "$HOME/Library/Logs/glances",
+        "$HOME/.local/share/glances",
+        "$HOME/Library/Application Support/glances"
+      ],
+      "notes": "Glances internal log (path via glances -V) and export/history caches. Config under ~/.config/glances kept unless only logs subtrees."
+    },
+    {
+      "id": "obs-istat-menus-caches",
+      "name": "iStat Menus caches and logs",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Caches/com.bjango.istatmenus",
+        "$HOME/Library/Caches/com.bjango.istatmenus.status",
+        "$HOME/Library/Caches/com.bjango.istatmenus.agent",
+        "$HOME/Library/Caches/com.bjango.istatmenus.menubar",
+        "$HOME/Library/Caches/com.bjango.istatmenus.helpers",
+        "$HOME/Library/Logs/iStat Menus",
+        "$HOME/Library/Logs/com.bjango.istatmenus"
+      ],
+      "notes": "Bjango iStat Menus regenerable caches. Application Support/iStat Menus * holds helpers and settings; not wiped here."
+    },
+    {
+      "id": "obs-stats-app-caches",
+      "name": "Stats.app (exelban) caches and logs",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Caches/eu.exelban.Stats",
+        "$HOME/Library/Logs/Stats",
+        "$HOME/Library/Logs/eu.exelban.Stats"
+      ],
+      "notes": "Open-source menu bar monitor. Application Support/Stats holds prefs/widgets; leave unless uninstalling."
+    },
+    {
+      "id": "obs-activity-monitor-samples-report",
+      "name": "Activity Monitor process samples (report-only)",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "$TMPDIR",
+        "/private/var/tmp",
+        "/tmp"
+      ],
+      "include_globs": [
+        "**/*.sample",
+        "**/sample-*.txt",
+        "**/*Sample*.txt",
+        "**/spindump*"
+      ],
+      "notes": "Activity Monitor Sample Process / sample(1) output is user-saved or temp. Report only; many samples land on Desktop/Documents (never-touch). Spindumps also appear in DiagnosticReports (covered elsewhere)."
+    },
+    {
+      "id": "obs-console-logarchives-user",
+      "name": "User Console.logarchive under Library Logs",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Logs"
+      ],
+      "include_globs": [
+        "**/*.logarchive",
+        "**/*.logarchive/**",
+        "**/system_logs.logarchive/**"
+      ],
+      "notes": "Console.app and sysdiagnose produce .logarchive bundles. Only under ~/Library/Logs (not Desktop/Documents/Downloads). Large regenerable diagnostic archives; age-gate carefully."
+    },
+    {
+      "id": "obs-console-logarchives-temp",
+      "name": "Console/sysdiagnose logarchive in temp",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$TMPDIR",
+        "/private/var/tmp",
+        "/tmp"
+      ],
+      "include_globs": [
+        "**/*.logarchive",
+        "**/*.logarchive/**",
+        "**/sysdiagnose*/*.logarchive/**"
+      ],
+      "notes": "Temporary logarchive extracts. Prefer user-owned aged files only."
+    }
+  ]
+}

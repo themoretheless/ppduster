@@ -1,0 +1,885 @@
+{
+  "batch": "31-network-proxy",
+  "platform": "macos",
+  "title": "macOS network debug, MITM proxy, firewall residual, and API client caches",
+  "description": "Regenerable caches, logs, crash dumps, WebKit/HTTPStorages, and capture leftovers for network debugging proxies (Proxyman, Charles, HTTP Toolkit, mitmproxy, Fiddler Everywhere, Whistle), packet capture (Wireshark/tshark/tcpdump report-only for large captures), host firewall residual (Little Snitch, LuLu), VPN/proxy clients (Surge, ClashX, Clash Verge, V2rayU, Qv2ray, Outline, ShadowsocksX-NG), and API clients (Postman residual intercept, Insomnia residual, Paw/RapidAPI, HTTPie desktop, Bruno). Prefer contents-only deletes and age gates. Never wipe license files, MITM CA keys/certs, or proxy rule/profile configs by default.",
+  "path_count": 209,
+  "risk_policy": {
+    "app_caches_logs": "low (default_enabled when pure cache/log; age-gated)",
+    "electron_gpu_code_cache": "low",
+    "session_recordings_flows": "medium (may hold request bodies/secrets; off by default)",
+    "packet_captures_pcap": "report-only (large; often intentional forensics)",
+    "mitm_ca_certs_keys": "never-touch / exclude (reinstall breaks HTTPS intercept until re-trusted)",
+    "licenses_activation": "never-touch / exclude",
+    "proxy_profiles_rules_subscriptions": "report-only or medium (user config, not pure junk)",
+    "firewall_rules_config": "report-only residual inventory only (do not auto-wipe live rules)",
+    "already_covered": "Postman/Insomnia primary Electron Cache/Code Cache/GPUCache/logs appear in apps-comms and office-electron; this batch adds intercept/agent residual and adjacent trees only"
+  },
+  "notes": "Sources: Homebrew cask zap stanzas (proxyman, charles, http-toolkit, wireshark-app, little-snitch, lulu, surge, clash-verge-rev, v2rayu, shadowsocksx-ng, outline-manager, bruno, httpie-desktop, rapidapi), Proxyman/mitmproxy/Whistle/Fiddler docs, Objective Development Little Snitch uninstall docs. System /Library paths and privileged helpers are out of default user clean (never-touch / root). Certificates live in Keychain after install; on-disk PEM/P12 under app support must not be bulk-deleted. path_count is total path template strings across rules.",
+  "rules": [
+    {
+      "id": "net-proxyman-caches",
+      "name": "Proxyman caches and HTTP/WebKit storage",
+      "description": "Proxyman regenerable caches, crash reporter data, HTTPStorages, WebKit site data. Not CA or user-data.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/com.proxyman.NSProxy",
+        "$HOME/Library/Caches/Proxyman",
+        "$HOME/Library/Caches/com.plausiblelabs.crashreporter.data/com.proxyman.NSProxy",
+        "$HOME/Library/HTTPStorages/com.proxyman.NSProxy",
+        "$HOME/Library/WebKit/com.proxyman.NSProxy"
+      ],
+      "exclude_globs": [],
+      "notes": "Do not delete Application Support app-data certs (proxyman-ca.pem) or user-data/session DB. Close Proxyman first."
+    },
+    {
+      "id": "net-proxyman-logs-savedstate",
+      "name": "Proxyman logs and saved state",
+      "description": "Proxyman resume state and any Logs under Proxyman support trees.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Saved Application State/com.proxyman.NSProxy.savedState",
+        "$HOME/Library/Logs/Proxyman",
+        "$HOME/Library/Logs/com.proxyman.NSProxy"
+      ],
+      "notes": "Saved Application State is regenerable window restore only."
+    },
+    {
+      "id": "net-proxyman-support-report",
+      "name": "Proxyman Application Support inventory (report-only)",
+      "description": "Full Proxyman support trees including user-data, backups, and CA material. Inventory only.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/com.proxyman",
+        "$HOME/Library/Application Support/com.proxyman.NSProxy",
+        "$HOME/.proxyman",
+        "$HOME/.proxyman-data"
+      ],
+      "notes": "CA at .../app-data/proxyman-ca.pem; user-data and user-data-backups hold request history and Map Local. Never bulk wipe. License/activation may also live under Preferences (excluded from delete rules)."
+    },
+    {
+      "id": "net-charles-caches-support",
+      "name": "Charles Proxy caches and support sessions",
+      "description": "Charles Application Support session/recording cache side data. Config/license stays out of default clean.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Application Support/Charles"
+      ],
+      "exclude_globs": [
+        "**/*.config",
+        "**/license*",
+        "**/License*"
+      ],
+      "notes": "Charles stores large .chls sessions under Application Support. Medium risk: may contain auth headers/bodies. Never delete ~/Library/Preferences/com.xk72.charles.config (settings/license)."
+    },
+    {
+      "id": "net-charles-savedstate-logs",
+      "name": "Charles saved state and residual logs",
+      "description": "Charles window restore and log leftovers.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Saved Application State/com.xk72.Charles.savedState",
+        "$HOME/Library/Logs/Charles",
+        "$HOME/Library/Caches/com.xk72.Charles",
+        "$HOME/Library/Caches/com.xk72.charles"
+      ],
+      "notes": "Safe regenerable UI state/caches. Preferences/config not listed."
+    },
+    {
+      "id": "net-httptoolkit-caches-logs",
+      "name": "HTTP Toolkit caches and logs",
+      "description": "HTTP Toolkit Electron/server caches, logs, and browser-detect preference cache.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/HTTP Toolkit/Cache",
+        "$HOME/Library/Application Support/HTTP Toolkit/Code Cache",
+        "$HOME/Library/Application Support/HTTP Toolkit/GPUCache",
+        "$HOME/Library/Application Support/HTTP Toolkit/logs",
+        "$HOME/Library/Application Support/HTTP Toolkit/blob_storage",
+        "$HOME/Library/Application Support/HTTP Toolkit/Crashpad",
+        "$HOME/Library/Caches/httptoolkit-server",
+        "$HOME/Library/Logs/HTTP Toolkit",
+        "$HOME/Library/Preferences/httptoolkit"
+      ],
+      "notes": "Preferences/httptoolkit holds browsers.json detect cache (safe). Do not wipe whole Application Support root if it stores API mocks/collections the user relies on; prefer listed subdirs. MITM CA is managed separately; never bulk-delete cert stores."
+    },
+    {
+      "id": "net-httptoolkit-support-report",
+      "name": "HTTP Toolkit Application Support root (report-only)",
+      "description": "Full HTTP Toolkit support tree for size inventory.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/HTTP Toolkit",
+        "$HOME/Library/Saved Application State/tech.httptoolkit.desktop.savedState"
+      ],
+      "notes": "Report sizes; clean only known cache/log children via net-httptoolkit-caches-logs."
+    },
+    {
+      "id": "net-mitmproxy-flows-temp",
+      "name": "mitmproxy flow dumps and temp (careful)",
+      "description": "Aged flow files and temp under ~/.mitmproxy excluding CA keys.",
+      "category": "app-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "$HOME/.mitmproxy"
+      ],
+      "include_globs": [
+        "**/*.flow",
+        "**/*.flows",
+        "**/flows",
+        "**/*dump*",
+        "**/*.log",
+        "**/tmp/**",
+        "**/cache/**"
+      ],
+      "exclude_globs": [
+        "**/mitmproxy-ca*",
+        "**/mitmproxy-dhparam*",
+        "**/*.pem",
+        "**/*.p12",
+        "**/*.p8",
+        "**/config.yaml",
+        "**/keys"
+      ],
+      "notes": "NEVER delete mitmproxy-ca.pem, mitmproxy-ca-cert.pem, mitmproxy-ca-cert.p12, or dhparam. Deleting CA forces re-trust everywhere. Flows may contain secrets (medium)."
+    },
+    {
+      "id": "net-mitmproxy-certs-report",
+      "name": "mitmproxy CA and config inventory (report-only)",
+      "description": "Report size of mitmproxy home including certs; never auto-delete.",
+      "category": "system-data",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.mitmproxy"
+      ],
+      "notes": "Default confdir ~/.mitmproxy (docs.mitmproxy.org). config.yaml + CA material. Report-only always."
+    },
+    {
+      "id": "net-wireshark-caches",
+      "name": "Wireshark caches and HTTP/WebKit storage",
+      "description": "Wireshark app caches, cookies store, HTTPStorages, WebKit. Not profiles or captures.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/org.wireshark.Wireshark",
+        "$HOME/Library/HTTPStorages/org.wireshark.Wireshark",
+        "$HOME/Library/WebKit/org.wireshark.Wireshark",
+        "$HOME/Library/Saved Application State/org.wireshark.Wireshark.savedState"
+      ],
+      "notes": "Personal config/profiles live under ~/.config/wireshark (report-only sibling). Captures are separate."
+    },
+    {
+      "id": "net-wireshark-config-report",
+      "name": "Wireshark personal config and profiles (report-only)",
+      "description": "Wireshark personal configuration, colorfilters, profiles. Inventory only.",
+      "category": "app-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.config/wireshark",
+        "$HOME/.wireshark",
+        "$HOME/Library/Application Support/Wireshark"
+      ],
+      "notes": "Profiles and recent files lists. Not junk. System ChmodBPF under /Library is out of user clean scope."
+    },
+    {
+      "id": "net-packet-captures-report",
+      "name": "Packet captures pcap/pcapng (report-only large)",
+      "description": "Large tcpdump/tshark/Wireshark capture files under common user-writable temps. Report-only; never auto-delete captures.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Caches",
+        "$TMPDIR",
+        "/private/tmp",
+        "/tmp",
+        "$HOME"
+      ],
+      "include_globs": [
+        "**/*.pcap",
+        "**/*.pcapng",
+        "**/*.cap",
+        "**/tcpdump*.log",
+        "**/dumpcap*"
+      ],
+      "max_depth": 4,
+      "notes": "Captures are often intentional evidence. Documents/Desktop/Downloads are never-touch for bulk clean; engine must still refuse those roots. Prefer report size + age; user deletes explicitly. tshark/tcpdump have no large fixed cache root beyond output paths."
+    },
+    {
+      "id": "net-little-snitch-caches-logs",
+      "name": "Little Snitch residual caches and logs",
+      "description": "User-scoped Little Snitch caches and agent logs after install/uninstall residual.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/at.obdev.LittleSnitchAgent",
+        "$HOME/Library/Caches/at.obdev.LittleSnitchConfiguration",
+        "$HOME/Library/Caches/at.obdev.LittleSnitchHelper",
+        "$HOME/Library/Caches/at.obdev.LittleSnitchSoftwareUpdate",
+        "$HOME/Library/Logs/Little Snitch Agent.log",
+        "$HOME/Library/Logs/Little Snitch Helper.log",
+        "$HOME/Library/Logs/Little Snitch Installer.log",
+        "$HOME/Library/Logs/Little Snitch Network Monitor.log",
+        "$HOME/Library/WebKit/at.obdev.LittleSnitchConfiguration",
+        "$HOME/Library/Saved Application State/at.obdev.LittleSnitchInstaller.savedState"
+      ],
+      "notes": "Caches/logs only. Rules and configuration must not be wiped as part of space reclaim (see report-only residual rule). System /Library/Application Support/Objective Development is root-owned and out of default scope."
+    },
+    {
+      "id": "net-little-snitch-config-report",
+      "name": "Little Snitch configuration residual (report-only)",
+      "description": "Little Snitch Application Support and rule-related prefs inventory after uninstall or for size.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/Little Snitch"
+      ],
+      "notes": "Live firewall rules. Uninstaller intentionally keeps config so reinstall restores rules. Never auto-delete. Preferences plists under ~/Library/Preferences/at.obdev.* hold settings; leave them."
+    },
+    {
+      "id": "net-lulu-caches-residual",
+      "name": "LuLu residual caches",
+      "description": "Objective-See LuLu firewall caches left after use or uninstall.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Caches/com.objective-see.lulu",
+        "$HOME/Library/Caches/com.objective-see.lulu.helper",
+        "$HOME/Library/Logs/LuLu",
+        "$HOME/Library/Logs/com.objective-see.lulu"
+      ],
+      "notes": "Rules live in Preferences (com.objective-see.lulu*.plist) and must not be default-cleaned. Residual caches only."
+    },
+    {
+      "id": "net-lulu-config-report",
+      "name": "LuLu rules and preferences residual (report-only)",
+      "description": "LuLu preference/rules residual inventory only.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/LuLu",
+        "$HOME/Library/Application Support/com.objective-see.lulu"
+      ],
+      "notes": "Firewall allow/block rules. Report-only residual after uninstall."
+    },
+    {
+      "id": "net-surge-caches-logs",
+      "name": "Surge caches, logs, and HTTP storage",
+      "description": "Surge Mac regenerable caches, Bugsnag crumbs, logs, HTTPStorages. Not profiles or license.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/com.nssurge.surge-mac",
+        "$HOME/Library/Caches/com.nssurge.surge-mac.plist",
+        "$HOME/Library/Caches/bugsnag-shared-com.nssurge.surge-mac",
+        "$HOME/Library/HTTPStorages/com.nssurge.surge-mac",
+        "$HOME/Library/Logs/Surge",
+        "$HOME/Library/Application Support/bugsnag-shared-com.nssurge.surge-mac",
+        "$HOME/Library/Application Support/com.bugsnag.Bugsnag/com.nssurge.surge-mac",
+        "$HOME/Library/Saved Application State/com.nssurge.surge-mac.savedState",
+        "$HOME/Library/Saved Application State/com.nssurge.surge-mac.dashboard.savedState"
+      ],
+      "notes": "Profiles, modules, and license under Application Support/Surge or com.nssurge.surge-mac are not default-deleted."
+    },
+    {
+      "id": "net-surge-profiles-report",
+      "name": "Surge profiles and Application Support (report-only)",
+      "description": "Surge profiles, database, and license-related support trees.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/Surge",
+        "$HOME/Library/Application Support/com.nssurge.surge-mac"
+      ],
+      "notes": "User profiles, rule sets, MITM CA, and paid license state. Report-only."
+    },
+    {
+      "id": "net-clashx-caches",
+      "name": "ClashX / ClashX Pro caches and logs",
+      "description": "ClashX menu-bar client caches and logs. Config/subscriptions separate.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/com.west2online.ClashX",
+        "$HOME/Library/Caches/com.west2online.ClashXPro",
+        "$HOME/Library/Logs/ClashX",
+        "$HOME/Library/Logs/com.west2online.ClashX",
+        "$HOME/Library/Logs/com.west2online.ClashXPro",
+        "$HOME/Library/HTTPStorages/com.west2online.ClashX",
+        "$HOME/Library/HTTPStorages/com.west2online.ClashXPro",
+        "$HOME/Library/Saved Application State/com.west2online.ClashX.savedState",
+        "$HOME/Library/Saved Application State/com.west2online.ClashXPro.savedState"
+      ],
+      "notes": "Do not wipe config.yaml / subscriptions under Application Support or ~/.config/clash without user intent."
+    },
+    {
+      "id": "net-clashx-config-report",
+      "name": "ClashX config and profiles (report-only)",
+      "description": "ClashX Application Support and classic clash config home.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/com.west2online.ClashX",
+        "$HOME/Library/Application Support/com.west2online.ClashXPro",
+        "$HOME/.config/clash",
+        "$HOME/.config/clash.meta"
+      ],
+      "notes": "Proxy providers, MMDB GeoIP databases, and subscription caches. MMDB can be large but is config-adjacent; report-only."
+    },
+    {
+      "id": "net-clash-verge-caches",
+      "name": "Clash Verge / Verge Rev caches",
+      "description": "Clash Verge (Tauri) and Clash Verge Rev caches and WebKit data.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/io.github.clash-verge-rev.clash-verge-rev",
+        "$HOME/Library/Caches/com.clashverge.dev",
+        "$HOME/Library/WebKit/io.github.clash-verge-rev.clash-verge-rev",
+        "$HOME/Library/WebKit/com.clashverge.dev",
+        "$HOME/Library/Logs/Clash Verge",
+        "$HOME/Library/Logs/io.github.clash-verge-rev.clash-verge-rev",
+        "$HOME/Library/Saved Application State/io.github.clash-verge-rev.clash-verge-rev.savedState"
+      ],
+      "notes": "Profiles under Application Support stay; only caches/logs/WebKit."
+    },
+    {
+      "id": "net-clash-verge-config-report",
+      "name": "Clash Verge profiles and support (report-only)",
+      "description": "Clash Verge Rev support tree with profiles, clash core logs, and geo data.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev",
+        "$HOME/Library/Application Support/com.clashverge.dev",
+        "$HOME/.local/share/io.github.clash-verge-rev.clash-verge-rev",
+        "$HOME/.config/clash-verge"
+      ],
+      "notes": "Subscriptions, profiles, Country.mmdb, geoip. Report-only; user may prune logs/ subdir manually."
+    },
+    {
+      "id": "net-v2rayu-caches-logs",
+      "name": "V2rayU caches and logs",
+      "description": "V2rayU caches, HTTPStorages, and log file.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/net.yanue.V2rayU",
+        "$HOME/Library/HTTPStorages/net.yanue.V2rayU",
+        "$HOME/Library/Logs/V2rayU.log",
+        "$HOME/Library/Logs/V2rayU",
+        "$HOME/Library/Saved Application State/net.yanue.V2rayU.savedState"
+      ],
+      "notes": "Server list and preference under Application Support / ~/.V2rayU are not default-cleaned."
+    },
+    {
+      "id": "net-v2rayu-config-report",
+      "name": "V2rayU config residual (report-only)",
+      "description": "V2rayU home and Application Support including cores and configs.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.V2rayU",
+        "$HOME/Library/Application Support/net.yanue.V2rayU",
+        "$HOME/Library/Containers/net.yanue.V2rayU.Launcher"
+      ],
+      "notes": "Pac, conf, v2ray-core binaries copies. Report-only."
+    },
+    {
+      "id": "net-qv2ray-caches",
+      "name": "Qv2ray caches and logs",
+      "description": "Qv2ray (deprecated GUI) caches and logs.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/com.github.Qv2ray",
+        "$HOME/Library/Caches/qv2ray",
+        "$HOME/Library/Logs/qv2ray",
+        "$HOME/Library/Logs/Qv2ray",
+        "$HOME/Library/Saved Application State/com.github.Qv2ray.savedState"
+      ],
+      "notes": "Config connections under ~/.config/qv2ray are report-only sibling."
+    },
+    {
+      "id": "net-qv2ray-config-report",
+      "name": "Qv2ray config residual (report-only)",
+      "description": "Qv2ray config home and Application Support residual after uninstall.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.config/qv2ray",
+        "$HOME/Library/Application Support/qv2ray",
+        "$HOME/Library/Application Support/Qv2ray",
+        "$HOME/Library/Application Support/com.github.Qv2ray"
+      ],
+      "notes": "Connection groups and plugin data. Project is deprecated; residual cleanup is user-driven."
+    },
+    {
+      "id": "net-outline-manager-caches",
+      "name": "Outline Manager Electron caches and logs",
+      "description": "Outline Manager (server admin) Electron caches and logs. Not access keys.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/Outline Manager/Cache",
+        "$HOME/Library/Application Support/Outline Manager/Code Cache",
+        "$HOME/Library/Application Support/Outline Manager/GPUCache",
+        "$HOME/Library/Application Support/Outline Manager/logs",
+        "$HOME/Library/Application Support/Outline Manager/blob_storage",
+        "$HOME/Library/Application Support/Outline Manager/Crashpad",
+        "$HOME/Library/Caches/com.electron.outline-manager",
+        "$HOME/Library/Saved Application State/com.electron.outline-manager.savedState"
+      ],
+      "notes": "Do not wipe Local Storage session that may hold server management tokens without user intent; prefer listed cache/log children."
+    },
+    {
+      "id": "net-outline-client-caches",
+      "name": "Outline Client caches and logs",
+      "description": "Outline VPN client caches/logs (App Store / Cordova layouts).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/org.getoutline.client",
+        "$HOME/Library/Caches/ch.outline.macos.client",
+        "$HOME/Library/Logs/Outline",
+        "$HOME/Library/Logs/org.getoutline.client",
+        "$HOME/Library/Application Support/Outline/Cache",
+        "$HOME/Library/Application Support/Outline/Code Cache",
+        "$HOME/Library/Application Support/Outline/GPUCache",
+        "$HOME/Library/Application Support/Outline/logs"
+      ],
+      "notes": "Access keys and server configs are user data. Container Group Containers may hold VPN state; not listed for default delete. Note: unrelated 'Outline' notes app also uses Library/Logs/Outline paths; age/name filters reduce collateral."
+    },
+    {
+      "id": "net-shadowsocksx-ng-caches",
+      "name": "ShadowsocksX-NG caches",
+      "description": "ShadowsocksX-NG caches. Config under .ShadowsocksX-NG is separate.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/com.qiuyuzhou.ShadowsocksX-NG",
+        "$HOME/Library/Logs/ShadowsocksX-NG",
+        "$HOME/Library/HTTPStorages/com.qiuyuzhou.ShadowsocksX-NG",
+        "$HOME/Library/Saved Application State/com.qiuyuzhou.ShadowsocksX-NG.savedState"
+      ],
+      "notes": "Server list and local socks config must not be wiped by default."
+    },
+    {
+      "id": "net-shadowsocksx-ng-config-report",
+      "name": "ShadowsocksX-NG config residual (report-only)",
+      "description": "ShadowsocksX-NG home and Application Support residual.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.ShadowsocksX-NG",
+        "$HOME/Library/Application Support/ShadowsocksX-NG"
+      ],
+      "notes": "ss-local conf, privoxy, kcp. Report-only residual."
+    },
+    {
+      "id": "net-whistle-logs-cache",
+      "name": "Whistle proxy logs and cache data",
+      "description": "Whistle Node proxy crash log and cache under .WhistleAppData excluding certs/rules.",
+      "category": "app-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/.WhistleAppData"
+      ],
+      "include_globs": [
+        "**/*.log",
+        "**/whistle.log",
+        "**/cache/**",
+        "**/tmp/**",
+        "**/composer/**",
+        "**/capture/**"
+      ],
+      "exclude_globs": [
+        "**/certs/**",
+        "**/*ca*",
+        "**/*.crt",
+        "**/*.key",
+        "**/rules",
+        "**/values",
+        "**/properties"
+      ],
+      "notes": "whistle.log path documented in FAQ. Never wipe certs/ or custom rules/values. Capture storage may hold bodies (medium)."
+    },
+    {
+      "id": "net-whistle-client-electron",
+      "name": "Whistle client Electron caches",
+      "description": "Desktop Whistle client (whistle-client) Electron caches if installed.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/whistle-client/Cache",
+        "$HOME/Library/Application Support/whistle-client/Code Cache",
+        "$HOME/Library/Application Support/whistle-client/GPUCache",
+        "$HOME/Library/Application Support/whistle-client/logs",
+        "$HOME/Library/Application Support/Whistle/Cache",
+        "$HOME/Library/Application Support/Whistle/Code Cache",
+        "$HOME/Library/Application Support/Whistle/GPUCache",
+        "$HOME/Library/Application Support/Whistle/logs",
+        "$HOME/Library/Logs/whistle-client",
+        "$HOME/Library/Caches/whistle-client"
+      ],
+      "notes": "Optional GUI wrapper paths; CLI-only installs may only have ~/.WhistleAppData."
+    },
+    {
+      "id": "net-fiddler-everywhere-caches-logs",
+      "name": "Fiddler Everywhere caches and logs",
+      "description": "Fiddler Everywhere Electron caches and Logs folder. License excluded.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/Fiddler Everywhere/Cache",
+        "$HOME/Library/Application Support/Fiddler Everywhere/Code Cache",
+        "$HOME/Library/Application Support/Fiddler Everywhere/GPUCache",
+        "$HOME/Library/Application Support/Fiddler Everywhere/Logs",
+        "$HOME/Library/Application Support/Fiddler Everywhere/logs",
+        "$HOME/Library/Application Support/Fiddler Everywhere/blob_storage",
+        "$HOME/Library/Application Support/Fiddler Everywhere/Crashpad",
+        "$HOME/Library/Caches/com.progress-telerik.fiddler",
+        "$HOME/Library/Caches/Fiddler Everywhere",
+        "$HOME/Library/Logs/Fiddler Everywhere",
+        "$HOME/Library/Saved Application State/com.progress-telerik.fiddler.savedState"
+      ],
+      "exclude_globs": [
+        "**/License/**",
+        "**/license.lic",
+        "**/*.lic"
+      ],
+      "notes": "License lives at ~/Library/Application Support/Fiddler Everywhere/License (docs). Never wipe. Captured sessions may sit under Application Support root (report sibling)."
+    },
+    {
+      "id": "net-fiddler-everywhere-support-report",
+      "name": "Fiddler Everywhere full support (report-only)",
+      "description": "Full Fiddler Everywhere tree including AutoSave/sessions and license.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/Fiddler Everywhere"
+      ],
+      "notes": "May include AutoSave traffic archives and License/. Report-only."
+    },
+    {
+      "id": "net-postman-intercept-residual",
+      "name": "Postman intercept/agent residual",
+      "description": "Postman Interceptor/proxy agent residual beyond primary Electron caches already in apps-comms.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/Postman/Partitions",
+        "$HOME/Library/Application Support/Postman/Service Worker",
+        "$HOME/Library/Application Support/Postman/Session Storage",
+        "$HOME/Library/Application Support/Postman/Local Storage",
+        "$HOME/Library/Application Support/PostmanAgent/Cache",
+        "$HOME/Library/Application Support/PostmanAgent/Code Cache",
+        "$HOME/Library/Application Support/PostmanAgent/GPUCache",
+        "$HOME/Library/Application Support/PostmanAgent/logs",
+        "$HOME/Library/Caches/com.postmanlabs.mac.ShipIt",
+        "$HOME/Library/HTTPStorages/com.postmanlabs.mac",
+        "$HOME/Library/WebKit/com.postmanlabs.mac"
+      ],
+      "notes": "Primary Cache/Code Cache/GPUCache/logs already covered elsewhere; this rule is residual intercept/agent/storage. Never delete Postman_Config, IndexedDB collections, or storage/ of collections. Close Postman first."
+    },
+    {
+      "id": "net-insomnia-residual",
+      "name": "Insomnia residual caches beyond primary",
+      "description": "Insomnia Service Worker, Session Storage, HTTPStorages residual beyond primary electron caches.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/Insomnia/Service Worker",
+        "$HOME/Library/Application Support/Insomnia/Session Storage",
+        "$HOME/Library/Application Support/Insomnia/Local Storage",
+        "$HOME/Library/Application Support/Insomnia/Partitions",
+        "$HOME/Library/Application Support/Insomnia/Crashpad",
+        "$HOME/Library/HTTPStorages/com.insomnia.app",
+        "$HOME/Library/WebKit/com.insomnia.app",
+        "$HOME/Library/Saved Application State/com.insomnia.app.savedState"
+      ],
+      "notes": "Leaves insomnia*.db request collections. Primary Cache/GPUCache covered in apps-comms."
+    },
+    {
+      "id": "net-paw-rapidapi-caches",
+      "name": "Paw / RapidAPI caches and container caches",
+      "description": "Paw (now RapidAPI) container caches and logs. Not project documents.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/com.luckymarmot.Paw",
+        "$HOME/Library/Caches/com.luckymarmot.RapidAPI",
+        "$HOME/Library/Logs/Paw",
+        "$HOME/Library/Logs/RapidAPI",
+        "$HOME/Library/Containers/com.luckymarmot.Paw/Data/Library/Caches",
+        "$HOME/Library/Containers/com.luckymarmot.Paw/Data/Library/Logs",
+        "$HOME/Library/Containers/com.luckymarmot.Paw/Data/tmp",
+        "$HOME/Library/Saved Application State/com.luckymarmot.Paw.savedState"
+      ],
+      "notes": "Paw documents (.paw) are user projects (never-touch if under Documents). Container Application Support may hold cloud tokens; stick to Caches/Logs/tmp."
+    },
+    {
+      "id": "net-paw-rapidapi-container-report",
+      "name": "Paw/RapidAPI container residual (report-only)",
+      "description": "Full Paw container and Application Scripts residual inventory.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Containers/com.luckymarmot.Paw",
+        "$HOME/Library/Application Scripts/com.luckymarmot.Paw"
+      ],
+      "notes": "Sandbox container; may include local API libraries. Report-only."
+    },
+    {
+      "id": "net-httpie-desktop-caches-logs",
+      "name": "HTTPie desktop caches and logs",
+      "description": "HTTPie for Desktop Electron caches and logs.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/HTTPie/Cache",
+        "$HOME/Library/Application Support/HTTPie/Code Cache",
+        "$HOME/Library/Application Support/HTTPie/GPUCache",
+        "$HOME/Library/Application Support/HTTPie/logs",
+        "$HOME/Library/Application Support/HTTPie/blob_storage",
+        "$HOME/Library/Application Support/HTTPie/Crashpad",
+        "$HOME/Library/Logs/HTTPie",
+        "$HOME/Library/Caches/io.httpie.desktop",
+        "$HOME/Library/Saved Application State/io.httpie.desktop.savedState"
+      ],
+      "notes": "Collections/sessions under Application Support/HTTPie root are user data; prefer listed subdirs only."
+    },
+    {
+      "id": "net-bruno-caches",
+      "name": "Bruno API client caches",
+      "description": "Bruno Electron caches and logs. Collections are git-friendly files outside this tree.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/bruno/Cache",
+        "$HOME/Library/Application Support/bruno/Code Cache",
+        "$HOME/Library/Application Support/bruno/GPUCache",
+        "$HOME/Library/Application Support/bruno/logs",
+        "$HOME/Library/Application Support/bruno/blob_storage",
+        "$HOME/Library/Application Support/bruno/Crashpad",
+        "$HOME/Library/Application Support/bruno/Service Worker",
+        "$HOME/Library/Caches/com.usebruno.app",
+        "$HOME/Library/Logs/bruno",
+        "$HOME/Library/Saved Application State/com.usebruno.app.savedState"
+      ],
+      "notes": "Bruno collections live in user-chosen project folders (never auto-scan Documents). App Support holds window state and cache only for space reclaim."
+    },
+    {
+      "id": "net-proxy-certs-license-never",
+      "name": "Proxy MITM certs and licenses inventory (report-only never-wipe)",
+      "description": "Explicit report-only list of known CA/license locations so cleaners do not target them.",
+      "category": "system-data",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.mitmproxy",
+        "$HOME/Library/Application Support/com.proxyman.NSProxy/app-data",
+        "$HOME/Library/Application Support/Fiddler Everywhere/License",
+        "$HOME/Library/Preferences/com.xk72.charles.config",
+        "$HOME/.WhistleAppData/certs"
+      ],
+      "notes": "HARD POLICY: never default-clean MITM private keys, trusted CA PEMs, or paid license blobs. Re-trust cost is high. Keychain entries are outside path cleaners entirely."
+    }
+  ]
+}

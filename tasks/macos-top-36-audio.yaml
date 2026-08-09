@@ -12,8 +12,7 @@ task:
       args: ["SPAudioDataType"]
     - id: plan-audio-profile
       name: Plan audio routing profile script
-      type: run-command
-      program: bash
-      args: ["-lc", "$HOME/.config/macos/audio-profile.sh"]
+      type: run-script
+      interpreter: bash
+      script: "$HOME/.config/macos/audio-profile.sh"
       dangerous: true
-      shell: allow

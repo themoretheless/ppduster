@@ -1,0 +1,634 @@
+pack: apps-education
+rules:
+
+  - id: edu-anki-app-caches
+    name: Anki app and launcher caches
+    description: Anki Qt/desktop Caches bundles and ShipIt-style leftovers; not decks.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/net.ankiweb.dtop
+      - $HOME/Library/Caches/net.ankiweb.launcher
+      - $HOME/Library/Caches/net.ankiweb.Anki
+      - $HOME/Library/Caches/Anki
+      - $HOME/Library/Logs/Anki
+    delete_mode: contents
+    max_depth: 5
+
+  - id: edu-anki-mpv-webengine-cache
+    name: Anki media helper residual caches
+    description: Qt WebEngine and helper caches sometimes nested under Anki support trees (not media files).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Anki2/QtWebEngine
+      - $HOME/Library/Application Support/Anki2/GPUCache
+      - $HOME/Library/Application Support/Anki2/Cache
+      - $HOME/Library/Application Support/Anki2/Code Cache
+    exclude_globs:
+      - "**/collection.anki2"
+      - "**/collection.media/**"
+      - "**/backups/**"
+      - "**/*.anki2"
+      - "**/*.colpkg"
+      - "**/*.apkg"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-anki-programfiles-cache
+    name: AnkiProgramFiles package/download cache
+    description: Launcher uv/package download cache under AnkiProgramFiles; reinstallable.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/AnkiProgramFiles/cache
+      - $HOME/Library/Application Support/AnkiProgramFiles/.cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-apple-books-residual-caches
+    name: Apple Books residual caches
+    description: iBooksX / Books app Caches and logs residual; not book files.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.apple.Books
+      - $HOME/Library/Containers/com.apple.Books/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.iBooksX/Data/tmp
+      - $HOME/Library/Logs/Books
+      - $HOME/Library/Logs/iBooksX
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-babbel-caches
+    name: Babbel app caches
+    description: Babbel language app Caches and container caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.babbel.Babbel
+      - $HOME/Library/Caches/com.babbel.BabbelMac
+      - $HOME/Library/Caches/com.babbel.language
+      - $HOME/Library/Containers/com.babbel.Babbel/Data/Library/Caches
+      - $HOME/Library/Application Support/Babbel/Cache
+      - $HOME/Library/Application Support/Babbel/Code Cache
+      - $HOME/Library/Application Support/Babbel/GPUCache
+      - $HOME/Library/Logs/Babbel
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-coursera-electron-caches
+    name: Coursera desktop Electron caches
+    description: Coursera desktop Chromium caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Coursera/Cache
+      - $HOME/Library/Application Support/Coursera/Code Cache
+      - $HOME/Library/Application Support/Coursera/GPUCache
+      - $HOME/Library/Application Support/Coursera/DawnGraphiteCache
+      - $HOME/Library/Application Support/Coursera/DawnWebGPUCache
+      - $HOME/Library/Application Support/Coursera/blob_storage
+      - $HOME/Library/Application Support/Coursera/Crashpad
+      - $HOME/Library/Application Support/Coursera/logs
+      - $HOME/Library/Caches/org.coursera.Coursera
+      - $HOME/Library/Caches/com.coursera.Coursera
+      - $HOME/Library/Logs/Coursera
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-desmos-caches
+    name: Desmos app caches
+    description: Desmos calculator/test-mode style Caches if Mac app present.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.desmos.Desmos
+      - $HOME/Library/Caches/com.desmos.calculator
+      - $HOME/Library/Caches/com.desmos.DesmosGraphingCalculator
+      - $HOME/Library/Containers/com.desmos.Desmos/Data/Library/Caches
+      - $HOME/Library/Containers/com.desmos.calculator/Data/Library/Caches
+      - $HOME/Library/Application Support/Desmos/Cache
+      - $HOME/Library/Application Support/Desmos/Code Cache
+      - $HOME/Library/Application Support/Desmos/GPUCache
+      - $HOME/Library/Logs/Desmos
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-duolingo-caches
+    name: Duolingo app caches
+    description: Duolingo Mac/Catalyst Caches, containers, logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.duolingo.DuolingoMobile
+      - $HOME/Library/Caches/com.duolingo.DuolingoMac
+      - $HOME/Library/Caches/com.duolingo.DuolingoDesktop
+      - $HOME/Library/Caches/com.duolingo.Duolingo
+      - $HOME/Library/Containers/com.duolingo.DuolingoMobile/Data/Library/Caches
+      - $HOME/Library/Containers/com.duolingo.DuolingoMac/Data/Library/Caches
+      - $HOME/Library/Logs/Duolingo
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-geogebra-caches
+    name: GeoGebra caches
+    description: GeoGebra Classic/mac app Caches and residual support caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/org.geogebra.mac
+      - $HOME/Library/Caches/org.geogebra.GeoGebra
+      - $HOME/Library/Caches/org.geogebra.calculator
+      - $HOME/Library/Application Support/GeoGebra/Cache
+      - $HOME/Library/Application Support/GeoGebra/Code Cache
+      - $HOME/Library/Application Support/GeoGebra/GPUCache
+      - $HOME/Library/Logs/GeoGebra
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-goodnotes-caches
+    name: GoodNotes sandbox and app caches
+    description: GoodNotes container Library/Caches and named Caches bundles only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.goodnotesapp.x
+      - $HOME/Library/Caches/com.goodnotesapp.GoodNotes
+      - $HOME/Library/Caches/42f94544.maccatalyst.com.goodnotesapp.x
+      - $HOME/Library/Containers/com.goodnotesapp.x/Data/Library/Caches
+      - $HOME/Library/Containers/com.goodnotesapp.x/Data/tmp
+      - $HOME/Library/Logs/GoodNotes
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-goodreader-caches
+    name: GoodReader caches
+    description: GoodReader Mac/iOS-Catalyst Caches and container caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.goodreader.GoodReader
+      - $HOME/Library/Caches/com.goodiware.GoodReader
+      - $HOME/Library/Caches/com.goodreaderapp.GoodReader
+      - $HOME/Library/Containers/com.goodreader.GoodReader/Data/Library/Caches
+      - $HOME/Library/Containers/com.goodiware.GoodReader/Data/Library/Caches
+      - $HOME/Library/Logs/GoodReader
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-khan-academy-caches
+    name: Khan Academy app caches
+    description: Khan Academy Mac/Catalyst Caches and container caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/org.khanacademy.Khan-Academy
+      - $HOME/Library/Caches/org.khanacademy.KhanAcademy
+      - $HOME/Library/Caches/com.khanacademy.KhanAcademy
+      - $HOME/Library/Containers/org.khanacademy.Khan-Academy/Data/Library/Caches
+      - $HOME/Library/Containers/org.khanacademy.KhanAcademy/Data/Library/Caches
+      - $HOME/Library/Logs/Khan Academy
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-kindle-app-caches
+    name: Kindle app caches (not book library)
+    description: Amazon Kindle for Mac container and Caches only; not ebook content.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.amazon.Kindle
+      - $HOME/Library/Caches/com.amazon.Kindle-Mac
+      - $HOME/Library/Containers/com.amazon.Kindle/Data/Library/Caches
+      - $HOME/Library/Containers/com.amazon.Kindle/Data/tmp
+      - $HOME/Library/Containers/com.amazon.Kindle/Data/Library/Logs
+      - $HOME/Library/Logs/Kindle
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-kindle-content-report
+    name: Kindle ebook content folders (report-only)
+    description: Possible Kindle library roots for size reporting only.
+    category: app-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Kindle
+      - $HOME/Library/Containers/com.amazon.Kindle/Data/Library/Application Support/Kindle
+    delete_mode: contents
+    max_depth: 4
+
+  - id: edu-liquidtext-caches
+    name: LiquidText caches
+    description: LiquidText Mac/Catalyst Caches and container caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.liquidtext.LiquidText
+      - $HOME/Library/Caches/com.liquidtext.mac
+      - $HOME/Library/Caches/net.liquidtext.LiquidText
+      - $HOME/Library/Containers/com.liquidtext.LiquidText/Data/Library/Caches
+      - $HOME/Library/Containers/net.liquidtext.LiquidText/Data/Library/Caches
+      - $HOME/Library/Application Support/LiquidText/Cache
+      - $HOME/Library/Logs/LiquidText
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-mathematica-paclet-cache
+    name: Mathematica paclet and front-end caches
+    description: User paclet download/cache trees under Mathematica/Wolfram local bases.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Mathematica/Paclets/Repository
+      - $HOME/Library/Mathematica/Paclets/Temporary
+      - $HOME/Library/Wolfram/Paclets/Repository
+      - $HOME/Library/Wolfram/Paclets/Temporary
+      - $HOME/Library/Mathematica/FrontEnd/Caches
+      - $HOME/Library/Wolfram/FrontEnd/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-matlab-caches
+    name: MATLAB download and app caches
+    description: MathWorks MATLAB Caches and download-agent style caches under user Library.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/com.mathworks.MATLAB
+      - $HOME/Library/Caches/com.mathworks.matlab
+      - $HOME/Library/Caches/MathWorks
+      - $HOME/Library/Application Support/MathWorks/MATLABConnector/logs
+      - $HOME/Library/Application Support/MathWorks/ServiceHost/logs
+      - $HOME/Library/Application Support/MathWorks/Downloads
+      - $HOME/Library/Logs/MathWorks
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-matlab-mcr-cache
+    name: MATLAB Compiler Runtime mcrCache
+    description: MATLAB Compiler Runtime extract/cache under user cache locations.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.mcrCache9.0
+      - $HOME/.mcrCache9.1
+      - $HOME/.mcrCache9.2
+      - $HOME/.mcrCache9.3
+      - $HOME/.mcrCache9.4
+      - $HOME/.mcrCache9.5
+      - $HOME/.mcrCache9.6
+      - $HOME/.mcrCache9.7
+      - $HOME/.mcrCache9.8
+      - $HOME/.mcrCache9.9
+      - $HOME/.mcrCache9.10
+      - $HOME/.mcrCache9.11
+      - $HOME/.mcrCache9.12
+      - $HOME/.mcrCache9.13
+      - $HOME/.mcrCache9.14
+      - $HOME/Library/Application Support/MathWorks/mcrCache
+    delete_mode: contents
+    max_depth: 5
+
+  - id: edu-memrise-caches
+    name: Memrise app caches
+    description: Memrise language app Caches and Electron leftovers.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.memrise.Memrise
+      - $HOME/Library/Caches/com.memrise.mac
+      - $HOME/Library/Containers/com.memrise.Memrise/Data/Library/Caches
+      - $HOME/Library/Application Support/Memrise/Cache
+      - $HOME/Library/Application Support/Memrise/Code Cache
+      - $HOME/Library/Application Support/Memrise/GPUCache
+      - $HOME/Library/Logs/Memrise
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-mendeley-caches
+    name: Mendeley Desktop / Reference Manager caches
+    description: Mendeley Caches and Electron Chromium caches; not PDF library DB.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.mendeley.desktop
+      - $HOME/Library/Caches/com.mendeley.MendeleyDesktop
+      - $HOME/Library/Caches/Mendeley Desktop
+      - $HOME/Library/Caches/Mendeley Reference Manager
+      - $HOME/Library/Application Support/Mendeley Reference Manager/Cache
+      - $HOME/Library/Application Support/Mendeley Reference Manager/Code Cache
+      - $HOME/Library/Application Support/Mendeley Reference Manager/GPUCache
+      - $HOME/Library/Application Support/Mendeley Reference Manager/DawnGraphiteCache
+      - $HOME/Library/Application Support/Mendeley Reference Manager/blob_storage
+      - $HOME/Library/Application Support/Mendeley Reference Manager/logs
+      - $HOME/Library/Logs/Mendeley Desktop
+      - $HOME/Library/Logs/Mendeley Reference Manager
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-notability-caches
+    name: Notability sandbox and app caches
+    description: Notability (Ginger Labs) container and Caches bundles.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.gingerlabs.Notability
+      - $HOME/Library/Caches/com.gingerlabs.notability
+      - $HOME/Library/Containers/com.gingerlabs.Notability/Data/Library/Caches
+      - $HOME/Library/Containers/com.gingerlabs.notability/Data/Library/Caches
+      - $HOME/Library/Containers/com.gingerlabs.Notability/Data/tmp
+      - $HOME/Library/Logs/Notability
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-octave-caches
+    name: GNU Octave caches
+    description: Octave GUI/app caches and local share cache trees.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/org.octave.Octave
+      - $HOME/Library/Caches/org.octave.OctaveGUI
+      - $HOME/Library/Caches/org.octave.cli
+      - $HOME/.cache/octave
+      - $HOME/.local/share/octave/packages-cache
+      - $HOME/Library/Logs/Octave
+    delete_mode: contents
+    max_depth: 5
+
+  - id: edu-papers-readcube-caches
+    name: Papers / ReadCube caches
+    description: ReadCube Papers app Caches and Electron leftovers.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.readcube.Papers
+      - $HOME/Library/Caches/com.readcube.papers
+      - $HOME/Library/Caches/com.mekentosj.papers
+      - $HOME/Library/Caches/com.mekentosj.papers3
+      - $HOME/Library/Application Support/Papers/Cache
+      - $HOME/Library/Application Support/Papers/Code Cache
+      - $HOME/Library/Application Support/Papers/GPUCache
+      - $HOME/Library/Application Support/ReadCube/Cache
+      - $HOME/Library/Application Support/ReadCube Papers/Cache
+      - $HOME/Library/Application Support/ReadCube Papers/Code Cache
+      - $HOME/Library/Application Support/ReadCube Papers/GPUCache
+      - $HOME/Library/Logs/Papers
+      - $HOME/Library/Logs/ReadCube
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-pdfexpert-caches
+    name: PDF Expert caches
+    description: Readdle PDF Expert Mac Caches and support cache trees.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.readdle.PDFExpert-Mac
+      - $HOME/Library/Caches/com.readdle.PDFExpert-Installer
+      - $HOME/Library/Caches/com.readdle.PDFExpert
+      - $HOME/Library/Application Support/com.readdle.PDFExpert-Mac/Caches
+      - $HOME/Library/Containers/com.readdle.PDFExpert-Mac/Data/Library/Caches
+      - $HOME/Library/Logs/PDF Expert
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-quizlet-caches
+    name: Quizlet app caches
+    description: Quizlet Mac/iOS-Catalyst style Caches and container caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.quizlet.quizlet
+      - $HOME/Library/Caches/com.quizlet.Quizlet
+      - $HOME/Library/Caches/com.quizlet.Quizlet-Mac
+      - $HOME/Library/Containers/com.quizlet.quizlet/Data/Library/Caches
+      - $HOME/Library/Containers/com.quizlet.Quizlet/Data/Library/Caches
+      - $HOME/Library/Logs/Quizlet
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-remnote-electron-caches
+    name: RemNote Electron caches
+    description: RemNote desktop Chromium caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/RemNote/Cache
+      - $HOME/Library/Application Support/RemNote/Code Cache
+      - $HOME/Library/Application Support/RemNote/GPUCache
+      - $HOME/Library/Application Support/RemNote/DawnGraphiteCache
+      - $HOME/Library/Application Support/RemNote/DawnWebGPUCache
+      - $HOME/Library/Application Support/RemNote/blob_storage
+      - $HOME/Library/Application Support/RemNote/Service Worker
+      - $HOME/Library/Application Support/RemNote/Crashpad
+      - $HOME/Library/Application Support/RemNote/logs
+      - $HOME/Library/Caches/com.remnote.RemNote
+      - $HOME/Library/Caches/RemNote
+      - $HOME/Library/Logs/RemNote
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-roam-research-electron-caches
+    name: Roam Research Electron caches
+    description: Roam Research desktop Chromium caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Roam Research/Cache
+      - $HOME/Library/Application Support/Roam Research/Code Cache
+      - $HOME/Library/Application Support/Roam Research/GPUCache
+      - $HOME/Library/Application Support/Roam Research/DawnGraphiteCache
+      - $HOME/Library/Application Support/Roam Research/blob_storage
+      - $HOME/Library/Application Support/Roam Research/Crashpad
+      - $HOME/Library/Application Support/Roam Research/logs
+      - $HOME/Library/Application Support/roam-research/Cache
+      - $HOME/Library/Application Support/roam-research/Code Cache
+      - $HOME/Library/Application Support/roam-research/GPUCache
+      - $HOME/Library/Caches/com.roamresearch.RoamResearch
+      - $HOME/Library/Logs/Roam Research
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-skillshare-electron-caches
+    name: Skillshare desktop Electron caches
+    description: Skillshare desktop Chromium caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Skillshare/Cache
+      - $HOME/Library/Application Support/Skillshare/Code Cache
+      - $HOME/Library/Application Support/Skillshare/GPUCache
+      - $HOME/Library/Application Support/Skillshare/DawnGraphiteCache
+      - $HOME/Library/Application Support/Skillshare/blob_storage
+      - $HOME/Library/Application Support/Skillshare/logs
+      - $HOME/Library/Caches/com.skillshare.Skillshare
+      - $HOME/Library/Caches/com.skillshare.desktop
+      - $HOME/Library/Logs/Skillshare
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-udemy-electron-caches
+    name: Udemy desktop Electron caches
+    description: Udemy desktop app Chromium caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/udemy/Cache
+      - $HOME/Library/Application Support/udemy/Code Cache
+      - $HOME/Library/Application Support/udemy/GPUCache
+      - $HOME/Library/Application Support/udemy-desktop-app/Cache
+      - $HOME/Library/Application Support/udemy-desktop-app/Code Cache
+      - $HOME/Library/Application Support/udemy-desktop-app/GPUCache
+      - $HOME/Library/Application Support/Udemy/Cache
+      - $HOME/Library/Application Support/Udemy/Code Cache
+      - $HOME/Library/Application Support/Udemy/GPUCache
+      - $HOME/Library/Application Support/Udemy/DawnGraphiteCache
+      - $HOME/Library/Application Support/Udemy/blob_storage
+      - $HOME/Library/Application Support/Udemy/logs
+      - $HOME/Library/Caches/com.udemy.desktop
+      - $HOME/Library/Caches/com.udemy.desktop-app
+      - $HOME/Library/Logs/Udemy
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-wolfram-caches
+    name: Wolfram / Mathematica caches
+    description: Official Wolfram cache base and bundle Caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/Wolfram
+      - $HOME/Library/Caches/com.wolfram.Mathematica
+      - $HOME/Library/Caches/com.wolfram.mathematica
+      - $HOME/Library/Caches/com.wolfram.WolframDesktop
+      - $HOME/Library/Caches/com.wolfram.WolframEngine
+      - $HOME/Library/Caches/WolframScript
+      - $HOME/.cache/Wolfram
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-zotero-caches
+    name: Zotero app caches (not library)
+    description: Zotero Firefox-profile style Caches and logs; not data directory.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Zotero
+      - $HOME/Library/Caches/org.zotero.zotero
+      - $HOME/Library/Caches/org.zotero.zotero-beta
+      - $HOME/Library/Logs/Zotero
+      - $HOME/Library/Application Support/Zotero/Crash Reports
+      - "$HOME/Library/Application Support/Zotero/Profiles/*/cache2"
+      - "$HOME/Library/Application Support/Zotero/Profiles/*/startupCache"
+      - "$HOME/Library/Application Support/Zotero/Profiles/*/shader-cache"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edu-zotero-data-cache-subdir
+    name: Zotero data-dir cache subfolder
+    description: Optional regenerable cache folder inside default data directory.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Zotero/cache
+    delete_mode: contents
+    max_depth: 4

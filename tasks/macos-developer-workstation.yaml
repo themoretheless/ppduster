@@ -3,8 +3,7 @@ task:
   name: macOS developer workstation
   description: |
     Prepare a macOS workstation for command-line and application development by running six existing setup scenarios in a deliberate order.
-    It verifies Homebrew before planning a Brewfile bundle, clones the dotfiles repository only when its destination is absent, and checks the expected shell configuration target.
-    It installs mise and the declared toolchains, verifies Git/SSH/GPG prerequisites, installs tmux while checking for an existing tmux config, and installs fzf and ripgrep.
+    The template bootstraps Homebrew, synchronizes a dotfiles repository, installs mise-based language toolchains, checks Git/SSH/GPG prerequisites, configures tmux, and installs modern CLI productivity tools.
     Some child scenarios may use Git credentials or shell-capable commands, so review the complete dry-run plan and grant only the permissions it reports before applying changes.
     The template reuses the child scenarios without copying their steps; their checks, trust requirements, safety gates, and already-satisfied behavior remain in effect.
   platform: macos

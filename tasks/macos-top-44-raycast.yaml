@@ -14,8 +14,8 @@ task:
         command_succeeds: ["brew", "list", "--cask", "raycast"]
     - id: plan-raycast-scripts
       name: Plan Raycast script commands sync
-      type: run-command
-      program: bash
-      args: ["-lc", "test -d \"$HOME/.config/raycast/scripts\""]
-      dangerous: true
-      shell: allow
+      type: inspect-path
+      path: $HOME/.config/raycast/scripts
+      expect:
+        exists: true
+        kind: directory

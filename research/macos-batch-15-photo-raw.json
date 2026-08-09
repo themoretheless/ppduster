@@ -1,0 +1,1111 @@
+{
+  "batch": "15-photo-raw",
+  "platform": "macos",
+  "description": "Regenerable cache/log/temp paths for photo and RAW workflow apps under $HOME beyond Lightroom Classic/cloud and Capture One (already in 04-creative). Covers DxO PhotoLab/PureRAW, Skylum Luminar Neo/AI, ON1 Photo RAW, darktable, RawTherapee, ACDSee, Exposure X, Affinity/Pixelmator residuals, OEM RAW (Nikon NX Studio, Canon DPP, Sony Imaging Edge, Fuji X Raw Studio), Phase One residual, Topaz Photo/Video/Gigapixel/Photo AI, Corel AfterShot. Never .photoslibrary. Catalog DBs, presets, and user edit history are not delete-enabled. Large preview trees and AI model stores are report-only or medium.",
+  "never_touch_notes": [
+    "$HOME/Pictures/*.photoslibrary and any **/*.photoslibrary/** (never)",
+    "Lightroom catalogs (.lrcat) and Previews.lrdata (handled in 04-creative; not re-listed as delete)",
+    "Capture One .cocatalog packages and catalog-internal Originals (04-creative report-only only)",
+    "DxO PhotoLab Database/ under Application Support (project index; not cache)",
+    "Luminar catalog packages and History/edit stacks under Application Support/Skylum (user edits)",
+    "ON1 catalog databases and user presets; only Photo SettingsCache / media caches for reclaim",
+    "darktable library.db and ~/.config/darktable (sidecars/settings); only ~/.cache/darktable mipmaps",
+    "RawTherapee config/presets; only cache/ subtrees",
+    "Affinity .afphoto/.afdesign documents; Pixelmator documents",
+    "Nikon NX Studio DB/, Canon/Sony/Fuji user settings and exported files",
+    "Topaz AI model packs: medium or report-only (large re-downloads)",
+    "AfterShot catalogs under Pictures (never-touch root; settings folder cache subdirs only when under Library)",
+    "Adobe Camera Raw / Lightroom paths already in apps-creative (not duplicated here)"
+  ],
+  "risk_policy": {
+    "app_caches_logs": "low, contents-only, min_age_days typically 7",
+    "large_preview_thumbnail_trees": "report-only (can be tens of GB; regenerable but slow)",
+    "ai_models_weights": "medium or report-only (Topaz models/coreMLCache)",
+    "catalog_databases_presets_history": "never-touch or report-only; not default clean",
+    "photoslibrary": "never-touch"
+  },
+  "sources": [
+    "DxO forum: ~/Library/Caches/com.dxo.PhotoLabN previews; Application Support DxO PhotoLab Database vs cache",
+    "DxO PureRAW installer paths (DxO Labs); bundle ids com.dxo / com.dxo-labs.PureRaw*",
+    "Skylum support: Luminar Neo History/CacheDocuments; ~/Library/Caches/Skylum; Group Containers RTW788AXG3.com.skylum.luminarneo",
+    "ON1 community: ~/Library/Application Support/ON1/**/Photo SettingsCache (often huge)",
+    "darktable usermanual: --cachedir default $HOME/.cache/darktable; configdir $HOME/.config/darktable",
+    "RawPedia File Paths: cache under Application Support/RawTherapee/cache and Containers",
+    "Exposure Software support: ~/Library/Application Support/Exposure Software (and Alien Skin legacy)",
+    "Nikon forum: ~/Library/Application Support/Nikon/NX Studio/{Cache,DB}",
+    "Corel AfterShot Pro file-locations: ~/Library/Application Support/Corel AfterShot Pro 3",
+    "Topaz Labs: coreMLCache under Application Support; models large re-download",
+    "Existing 04-creative Affinity/Pixelmator/Capture One/Lightroom rules (residual only here)"
+  ],
+  "path_count": 233,
+  "rules": [
+    {
+      "id": "photo-dxo-photolab-caches",
+      "name": "DxO PhotoLab app caches",
+      "description": "Versioned PhotoLab Caches bundle IDs. Regenerable previews/thumbnails live here on many installs; close PhotoLab first.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.dxo.PhotoLab",
+        "$HOME/Library/Caches/com.dxo.PhotoLab4",
+        "$HOME/Library/Caches/com.dxo.PhotoLab5",
+        "$HOME/Library/Caches/com.dxo.PhotoLab6",
+        "$HOME/Library/Caches/com.dxo.PhotoLab7",
+        "$HOME/Library/Caches/com.dxo.PhotoLab8",
+        "$HOME/Library/Caches/com.dxo.PhotoLab9",
+        "$HOME/Library/Caches/com.dxo.PhotoLab10"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "Forum-confirmed preview host for PL4+. Do not touch Preferences plists."
+    },
+    {
+      "id": "photo-dxo-photolab-support-cache",
+      "name": "DxO PhotoLab Application Support cache trees",
+      "description": "Cache/Previews/Thumbnails under DxO PhotoLab Application Support. Not Database/.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Application Support/DxO PhotoLab v4",
+        "$HOME/Library/Application Support/DxO PhotoLab v5",
+        "$HOME/Library/Application Support/DxO PhotoLab v6",
+        "$HOME/Library/Application Support/DxO",
+        "$HOME/Library/DxO PhotoLab v4",
+        "$HOME/Library/DxO PhotoLab v5",
+        "$HOME/Library/DxO PhotoLab v6",
+        "$HOME/Library/DxO PhotoLab 7",
+        "$HOME/Library/DxO PhotoLab 8",
+        "$HOME/Library/DxO PhotoLab 9"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/Caches/**",
+        "**/Previews/**",
+        "**/Thumbnails/**",
+        "**/cache/**"
+      ],
+      "exclude_globs": [
+        "**/Database/**",
+        "**/database/**",
+        "**/Presets/**",
+        "**/presets/**",
+        "**/*.db",
+        "**/*.db-*"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 10,
+      "notes": "Database/ holds project index; exclude. Large preview rebuild is slow."
+    },
+    {
+      "id": "photo-dxo-photolab-logs",
+      "name": "DxO PhotoLab logs",
+      "description": "DxO PhotoLab and related DxO Labs logs.",
+      "category": "app-logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/DxO",
+        "$HOME/Library/Logs/DxO PhotoLab",
+        "$HOME/Library/Logs/DxO Labs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5
+    },
+    {
+      "id": "photo-dxo-pureraw-caches",
+      "name": "DxO PureRAW caches and logs",
+      "description": "PureRAW standalone caches (bundle family com.dxo / com.dxo-labs.PureRaw*). Not exported DNG outputs.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.dxo.PureRAW",
+        "$HOME/Library/Caches/com.dxo.PureRaw",
+        "$HOME/Library/Caches/com.dxo-labs.PureRaw",
+        "$HOME/Library/Caches/com.dxo-labs.PureRawv2.standalone",
+        "$HOME/Library/Caches/com.dxo-labs.PureRawv3.standalone",
+        "$HOME/Library/Caches/com.dxo-labs.PureRawv4.standalone",
+        "$HOME/Library/Caches/com.dxo-labs.PureRawv5.standalone",
+        "$HOME/Library/Application Support/DxO Labs",
+        "$HOME/Library/Logs/DxO PureRAW",
+        "$HOME/Library/Logs/PureRAW"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/Caches/**",
+        "**/Logs/**",
+        "**/Temp/**",
+        "**/tmp/**"
+      ],
+      "exclude_globs": [
+        "**/Presets/**",
+        "**/Licenses/**",
+        "**/*.dxo",
+        "**/Preferences/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "notes": "System /Library/Application Support/DxO Labs is out of $HOME scope."
+    },
+    {
+      "id": "photo-luminar-neo-caches",
+      "name": "Luminar Neo / AI app caches",
+      "description": "Skylum Luminar Neo and Luminar AI regenerable caches under Library/Caches.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/Skylum",
+        "$HOME/Library/Caches/com.skylum.luminarNeo",
+        "$HOME/Library/Caches/com.skylum.luminarneomas",
+        "$HOME/Library/Caches/com.skylum.luminarAI",
+        "$HOME/Library/Caches/com.skylum.luminar4",
+        "$HOME/Library/Caches/com.macphun.luminar",
+        "$HOME/Library/Caches/com.macphun.luminar2018"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6
+    },
+    {
+      "id": "photo-luminar-support-cache-report",
+      "name": "Luminar catalog cache / History (report-only)",
+      "description": "Large History/CacheDocuments under Application Support/Skylum. Skylum docs: edit history can dominate disk; report-only.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/Library/Application Support/Skylum",
+        "$HOME/Library/Application Support/MacPhun Software"
+      ],
+      "include_globs": [
+        "**/History/**",
+        "**/CacheDocuments/**",
+        "**/Cache/**",
+        "**/Caches/**",
+        "**/Temp/**",
+        "**/tmp/**"
+      ],
+      "exclude_globs": [
+        "**/Presets/**",
+        "**/Templates/**",
+        "**/LUTs/**",
+        "**/Extensions/**",
+        "**/Plugins/**",
+        "**/CameraProfiles/**",
+        "**/*.db",
+        "**/*.luminar*"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 10,
+      "notes": "Prefer in-app Catalog Cache Cleaning. Do not wipe whole Skylum tree (presets/plugins)."
+    },
+    {
+      "id": "photo-luminar-logs",
+      "name": "Luminar / Skylum logs",
+      "description": "Luminar Neo/AI and Skylum diagnostic logs.",
+      "category": "app-logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/Skylum",
+        "$HOME/Library/Logs/Luminar Neo",
+        "$HOME/Library/Logs/Luminar AI",
+        "$HOME/Library/Logs/com.skylum.luminarNeo"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5
+    },
+    {
+      "id": "photo-luminar-group-container-caches",
+      "name": "Luminar Neo group container caches",
+      "description": "Sandbox group container caches for Luminar Neo. Skip CameraProfiles (user DCP copies).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Group Containers/RTW788AXG3.com.skylum.luminarneo",
+        "$HOME/Library/Group Containers/RTW788AXG3.com.skylum.luminarNeo"
+      ],
+      "include_globs": [
+        "**/Library/Caches/**",
+        "**/Caches/**",
+        "**/tmp/**",
+        "**/Temp/**"
+      ],
+      "exclude_globs": [
+        "**/CameraProfiles/**",
+        "**/Presets/**",
+        "**/*.photoslibrary/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 10
+    },
+    {
+      "id": "photo-on1-caches",
+      "name": "ON1 Photo RAW app caches",
+      "description": "ON1 bundle caches under Library/Caches.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.on1.On1",
+        "$HOME/Library/Caches/com.on1.photo-raw",
+        "$HOME/Library/Caches/com.on1.ON1PhotoRAW",
+        "$HOME/Library/Caches/com.on1.ON1PhotoRAW2023",
+        "$HOME/Library/Caches/com.on1.ON1PhotoRAW2024",
+        "$HOME/Library/Caches/com.on1.ON1PhotoRAW2025",
+        "$HOME/Library/Caches/com.on1.ON1PhotoRAW2026",
+        "$HOME/Library/Caches/ON1"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6
+    },
+    {
+      "id": "photo-on1-settings-cache-report",
+      "name": "ON1 Photo SettingsCache (report-only)",
+      "description": "Photo SettingsCache under Application Support/ON1 can exceed tens of GB. Regenerable previews; report-only.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/Library/Application Support/ON1"
+      ],
+      "include_globs": [
+        "**/Photo SettingsCache/**",
+        "**/PhotoSettingsCache/**",
+        "**/SettingsCache/**",
+        "**/Media Cache/**",
+        "**/MediaCache/**",
+        "**/Cache/**",
+        "**/Caches/**",
+        "**/Preview/**",
+        "**/Previews/**",
+        "**/Temp/**",
+        "**/tmp/**"
+      ],
+      "exclude_globs": [
+        "**/Presets/**",
+        "**/Extras/**",
+        "**/Plugins/**",
+        "**/Database/**",
+        "**/*.db",
+        "**/*.on1",
+        "**/*.photoslibrary/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 12,
+      "notes": "Community reports Photo SettingsCache ~80GB+. Prefer ON1 in-app cache tools when available."
+    },
+    {
+      "id": "photo-on1-logs",
+      "name": "ON1 logs",
+      "description": "ON1 Photo RAW and related product logs.",
+      "category": "app-logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/ON1",
+        "$HOME/Library/Logs/com.on1.ON1PhotoRAW",
+        "$HOME/Library/Application Support/ON1/Logs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6
+    },
+    {
+      "id": "photo-darktable-cache",
+      "name": "darktable thumbnail and OpenCL cache",
+      "description": "Default darktable cachedir (~/.cache/darktable): mipmaps and OpenCL binaries. Safe; rebuilds via darktable-generate-cache.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.cache/darktable",
+        "$XDG_CACHE_HOME/darktable",
+        "$HOME/Library/Caches/org.darktable",
+        "$HOME/Library/Caches/darktable",
+        "$HOME/Library/Application Support/darktable/cache"
+      ],
+      "exclude_globs": [
+        "**/library.db",
+        "**/library.db.lock",
+        "**/data.db",
+        "**/*.dt",
+        "**/*.xmp"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "notes": "Never delete $HOME/.config/darktable (library.db + settings)."
+    },
+    {
+      "id": "photo-darktable-tmp-logs",
+      "name": "darktable tmp and logs",
+      "description": "darktable temporary files and user logs outside the library DB.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 3,
+      "paths": [
+        "$HOME/.cache/darktable/tmp",
+        "$HOME/Library/Logs/darktable",
+        "$HOME/Library/Logs/org.darktable"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5
+    },
+    {
+      "id": "photo-rawtherapee-cache",
+      "name": "RawTherapee cache",
+      "description": "RawTherapee thumbnail/metadata cache sets. Safe per RawPedia File Paths.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.cache/RawTherapee",
+        "$HOME/.cache/RawTherapee5",
+        "$XDG_CACHE_HOME/RawTherapee",
+        "$HOME/Library/Application Support/RawTherapee/cache",
+        "$HOME/Library/Application Support/RawTherapee5/cache",
+        "$HOME/Library/Caches/com.rawtherapee.RawTherapee",
+        "$HOME/Library/Caches/RawTherapee",
+        "$HOME/Library/Containers/RawTherapee/Data/Library/Application Support/RawTherapee/cache",
+        "$HOME/Library/Containers/com.rawtherapee.RawTherapee/Data/Library/Application Support/RawTherapee/cache",
+        "$HOME/Library/Containers/com.rawtherapee.RawTherapee/Data/Library/Caches"
+      ],
+      "exclude_globs": [
+        "**/config/**",
+        "**/profiles/**",
+        "**/*.pp3"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8
+    },
+    {
+      "id": "photo-acdsee-caches",
+      "name": "ACDSee Photo Studio Mac caches",
+      "description": "ACD Systems / ACDSee caches and thumbnail trees. Not catalog databases.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.acdsystems.ACDSee",
+        "$HOME/Library/Caches/com.acdsystems.ACDSeePhotoStudio",
+        "$HOME/Library/Caches/com.acdsystems.ACDSeePhotoStudioForMac",
+        "$HOME/Library/Caches/ACD Systems",
+        "$HOME/Library/Caches/ACDSee",
+        "$HOME/Library/Application Support/ACD Systems",
+        "$HOME/Library/Application Support/ACDSee"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/Caches/**",
+        "**/Thumbnails/**",
+        "**/thumbnails/**",
+        "**/Temp/**",
+        "**/tmp/**",
+        "**/Logs/**"
+      ],
+      "exclude_globs": [
+        "**/Catalogs/**",
+        "**/Databases/**",
+        "**/Database/**",
+        "**/*.db",
+        "**/*.acd*"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 10
+    },
+    {
+      "id": "photo-acdsee-logs",
+      "name": "ACDSee logs",
+      "description": "ACDSee Photo Studio diagnostic logs.",
+      "category": "app-logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/ACD Systems",
+        "$HOME/Library/Logs/ACDSee",
+        "$HOME/Library/Logs/com.acdsystems.ACDSeePhotoStudio"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5
+    },
+    {
+      "id": "photo-exposure-x-caches",
+      "name": "Exposure X app caches",
+      "description": "Exposure Software / Alien Skin legacy caches. Not custom presets under Application Support.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.exposure.software",
+        "$HOME/Library/Caches/com.exposuresoftware.ExposureX7",
+        "$HOME/Library/Caches/com.exposuresoftware.ExposureX6",
+        "$HOME/Library/Caches/com.exposuresoftware.ExposureX5",
+        "$HOME/Library/Caches/com.alienskin.exposure",
+        "$HOME/Library/Caches/Exposure Software",
+        "$HOME/Library/Caches/Alien Skin",
+        "$HOME/Library/Application Support/Exposure Software",
+        "$HOME/Library/Application Support/Alien Skin"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/Caches/**",
+        "**/Thumbnails/**",
+        "**/Previews/**",
+        "**/Temp/**",
+        "**/tmp/**",
+        "**/Logs/**"
+      ],
+      "exclude_globs": [
+        "**/Presets/**",
+        "**/presets/**",
+        "**/User/**",
+        "**/Keywords/**",
+        "**/*.exposure*"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 10,
+      "notes": "Support docs store user folder under Application Support/Exposure Software; only cache-like subtrees."
+    },
+    {
+      "id": "photo-exposure-x-logs",
+      "name": "Exposure X logs",
+      "description": "Exposure Software logs.",
+      "category": "app-logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/Exposure Software",
+        "$HOME/Library/Logs/Alien Skin",
+        "$HOME/Library/Logs/com.exposuresoftware.ExposureX7"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5
+    },
+    {
+      "id": "photo-affinity-residual-caches",
+      "name": "Affinity residual caches (beyond creative pack)",
+      "description": "Extra Affinity Photo/Designer/Publisher cache locations not covered by creative-affinity-caches: containers, MAS data, autosave, crash reports.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Containers/com.seriflabs.affinityphoto2/Data/Library/Caches",
+        "$HOME/Library/Containers/com.seriflabs.affinitydesigner2/Data/Library/Caches",
+        "$HOME/Library/Containers/com.seriflabs.affinitypublisher2/Data/Library/Caches",
+        "$HOME/Library/Containers/com.seriflabs.affinityphoto/Data/Library/Caches",
+        "$HOME/Library/Application Support/Affinity/Photo/2.0/autosave",
+        "$HOME/Library/Application Support/Affinity/Designer/2.0/autosave",
+        "$HOME/Library/Application Support/Affinity/Publisher/2.0/autosave",
+        "$HOME/Library/Application Support/Affinity/Common/2.0/temp",
+        "$HOME/Library/Application Support/Affinity/Common/1.0/temp",
+        "$HOME/Library/Caches/com.seriflabs.rgba.affinityphoto2"
+      ],
+      "exclude_globs": [
+        "**/*.afphoto",
+        "**/*.afdesign",
+        "**/*.afpub",
+        "**/*.photoslibrary/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "notes": "Complements creative-affinity-caches; containers and autosave only."
+    },
+    {
+      "id": "photo-pixelmator-residual-caches",
+      "name": "Pixelmator residual caches (beyond creative pack)",
+      "description": "Additional Pixelmator Pro support, ML, container, and log paths beyond creative-pixelmator-caches.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Application Support/Pixelmator Pro",
+        "$HOME/Library/Application Support/com.pixelmatorteam.pixelmator.x",
+        "$HOME/Library/Containers/com.pixelmatorteam.pixelmator.x/Data/Library/Application Support",
+        "$HOME/Library/Containers/com.pixelmatorteam.pixelmator.x.photosextension/Data/Library/Caches",
+        "$HOME/Library/Containers/com.pixelmatorteam.pixelmator.x.quicklookextension/Data/Library/Caches",
+        "$HOME/Library/Logs/Pixelmator Pro",
+        "$HOME/Library/Logs/com.pixelmatorteam.pixelmator.x",
+        "$HOME/Library/Caches/com.pixelmatorteam.pixelmator.x.photosextension"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/Caches/**",
+        "**/Temp/**",
+        "**/tmp/**",
+        "**/ML/**",
+        "**/Models/Cache/**",
+        "**/thumbnails/**"
+      ],
+      "exclude_globs": [
+        "**/*.pxd",
+        "**/*.pxb",
+        "**/*.photoslibrary/**",
+        "**/Presets/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 10
+    },
+    {
+      "id": "photo-nikon-nx-studio-cache",
+      "name": "Nikon NX Studio cache",
+      "description": "NX Studio Cache under Application Support/Nikon. Leave DB/ intact.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Application Support/Nikon/NX Studio/Cache",
+        "$HOME/Library/Application Support/Nikon/ViewNX 2/Cache",
+        "$HOME/Library/Application Support/Nikon/ViewNX-i/Cache",
+        "$HOME/Library/Application Support/Nikon/Capture NX-D/Cache",
+        "$HOME/Library/Caches/jp.co.nikon.NXStudio",
+        "$HOME/Library/Caches/jp.co.nikon.NikonMessageCenter2",
+        "$HOME/Library/Caches/com.nikon.NXStudio",
+        "$HOME/Library/Caches/Nikon"
+      ],
+      "exclude_globs": [
+        "**/DB/**",
+        "**/Database/**",
+        "**/*.db",
+        "**/*.nksc"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "notes": "Forum: NX Studio has Cache and DB siblings; only Cache."
+    },
+    {
+      "id": "photo-nikon-logs",
+      "name": "Nikon imaging software logs",
+      "description": "Nikon NX Studio / Message Center logs.",
+      "category": "app-logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/Nikon",
+        "$HOME/Library/Logs/jp.co.nikon.NXStudio",
+        "$HOME/Library/Logs/jp.co.nikon.NikonMessageCenter2"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5
+    },
+    {
+      "id": "photo-canon-dpp-caches",
+      "name": "Canon Digital Photo Professional caches",
+      "description": "DPP cache and temp under Canon Application Support / Caches. In-app clear cache also available.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/jp.co.canon.dpp",
+        "$HOME/Library/Caches/jp.co.canon.DPP",
+        "$HOME/Library/Caches/com.canon.DigitalPhotoProfessional",
+        "$HOME/Library/Caches/com.canon.dpp",
+        "$HOME/Library/Caches/Canon",
+        "$HOME/Library/Application Support/Canon_Inc_IC",
+        "$HOME/Library/Application Support/Canon",
+        "$HOME/Library/Application Support/Canon/dpp"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/Caches/**",
+        "**/Temp/**",
+        "**/tmp/**",
+        "**/Thumbnail/**",
+        "**/Thumbnails/**",
+        "**/Preview/**",
+        "**/Previews/**",
+        "**/Logs/**"
+      ],
+      "exclude_globs": [
+        "**/Recipes/**",
+        "**/Presets/**",
+        "**/*.dr4",
+        "**/*.vrd"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 10
+    },
+    {
+      "id": "photo-canon-dpp-logs",
+      "name": "Canon DPP logs",
+      "description": "Digital Photo Professional and EOS utility-adjacent user logs.",
+      "category": "app-logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/Canon",
+        "$HOME/Library/Logs/jp.co.canon.dpp",
+        "$HOME/Library/Logs/com.canon.DigitalPhotoProfessional"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5
+    },
+    {
+      "id": "photo-sony-imaging-edge-caches",
+      "name": "Sony Imaging Edge caches",
+      "description": "Imaging Edge Desktop / Viewer / Remote / Webcam caches under Sony Corporation support trees.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.sony.ImagingEdgeDesktop",
+        "$HOME/Library/Caches/com.sony.ImagingEdge",
+        "$HOME/Library/Caches/com.sony.Remote",
+        "$HOME/Library/Caches/com.sony.Viewer",
+        "$HOME/Library/Caches/com.sony.Webcam",
+        "$HOME/Library/Caches/Sony Corporation",
+        "$HOME/Library/Caches/Sony",
+        "$HOME/Library/Application Support/Sony Corporation",
+        "$HOME/Library/Application Support/Sony"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/Caches/**",
+        "**/Temp/**",
+        "**/tmp/**",
+        "**/Thumbnail/**",
+        "**/Thumbnails/**",
+        "**/Preview/**",
+        "**/Logs/**",
+        "**/log/**"
+      ],
+      "exclude_globs": [
+        "**/Settings/**",
+        "**/Presets/**",
+        "**/*.arw",
+        "**/*.photoslibrary/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 10
+    },
+    {
+      "id": "photo-sony-imaging-edge-logs",
+      "name": "Sony Imaging Edge logs",
+      "description": "Imaging Edge family logs.",
+      "category": "app-logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/Sony Corporation",
+        "$HOME/Library/Logs/Sony",
+        "$HOME/Library/Logs/com.sony.ImagingEdgeDesktop"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5
+    },
+    {
+      "id": "photo-fuji-xrawstudio-caches",
+      "name": "Fujifilm X Raw Studio caches",
+      "description": "X Raw Studio application caches and temps. Not RAF originals or camera recipes stored as user files.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.fujifilm.XRawStudio",
+        "$HOME/Library/Caches/com.fujifilm.xrawstudio",
+        "$HOME/Library/Caches/com.fuji.XRawStudio",
+        "$HOME/Library/Caches/FUJIFILM",
+        "$HOME/Library/Caches/Fujifilm",
+        "$HOME/Library/Application Support/com.fujifilm.XRawStudio",
+        "$HOME/Library/Application Support/FUJIFILM",
+        "$HOME/Library/Application Support/Fujifilm",
+        "$HOME/Library/Application Support/X Raw Studio"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/Caches/**",
+        "**/Temp/**",
+        "**/tmp/**",
+        "**/Thumbnail/**",
+        "**/Logs/**"
+      ],
+      "exclude_globs": [
+        "**/*.raf",
+        "**/*.FP1",
+        "**/*.FP2",
+        "**/*.FP3",
+        "**/Recipes/**",
+        "**/*.photoslibrary/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 10
+    },
+    {
+      "id": "photo-fuji-logs",
+      "name": "Fujifilm X Raw Studio logs",
+      "description": "X Raw Studio logs.",
+      "category": "app-logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/FUJIFILM",
+        "$HOME/Library/Logs/Fujifilm",
+        "$HOME/Library/Logs/com.fujifilm.XRawStudio",
+        "$HOME/Library/Logs/X Raw Studio"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5
+    },
+    {
+      "id": "photo-phaseone-residual-caches",
+      "name": "Phase One residual caches (beyond Capture One pack)",
+      "description": "Additional Phase One / Capture One support caches and Media Pro leftovers not in creative-capture-one-caches.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.phaseone.captureone17",
+        "$HOME/Library/Caches/com.phaseone.captureone18",
+        "$HOME/Library/Caches/com.phaseone.mediapro",
+        "$HOME/Library/Caches/com.phaseone.CaptureOne",
+        "$HOME/Library/Application Support/Phase One",
+        "$HOME/Library/Application Support/Capture One/Thumbnails",
+        "$HOME/Library/Application Support/Capture One/Previews",
+        "$HOME/Library/Application Support/Capture One/Temp",
+        "$HOME/Library/Application Support/Capture One/Logs",
+        "$HOME/Library/Logs/Phase One"
+      ],
+      "exclude_globs": [
+        "**/*.cocatalog/**",
+        "**/*.cof/**",
+        "**/*.eip",
+        "**/*.photoslibrary/**",
+        "**/Settings/**",
+        "**/Presets/**",
+        "**/Styles/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "notes": "Catalog package Cache remains report-only in 04-creative; do not target .cocatalog here."
+    },
+    {
+      "id": "photo-topaz-app-caches",
+      "name": "Topaz Photo / Video / Gigapixel app caches",
+      "description": "Topaz Labs regenerable app caches and logs. Models handled separately as medium/report-only.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.topazlabs.TopazPhoto",
+        "$HOME/Library/Caches/com.topazlabs.TopazPhotoAI",
+        "$HOME/Library/Caches/com.topazlabs.TopazGigapixel",
+        "$HOME/Library/Caches/com.topazlabs.TopazGigapixelAI",
+        "$HOME/Library/Caches/com.topazlabs.TopazVideo",
+        "$HOME/Library/Caches/com.topazlabs.TopazVideoAI",
+        "$HOME/Library/Caches/com.topazlabs.TopazDeNoiseAI",
+        "$HOME/Library/Caches/com.topazlabs.TopazSharpenAI",
+        "$HOME/Library/Caches/Topaz Labs",
+        "$HOME/Library/Caches/Topaz Labs LLC",
+        "$HOME/Library/Logs/Topaz Labs",
+        "$HOME/Library/Logs/Topaz Labs LLC",
+        "$HOME/Library/Logs/com.topazlabs.TopazPhotoAI",
+        "$HOME/Library/Logs/com.topazlabs.TopazVideoAI",
+        "$HOME/Library/Logs/com.topazlabs.TopazGigapixelAI"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6
+    },
+    {
+      "id": "photo-topaz-coreml-cache",
+      "name": "Topaz CoreML compile cache",
+      "description": "coreMLCache used by Topaz Photo/Gigapixel/Video AI. Regenerable compile artifacts; safe but may recompile on next run.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Application Support/coreMLCache",
+        "$HOME/Library/Application Support/Topaz Labs LLC/coreMLCache",
+        "$HOME/Library/Application Support/Topaz Labs/coreMLCache",
+        "$HOME/Library/Application Support/Topaz Labs LLC/Topaz Photo AI/coreMLCache",
+        "$HOME/Library/Application Support/Topaz Labs LLC/Topaz Photo/coreMLCache",
+        "$HOME/Library/Application Support/Topaz Labs LLC/Topaz Gigapixel AI/coreMLCache",
+        "$HOME/Library/Application Support/Topaz Labs LLC/Topaz Video AI/coreMLCache"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "notes": "Topaz support documents deleting coreMLCache to fix model load crashes."
+    },
+    {
+      "id": "photo-topaz-models-report",
+      "name": "Topaz AI models (report-only / medium)",
+      "description": "Downloaded AI model packs for Photo AI, Gigapixel, Video AI. Large re-downloads; report-only by default.",
+      "category": "ml-models",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 60,
+      "paths": [
+        "$HOME/Library/Application Support/Topaz Labs LLC",
+        "$HOME/Library/Application Support/Topaz Labs",
+        "$HOME/Library/Application Support/Topaz Photo AI",
+        "$HOME/Library/Application Support/Topaz Gigapixel AI",
+        "$HOME/Library/Application Support/Topaz Video AI",
+        "$HOME/Library/Application Support/Topaz DeNoise AI"
+      ],
+      "include_globs": [
+        "**/models/**",
+        "**/Models/**",
+        "**/model/**",
+        "**/*.onnx",
+        "**/*.mlmodel*",
+        "**/*.tza",
+        "**/*.tzm"
+      ],
+      "exclude_globs": [
+        "**/coreMLCache/**",
+        "**/Logs/**",
+        "**/Cache/**",
+        "**/Caches/**",
+        "**/Preferences/**",
+        "**/settings/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 10,
+      "notes": "Models also live inside /Applications/Topaz*.app bundles (out of $HOME cleaner scope). Prefer uninstall unused legacy Photo AI + Gigapixel AI if using unified Topaz Photo."
+    },
+    {
+      "id": "photo-topaz-models-medium",
+      "name": "Topaz models medium opt-in (user Library only)",
+      "description": "Same model trees as report rule but medium risk opt-in for explicit reclaim after report.",
+      "category": "ml-models",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 90,
+      "paths": [
+        "$HOME/Library/Application Support/Topaz Labs LLC/models",
+        "$HOME/Library/Application Support/Topaz Labs/models",
+        "$HOME/Library/Application Support/Topaz Photo AI/models",
+        "$HOME/Library/Application Support/Topaz Gigapixel AI/models",
+        "$HOME/Library/Application Support/Topaz Video AI/models",
+        "$HOME/Library/Application Support/Topaz DeNoise AI/models"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "notes": "medium: default_enabled false. Re-download on next Topaz launch can be multi-GB."
+    },
+    {
+      "id": "photo-aftershot-caches",
+      "name": "Corel AfterShot Pro caches",
+      "description": "AfterShot Pro settings-folder cache/thumbnails under Application Support. Not catalogs under Pictures.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Application Support/Corel AfterShot Pro",
+        "$HOME/Library/Application Support/Corel AfterShot Pro 2",
+        "$HOME/Library/Application Support/Corel AfterShot Pro 3",
+        "$HOME/Library/Application Support/Corel/AfterShot Pro",
+        "$HOME/Library/Caches/com.corel.AfterShotPro",
+        "$HOME/Library/Caches/com.corel.AfterShot",
+        "$HOME/Library/Caches/Corel AfterShot Pro",
+        "$HOME/Library/Caches/AfterShot"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/Caches/**",
+        "**/cache/**",
+        "**/Thumbnails/**",
+        "**/thumbnails/**",
+        "**/Previews/**",
+        "**/Temp/**",
+        "**/tmp/**",
+        "**/Logs/**"
+      ],
+      "exclude_globs": [
+        "**/Presets/**",
+        "**/Batches/**",
+        "**/presets/**",
+        "**/*.photoslibrary/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 10,
+      "notes": "Official default settings folder: ~/Library/Application Support/Corel AfterShot Pro 3. Catalogs default under Pictures (never-touch root)."
+    },
+    {
+      "id": "photo-aftershot-logs",
+      "name": "AfterShot Pro logs",
+      "description": "Corel AfterShot Pro logs.",
+      "category": "app-logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/Corel AfterShot Pro",
+        "$HOME/Library/Logs/AfterShot",
+        "$HOME/Library/Logs/com.corel.AfterShotPro"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5
+    },
+    {
+      "id": "photo-raw-shared-temp",
+      "name": "Shared photo/RAW temp leftovers under TMPDIR",
+      "description": "Age-gated temp names left by RAW converters and plug-in hosts in the user temp directory.",
+      "category": "temp",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 3,
+      "paths": [
+        "$TMPDIR"
+      ],
+      "include_globs": [
+        "**/DxO*",
+        "**/PureRAW*",
+        "**/Luminar*",
+        "**/Skylum*",
+        "**/ON1*",
+        "**/Topaz*",
+        "**/darktable*",
+        "**/RawTherapee*",
+        "**/AfterShot*",
+        "**/CaptureOne*",
+        "**/NX Studio*",
+        "**/PhotoLab*",
+        "**/ImagingEdge*",
+        "**/XRawStudio*"
+      ],
+      "exclude_globs": [
+        "**/*.photoslibrary/**",
+        "**/.ssh/**",
+        "**/*.key",
+        "**/*.pem"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Only include_glob matches under $TMPDIR. Never Photos libraries."
+    },
+    {
+      "id": "photo-raw-saved-state",
+      "name": "Photo/RAW apps saved application state",
+      "description": "Resume/window state for photo apps. Regenerable; not documents.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Saved Application State/com.dxo.PhotoLab.savedState",
+        "$HOME/Library/Saved Application State/com.dxo.PhotoLab7.savedState",
+        "$HOME/Library/Saved Application State/com.dxo.PhotoLab8.savedState",
+        "$HOME/Library/Saved Application State/com.dxo.PhotoLab9.savedState",
+        "$HOME/Library/Saved Application State/com.skylum.luminarNeo.savedState",
+        "$HOME/Library/Saved Application State/com.on1.ON1PhotoRAW.savedState",
+        "$HOME/Library/Saved Application State/org.darktable.savedState",
+        "$HOME/Library/Saved Application State/com.rawtherapee.RawTherapee.savedState",
+        "$HOME/Library/Saved Application State/com.topazlabs.TopazPhotoAI.savedState",
+        "$HOME/Library/Saved Application State/com.topazlabs.TopazGigapixelAI.savedState",
+        "$HOME/Library/Saved Application State/com.topazlabs.TopazVideoAI.savedState",
+        "$HOME/Library/Saved Application State/jp.co.nikon.NXStudio.savedState",
+        "$HOME/Library/Saved Application State/com.fujifilm.XRawStudio.savedState",
+        "$HOME/Library/Saved Application State/com.corel.AfterShotPro.savedState"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4
+    }
+  ]
+}

@@ -1,0 +1,498 @@
+pack: apps-security-vpn
+rules:
+
+  - id: app-1password-logs-ext
+    name: 1Password logs only
+    description: 1Password diagnostic logs. Never vaults, keychain, or .op data.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Group Containers/2BUA8C4S2C.com.1password/Library/Logs
+      - $HOME/Library/Containers/com.1password.1password-launcher/Data/Library/Logs
+      - "$HOME/Library/Application Support/CrashReporter/1Password*"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-authy-updater-cache
+    name: Authy Desktop updater cache only
+    description: Authy Desktop ShipIt updater cache. Not token/fsCachedData stores.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.authy.authy-mac.ShipIt
+      - $HOME/Library/Logs/Authy
+      - $HOME/Library/Logs/Authy Desktop
+      - $HOME/Library/Logs/com.authy.authy-mac
+    exclude_globs:
+      - "**/fsCachedData/**"
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/leveldb/**"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: app-bitwarden-cache-logs
+    name: Bitwarden desktop Chromium caches and logs
+    description: Bitwarden Electron caches/logs; not encrypted vault data.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Bitwarden/Cache
+      - $HOME/Library/Application Support/Bitwarden/Code Cache
+      - $HOME/Library/Application Support/Bitwarden/GPUCache
+      - $HOME/Library/Application Support/Bitwarden/DawnGraphiteCache
+      - $HOME/Library/Application Support/Bitwarden/DawnWebGPUCache
+      - $HOME/Library/Application Support/Bitwarden/logs
+      - $HOME/Library/Application Support/Bitwarden/Crashpad
+    exclude_globs:
+      - "**/data.json"
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Session Storage/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-blockblock-cache
+    name: BlockBlock helper cache
+    description: Objective-See BlockBlock helper cache only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.objective-see.blockblock.helper
+      - $HOME/Library/Logs/BlockBlock
+      - $HOME/Library/Logs/com.objective-see.blockblock
+      - $HOME/Library/Application Support/Objective-See/BlockBlock/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-cloudflare-warp-cache
+    name: Cloudflare WARP caches
+    description: Cloudflare WARP (1.1.1.1) user caches and crash reporter cache. Not registration/settings.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.cloudflare.1dot1dot1dot1.macos
+      - $HOME/Library/Caches/com.plausiblelabs.crashreporter.data/com.cloudflare.1dot1dot1dot1.macos
+      - $HOME/Library/Logs/Cloudflare WARP
+      - $HOME/Library/Logs/com.cloudflare.1dot1dot1dot1.macos
+      - $HOME/Library/Application Support/com.cloudflare.1dot1dot1dot1.macos/Logs
+      - $HOME/Library/Application Support/com.cloudflare.1dot1dot1dot1.macos/logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-expressvpn-cache-logs
+    name: ExpressVPN caches and logs
+    description: ExpressVPN user cache and log directories under $HOME.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.express.vpn
+      - $HOME/Library/Logs/ExpressVPN
+      - $HOME/Library/Application Support/com.express.vpn/log
+      - $HOME/Library/Application Support/com.express.vpn/logs
+      - $HOME/Library/Application Support/com.express.vpn/Cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-keepassxc-cache
+    name: KeePassXC cache only
+    description: KeePassXC image/icon and app cache. Never .kdbx databases or Application Support config.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/org.keepassx.keepassxc
+      - $HOME/Library/Caches/org.keepassxc.keepassxc
+      - $HOME/Library/Logs/KeePassXC
+      - "$HOME/Library/Application Support/CrashReporter/KeePassXC*"
+    exclude_globs:
+      - "**/*.kdbx"
+      - "**/*.kdb"
+      - "**/*.keyx"
+      - "**/*.key"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-knockknock-cache-reports
+    name: KnockKnock cache and reports
+    description: KnockKnock scan caches and saved reports under Application Support. Not preferences.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.objective-see.KnockKnock
+      - $HOME/Library/Application Support/KnockKnock
+      - $HOME/Library/Application Support/Objective-See/KnockKnock
+      - $HOME/Library/Logs/KnockKnock
+      - $HOME/Library/Logs/com.objective-see.KnockKnock
+    include_globs:
+      - "**/*.json"
+      - "**/*.txt"
+      - "**/*.log"
+      - "**/*report*"
+      - "**/*Report*"
+      - "**/Cache/**"
+      - "**/cache/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-little-flocker-logs-cache
+    name: Little Flocker leftover logs and cache
+    description: Legacy Little Flocker (discontinued) user logs/cache leftovers if present.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Caches/com.zdziarski.LittleFlocker
+      - $HOME/Library/Caches/com.zdziarski.littelflocker
+      - $HOME/Library/Logs/Little Flocker
+      - $HOME/Library/Application Support/Little Flocker/Logs
+      - $HOME/Library/Application Support/Little Flocker/logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-little-snitch-logs-cache
+    name: Little Snitch logs and caches
+    description: Little Snitch agent/helper/network-monitor logs and software caches. Not rules database.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Little Snitch Agent.log
+      - $HOME/Library/Logs/Little Snitch Helper.log
+      - $HOME/Library/Logs/Little Snitch Installer.log
+      - $HOME/Library/Logs/Little Snitch Network Monitor.log
+      - $HOME/Library/Caches/at.obdev.LittleSnitchAgent
+      - $HOME/Library/Caches/at.obdev.LittleSnitchConfiguration
+      - $HOME/Library/Caches/at.obdev.LittleSnitchHelper
+      - $HOME/Library/Caches/at.obdev.LittleSnitchSoftwareUpdate
+      - $HOME/Library/Caches/at.obdev.LittleSnitchNetworkMonitor
+      - $HOME/Library/Application Support/Little Snitch/Logs
+      - $HOME/Library/Application Support/Little Snitch/logs
+    exclude_globs:
+      - "**/*Rules*"
+      - "**/*Configuration*"
+      - "**/*.lsrules"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-lulu-cache-logs
+    name: LuLu firewall caches and logs
+    description: Objective-See LuLu helper/app caches and user logs. Not allow/deny rules.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.objective-see.lulu
+      - $HOME/Library/Caches/com.objective-see.lulu.helper
+      - $HOME/Library/Logs/LuLu
+      - $HOME/Library/Logs/com.objective-see.lulu
+      - $HOME/Library/Application Support/Objective-See/LuLu/Logs
+      - $HOME/Library/Application Support/Objective-See/LuLu/logs
+    exclude_globs:
+      - "**/*rules*"
+      - "**/*Rules*"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-mullvad-vpn-logs-cache
+    name: Mullvad VPN logs and cache
+    description: Mullvad VPN user logs and optional app cache. Not account token or settings.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Mullvad VPN
+      - $HOME/Library/Caches/net.mullvad.vpn
+      - $HOME/Library/Application Support/Mullvad VPN/logs
+      - $HOME/Library/Application Support/Mullvad VPN/cache
+    exclude_globs:
+      - "**/account*"
+      - "**/settings*"
+      - "**/device*"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-nordvpn-cache-logs
+    name: NordVPN caches and logs
+    description: NordVPN direct and App Store container caches plus diagnostic logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.nordvpn.macos
+      - $HOME/Library/Logs/NordVPN
+      - $HOME/Library/Containers/com.nordvpn.macos/Data/Library/Caches
+      - $HOME/Library/Containers/com.nordvpn.macos/Data/Library/Logs
+      - $HOME/Library/Containers/com.nordvpn.NordVPN/Data/Library/Caches
+      - $HOME/Library/Containers/com.nordvpn.NordVPN/Data/Library/Logs
+      - $HOME/Library/Group Containers/W5W395V82Y.group.com.nordvpn/Library/Caches
+      - $HOME/Library/Group Containers/W5W395V82Y.group.com.nordvpn/Library/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-objective-see-shared-logs
+    name: Objective-See shared product logs
+    description: Shared Objective-See Application Support log folders used by LuLu/BlockBlock/KnockKnock suite leftovers.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Application Support/Objective-See/Logs
+      - $HOME/Library/Logs/Objective-See
+      - $HOME/Library/Caches/com.objective-see.support
+    exclude_globs:
+      - "**/*rules*"
+      - "**/*Rules*"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: app-openvpn-connect-logs-cache
+    name: OpenVPN Connect logs and cache
+    description: OpenVPN Connect client diagnostic logs and cache. Not connection profiles or openvpn.keychain-db.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/OpenVPN Connect
+      - $HOME/Library/Caches/org.openvpn.client.app
+      - $HOME/Library/Application Support/OpenVPN Connect/logs
+      - $HOME/Library/Application Support/OpenVPN Connect/log
+    exclude_globs:
+      - "**/*.ovpn"
+      - "**/*.conf"
+      - "**/*.p12"
+      - "**/*.pem"
+      - "**/*.crt"
+      - "**/*.key"
+      - "**/profiles/**"
+      - "**/Profiles/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-passepartout-cache-logs
+    name: Passepartout VPN caches and logs
+    description: Passepartout WireGuard/OpenVPN client container caches and logs only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.algoritmico.mac.Passepartout
+      - $HOME/Library/Containers/com.algoritmico.mac.Passepartout/Data/Library/Caches
+      - $HOME/Library/Containers/com.algoritmico.mac.Passepartout/Data/Library/Logs
+      - $HOME/Library/Logs/Passepartout
+      - $HOME/Library/Group Containers/group.com.algoritmico.Passepartout/Library/Caches
+      - $HOME/Library/Group Containers/group.com.algoritmico.Passepartout/Library/Logs
+    exclude_globs:
+      - "**/*.ovpn"
+      - "**/*.conf"
+      - "**/*private*"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-protonvpn-cache-logs
+    name: ProtonVPN caches and logs
+    description: ProtonVPN app caches, Sentry crash cache, container caches/logs, and log file.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/ch.protonvpn.mac
+      - $HOME/Library/Caches/SentryCrash/ProtonVPN
+      - $HOME/Library/Logs/ProtonVPN.log
+      - $HOME/Library/Containers/ch.protonvpn.mac/Data/Library/Caches
+      - $HOME/Library/Containers/ch.protonvpn.mac/Data/Library/Logs
+      - "$HOME/Library/Application Support/CrashReporter/ProtonVPN*"
+      - $HOME/Library/Application Support/ProtonVPN/Logs
+      - $HOME/Library/Application Support/ProtonVPN/logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-surfshark-cache-logs
+    name: Surfshark container caches and logs
+    description: Surfshark VPN client caches/logs inside sandboxed containers.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.surfshark.vpnclient.macos
+      - $HOME/Library/Containers/com.surfshark.vpnclient.macos/Data/Library/Caches
+      - $HOME/Library/Containers/com.surfshark.vpnclient.macos/Data/Library/Logs
+      - $HOME/Library/Containers/com.surfshark.vpnclient.macos.launchagent/Data/Library/Caches
+      - $HOME/Library/Containers/com.surfshark.vpnclient.macos.launchagent/Data/Library/Logs
+      - $HOME/Library/Group Containers/YHUG37CKN8.com.surfshark.vpn/Library/Caches
+      - $HOME/Library/Group Containers/YHUG37CKN8.com.surfshark.vpn/Library/Logs
+      - "$HOME/Library/Application Support/CrashReporter/Surfshark*"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-tailscale-cache-logs
+    name: Tailscale caches and container logs
+    description: Tailscale standalone (macsys) and App Store (macos) caches and sandboxed logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/io.tailscale.ipn.macsys
+      - $HOME/Library/Caches/io.tailscale.ipn.macos
+      - $HOME/Library/Containers/io.tailscale.ipn.macsys/Data/Library/Caches
+      - $HOME/Library/Containers/io.tailscale.ipn.macsys/Data/Library/Logs
+      - $HOME/Library/Containers/io.tailscale.ipn.macos/Data/Library/Caches
+      - $HOME/Library/Containers/io.tailscale.ipn.macos/Data/Library/Logs
+      - $HOME/Library/Containers/io.tailscale.ipn.macsys.login-item-helper/Data/Library/Caches
+      - $HOME/Library/Containers/io.tailscale.ipn.macos.network-extension/Data/Library/Logs
+      - $HOME/Library/Logs/Tailscale
+      - $HOME/Library/Logs/io.tailscale.ipn.macsys
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-tunnelblick-user-cache
+    name: Tunnelblick user cache only
+    description: Tunnelblick per-user cache under $HOME. Not Configurations, Shared configs, or system /Library logs that sit next to keys.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/net.tunnelblick.tunnelblick
+      - "$HOME/Library/Caches/com.apple.helpd/Generated/net.tunnelblick.tunnelblick.help*"
+      - $HOME/Library/HTTPStorages/net.tunnelblick.tunnelblick
+    exclude_globs:
+      - "**/*.tblk/**"
+      - "**/*.ovpn"
+      - "**/*.conf"
+      - "**/*.crt"
+      - "**/*.key"
+      - "**/*.pem"
+      - "**/*.p12"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-viscosity-cache-logs
+    name: Viscosity OpenVPN client cache and logs
+    description: Viscosity user caches and connection logs. Not connection configs or certs.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.viscosityvpn.Viscosity
+      - $HOME/Library/Logs/Viscosity
+      - $HOME/Library/Application Support/Viscosity/Log
+      - $HOME/Library/Application Support/Viscosity/Logs
+    exclude_globs:
+      - "**/*.ovpn"
+      - "**/*.crt"
+      - "**/*.key"
+      - "**/*.pem"
+      - "**/*.p12"
+      - "**/OpenVPN/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-wireguard-cache-logs
+    name: WireGuard App Store caches and logs
+    description: WireGuard macOS client regenerable caches and logs only. Never tunnel configs or private keys.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.wireguard.macos
+      - $HOME/Library/Containers/com.wireguard.macos/Data/Library/Caches
+      - $HOME/Library/Containers/com.wireguard.macos/Data/Library/Logs
+      - $HOME/Library/Logs/WireGuard
+    exclude_globs:
+      - "**/*.conf"
+      - "**/*.key"
+      - "**/*private*"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-yubico-cache-logs
+    name: Yubico Authenticator and Manager caches
+    description: Yubico Authenticator container caches/logs and YubiKey Manager cache. Not credential slots on the hardware key.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Yubico/YubiKey Manager
+      - $HOME/Library/Caches/com.yubico.ykman
+      - $HOME/Library/Caches/com.yubico.yubioath
+      - $HOME/Library/Containers/com.yubico.yubioath/Data/Library/Caches
+      - $HOME/Library/Containers/com.yubico.yubioath/Data/Library/Logs
+      - $HOME/Library/Logs/Yubico
+      - $HOME/Library/Logs/YubiKey Manager
+      - $HOME/Library/Logs/Yubico Authenticator
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-zerotier-cache-logs
+    name: ZeroTier One caches and logs
+    description: ZeroTier mesh VPN user cache and log paths under $HOME.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.zerotier.ZeroTier-One
+      - $HOME/Library/Logs/ZeroTier
+      - $HOME/Library/Logs/ZeroTier One
+      - $HOME/Library/Application Support/ZeroTier/One/logs
+      - $HOME/Library/Application Support/ZeroTier/One/log
+    exclude_globs:
+      - "**/identity.*"
+      - "**/networks.d/**"
+      - "**/*.secret"
+    delete_mode: contents
+    max_depth: 6

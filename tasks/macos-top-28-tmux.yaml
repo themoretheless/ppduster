@@ -13,8 +13,8 @@ task:
         command_succeeds: ["brew", "list", "tmux"]
     - id: verify-tmux-config
       name: Verify tmux config target
-      type: run-command
-      program: bash
-      args: ["-lc", "test -f \"$HOME/.tmux.conf\""]
-      dangerous: true
-      shell: allow
+      type: inspect-path
+      path: $HOME/.tmux.conf
+      expect:
+        exists: true
+        kind: file

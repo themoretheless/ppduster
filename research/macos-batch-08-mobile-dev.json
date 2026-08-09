@@ -1,0 +1,911 @@
+{
+  "batch": "08-mobile-dev",
+  "title": "macOS mobile development cleanup (iOS/Android/Flutter/React Native and related toolchains)",
+  "platform": "macos",
+  "scope_note": "Beyond already-covered primary rules: Xcode DerivedData, iOS DeviceSupport, Archives, CoreSimulator Caches/Logs. Those roots may appear here only as adjacent subpaths or explicit expansions (watchOS/tvOS/visionOS DeviceSupport, ModuleCache, Products, devices, runtimes). Prefer simctl/sdkmanager for device/runtime lifecycle; never bulk-delete whole SDK or AVD config trees by default.",
+  "already_covered_primary": [
+    "$HOME/Library/Developer/Xcode/DerivedData",
+    "$HOME/Library/Developer/Xcode/iOS DeviceSupport",
+    "$HOME/Library/Developer/Xcode/Archives",
+    "$HOME/Library/Developer/CoreSimulator/Caches",
+    "$HOME/Library/Logs/CoreSimulator"
+  ],
+  "path_count": 216,
+  "rules": [
+    {
+      "id": "mobile-watchos-tvos-visionos-device-support",
+      "label": "watchOS/tvOS/visionOS/macOS DeviceSupport symbols",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Developer/Xcode/watchOS DeviceSupport",
+        "$HOME/Library/Developer/Xcode/tvOS DeviceSupport",
+        "$HOME/Library/Developer/Xcode/visionOS DeviceSupport",
+        "$HOME/Library/Developer/Xcode/macOS DeviceSupport"
+      ],
+      "notes": "Same class as iOS DeviceSupport (already covered): per-OS-version symbol packs regenerated when a device of that version reconnects. Prefer deleting only stale version folders, not the parent tree blindly on active device fleets."
+    },
+    {
+      "id": "mobile-xcode-device-logs",
+      "label": "Xcode iOS/watchOS/tvOS device logs",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Developer/Xcode/iOS Device Logs",
+        "$HOME/Library/Developer/Xcode/watchOS Device Logs",
+        "$HOME/Library/Developer/Xcode/tvOS Device Logs",
+        "$HOME/Library/Developer/Xcode/visionOS Device Logs"
+      ],
+      "notes": "On-device console logs captured by Xcode. Regenerable; useful for crash triage until exported elsewhere."
+    },
+    {
+      "id": "mobile-xcode-products",
+      "label": "Xcode Products build outputs",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Developer/Xcode/Products"
+      ],
+      "notes": "Alternate/legacy build products location (also often under DerivedData). Forces rebuild; default off."
+    },
+    {
+      "id": "mobile-xcode-module-symbol-caches",
+      "label": "Xcode ModuleCache / SymbolCache / CompilationCache (DerivedData subtrees)",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Developer/Xcode/DerivedData/ModuleCache.noindex",
+        "$HOME/Library/Developer/Xcode/DerivedData/SymbolCache.noindex",
+        "$HOME/Library/Developer/Xcode/DerivedData/SDKStatCaches.noindex",
+        "$HOME/Library/Developer/Xcode/DerivedData/CompilationCache.noindex"
+      ],
+      "notes": "Shared clang module and compilation caches under DerivedData. Already-covered root is whole DerivedData; these are finer-grained reclaim targets when full wipe is undesired. Rebuild cost high on next compile."
+    },
+    {
+      "id": "mobile-xcode-userdata-ib-previews",
+      "label": "Xcode UserData IB Support, Previews, editor history",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Developer/Xcode/UserData/IB Support",
+        "$HOME/Library/Developer/Xcode/UserData/Previews",
+        "$HOME/Library/Developer/Xcode/UserData/IDEEditorInteractivityHistory",
+        "$HOME/Library/Developer/Xcode/UserData/XcodeCloud"
+      ],
+      "notes": "Interface Builder caches, SwiftUI preview data, editor interactivity history, local Xcode Cloud leftovers. Do NOT wipe whole UserData (KeyBindings, CodeSnippets, FontAndColorThemes, IDEPreferences)."
+    },
+    {
+      "id": "mobile-xcode-app-caches",
+      "label": "Xcode and Instruments app caches",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Caches/com.apple.dt.Xcode",
+        "$HOME/Library/Caches/com.apple.dt.xcodebuild",
+        "$HOME/Library/Caches/com.apple.dt.Instruments",
+        "$HOME/Library/Caches/com.apple.dt.IDECacheDeleteAppExtension"
+      ],
+      "notes": "IDE-level caches under Library/Caches. Safe; may slow first Xcode launch/index after wipe."
+    },
+    {
+      "id": "mobile-instruments-traces",
+      "label": "Instruments traces and saved packages",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Developer/Xcode/Instruments",
+        "$HOME/Library/Application Support/Instruments",
+        "$HOME/Library/Caches/com.apple.dt.Instruments",
+        "$HOME/Library/Logs/Instruments"
+      ],
+      "notes": "Saved .trace sessions can be large and user-created; treat as medium. Prefer age-gated contents delete. Do not remove Instruments templates the user installed intentionally without review."
+    },
+    {
+      "id": "mobile-dvt-downloads-runtimes",
+      "label": "DVTDownloads / Available Runtimes leftover downloads",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Developer/DVTDownloads",
+        "$HOME/Library/Developer/CoreSimulator/Images",
+        "$HOME/Library/Developer/CoreSimulator/Cryptex"
+      ],
+      "notes": "Incomplete or leftover simulator runtime downloads/images. Prefer xcodebuild -downloadPlatform / Xcode Settings > Platforms and simctl runtime delete for installed runtimes. System runtimes also under /Library/Developer/CoreSimulator (report-only rule)."
+    },
+    {
+      "id": "mobile-system-simulator-runtimes-report",
+      "label": "System CoreSimulator runtimes and volumes (report-only)",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "path",
+      "paths": [
+        "/Library/Developer/CoreSimulator/Profiles/Runtimes",
+        "/Library/Developer/CoreSimulator/Volumes",
+        "/Library/Developer/CoreSimulator/Images",
+        "/Library/Developer/CoreSimulator/Caches"
+      ],
+      "notes": "System-wide simulator runtimes (multi-GB each). Never auto-delete; reclaim via xcrun simctl runtime delete or Xcode Platforms UI. Report size only."
+    },
+    {
+      "id": "mobile-coresimulator-devices-report",
+      "label": "CoreSimulator device data (careful / report-or-medium)",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Developer/CoreSimulator/Devices",
+        "$HOME/Library/Developer/CoreSimulator/Temp",
+        "$HOME/Library/Developer/XCTestDevices"
+      ],
+      "notes": "Per-device UUID trees hold app data, keychains for sims, and large media. Prefer xcrun simctl delete unavailable / erase. Auto-wiping Devices breaks booted sims and local test state. XCTestDevices holds XCTest runner device data. Temp is safer medium reclaim if aged."
+    },
+    {
+      "id": "mobile-provisioning-profiles-report",
+      "label": "Provisioning profiles (report-only)",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 90,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/MobileDevice/Provisioning Profiles",
+        "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+      ],
+      "notes": "Required for code signing. Xcode/Apple Developer Portal re-download, but wiping causes signing failures until refreshed. Report size and age only; never default clean."
+    },
+    {
+      "id": "mobile-dsyms-archives-report",
+      "label": "dSYMs and archive symbolication artifacts (report-only)",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 90,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Developer/Xcode/Archives",
+        "$HOME/Library/Developer/Xcode/iOS DeviceSupport",
+        "$HOME/Library/Caches/com.apple.dt.Xcode/Downloads"
+      ],
+      "notes": "Archives already primary report-only. dSYMs inside .xcarchive are needed for crash symbolication and App Store/TestFlight. DeviceSupport Symbols also used for symbolication. Measure only unless user confirms Organizer delete."
+    },
+    {
+      "id": "mobile-documentation-cache",
+      "label": "Xcode/Shared documentation cache",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Developer/Shared/Documentation",
+        "$HOME/Library/Developer/Xcode/DocumentationIndex",
+        "$HOME/Library/Developer/Xcode/DocumentationCache"
+      ],
+      "notes": "Offline docsets and indexes; re-download via Xcode documentation downloads."
+    },
+    {
+      "id": "mobile-cocoapods-cache",
+      "label": "CocoaPods caches",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Caches/CocoaPods",
+        "$HOME/Library/Caches/org.cocoapods.CocoaPods"
+      ],
+      "notes": "pod cache; regenerable via pod install. Prefer pod cache clean --all when pods CLI available."
+    },
+    {
+      "id": "mobile-cocoapods-repos-report",
+      "label": "CocoaPods specs repos (report-only / medium)",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 60,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.cocoapods/repos",
+        "$HOME/.cocoapods/repos/trunk",
+        "$HOME/.cocoapods/repos/cocoapods"
+      ],
+      "notes": "Large git/CDN specs mirrors. CDN trunk is default now; old master clone can be multi-GB. Report; deleting forces slow pod repo update."
+    },
+    {
+      "id": "mobile-carthage-cache",
+      "label": "Carthage global cache and Build leftovers",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Caches/org.carthage.CarthageKit",
+        "$HOME/Library/Caches/carthage",
+        "$HOME/Library/Caches/Carthage"
+      ],
+      "notes": "Global CarthageKit cache. Project-local Carthage/Build and Carthage/Checkouts are not global roots (project walk, higher risk)."
+    },
+    {
+      "id": "mobile-spm-repositories-cache",
+      "label": "SwiftPM repositories and artifacts cache",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Caches/org.swift.swiftpm",
+        "$HOME/Library/Caches/org.swift.swiftpm/repositories",
+        "$HOME/Library/Caches/org.swift.swiftpm/artifacts",
+        "$HOME/Library/Caches/org.swift.swiftpm/manifests",
+        "$HOME/Library/Caches/swiftpm",
+        "$HOME/Library/org.swift.swiftpm"
+      ],
+      "notes": "SPM clone/binary artifact cache. Re-fetched on resolve. SourcePackages under project or DerivedData is separate."
+    },
+    {
+      "id": "mobile-android-sdk-temps",
+      "label": "Android SDK temp, downloads, and emulator side caches",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Android/sdk/.temp",
+        "$HOME/Library/Android/sdk/.downloadIntermediates",
+        "$HOME/Library/Android/sdk/temp",
+        "$HOME/Library/Android/sdk/emulator/qemu",
+        "$HOME/Android/Sdk/.temp",
+        "$HOME/Android/Sdk/.downloadIntermediates",
+        "$ANDROID_HOME/.temp",
+        "$ANDROID_SDK_ROOT/.temp"
+      ],
+      "notes": "Partial SDK downloads and emulator qemu leftovers. Never delete whole sdk/, platform-tools/, licenses/, or cmdline-tools/."
+    },
+    {
+      "id": "mobile-android-sdk-system-images-report",
+      "label": "Android SDK system-images / NDK / old build-tools (report-only)",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Android/sdk/system-images",
+        "$HOME/Library/Android/sdk/ndk",
+        "$HOME/Library/Android/sdk/ndk-bundle",
+        "$HOME/Library/Android/sdk/build-tools",
+        "$HOME/Library/Android/sdk/platforms",
+        "$HOME/Android/Sdk/system-images",
+        "$HOME/Android/Sdk/ndk",
+        "$HOME/Android/Sdk/build-tools"
+      ],
+      "notes": "Multi-GB API-level images and NDK side-by-side installs. Prefer sdkmanager --uninstall for unused packages. Report only; wrong delete breaks emulators and CI images."
+    },
+    {
+      "id": "mobile-android-dot-android-caches",
+      "label": "Android ~/.android cache, metrics, build-cache",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.android/cache",
+        "$HOME/.android/build-cache",
+        "$HOME/.android/metrics",
+        "$HOME/.android/studio"
+      ],
+      "notes": "Safe regenerable caches. Do not delete adbkey, adbkey.pub, or debug.keystore (device auth / debug signing)."
+    },
+    {
+      "id": "mobile-android-avd-snapshots",
+      "label": "Android AVD snapshots and emulator disk overlays",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.android/avd"
+      ],
+      "include_globs": [
+        "**/*.avd/snapshots/**",
+        "**/*.avd/*.qcow2",
+        "**/*.avd/cache.img",
+        "**/*.avd/cache.img.qcow2",
+        "**/*.avd/tmpdir/**",
+        "**/*.avd/*.log"
+      ],
+      "notes": "Snapshots and qcow2 overlays are large. AVD definitions (.ini + config.ini + userdata) should not be bulk-wiped (platforms never_touch lists full avd tree). Prefer snapshot-only globs; whole avd wipe is report-only elsewhere."
+    },
+    {
+      "id": "mobile-android-avd-tree-report",
+      "label": "Android AVD full tree (report-only)",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "path",
+      "paths": [
+        "$HOME/.android/avd"
+      ],
+      "notes": "Full AVD data dirs. never_touch for auto-clean in product policy; report size. Use avdmanager delete avd -n NAME."
+    },
+    {
+      "id": "mobile-gradle-android",
+      "label": "Gradle caches for Android builds",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.gradle/caches",
+        "$HOME/.gradle/daemon",
+        "$HOME/.gradle/native",
+        "$HOME/.gradle/.tmp",
+        "$HOME/.gradle/wrapper/dists",
+        "$HOME/.gradle/kotlin-profile",
+        "$HOME/.gradle/notifications",
+        "$HOME/.gradle/workers",
+        "$HOME/.gradle/jdks",
+        "$HOME/.gradle/android"
+      ],
+      "notes": "Gradle User Home. Safe but forces large re-downloads. Project-level .gradle/ and build/ are separate higher-risk project walks. Keep wrapper scripts outside dists."
+    },
+    {
+      "id": "mobile-android-studio-caches",
+      "label": "Android Studio caches and logs",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Caches/Google/AndroidStudio*",
+        "$HOME/Library/Caches/AndroidStudio*",
+        "$HOME/Library/Logs/Google/AndroidStudio*",
+        "$HOME/Library/Logs/AndroidStudio*",
+        "$HOME/Library/Application Support/Google/AndroidStudio*/caches",
+        "$HOME/Library/Application Support/Google/AndroidStudio*/system",
+        "$HOME/Library/Application Support/Google/AndroidStudio*/localHistory",
+        "$HOME/Library/Application Support/AndroidStudio*/caches",
+        "$HOME/Library/Application Support/AndroidStudio*/system"
+      ],
+      "notes": "JetBrains-based Android Studio system caches. Versioned dirs (AndroidStudio2024.1 etc.). Prefer Invalidate Caches from IDE when possible. Do not wipe whole Application Support options/config (keymaps, projects list)."
+    },
+    {
+      "id": "mobile-intellij-android-caches",
+      "label": "IntelliJ IDEA Android/Kotlin plugin caches",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/IntelliJIdea*",
+        "$HOME/Library/Caches/JetBrains/IdeaIC*",
+        "$HOME/Library/Logs/JetBrains/IntelliJIdea*",
+        "$HOME/Library/Logs/JetBrains/IdeaIC*",
+        "$HOME/Library/Caches/JetBrains/AndroidStudio*"
+      ],
+      "notes": "IntelliJ caches used when developing Android/KMP outside Android Studio. Contents-only under versioned product dirs."
+    },
+    {
+      "id": "mobile-flutter-pub-dart",
+      "label": "Flutter pub cache and Dart tool caches",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.pub-cache",
+        "$HOME/.pub-cache/hosted",
+        "$HOME/.pub-cache/git",
+        "$HOME/.pub-cache/hosted-hashes",
+        "$HOME/.dart-tool",
+        "$HOME/.dartServer",
+        "$HOME/.dart-cli-completion",
+        "$HOME/Library/Caches/flutter_engine",
+        "$HOME/Library/Caches/Dart",
+        "$HOME/.config/flutter/tool_state"
+      ],
+      "notes": "dart pub / flutter pub system cache. flutter pub cache repair regenerates. Do not delete Flutter SDK checkout itself (FVM/asdf/mise installs are separate report-only)."
+    },
+    {
+      "id": "mobile-flutter-sdk-cache-report",
+      "label": "Flutter SDK bin/cache and FVM versions (report-only)",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/flutter/bin/cache",
+        "$HOME/development/flutter/bin/cache",
+        "$HOME/fvm/versions",
+        "$HOME/fvm/cache",
+        "$HOME/.fvm",
+        "$HOME/Library/Application Support/fvm"
+      ],
+      "notes": "Flutter engine artifacts under SDK bin/cache and FVM multi-version installs. Path varies; report only. flutter doctor --android-licenses / flutter precache refill."
+    },
+    {
+      "id": "mobile-expo-caches",
+      "label": "Expo CLI caches",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.expo",
+        "$HOME/.expo/cache",
+        "$HOME/.expo/ios-simulator-app-cache",
+        "$HOME/.expo/android-apk-cache",
+        "$HOME/.expo/native-modules-cache",
+        "$HOME/.expo/versions-cache",
+        "$HOME/.expo/template-cache",
+        "$HOME/Library/Caches/Expo",
+        "$HOME/Library/Caches/com.expo.exporter",
+        "$HOME/Library/Caches/com.exponent.Exponent"
+      ],
+      "notes": "Expo Go caches, native module and template caches. npx expo start --clear for project metro; these are global home caches."
+    },
+    {
+      "id": "mobile-metro-rn-temp-caches",
+      "label": "Metro / React Native packager temp caches",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 3,
+      "delete_mode": "contents",
+      "paths": [
+        "$TMPDIR",
+        "$HOME/Library/Caches/com.facebook.react.packager",
+        "$HOME/Library/Caches/metro-cache",
+        "$HOME/.metro",
+        "$HOME/.rncache"
+      ],
+      "include_globs": [
+        "metro-cache/**",
+        "metro-*/**",
+        "haste-map-*/**",
+        "react-native-packager-cache-*/**",
+        "react-*/**"
+      ],
+      "notes": "Metro transform caches often live under os.tmpdir(). Age-gated globs under TMPDIR only; do not wipe entire TMPDIR. Legacy ~/.rncache and metro home caches included."
+    },
+    {
+      "id": "mobile-fastlane",
+      "label": "fastlane cache and logs",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Caches/fastlane",
+        "$HOME/Library/Logs/fastlane",
+        "$HOME/.fastlane/spaceship",
+        "$HOME/.fastlane"
+      ],
+      "notes": "Spaceship/session caches and logs. Do not delete Appfile/Fastfile (project). Credentials in keychain or env stay untouched."
+    },
+    {
+      "id": "mobile-testflight-transporter",
+      "label": "TestFlight / Transporter / AMP delivery leftovers",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Caches/com.apple.TransporterApp",
+        "$HOME/Library/Caches/com.apple.amp.itmstransporter",
+        "$HOME/Library/Application Support/Transporter",
+        "$HOME/Library/Caches/com.apple.AMPLibraryAgent",
+        "$HOME/Library/Logs/Transporter"
+      ],
+      "notes": "Apple Transporter upload caches and App Store Connect delivery leftovers. Not App Store app purchase data."
+    },
+    {
+      "id": "mobile-apple-configurator",
+      "label": "Apple Configurator caches and logs",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Caches/com.apple.configurator.ui",
+        "$HOME/Library/Caches/com.apple.configurator.xpc.DeviceService",
+        "$HOME/Library/Logs/Apple Configurator",
+        "$HOME/Library/Group Containers/K36BKF7T3D.group.com.apple.configurator",
+        "$HOME/Library/Application Support/com.apple.configurator"
+      ],
+      "notes": "MDM/device imaging tool caches. Group container may hold IPSW/assets; medium risk; age-gate. Never wipe supervised device records without user intent."
+    },
+    {
+      "id": "mobile-ios-deploy-libimobiledevice",
+      "label": "ios-deploy / libimobiledevice / lockdown leftovers",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Logs/ios-deploy",
+        "$HOME/.config/libimobiledevice",
+        "$HOME/Library/Caches/libimobiledevice",
+        "$HOME/Library/Logs/libimobiledevice"
+      ],
+      "notes": "CLI device tooling caches/logs. System /var/db/lockdown pairing records are report-only (separate) and affect trust with physical devices."
+    },
+    {
+      "id": "mobile-lockdown-pairing-report",
+      "label": "usbmuxd lockdown pairing records (report-only)",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "path",
+      "paths": [
+        "/var/db/lockdown",
+        "/var/db/lockdown-development"
+      ],
+      "notes": "Device trust/pairing. Deleting forces re-Trust on every cable connect. Report only."
+    },
+    {
+      "id": "mobile-scrcpy",
+      "label": "scrcpy caches and config leftovers",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Caches/scrcpy",
+        "$HOME/.config/scrcpy",
+        "$HOME/.cache/scrcpy"
+      ],
+      "notes": "Android screen-mirroring tool. Config is small; caches regenerable."
+    },
+    {
+      "id": "mobile-kotlin-native-kmp",
+      "label": "Kotlin/Native and KMP Konan caches",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.konan",
+        "$HOME/.konan/dependencies",
+        "$HOME/.konan/cache",
+        "$HOME/.konan/kotlin-native-prebuilt-*",
+        "$HOME/Library/Caches/Kotlin",
+        "$HOME/Library/Application Support/kotlin"
+      ],
+      "notes": "Kotlin/Native compiler distribution and dependency caches for KMP. Large re-download after wipe. Gradle kotlin caches also under ~/.gradle/caches."
+    },
+    {
+      "id": "mobile-maui-xamarin",
+      "label": "MAUI / Xamarin caches",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Caches/Xamarin",
+        "$HOME/Library/Caches/XamarinBuildDownloadCache",
+        "$HOME/Library/Caches/com.xamarin.*",
+        "$HOME/Library/Caches/com.microsoft.visual-studio",
+        "$HOME/Library/Developer/Xamarin",
+        "$HOME/.local/share/Xamarin",
+        "$HOME/.nuget/packages/microsoft.maui.*",
+        "$HOME/.nuget/packages/xamarin.*"
+      ],
+      "notes": "Xamarin/MAUI build download caches. NuGet package globs are coarse; prefer report if unsure. Do not wipe all of ~/.nuget/packages blindly in default product policy."
+    },
+    {
+      "id": "mobile-appium",
+      "label": "Appium drivers and cache",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.appium",
+        "$HOME/.appium/node_modules",
+        "$HOME/Library/Caches/appium",
+        "$HOME/.cache/appium",
+        "$HOME/Library/Logs/Appium"
+      ],
+      "notes": "Appium 2 drivers/plugins under ~/.appium. Reinstall via appium driver install. Medium: may remove installed drivers."
+    },
+    {
+      "id": "mobile-detox",
+      "label": "Detox global artifacts and cache",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Caches/Detox",
+        "$HOME/Library/Detox",
+        "$HOME/.detox-artifacts",
+        "$TMPDIR/detox"
+      ],
+      "notes": "Detox E2E global caches/artifacts. Project detox artifacts folders are project-local."
+    },
+    {
+      "id": "mobile-maestro",
+      "label": "Maestro mobile E2E caches and test cloud leftovers",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.maestro",
+        "$HOME/.maestro/tests",
+        "$HOME/.maestro/tests/**",
+        "$HOME/Library/Caches/maestro",
+        "$HOME/Library/Caches/Maestro",
+        "$HOME/.cache/maestro"
+      ],
+      "notes": "Maestro CLI flows store screenshots/logs under ~/.maestro/tests. Safe to prune aged test output."
+    },
+    {
+      "id": "mobile-buck-bazel-mobile",
+      "label": "Buck/Bazel caches used by some RN/Android monorepos",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.buckd",
+        "$HOME/.buck",
+        "$HOME/Library/Caches/Buck",
+        "$HOME/.cache/bazel",
+        "$HOME/Library/Caches/Bazel",
+        "$HOME/.bazel-cache"
+      ],
+      "notes": "Optional monorepo build systems. Medium re-download/recompile cost."
+    },
+    {
+      "id": "mobile-react-native-firebase-caches",
+      "label": "Common RN native module download caches",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Caches/Firebase",
+        "$HOME/Library/Caches/com.google.firebase",
+        "$HOME/Library/Caches/Google/Firebase",
+        "$HOME/Library/Caches/cn.jiguang",
+        "$HOME/Library/Caches/io.sentry"
+      ],
+      "notes": "Occasional global caches from native SDKs pulled into mobile apps. Low risk if present; many installs never create these."
+    },
+    {
+      "id": "mobile-watchman-flow",
+      "label": "Watchman / Flow state (RN adjacent)",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.watchman",
+        "$TMPDIR/watchman-*",
+        "$HOME/Library/Caches/com.github.facebook.watchman",
+        "$HOME/.flow-typed"
+      ],
+      "notes": "Watchman cookie/state and caches; Flow typed libs. Prefer watchman watch-del-all over deleting LaunchAgents plists."
+    },
+    {
+      "id": "mobile-eas-cli",
+      "label": "Expo EAS CLI and build caches",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.eas",
+        "$HOME/.eas-cli",
+        "$HOME/Library/Caches/eas-cli",
+        "$HOME/Library/Caches/eas-cli-nodejs"
+      ],
+      "notes": "EAS CLI local caches. Credentials stay in Expo account/keychain."
+    },
+    {
+      "id": "mobile-flipper-reactotron",
+      "label": "Flipper / Reactotron / RN debug tool caches",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Application Support/Flipper",
+        "$HOME/Library/Caches/Flipper",
+        "$HOME/Library/Caches/facebook-flipper",
+        "$HOME/Library/Application Support/Reactotron",
+        "$HOME/Library/Caches/Reactotron",
+        "$HOME/Library/Logs/Flipper"
+      ],
+      "notes": "Deprecated Flipper and Reactotron desktop debug tools."
+    },
+    {
+      "id": "mobile-simulator-screenshots-media",
+      "label": "Simulator screenshots, recordings, and media leftovers",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Developer/CoreSimulator/Devices",
+        "$HOME/Library/Logs/CoreSimulator"
+      ],
+      "include_globs": [
+        "**/data/Media/**",
+        "**/data/Library/Caches/**",
+        "**/data/tmp/**",
+        "**/*.log"
+      ],
+      "notes": "Scoped globs inside Devices only for media/caches/tmp. Safer than full device wipe. CoreSimulator logs already primary-covered; included as path parent for globs."
+    },
+    {
+      "id": "mobile-xcode-gpu-metal",
+      "label": "Xcode Metal/GPU tools intermediate data",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/Library/Developer/Xcode/GPUToolsAgent.caches",
+        "$HOME/Library/Caches/com.apple.gpu",
+        "$HOME/Library/Developer/Xcode/UserData/IB Support/Simulator Devices"
+      ],
+      "notes": "GPU capture/Metal tooling and IB simulator device caches."
+    },
+    {
+      "id": "mobile-ruby-gems-cocoapods-side",
+      "label": "CocoaPods-related Ruby gem caches (user)",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.gem/ruby",
+        "$HOME/Library/Caches/RubyGems",
+        "$HOME/.bundle/cache"
+      ],
+      "notes": "User gem caches often used for CocoaPods. Do not delete system Ruby or brew ruby prefixes. Project vendor/bundle is project-local."
+    }
+  ],
+  "never_touch_reminders": [
+    "$HOME/.android/avd (full tree auto-delete)",
+    "$HOME/.android/adbkey",
+    "$HOME/.android/adbkey.pub",
+    "$HOME/.android/debug.keystore",
+    "$HOME/Library/Android/sdk/platform-tools",
+    "$HOME/Library/Android/sdk/licenses",
+    "$HOME/Library/Developer/Xcode/UserData/KeyBindings",
+    "$HOME/Library/Developer/Xcode/UserData/CodeSnippets",
+    "$HOME/Library/Developer/Xcode/UserData/FontAndColorThemes",
+    "$HOME/Library/MobileDevice/Provisioning Profiles (auto-delete)",
+    "/Library/Developer/CoreSimulator/Volumes (auto-delete)",
+    "/var/db/lockdown (auto-delete)",
+    "Project-local ios/Pods, android/.gradle, android/app/build, node_modules, .expo project dir"
+  ],
+  "implementation_notes": [
+    "Expand AndroidStudio* and JetBrains version globs at scan time to concrete versioned directories.",
+    "TMPDIR metro globs must be contents-only with min_age and must not delete the TMPDIR root.",
+    "CoreSimulator Devices: default report_only; optional future policy for simctl-driven unavailable-device cleanup.",
+    "Count path strings literally including globs and env variants ($ANDROID_HOME) as distinct catalog entries; runtime de-dupe when env maps to same absolute path.",
+    "Exclude primary already-covered roots from default enabled packs; expansions here are opt-in medium/report."
+  ]
+}

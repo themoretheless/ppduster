@@ -1,0 +1,468 @@
+pack: macos-fonts-icons
+rules:
+
+  - id: emoji-memoji-avatar-caches
+    name: Emoji, Memoji, stickers, AvatarKit caches
+    description: Emoji function row, Memoji picker, stickers, and AvatarKit regenerable caches.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.inputmethod.EmojiFunctionRowItem/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.AvatarUI.AvatarPickerMemojiEditor/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.AvatarUI.AvatarPickerMemojiPicker/Data/Library/Caches
+      - $TMPDIR/../C/com.apple.stickersd
+      - $HOME/Library/Caches/com.apple.stickersd
+    delete_mode: contents
+    max_depth: 6
+
+  - id: fonts-adobe-fonts-sync-cache
+    name: Adobe Fonts / Typekit sync cache
+    description: Adobe Fonts livetype sync, TypeSupport, and Adobe Fonts cache trees. Activated fonts re-sync from cloud.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Adobe/CoreSync/plugins/livetype
+      - $HOME/Library/Application Support/Adobe/TypeSupport
+      - $HOME/Library/Application Support/Adobe/Fonts
+      - $HOME/Library/Logs/CreativeCloud/ACC/AdobeDesktopService
+    delete_mode: contents
+    max_depth: 8
+
+  - id: fonts-ats-user-cache
+    name: ATS user font cache
+    description: Apple Type Services per-user font cache under Library/Caches. Not font files.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.ATSServer
+    delete_mode: contents
+    max_depth: 6
+
+  - id: fonts-fontbase-residual
+    name: FontBase residual caches
+    description: FontBase Electron app caches/logs and regenerable Application Support leaves.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/FontBase
+      - $HOME/Library/Caches/FontBase
+      - $HOME/Library/Caches/com.dominiklevitsky.fontbase
+      - $HOME/Library/Logs/FontBase
+      - $HOME/Library/Saved Application State/com.dominiklevitsky.fontbase.savedState
+    include_globs:
+      - "**/Cache/**"
+      - "**/Caches/**"
+      - "**/Code Cache/**"
+      - "**/GPUCache/**"
+      - "**/Logs/**"
+      - "**/IndexedDB/**"
+      - "**/Session Storage/**"
+      - "**/blob_storage/**"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: fonts-fontbook-container-residual
+    name: Font Book container residual
+    description: "Font Book sandboxed container caches and support residual (not the user's font files)."
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.FontBook/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.FontBook/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.FontBook/Data/tmp
+      - $HOME/Library/Containers/com.apple.FontBook/Data/Library/Saved Application State
+    delete_mode: contents
+    max_depth: 6
+
+  - id: fonts-fontbook-database-report
+    name: Font Book database residual (report-only)
+    description: Font Book container Application Support and validation residual; may hold validation DB / state.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Containers/com.apple.FontBook/Data/Library/Application Support
+      - $HOME/Library/Application Support/Font Book
+      - $HOME/Library/Application Support/com.apple.FontBook
+    delete_mode: contents
+    max_depth: 6
+
+  - id: fonts-fontcollections-report
+    name: Font Book collections (report-only)
+    description: User Font Collections metadata (not caches).
+    category: user-data
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Font Collections
+    delete_mode: contents
+    max_depth: 3
+
+  - id: fonts-fontd-coretext-caches
+    name: fontd and CoreText related caches
+    description: fontd, CoreText, CTFontManager, and related Apple font pipeline caches under user Caches.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.CoreText
+      - $HOME/Library/Caches/com.apple.CTFontManager
+      - $HOME/Library/Caches/com.apple.FontBook
+      - $HOME/Library/Caches/com.apple.FontValidationService
+    delete_mode: contents
+    max_depth: 6
+
+  - id: fonts-fontexplorer-residual
+    name: FontExplorer X residual
+    description: Linotype FontExplorer X caches and logs (legacy managers still seen).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Application Support/Linotype/FontExplorer X
+      - $HOME/Library/Caches/com.linotype.FontExplorerX
+      - $HOME/Library/Caches/FontExplorer X
+      - $HOME/Library/Logs/FontExplorer X
+    delete_mode: contents
+    max_depth: 6
+
+  - id: fonts-fontregistry-user-cache
+    name: FontRegistry user cache
+    description: com.apple.FontRegistry user cache (Library/Caches and Darwin C residual).
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $TMPDIR/../C/com.apple.FontRegistry
+    delete_mode: contents
+    max_depth: 6
+
+  - id: fonts-google-fonts-desktop
+    name: Google Fonts desktop residual
+    description: Google Fonts desktop helper / local catalog residual under Application Support and Caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Google/Fonts
+      - $HOME/Library/Application Support/com.google.fonts
+      - $HOME/Library/Application Support/Google Fonts
+      - $HOME/Library/Caches/com.google.fonts
+      - $HOME/Library/Caches/Google/Fonts
+      - $HOME/Library/Fonts/Google
+    delete_mode: contents
+    max_depth: 6
+
+  - id: fonts-nexusfont-residual
+    name: NexusFont residual
+    description: NexusFont (often Wine/CrossOver or ported) caches and support residual on macOS.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/NexusFont
+      - $HOME/Library/Caches/NexusFont
+      - $HOME/Library/Logs/NexusFont
+      - $HOME/.NexusFont
+    delete_mode: contents
+    max_depth: 6
+
+  - id: fonts-office-font-cache-legacy
+    name: Microsoft Office font cache (legacy prefs)
+    description: Legacy Office Font Cache files under Preferences/Microsoft (not user font files).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Preferences/Microsoft/Office Font Cache
+      - $HOME/Library/Preferences/Microsoft/Office 2008/Office Font Cache
+      - $HOME/Library/Preferences/Microsoft/Office 2011/Office Font Cache
+    delete_mode: contents
+    max_depth: 2
+
+  - id: fonts-rightfont-residual
+    name: RightFont residual caches
+    description: RightFont Application Support residual and caches/logs. Prefer cache leaves over full library wipe.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/RightFont
+      - $HOME/Library/Caches/RightFont
+      - $HOME/Library/Caches/com.designersrefuge.RightFont
+      - $HOME/Library/Caches/com.rightfontapp.RightFont
+      - $HOME/Library/Logs/RightFont
+      - $HOME/Library/HTTPStorages/com.rightfontapp.RightFont
+      - $HOME/Library/Saved Application State/com.rightfontapp.RightFont.savedState
+    include_globs:
+      - "**/Cache/**"
+      - "**/Caches/**"
+      - "**/Logs/**"
+      - "**/tmp/**"
+      - "**/Temp/**"
+      - "**/*cache*"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: fonts-skyfonts-monotype-residual
+    name: SkyFonts / Monotype residual
+    description: Monotype SkyFonts / Connect Fonts desktop residual caches and sync staging.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/SkyFonts
+      - $HOME/Library/Application Support/Monotype SkyFonts
+      - $HOME/Library/Application Support/Monotype
+      - $HOME/Library/Application Support/Monotype Connect
+      - $HOME/Library/Caches/com.monotype.skyfonts
+      - $HOME/Library/Caches/SkyFonts
+      - $HOME/Library/Logs/SkyFonts
+      - $HOME/Library/Logs/Monotype
+    delete_mode: contents
+    max_depth: 8
+
+  - id: fonts-suitcase-extensis-residual
+    name: Suitcase Fusion / Extensis residual
+    description: Extensis Suitcase Fusion / Connect residual caches and logs. Vaults report-only via separate rule.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.extensis.SuitcaseFusion
+      - $HOME/Library/Caches/com.extensis.Suitcase-Fusion
+      - $HOME/Library/Caches/Extensis
+      - $HOME/Library/Logs/Extensis
+      - $HOME/Library/Logs/Suitcase Fusion
+      - $HOME/Library/Application Support/Extensis/Suitcase Fusion/Logs
+      - $HOME/Library/Application Support/Extensis/Suitcase Fusion/Cache
+      - $HOME/Library/Application Support/Extensis/Suitcase Fusion/Caches
+      - $HOME/Library/Extensis/Suitcase Fusion
+    delete_mode: contents
+    max_depth: 8
+
+  - id: fonts-suitcase-vault-report
+    name: Suitcase / Extensis font vault (report-only)
+    description: Font vault/library storage for Suitcase Fusion. May be only copy of fonts.
+    category: user-data
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Extensis/Suitcase Fusion/Suitcase Fusion.fontvault
+      - $HOME/Library/Application Support/Extensis/Suitcase Fusion/Font Library
+      - $HOME/Library/Application Support/Extensis/Suitcase Fusion/Vault
+    delete_mode: contents
+    max_depth: 4
+
+  - id: fonts-typeface-app-residual
+    name: Typeface app residual
+    description: Typeface font manager caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.albertino.Typeface
+      - $HOME/Library/Caches/com.typefaceapp.Typeface
+      - $HOME/Library/Caches/Typeface
+      - $HOME/Library/Logs/Typeface
+      - $HOME/Library/Application Support/Typeface/Cache
+      - $HOME/Library/Application Support/Typeface/Caches
+      - $HOME/Library/HTTPStorages/com.typefaceapp.Typeface
+    delete_mode: contents
+    max_depth: 6
+
+  - id: fonts-user-fonts-folder-report
+    name: User Fonts folder (report-only)
+    description: Installed user fonts and disabled-fonts residual. Never default delete.
+    category: user-data
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Fonts Disabled
+      - $HOME/Library/Fonts (Disabled)
+      - $HOME/Library/Fonts (disabled)
+    delete_mode: contents
+    max_depth: 4
+
+  - id: fonts-wordmark-fontapp-residual
+    name: Wordmark / other font browser residual
+    description: Wordmark and similar font browser app caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.fabriceleyne.wordmark
+      - $HOME/Library/Caches/com.wordmarkapp.Wordmark
+      - $HOME/Library/Application Support/Wordmark/Cache
+      - $HOME/Library/Application Support/Wordmark/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: icons-dock-iconcache
+    name: Dock icon cache residual
+    description: Dock icon cache under Darwin user C and legacy Library/Caches locations.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 3
+    paths:
+      - $TMPDIR/../C/com.apple.dock.iconcache
+      - $HOME/Library/Caches/com.apple.dock.iconcache
+      - $HOME/Library/Caches/com.apple.dock
+      - $TMPDIR/../C/com.apple.dock
+    delete_mode: contents
+    max_depth: 5
+
+  - id: icons-iconservices-user-residual
+    name: Icon Services user residual (Darwin C)
+    description: Per-user Icon Services cache under Darwin user cache dir (sibling of $TMPDIR).
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $TMPDIR/../C/com.apple.iconservices
+      - $TMPDIR/../C/com.apple.iconservicesagent
+      - $TMPDIR/com.apple.IconServices
+      - $HOME/Library/Caches/com.apple.iconservicesagent
+      - $HOME/Library/Caches/com.apple.IconServices
+    delete_mode: contents
+    max_depth: 6
+
+  - id: icons-launchservices-user-residual-report
+    name: LaunchServices user residual (report-only)
+    description: Per-user LaunchServices databases and quarantine events under Preferences.
+    category: system-data
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Preferences/com.apple.LaunchServices
+      - $HOME/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist
+      - $HOME/Library/Preferences/com.apple.LaunchServices/com.apple.LaunchServices.plist
+      - $HOME/Library/Preferences/com.apple.LaunchServices/com.apple.LaunchServices.SettingsStore.sql
+      - $HOME/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2
+    delete_mode: contents
+    max_depth: 3
+
+  - id: icons-sf-symbols-caches
+    name: SF Symbols app caches
+    description: SF Symbols developer app caches and support residual.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.SFSymbols
+      - $HOME/Library/Caches/com.apple.SFSymbolsApp
+      - $HOME/Library/Application Support/com.apple.SFSymbols
+      - $HOME/Library/HTTPStorages/com.apple.SFSymbols
+      - $HOME/Library/Logs/SF Symbols
+    delete_mode: contents
+    max_depth: 6
+
+  - id: ql-thumbnail-darwin-c-residual
+    name: Quick Look Darwin C residual
+    description: Per-user Quick Look / thumbnail service residuals under Darwin C next to $TMPDIR.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $TMPDIR/../C/com.apple.quicklook.ThumbnailsAgent
+      - $TMPDIR/../C/com.apple.quicklook.qlmanage
+      - $TMPDIR/../C/com.apple.quicklook.quicklookd
+      - $TMPDIR/../C/com.apple.quicklook.satellite.general
+      - $TMPDIR/../C/com.apple.quicklook.ui.helper
+      - $TMPDIR/../C/com.apple.quicklook.QuickLookUIService
+      - $TMPDIR/../C/com.apple.QuickLook.thumbnailcache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: ql-thumbnail-extension-caches
+    name: Quick Look thumbnail extension container caches
+    description: Caches inside Apple Quick Look thumbnail extension containers (contents only).
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.quicklook.thumbnail.ImageExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.quicklook.thumbnail.TextExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.quicklook.thumbnail.FontExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.quicklook.thumbnail.WebExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.quicklook.thumbnail.PackageExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.quicklook.QuickLookUIService/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.QuickLookUIFramework.QLPreviewGenerationExtension/Data/Library/Caches
+    delete_mode: contents
+    max_depth: 5
+
+  - id: ql-thumbnail-user-caches
+    name: Quick Look and thumbnail user caches
+    description: Quick Look thumbnailcache, ThumbnailsAgent, and related user caches.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.quicklook.ThumbnailsAgent
+      - $HOME/Library/Caches/com.apple.QuickLookUIService
+    delete_mode: contents
+    max_depth: 6

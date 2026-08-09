@@ -1,18 +1,16 @@
 task:
   id: macos-top-26-app-store
   name: macOS App Store baseline
-  description: Install the mas CLI used by typed app-store-install steps and list installed Mac App Store applications.
+  description: Verify the macOS baseline used by native App Store automation and safely inspect Spotlight metadata for installed App Store applications without installing third-party tooling.
   platform: macos
   trust: bundled-only
   steps:
-    - id: install-mas
-      name: Install mas CLI
-      type: brew-install
-      package: mas
-      check:
-        command_succeeds: ["brew", "list", "mas"]
-    - id: list-app-store-apps
-      name: List installed Mac App Store applications
+    - id: verify-app-store-requirements
+      name: Verify native App Store macOS requirements
+      type: macos-requirements
+      minimum_version: "14.0"
+    - id: inspect-app-store-metadata
+      name: Inspect installed App Store receipt metadata
       type: run-command
-      program: mas
-      args: ["list"]
+      program: /usr/bin/mdfind
+      args: ["kMDItemAppStoreHasReceipt == 1"]

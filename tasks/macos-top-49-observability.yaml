@@ -12,8 +12,7 @@ task:
       args: ["show", "--last", "1m", "--style", "compact"]
     - id: plan-health-audit
       name: Plan system health audit script
-      type: run-command
-      program: bash
-      args: ["-lc", "$HOME/.config/macos/health-audit.sh"]
+      type: run-script
+      interpreter: bash
+      script: "$HOME/.config/macos/health-audit.sh"
       dangerous: true
-      shell: allow

@@ -1,0 +1,781 @@
+pack: apps-music-daw
+rules:
+
+  - id: daw-ableton-bundle-caches
+    name: Ableton bundle-id caches
+    description: "com.ableton.* entries under Library/Caches."
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.ableton.live
+      - $HOME/Library/Caches/com.ableton.live.Lockfile
+      - $HOME/Library/WebKit/com.ableton.live
+      - $HOME/Library/HTTPStorages/com.ableton.live
+    delete_mode: contents
+    max_depth: 6
+
+  - id: daw-ableton-live-caches
+    name: Ableton Live cache tree
+    description: Default Live Cache and related Ableton cache tree under ~/Library/Caches. Regenerable; close Live first. Not User Library or installed Packs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Ableton
+      - $HOME/Library/Caches/Ableton/Cache
+      - $HOME/Library/Caches/Ableton/PackDownloads
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-ableton-live-logs-support-temps
+    name: Ableton Live logs and support temps
+    description: Ableton logs and regenerable temp/index leaves under Application Support. Does not delete whole Application Support/Ableton (prefs/databases).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Ableton
+      - $HOME/Library/Logs/Ableton Live
+      - $HOME/Library/Application Support/Ableton/Live Reports
+      - $HOME/Library/Application Support/Ableton/Crash
+    include_globs:
+      - "**/Tmp/**"
+      - "**/Temp/**"
+      - "**/Cache/**"
+      - "**/Logs/**"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-ableton-packs-library-report
+    name: Ableton Packs and User Library (report-only)
+    description: Installed Packs and User Library content. Large re-downloads; user presets live here. Report size only.
+    category: sample-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Ableton/Factory Packs
+    delete_mode: contents
+    max_depth: 4
+
+  - id: daw-arturia-caches
+    name: Arturia Software Center caches and logs
+    description: Arturia ASC and instrument app caches/logs under user Library. Not factory instrument content under /Library/Arturia.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Arturia
+      - $HOME/Library/Caches/com.arturia
+      - $HOME/Library/Caches/com.arturia.ArturiaSoftwareCenter
+      - $HOME/Library/Caches/com.arturia.ASC
+      - $HOME/Library/Logs/Arturia
+      - $HOME/Library/Application Support/Arturia/Cache
+      - $HOME/Library/Application Support/Arturia/Caches
+      - $HOME/Library/Application Support/Arturia/Logs
+      - $HOME/Library/Application Support/Arturia/Arturia Software Center/Cache
+      - $HOME/Library/Application Support/Arturia/Arturia Software Center/Logs
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-arturia-content-report
+    name: Arturia instrument content (report-only)
+    description: User-scoped Arturia content if present. Factory content often system /Library/Arturia. Report only.
+    category: sample-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Arturia
+      - $HOME/Library/Application Support/Arturia/Content
+    delete_mode: contents
+    max_depth: 3
+
+  - id: daw-audacity-session-temp
+    name: Audacity Session Data and caches
+    description: Audacity temporary Session Data and app caches. Close Audacity first; unsaved recordings in Session Data can be lost.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 3
+    paths:
+      - $HOME/Library/Application Support/audacity/Session Data
+      - $HOME/Library/Application Support/audacity/AutoSave
+      - $HOME/Library/Caches/audacity
+      - $HOME/Library/Caches/org.audacityteam.audacity
+      - $HOME/Library/Caches/com.audacityteam.audacity
+      - $HOME/Library/Logs/audacity
+    delete_mode: contents
+    max_depth: 6
+
+  - id: daw-audiounit-cache-shared
+    name: Shared Audio Unit plugin cache
+    description: Systemwide-per-user AU validation cache used by Logic, GarageBand, and other AU hosts. Safe; next host launch rescans plugins.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Caches/com.apple.audiounits.sandboxed.cache
+      - $HOME/Library/Caches/com.apple.audio.InfoHelper
+    delete_mode: contents
+    max_depth: 4
+
+  - id: daw-bitwig-caches
+    name: Bitwig Studio caches and plugin index
+    description: Bitwig Caches tree, vst-metadata, and Application Support index used for plugin/preset indexing. Regenerable; close Bitwig first.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Bitwig
+      - $HOME/Library/Caches/Bitwig/vst-metadata
+      - $HOME/Library/Caches/com.bitwig.BitwigStudio
+      - $HOME/Library/Application Support/Bitwig/Bitwig Studio/index
+      - $HOME/Library/Application Support/Bitwig Studio/index
+      - $HOME/Library/Application Support/Bitwig/Bitwig Studio/cache
+      - $HOME/Library/Application Support/Bitwig/Bitwig Studio/caches
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-bitwig-logs
+    name: Bitwig Studio logs
+    description: Bitwig log directories under user Library.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Bitwig
+      - $HOME/Library/Logs/Bitwig Studio
+      - $HOME/Library/Application Support/Bitwig/Bitwig Studio/log
+      - $HOME/Library/Application Support/Bitwig/Bitwig Studio/logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: daw-cubase-nuendo-plugin-cache
+    name: Cubase/Nuendo VST plugin caches
+    description: Versioned Cubase/Nuendo VST2/VST3 plugin cache XML under Preferences. Close host first; forces rescan.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Preferences/Cubase 12
+      - $HOME/Library/Preferences/Cubase 13
+      - $HOME/Library/Preferences/Cubase 14
+      - $HOME/Library/Preferences/Cubase 15
+      - $HOME/Library/Preferences/Nuendo 12
+      - $HOME/Library/Preferences/Nuendo 13
+      - $HOME/Library/Preferences/Nuendo 14
+      - $HOME/Library/Preferences/Nuendo 15
+    include_globs:
+      - "**/Cubase*VST3 Cache/**"
+      - "**/Nuendo*VST3 Cache/**"
+      - "**/Vst2xPlugins*"
+      - "**/Vst2xBlacklist*"
+      - "**/VST3 Plugin Cache/**"
+      - "**/*VST3*Cache*"
+    exclude_globs:
+      - "**/*.xml.bak"
+      - "**/Key Commands/**"
+      - "**/Workspace/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: daw-fabfilter-caches
+    name: FabFilter caches
+    description: FabFilter plug-in bundle caches under user Library. Prefs/presets not targeted as roots.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/FabFilter
+      - $HOME/Library/Caches/com.fabfilter
+      - $HOME/Library/Caches/com.fabfilter.Pro-Q
+      - $HOME/Library/Caches/com.fabfilter.Pro-C
+      - $HOME/Library/Caches/com.fabfilter.Pro-L
+      - $HOME/Library/Caches/com.fabfilter.Saturn
+      - $HOME/Library/Application Support/FabFilter/Cache
+      - $HOME/Library/Application Support/FabFilter/Caches
+      - $HOME/Library/Logs/FabFilter
+    delete_mode: contents
+    max_depth: 6
+
+  - id: daw-fl-studio-caches
+    name: FL Studio / Image-Line caches
+    description: Image-Line and FL Studio regenerable caches under user Library. Not Documents/Image-Line user data or projects.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Image-Line
+      - $HOME/Library/Caches/FL Studio
+      - $HOME/Library/Caches/com.image-line.flstudio
+      - $HOME/Library/Caches/com.image-line.shared
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-fl-studio-logs-support
+    name: FL Studio logs and shared support temps
+    description: Logs and Application Support leaves that are cache-like. Avoid wiping license/settings plists wholesale.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Image-Line
+      - $HOME/Library/Logs/FL Studio
+      - $HOME/Library/Application Support/Image-Line/Shared/Cache
+      - $HOME/Library/Application Support/Image-Line/FL Studio/Cache
+      - $HOME/Library/Application Support/Image-Line/FL Studio/Logs
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-hydrogen-caches
+    name: Hydrogen drum machine caches and logs
+    description: Hydrogen (hydrogen-music) caches, logs, and temp under user Library. Not user drumkits intentionally stored as libraries if under separate content paths.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/Hydrogen
+      - $HOME/Library/Caches/com.hydrogen-music.Hydrogen
+      - $HOME/Library/Caches/org.hydrogen-music.Hydrogen
+      - $HOME/Library/Application Support/Hydrogen/Cache
+      - $HOME/Library/Application Support/Hydrogen/Caches
+      - $HOME/Library/Application Support/Hydrogen/logs
+      - $HOME/Library/Logs/Hydrogen
+      - $HOME/.hydrogen/cache
+      - $HOME/.hydrogen/tmp
+    delete_mode: contents
+    max_depth: 6
+
+  - id: daw-ilok-pace-caches
+    name: iLok / PACE license manager caches
+    description: iLok License Manager caches only. Never licenses or Pace identity DBs as primary wipe targets.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.paceap.eden.iLokLicenseManager
+      - $HOME/Library/Caches/com.paceap.iLokLicenseManager
+      - $HOME/Library/Caches/iLok License Manager
+      - $HOME/Library/Logs/iLok License Manager
+      - $HOME/Library/Logs/PACE
+    delete_mode: contents
+    max_depth: 5
+
+  - id: daw-izotope-caches
+    name: iZotope caches and Product Portal
+    description: iZotope product caches, Product Portal Electron caches, and logs. Not user presets under Documents.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/iZotope
+      - $HOME/Library/Caches/com.izotope.audioplugins.productportal
+      - $HOME/Library/Caches/com.izotope.ProductPortal
+      - $HOME/Library/Caches/com.izotope.rx
+      - $HOME/Library/Caches/com.izotope.ozone
+      - $HOME/Library/Caches/com.izotope.neutron
+      - $HOME/Library/Application Support/iZotope/Product Portal/Cache
+      - $HOME/Library/Application Support/iZotope/Product Portal/Code Cache
+      - $HOME/Library/Application Support/iZotope/Product Portal/GPUCache
+      - $HOME/Library/Application Support/iZotope/Product Portal/Logs
+      - $HOME/Library/Logs/iZotope
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-izotope-rx-session-data
+    name: iZotope RX Session Data
+    description: RX Audio Editor session/recording temp data. Regenerable; can be large. Not RX presets.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/iZotope/RX 10/Session Data
+      - $HOME/Library/Application Support/iZotope/RX 11/Session Data
+      - $HOME/Library/Application Support/iZotope/RX 9/Session Data
+      - $HOME/Library/Application Support/iZotope/RX/Session Data
+    delete_mode: contents
+    max_depth: 6
+
+  - id: daw-kontakt-db-cache
+    name: Kontakt database and library cache indexes
+    description: Kontakt per-version Application Support DB/cache indexes (not sample libraries). Rebuilds on rescan.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Application Support/Native Instruments/Kontakt 7
+      - $HOME/Library/Application Support/Native Instruments/Kontakt 8
+      - $HOME/Library/Application Support/Native Instruments/Kontakt
+    include_globs:
+      - "**/*.db3"
+      - "**/cache/**"
+      - "**/Cache/**"
+      - "**/Library Cache/**"
+      - "**/database/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: daw-logic-pro-residual-deeper
+    name: Logic Pro residual deeper caches
+    description: "Deeper Logic residual beyond base com.apple.logic10 / Cached Data rules: Audio Unit cache, ModuleCache, temp, and extra logs. Not project .logicx or Apple Loops content libraries."
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.logic.pro.excs
+      - $HOME/Library/Application Support/Logic/Cached Data
+      - $HOME/Library/Application Support/Logic/Temp
+      - $HOME/Library/Application Support/Logic/Undo
+      - $HOME/Library/Application Support/Logic/Chord Memories
+      - $HOME/Library/Logs/Logic Pro
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-melodyne-caches
+    name: Melodyne / Celemony caches
+    description: Melodyne cache tree including Separations analysis cache. Regenerable; re-analysis cost on reopen.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.celemony.Melodyne
+      - $HOME/Library/Caches/com.celemony.Melodyne/Separations
+      - $HOME/Library/Caches/com.celemony.melodyne
+      - $HOME/Library/Caches/Celemony
+      - $HOME/Library/Logs/Celemony
+      - $HOME/Library/Logs/Melodyne
+      - $HOME/Library/Application Support/Celemony/Cache
+      - $HOME/Library/Application Support/Celemony/Caches
+      - $HOME/Library/Application Support/Celemony/Logs
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-native-instruments-caches
+    name: Native Instruments / Native Access caches
+    description: Native Access, NTK, and NI product caches. Not Komplete/Kontakt sample content directories.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Native Instruments
+      - $HOME/Library/Caches/Native Access
+      - $HOME/Library/Caches/com.native-instruments.NativeAccess
+      - $HOME/Library/Caches/com.native-instruments.NativeAccess2
+      - $HOME/Library/Caches/com.native-instruments.NTKDaemon
+      - $HOME/Library/Caches/com.native-instruments.kontakt
+      - $HOME/Library/Caches/com.native-instruments.KompleteKontrol
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-native-instruments-support-temps
+    name: Native Instruments Application Support temps
+    description: NTK/Native Access temp and cache leaves under Application Support. Avoid Service Center licenses and installed library paths.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Native Instruments/Native Access
+      - $HOME/Library/Application Support/Native Instruments/NTK
+      - $HOME/Library/Application Support/Native Instruments/NTKDaemon
+      - $HOME/Library/Logs/Native Instruments
+      - $HOME/Library/Logs/Native Access
+    include_globs:
+      - "**/Cache/**"
+      - "**/Caches/**"
+      - "**/Temp/**"
+      - "**/tmp/**"
+      - "**/Logs/**"
+      - "**/log/**"
+      - "**/*.log"
+    exclude_globs:
+      - "**/Service Center/**"
+      - "**/license*"
+      - "**/License*"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-ni-komplete-content-report
+    name: Native Instruments Komplete content (report-only)
+    description: Large Komplete/Kontakt library content roots commonly under user Library or custom drives. Report only.
+    category: sample-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Native Instruments/Komplete
+      - $HOME/Native Instruments
+    delete_mode: contents
+    max_depth: 3
+
+  - id: daw-ocenaudio-caches
+    name: Ocenaudio caches and logs
+    description: Ocenaudio regenerable caches, logs, and temp under user Library.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/ocenaudio
+      - $HOME/Library/Caches/com.ocenaudio.ocenaudio
+      - $HOME/Library/Application Support/ocenaudio/Cache
+      - $HOME/Library/Application Support/ocenaudio/Caches
+      - $HOME/Library/Application Support/ocenaudio/log
+      - $HOME/Library/Application Support/ocenaudio/logs
+      - $HOME/Library/Logs/ocenaudio
+    delete_mode: contents
+    max_depth: 6
+
+  - id: daw-output-arcade-content-report
+    name: Output Arcade content (report-only)
+    description: Arcade packs/content folders. Large streaming library offline cache/content. Report only.
+    category: sample-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Output/Arcade
+      - $HOME/Library/Application Support/Output/ARCADE
+      - $HOME/Library/Application Support/Output/Arcade/ARCADE Content
+    delete_mode: contents
+    max_depth: 4
+
+  - id: daw-output-caches
+    name: Output / Arcade user caches and logs
+    description: User-level Output/Arcade caches and logs. System content often under /Library/Application Support/Output (out of $HOME).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Output
+      - $HOME/Library/Caches/Arcade
+      - $HOME/Library/Caches/com.output.Arcade
+      - $HOME/Library/Caches/com.output.output
+      - $HOME/Library/Logs/Output
+      - $HOME/Library/Logs/Arcade
+      - $HOME/Library/Application Support/Output/Cache
+      - $HOME/Library/Application Support/Output/Caches
+      - $HOME/Library/Application Support/Output/Arcade/Cache
+      - $HOME/Library/Application Support/Output/Arcade/log.txt
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-plugin-alliance-caches
+    name: Plugin Alliance Installation Manager caches
+    description: Plugin Alliance IM caches and logs. License folder under Application Support is excluded from bulk wipe.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Plugin Alliance
+      - $HOME/Library/Caches/com.plugin-alliance
+      - $HOME/Library/Caches/com.plugin-alliance.InstallationManager
+      - $HOME/Library/Logs/Plugin Alliance
+      - $HOME/Library/Application Support/Plugin Alliance/Cache
+      - $HOME/Library/Application Support/Plugin Alliance/Caches
+      - $HOME/Library/Application Support/Plugin Alliance/Logs
+      - $HOME/Library/Application Support/Plugin Alliance/Installation Manager/Cache
+      - $HOME/Library/Application Support/Plugin Alliance/Installation Manager/Logs
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-reaper-caches
+    name: REAPER caches and media database
+    description: REAPER bundle caches and regenerable MediaDB / FX cache leaves under resource path. Not scripts, reaper.ini, or project .rpp files.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/REAPER
+      - $HOME/Library/Caches/com.cockos.reaper
+      - $HOME/Library/Caches/com.cockos.REAPER
+      - $HOME/Library/Application Support/REAPER/MediaDB
+      - $HOME/Library/Application Support/REAPER/Cache
+      - $HOME/Library/Application Support/REAPER/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: daw-reaper-logs
+    name: REAPER logs
+    description: REAPER and Cockos log folders under user Library.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/REAPER
+      - $HOME/Library/Logs/com.cockos.reaper
+    delete_mode: contents
+    max_depth: 5
+
+  - id: daw-reaper-plugin-cache-files
+    name: REAPER plugin scan cache files
+    description: Known regenerable VST/FX cache files in REAPER resource path. Close REAPER first; next launch rescans plugins.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/REAPER
+    include_globs:
+      - "**/reaper-vstplugins*.ini"
+      - "**/reaper-fxcache*"
+      - "**/reaper-jsfxcache*"
+      - "**/mediadb*"
+    exclude_globs:
+      - "**/reaper.ini"
+      - "**/reaper-license*"
+      - "**/Scripts/**"
+      - "**/ColorThemes/**"
+      - "**/KeyMaps/**"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: daw-shared-audio-plugin-caches
+    name: Shared audio plugin host residual caches
+    description: Cross-host residual caches often left by plugin scans (AU components registrar helpers, VST inventory leftovers under Caches).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/AudioComponents
+      - $HOME/Library/Caches/com.apple.audio.ComponentManager
+      - $HOME/Library/Caches/JUCE
+      - $HOME/Library/Caches/com.juce
+      - $HOME/Library/Logs/AudioUnit
+      - $HOME/Library/Logs/CoreAudio
+    delete_mode: contents
+    max_depth: 6
+
+  - id: daw-spitfire-caches
+    name: Spitfire Audio app caches and logs
+    description: Spitfire Audio app/plugin regenerable caches and logs. Not library sample content.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Spitfire Audio
+      - $HOME/Library/Caches/com.spitfireaudio
+      - $HOME/Library/Caches/com.spitfireaudio.SpitfireAudio
+      - $HOME/Library/Caches/com.spitfireaudio.labs
+      - $HOME/Library/Logs/Spitfire Audio
+      - $HOME/Library/Application Support/Spitfire Audio/Cache
+      - $HOME/Library/Application Support/Spitfire Audio/Caches
+      - $HOME/Library/Application Support/Spitfire Audio/Logs
+      - $HOME/Library/Application Support/Spitfire Audio/log
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-spitfire-content-report
+    name: Spitfire library content (report-only)
+    description: Installed Spitfire/LABS library content. Multi-GB; reinstall via Spitfire app. Report only.
+    category: sample-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Spitfire Audio/Libraries
+      - $HOME/Library/Application Support/Spitfire/Libraries
+      - $HOME/Spitfire Audio
+    delete_mode: contents
+    max_depth: 3
+
+  - id: daw-steinberg-caches-logs
+    name: Steinberg caches and logs
+    description: Steinberg Download Assistant / host caches and logs under user Library. Not VST Sound content libraries.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Steinberg
+      - $HOME/Library/Caches/com.steinberg
+      - $HOME/Library/Caches/com.steinberg.cubase
+      - $HOME/Library/Caches/com.steinberg.nuendo
+      - $HOME/Library/Caches/com.steinberg.downloadassistant
+      - $HOME/Library/Logs/Steinberg
+      - $HOME/Library/Logs/Cubase
+      - $HOME/Library/Logs/Nuendo
+      - $HOME/Library/Application Support/Steinberg/Cache
+      - $HOME/Library/Application Support/Steinberg/Caches
+      - $HOME/Library/Application Support/Steinberg/Download Assistant/Cache
+      - $HOME/Library/Application Support/Steinberg/Download Assistant/Logs
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-steinberg-vst-sound-content-report
+    name: Steinberg VST Sound content (report-only)
+    description: Installed VST Sound / media content. Large libraries; re-download via Library Manager. Report only.
+    category: sample-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Steinberg/Content
+      - $HOME/Library/Application Support/Steinberg/Media
+    delete_mode: contents
+    max_depth: 4
+
+  - id: daw-studio-one-caches
+    name: Studio One / PreSonus caches
+    description: PreSonus Studio One application cache trees (not per-song cache inside Documents projects).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/PreSonus
+      - $HOME/Library/Caches/com.presonus.studioone2
+      - $HOME/Library/Caches/com.presonus.studioone3
+      - $HOME/Library/Caches/com.presonus.studioone4
+      - $HOME/Library/Caches/com.presonus.studioone5
+      - $HOME/Library/Caches/com.presonus.studioone6
+      - $HOME/Library/Caches/com.presonus.studioone7
+      - $HOME/Library/Application Support/PreSonus/Studio One/cache
+      - $HOME/Library/Application Support/PreSonus/Studio One 5/cache
+      - $HOME/Library/Application Support/PreSonus/Studio One 6/cache
+      - $HOME/Library/Application Support/PreSonus/Studio One 7/cache
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-studio-one-plugin-scanner-logs
+    name: Studio One plugin scanner logs
+    description: PlugInScanner and related logs under PreSonus Application Support. Regenerable on next plugin scan.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/PreSonus
+      - $HOME/Library/Logs/Studio One
+      - $HOME/Library/Application Support/PreSonus/Studio One/x64
+      - $HOME/Library/Application Support/PreSonus/Studio One/ARM64
+      - $HOME/Library/Application Support/PreSonus/Studio One 7/x64
+      - $HOME/Library/Application Support/PreSonus/Studio One 7/ARM64
+    include_globs:
+      - "**/PlugInScanner.log"
+      - "**/PluginScanner.log"
+      - "**/*Scanner*.log"
+      - "**/logs/**"
+      - "**/Logs/**"
+      - "**/cache/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: daw-uad-caches
+    name: Universal Audio / UA Connect caches
+    description: UAD and UA Connect user caches and logs. Not UADx plug-in bundles or system helper tools.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Universal Audio
+      - $HOME/Library/Caches/com.uaudio
+      - $HOME/Library/Caches/com.uaudio.uad.meter
+      - $HOME/Library/Caches/com.uaudio.UA_Connect
+      - $HOME/Library/Caches/com.uaudio.console
+      - $HOME/Library/Logs/Universal Audio
+      - $HOME/Library/Application Support/Universal Audio/Cache
+      - $HOME/Library/Application Support/Universal Audio/Caches
+      - $HOME/Library/Application Support/Universal Audio/Logs
+      - $HOME/Library/Application Support/Universal Audio/UA Connect/Cache
+      - $HOME/Library/Application Support/Universal Audio/UA Connect/Caches
+      - $HOME/Library/Application Support/Universal Audio/UA Connect/logs
+      - $HOME/Library/Application Support/Universal Audio/UA Connect/Logs
+    delete_mode: contents
+    max_depth: 8
+
+  - id: daw-waves-caches
+    name: Waves Audio / Waves Central caches
+    description: Waves install and runtime caches under user Caches and Application Support. Not Applications/Waves plugins or instrument sample data.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Waves Audio
+      - $HOME/Library/Caches/Waves
+      - $HOME/Library/Caches/Waves Audio/instl
+      - $HOME/Library/Caches/Waves Audio/instl/Cache
+      - $HOME/Library/Caches/com.waves.central
+      - $HOME/Library/Caches/com.wavesaudio.WavesCentral
+      - $HOME/Library/Application Support/Waves Audio/Caches
+      - $HOME/Library/Application Support/Waves Audio/Cache
+      - $HOME/Library/Application Support/Waves/WavesLocalServer
+      - $HOME/Library/Logs/Waves Audio
+      - $HOME/Library/Logs/Waves
+    delete_mode: contents
+    max_depth: 8

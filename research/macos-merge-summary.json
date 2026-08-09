@@ -1,0 +1,167 @@
+{
+  "stats": {
+    "rules_in": 942,
+    "rules_kept": 895,
+    "rules_skip_id": 0,
+    "rules_skip_paths": 47,
+    "paths_in": 5736,
+    "paths_kept": 5224,
+    "paths_dup_existing": 376,
+    "paths_never_touch": 136
+  },
+  "unique_new_paths": 5092,
+  "packs": [
+    {
+      "file": "apps-asia.yaml",
+      "rules": 20,
+      "paths": 204
+    },
+    {
+      "file": "apps-backup-sync.yaml",
+      "rules": 39,
+      "paths": 172
+    },
+    {
+      "file": "apps-cad-print.yaml",
+      "rules": 33,
+      "paths": 197
+    },
+    {
+      "file": "apps-cis.yaml",
+      "rules": 26,
+      "paths": 286
+    },
+    {
+      "file": "apps-design-ui.yaml",
+      "rules": 32,
+      "paths": 262
+    },
+    {
+      "file": "apps-education.yaml",
+      "rules": 32,
+      "paths": 240
+    },
+    {
+      "file": "apps-finance.yaml",
+      "rules": 25,
+      "paths": 179
+    },
+    {
+      "file": "apps-mdm-enterprise.yaml",
+      "rules": 30,
+      "paths": 126
+    },
+    {
+      "file": "apps-microsoft-deep.yaml",
+      "rules": 22,
+      "paths": 182
+    },
+    {
+      "file": "apps-music-daw.yaml",
+      "rules": 40,
+      "paths": 241
+    },
+    {
+      "file": "apps-network-proxy.yaml",
+      "rules": 40,
+      "paths": 203
+    },
+    {
+      "file": "apps-notes-pkm.yaml",
+      "rules": 30,
+      "paths": 275
+    },
+    {
+      "file": "apps-photo-raw.yaml",
+      "rules": 36,
+      "paths": 232
+    },
+    {
+      "file": "apps-security-vpn.yaml",
+      "rules": 24,
+      "paths": 135
+    },
+    {
+      "file": "apps-social.yaml",
+      "rules": 22,
+      "paths": 276
+    },
+    {
+      "file": "apps-streaming.yaml",
+      "rules": 36,
+      "paths": 189
+    },
+    {
+      "file": "dev-cloud-cli.yaml",
+      "rules": 37,
+      "paths": 112
+    },
+    {
+      "file": "dev-databases.yaml",
+      "rules": 46,
+      "paths": 212
+    },
+    {
+      "file": "dev-jetbrains-deep.yaml",
+      "rules": 29,
+      "paths": 127
+    },
+    {
+      "file": "dev-js-monorepo.yaml",
+      "rules": 32,
+      "paths": 87
+    },
+    {
+      "file": "dev-observability.yaml",
+      "rules": 25,
+      "paths": 97
+    },
+    {
+      "file": "dev-pkg-exotic.yaml",
+      "rules": 19,
+      "paths": 70
+    },
+    {
+      "file": "dev-pwa-helpers.yaml",
+      "rules": 22,
+      "paths": 129
+    },
+    {
+      "file": "dev-virt.yaml",
+      "rules": 31,
+      "paths": 104
+    },
+    {
+      "file": "dev-webservers.yaml",
+      "rules": 43,
+      "paths": 132
+    },
+    {
+      "file": "macos-containers.yaml",
+      "rules": 33,
+      "paths": 284
+    },
+    {
+      "file": "macos-continuity.yaml",
+      "rules": 23,
+      "paths": 130
+    },
+    {
+      "file": "macos-fonts-icons.yaml",
+      "rules": 27,
+      "paths": 121
+    },
+    {
+      "file": "macos-homebrew-deep.yaml",
+      "rules": 19,
+      "paths": 72
+    },
+    {
+      "file": "macos-system-logs.yaml",
+      "rules": 22,
+      "paths": 148
+    }
+  ],
+  "existing_ids": 544,
+  "existing_paths": 1448
+}

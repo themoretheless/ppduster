@@ -1,0 +1,893 @@
+{
+  "batch": "06-gaming",
+  "platform": "macos",
+  "scope": "Gaming launchers, clients, Wine/GPTK layers, media players, and entertainment app caches/logs/temp under $HOME only. Never whole game installs, libraries, or save files. Large incomplete download trees are report_only.",
+  "safety_notes": [
+    "Do not wipe steamapps/common, Epic/GOG/itch installed games, Minecraft saves/resource packs, OpenEmu ROM library or battery saves, bottle roots, Music/TV media libraries, or userdata save trees.",
+    "Steam: clean appcache/depotcache/logs/shadercache/temp only; leave config, userdata, and common installs.",
+    "Whisky/CrossOver: clean bottle Temp/shader/logs only, never entire Bottles directories.",
+    "Valorant has no native Mac client; only Wine/bottle temp caches if present.",
+    "Spotify PersistentCache/Storage can hold offline downloads; regenerable but large — keep min_age and contents-only.",
+    "Battle.net/Riot install roots often live under /Users/Shared (outside $HOME); only $HOME Library paths listed here.",
+    "report_only for large in-progress download folders (steamapps/downloading, itch downloads, Heroic/GOG/Epic incomplete installs)."
+  ],
+  "sources": [
+    "mac-cleanup-sh Steam/Minecraft/Lunar modules",
+    "Epic official launcher cache FAQ (webcache under ~/Library/Caches/com.epicgames.EpicGamesLauncher)",
+    "Whisky docs paths (Containers Bottles, Logs, Application Support Libraries)",
+    "Unity docs UPM global cache ~/Library/Caches/Unity/upm",
+    "Plex support Plug-in Support/Caches + PhotoTranscoder",
+    "Apple GPTK D3DMetal shader cache under DARWIN_USER_CACHE_DIR/d3dm",
+    "Local machine verification: Steam appcache/logs/steamapps layout under this user"
+  ],
+  "path_count": 194,
+  "rules": [
+    {
+      "id": "mac-steam-appcache",
+      "name": "Steam appcache (HTTP/library metadata)",
+      "description": "Regenerable Steam client appinfo, HTTP cache, library artwork cache. Not game installs.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 3,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/Steam/appcache/httpcache",
+        "$HOME/Library/Application Support/Steam/appcache/librarycache",
+        "$HOME/Library/Application Support/Steam/appcache/stats"
+      ],
+      "notes": "Verified on host: appcache/{httpcache,librarycache,stats}. Leave appinfo.vdf/packageinfo.vdf if present (regenerable but small)."
+    },
+    {
+      "id": "mac-steam-depotcache",
+      "name": "Steam depotcache",
+      "description": "Downloaded depot chunk/metadata cache used by Steam updates. Safe to clear; redownloads as needed.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Application Support/Steam/depotcache"
+      ]
+    },
+    {
+      "id": "mac-steam-logs",
+      "name": "Steam client logs",
+      "description": "Steam UI, connection, shader, and webhelper logs.",
+      "category": "game-logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "$HOME/Library/Application Support/Steam/logs",
+        "$HOME/Library/Logs/Steam"
+      ]
+    },
+    {
+      "id": "mac-steam-shadercache",
+      "name": "Steam shader cache",
+      "description": "Per-app shader pre-cache under steamapps. Regenerates on next launch (can cause stutter).",
+      "category": "shader-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Application Support/Steam/steamapps/shadercache"
+      ],
+      "notes": "Do not touch steamapps/common. First launch after clean may recompile shaders."
+    },
+    {
+      "id": "mac-steam-temp",
+      "name": "Steam steamapps temp",
+      "description": "Steam temporary extract/update files under steamapps/temp.",
+      "category": "temp",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 2,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Application Support/Steam/steamapps/temp",
+        "$HOME/Library/Application Support/Steam/steamapps/steamclean"
+      ]
+    },
+    {
+      "id": "mac-steam-downloading-report",
+      "name": "Steam incomplete downloads (report only)",
+      "description": "Partial game downloads. Report size only; never auto-delete in-progress installs.",
+      "category": "game-downloads",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "min_age_days": 0,
+      "report_only": true,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Application Support/Steam/steamapps/downloading"
+      ]
+    },
+    {
+      "id": "mac-steam-library-caches",
+      "name": "Steam Library/Caches and dump leftovers",
+      "description": "User Library Caches/Steam and crash dumps only.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/Steam",
+        "$HOME/Library/Application Support/Steam/dumps",
+        "$HOME/Library/Application Support/Steam/bin/cef/cef.macosx/debug.log"
+      ]
+    },
+    {
+      "id": "mac-steam-htmlcache",
+      "name": "Steam HTML/CEF cache variants",
+      "description": "Steam store/client Chromium htmlcache locations used on some Mac builds.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 5,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Application Support/Steam/config/htmlcache",
+        "$HOME/Library/Application Support/Steam/htmlcache",
+        "$HOME/Library/Application Support/Steam/gpu_cache"
+      ]
+    },
+    {
+      "id": "mac-epic-launcher-cache",
+      "name": "Epic Games Launcher caches",
+      "description": "Official Epic launcher webcache and related caches. Not installed games.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 5,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/com.epicgames.EpicGamesLauncher",
+        "$HOME/Library/Caches/com.epicgames.EpicGamesLauncher/webcache",
+        "$HOME/Library/Caches/com.epicgames.Portal",
+        "$HOME/Library/Application Support/Epic/EpicGamesLauncher/Data/EMS",
+        "$HOME/Library/Application Support/Epic/EpicGamesLauncher/Data/Cli",
+        "$HOME/Library/Application Support/Epic/EpicGamesLauncher/Intermediate"
+      ],
+      "notes": "Epic FAQ: clear webcache under Caches/com.epicgames.EpicGamesLauncher."
+    },
+    {
+      "id": "mac-epic-launcher-logs",
+      "name": "Epic Games Launcher logs",
+      "description": "Epic launcher and Unreal Engine editor logs only.",
+      "category": "game-logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Logs/EpicGamesLauncher",
+        "$HOME/Library/Logs/Unreal Engine",
+        "$HOME/Library/Application Support/Epic/EpicGamesLauncher/Saved/Logs",
+        "$HOME/Library/Application Support/Epic/UnrealEngineLauncher/Saved/Logs"
+      ]
+    },
+    {
+      "id": "mac-epic-webcache-saved",
+      "name": "Epic Saved webcache folders",
+      "description": "webcache* folders under EpicGamesLauncher Saved (versioned webcache dirs).",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 5,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/Epic/EpicGamesLauncher/Saved/webcache",
+        "$HOME/Library/Application Support/Epic/EpicGamesLauncher/Saved/webcache_4147",
+        "$HOME/Library/Application Support/Epic/EpicGamesLauncher/Saved/webcache_4430",
+        "$HOME/Library/Application Support/Epic/EpicGamesLauncher/Saved/webcache_4430_1"
+      ]
+    },
+    {
+      "id": "mac-gog-galaxy-cache",
+      "name": "GOG Galaxy caches and logs",
+      "description": "GOG Galaxy client cache/logs; not galaxy-library game installs.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 5,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/GOG.com/Galaxy/cache",
+        "$HOME/Library/Application Support/GOG.com/Galaxy/logs",
+        "$HOME/Library/Application Support/GOG.com/Galaxy/crashdumps",
+        "$HOME/Library/Caches/com.gog.galaxy",
+        "$HOME/Library/Caches/com.gog.galaxy.GalaxySupport",
+        "$HOME/Library/Logs/GOG.com"
+      ]
+    },
+    {
+      "id": "mac-gog-downloads-report",
+      "name": "GOG Galaxy download staging (report only)",
+      "description": "In-progress or leftover GOG download staging. Report only.",
+      "category": "game-downloads",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "min_age_days": 0,
+      "report_only": true,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Application Support/GOG.com/Galaxy/downloading",
+        "$HOME/Library/Application Support/GOG.com/Galaxy/games-tmp"
+      ]
+    },
+    {
+      "id": "mac-battlenet-cache",
+      "name": "Battle.net caches and logs ($HOME only)",
+      "description": "Battle.net client caches under user Library. Shared Agent under /Users/Shared is out of $HOME scope.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 5,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/Battle.net/Cache",
+        "$HOME/Library/Application Support/Battle.net/Logs",
+        "$HOME/Library/Application Support/Battle.net/Errors",
+        "$HOME/Library/Caches/com.blizzard.Battle.net",
+        "$HOME/Library/Caches/com.blizzard.Battle.net.BrowserHelper",
+        "$HOME/Library/Logs/Battle.net"
+      ]
+    },
+    {
+      "id": "mac-riot-client-cache",
+      "name": "Riot Client caches and logs ($HOME only)",
+      "description": "Riot Client user Library caches/logs. League installs often under /Users/Shared (out of scope). Valorant not native on Mac.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 5,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/Riot Games/Riot Client/Logs",
+        "$HOME/Library/Application Support/Riot Games/Riot Client/Crashes",
+        "$HOME/Library/Application Support/Riot Games/Metadata",
+        "$HOME/Library/Caches/com.riotgames.LeagueofLegends.LeagueClient",
+        "$HOME/Library/Caches/com.riotgames.LeagueofLegends.GameClient",
+        "$HOME/Library/Caches/com.riotgames.RiotGames.RiotClient",
+        "$HOME/Library/Logs/Riot Client",
+        "$HOME/Library/Logs/League of Legends"
+      ]
+    },
+    {
+      "id": "mac-minecraft-cache-logs",
+      "name": "Minecraft logs and web caches",
+      "description": "Minecraft launcher logs, crash reports, webcache. Never saves/ or versions/ installs.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Application Support/minecraft/logs",
+        "$HOME/Library/Application Support/minecraft/crash-reports",
+        "$HOME/Library/Application Support/minecraft/webcache",
+        "$HOME/Library/Application Support/minecraft/webcache2",
+        "$HOME/Library/Application Support/minecraft/.mixin.out",
+        "$HOME/Library/Caches/com.mojang",
+        "$HOME/Library/Caches/net.minecraft",
+        "$HOME/Library/Logs/minecraft"
+      ],
+      "exclude_globs": [
+        "**/saves/**",
+        "**/versions/**",
+        "**/resourcepacks/**",
+        "**/shaderpacks/**"
+      ]
+    },
+    {
+      "id": "mac-lunar-client",
+      "name": "Lunar Client caches and logs",
+      "description": "Lunar Client (Minecraft) game/launcher caches and logs.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/.lunarclient/game-cache",
+        "$HOME/.lunarclient/launcher-cache",
+        "$HOME/.lunarclient/logs",
+        "$HOME/.lunarclient/offline"
+      ],
+      "include_globs": [
+        "**/logs/**",
+        "**/game-cache/**",
+        "**/launcher-cache/**"
+      ]
+    },
+    {
+      "id": "mac-roblox-cache",
+      "name": "Roblox caches and logs",
+      "description": "Roblox Player/Studio caches and logs. Not place files the user authored.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 5,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/com.roblox.RobloxPlayer",
+        "$HOME/Library/Caches/com.roblox.RobloxStudio",
+        "$HOME/Library/Caches/com.roblox.roblox",
+        "$HOME/Library/Caches/Roblox",
+        "$HOME/Library/Logs/Roblox",
+        "$HOME/Library/Logs/com.roblox.RobloxPlayer",
+        "$HOME/Library/Application Support/Roblox/logs",
+        "$HOME/Library/Application Support/Roblox/crashes"
+      ]
+    },
+    {
+      "id": "mac-openemu-cache",
+      "name": "OpenEmu caches and logs",
+      "description": "OpenEmu app caches/logs. Never Game Library, Battery Saves, or Screenshots.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/org.openemu.OpenEmu",
+        "$HOME/Library/Caches/OpenEmu",
+        "$HOME/Library/Application Support/OpenEmu/Core Video Cache",
+        "$HOME/Library/Logs/OpenEmu"
+      ],
+      "exclude_globs": [
+        "**/Game Library/**",
+        "**/Battery Saves/**",
+        "**/Save States/**"
+      ]
+    },
+    {
+      "id": "mac-playcover-cache",
+      "name": "PlayCover caches and logs",
+      "description": "PlayCover IPA runner caches/logs. Do not delete Apps/ container installs.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 5,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/io.playcover.PlayCover",
+        "$HOME/Library/Logs/io.playcover.PlayCover",
+        "$HOME/Library/Application Support/io.playcover.PlayCover/Log",
+        "$HOME/Library/HTTPStorages/io.playcover.PlayCover"
+      ]
+    },
+    {
+      "id": "mac-whisky-logs-cache",
+      "name": "Whisky host logs and Wine libraries cache",
+      "description": "Whisky app logs. Libraries/GPTK are large regenerable toolchains (medium).",
+      "category": "wine-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Logs/com.isaacmarovitz.Whisky",
+        "$HOME/Library/Caches/com.isaacmarovitz.Whisky",
+        "$HOME/Library/HTTPStorages/com.isaacmarovitz.Whisky"
+      ]
+    },
+    {
+      "id": "mac-whisky-bottle-temp",
+      "name": "Whisky bottle Temp/cache (not bottles)",
+      "description": "Windows Temp and local cache inside bottles only. Never delete Bottles root.",
+      "category": "wine-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 12,
+      "paths": [
+        "$HOME/Library/Containers/com.isaacmarovitz.Whisky/Bottles"
+      ],
+      "include_globs": [
+        "**/drive_c/windows/temp/**",
+        "**/drive_c/users/*/Temp/**",
+        "**/drive_c/users/*/AppData/Local/Temp/**",
+        "**/drive_c/users/*/AppData/Local/Steam/htmlcache/**",
+        "**/drive_c/Program Files (x86)/Steam/appcache/**",
+        "**/drive_c/Program Files (x86)/Steam/depotcache/**",
+        "**/drive_c/Program Files (x86)/Steam/logs/**",
+        "**/drive_c/Program Files (x86)/Steam/steamapps/shadercache/**"
+      ],
+      "notes": "Proton-like layer on Mac via Wine. Valorant/Windows-only titles only appear inside bottles."
+    },
+    {
+      "id": "mac-crossover-cache",
+      "name": "CrossOver caches, logs, bottle temps",
+      "description": "CrossOver host cache/logs and bottle temp trees. Not bottle install roots as wholes.",
+      "category": "wine-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 12,
+      "paths": [
+        "$HOME/Library/Caches/com.codeweavers.CrossOver",
+        "$HOME/Library/Application Support/CrossOver/Cache",
+        "$HOME/Library/Logs/CrossOver",
+        "$HOME/Library/Application Support/CrossOver/Bottles"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/drive_c/windows/temp/**",
+        "**/drive_c/users/*/Temp/**",
+        "**/drive_c/users/*/AppData/Local/Temp/**"
+      ]
+    },
+    {
+      "id": "mac-gptk-d3dmetal-shaders",
+      "name": "D3DMetal / GPTK shader caches",
+      "description": "Apple Game Porting Toolkit D3DMetal shaders.cache under user cache dir.",
+      "category": "shader-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/d3dm",
+        "$HOME/Library/Caches/GamePortingToolkit",
+        "$HOME/Library/Caches/com.apple.game-porting-toolkit"
+      ],
+      "notes": "Also exists under DARWIN_USER_CACHE_DIR/d3dm (often /var/folders/.../C/d3dm), outside pure $HOME; optional follow-up."
+    },
+    {
+      "id": "mac-metal-game-shader-caches",
+      "name": "Metal / game GPU shader caches",
+      "description": "User-space Metal and common game engine shader caches.",
+      "category": "shader-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/com.apple.metal",
+        "$HOME/Library/Caches/org.libsdl.SDL2/metal"
+      ]
+    },
+    {
+      "id": "mac-heroic-cache",
+      "name": "Heroic Games Launcher caches and logs",
+      "description": "Heroic Electron caches, legendary helper cache, game logs. Not installed game folders.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 5,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/heroic/Cache",
+        "$HOME/Library/Application Support/heroic/Code Cache",
+        "$HOME/Library/Application Support/heroic/GPUCache",
+        "$HOME/Library/Application Support/heroic/store",
+        "$HOME/Library/Application Support/heroic/logs",
+        "$HOME/Library/Caches/heroic",
+        "$HOME/.cache/heroic",
+        "$HOME/.config/heroic/Cache",
+        "$HOME/.config/heroic/logs"
+      ],
+      "notes": "Do not wipe heroic config.json, GamesConfig, or legendary auth/install metadata; target Cache/logs/store image cache only."
+    },
+    {
+      "id": "mac-heroic-downloads-report",
+      "name": "Heroic/Legendary download staging (report only)",
+      "description": "Large incomplete Heroic/Epic downloads via legendary.",
+      "category": "game-downloads",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "min_age_days": 0,
+      "report_only": true,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Application Support/heroic/tools",
+        "$HOME/Games/Heroic/Downloads"
+      ]
+    },
+    {
+      "id": "mac-itch-cache",
+      "name": "itch.io app caches and logs",
+      "description": "itch desktop app caches/logs. Not apps/ game install library.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 5,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/itch/Cache",
+        "$HOME/Library/Application Support/itch/Code Cache",
+        "$HOME/Library/Application Support/itch/GPUCache",
+        "$HOME/Library/Application Support/itch/logs",
+        "$HOME/Library/Caches/itch",
+        "$HOME/Library/Logs/itch",
+        "$HOME/Library/Application Support/itch-setup"
+      ]
+    },
+    {
+      "id": "mac-itch-downloads-report",
+      "name": "itch.io downloads cache (report only)",
+      "description": "Installer/download cache can hold full game archives. Report only.",
+      "category": "game-downloads",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "min_age_days": 0,
+      "report_only": true,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Application Support/itch/downloads",
+        "$HOME/Library/Application Support/itch/broth"
+      ]
+    },
+    {
+      "id": "mac-unity-hub-cache",
+      "name": "Unity Hub and UPM caches",
+      "description": "Unity Hub Electron caches, logs, Package Manager global cache. Not project Assets or installed Editors under /Applications.",
+      "category": "game-dev-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/Unity",
+        "$HOME/Library/Caches/Unity/upm",
+        "$HOME/Library/Caches/com.unity3d.UnityEditor",
+        "$HOME/Library/Caches/com.unity3d.unityhub",
+        "$HOME/Library/Application Support/UnityHub/Cache",
+        "$HOME/Library/Application Support/UnityHub/Code Cache",
+        "$HOME/Library/Application Support/UnityHub/GPUCache",
+        "$HOME/Library/Application Support/UnityHub/logs",
+        "$HOME/Library/Logs/Unity",
+        "$HOME/Library/Logs/UnityHub",
+        "$HOME/Library/Unity/cache"
+      ]
+    },
+    {
+      "id": "mac-game-center-cache",
+      "name": "Game Center / GameKit caches",
+      "description": "Apple Game Center client caches. Regenerable; not iCloud game saves.",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/GameKit",
+        "$HOME/Library/Caches/com.apple.gamed",
+        "$HOME/Library/Caches/com.apple.gamecenter",
+        "$HOME/Library/Application Support/GameKit"
+      ]
+    },
+    {
+      "id": "mac-spotify-deep",
+      "name": "Spotify deep caches",
+      "description": "Spotify client Data/Storage/PersistentCache and browser-like caches. Offline music redownloads.",
+      "category": "media-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/com.spotify.client",
+        "$HOME/Library/Caches/com.spotify.client/Data",
+        "$HOME/Library/Caches/com.spotify.client/Storage",
+        "$HOME/Library/Application Support/Spotify/PersistentCache",
+        "$HOME/Library/Application Support/Spotify/PersistentCache/Storage",
+        "$HOME/Library/Application Support/Spotify/Browser",
+        "$HOME/Library/Application Support/Spotify/Component Crashes",
+        "$HOME/Library/Logs/Spotify"
+      ]
+    },
+    {
+      "id": "mac-apple-music-tv-cache",
+      "name": "Apple Music and TV app caches",
+      "description": "AMP/Music/TV regenerable caches. Never Music Library.musiclibrary or Media.localized song/video files.",
+      "category": "media-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/com.apple.Music",
+        "$HOME/Library/Caches/com.apple.TV",
+        "$HOME/Library/Caches/com.apple.iTunes",
+        "$HOME/Library/Caches/com.apple.AMPLibraryAgent",
+        "$HOME/Library/Caches/com.apple.AMPDevicesAgent",
+        "$HOME/Library/Caches/com.apple.itunescloudd",
+        "$HOME/Library/Caches/com.apple.AppleMediaServices",
+        "$HOME/Library/Containers/com.apple.Music/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.TV/Data/Library/Caches"
+      ]
+    },
+    {
+      "id": "mac-twitch-cache",
+      "name": "Twitch desktop caches",
+      "description": "Twitch desktop Electron caches and logs.",
+      "category": "media-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 5,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Application Support/Twitch/Cache",
+        "$HOME/Library/Application Support/Twitch/Code Cache",
+        "$HOME/Library/Application Support/Twitch/GPUCache",
+        "$HOME/Library/Caches/com.twitch.desktop",
+        "$HOME/Library/Logs/Twitch"
+      ]
+    },
+    {
+      "id": "mac-netflix-desktop",
+      "name": "Netflix desktop / PWA caches if present",
+      "description": "No long-lived first-party Netflix Mac desktop; cover Electron wrappers / web app caches if installed.",
+      "category": "media-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Application Support/Netflix/Cache",
+        "$HOME/Library/Caches/com.netflix.Netflix",
+        "$HOME/Library/Caches/Netflix"
+      ],
+      "notes": "Netflix is primarily web/iOS; paths may be absent on most Macs."
+    },
+    {
+      "id": "mac-youtube-music",
+      "name": "YouTube Music desktop caches",
+      "description": "YouTube Music Electron/unofficial desktop wrappers and browser helper caches.",
+      "category": "media-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 5,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Application Support/YouTube Music/Cache",
+        "$HOME/Library/Application Support/YouTube Music/Code Cache",
+        "$HOME/Library/Application Support/YouTube Music/GPUCache",
+        "$HOME/Library/Application Support/youtube-music/Cache",
+        "$HOME/Library/Caches/com.github.th-ch.youtube-music"
+      ]
+    },
+    {
+      "id": "mac-plex-cache",
+      "name": "Plex Media Server and Plex app caches",
+      "description": "Plex transcoder/PhotoTranscoder, plugin HTTP caches. Not media library files on disk.",
+      "category": "media-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/PlexMediaServer",
+        "$HOME/Library/Caches/tv.plex.desktop",
+        "$HOME/Library/Application Support/Plex Media Server/Cache",
+        "$HOME/Library/Application Support/Plex Media Server/Cache/PhotoTranscoder",
+        "$HOME/Library/Application Support/Plex Media Server/Cache/Transcode",
+        "$HOME/Library/Application Support/Plex Media Server/Logs",
+        "$HOME/Library/Application Support/Plex Media Server/Plug-in Support/Caches",
+        "$HOME/Library/Logs/Plex Media Server",
+        "$HOME/Library/Logs/Plex"
+      ]
+    },
+    {
+      "id": "mac-jellyfin-cache",
+      "name": "Jellyfin server/client caches and logs",
+      "description": "Jellyfin media server cache/transcodes/logs under Application Support. Not media libraries.",
+      "category": "media-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/jellyfin/log",
+        "$HOME/Library/Application Support/jellyfin/cache",
+        "$HOME/Library/Application Support/jellyfin/data/transcodes",
+        "$HOME/Library/Application Support/Jellyfin Media Player/Cache",
+        "$HOME/Library/Application Support/Jellyfin Media Player/Code Cache",
+        "$HOME/Library/Application Support/Jellyfin Media Player/GPUCache",
+        "$HOME/Library/Caches/org.jellyfin.Jellyfin",
+        "$HOME/Library/Logs/jellyfin"
+      ]
+    },
+    {
+      "id": "mac-infuse-cache",
+      "name": "Infuse caches and logs",
+      "description": "Infuse metadata/artwork caches. Not user media files.",
+      "category": "media-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/com.firecore.infuse",
+        "$HOME/Library/Application Support/Infuse/Caches",
+        "$HOME/Library/Logs/Infuse",
+        "$HOME/Library/Containers/com.firecore.infuse/Data/Library/Caches"
+      ]
+    },
+    {
+      "id": "mac-iina-vlc-cache",
+      "name": "IINA and VLC caches and logs",
+      "description": "IINA/VLC watch-later is user preference; only clear Caches and Logs, not watch_later or configs if marked exclude.",
+      "category": "media-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/com.colliderli.iina",
+        "$HOME/Library/Logs/com.colliderli.iina",
+        "$HOME/Library/Application Support/com.colliderli.iina/logs",
+        "$HOME/Library/Caches/org.videolan.vlc",
+        "$HOME/Library/Application Support/org.videolan.vlc/cache",
+        "$HOME/Library/Logs/vlc"
+      ],
+      "exclude_globs": [
+        "**/watch_later/**",
+        "**/ml.xspf"
+      ]
+    },
+    {
+      "id": "mac-logitech-ghub",
+      "name": "Logitech G HUB game peripheral caches",
+      "description": "G HUB crash dumps and cache (common with gaming setups).",
+      "category": "game-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Application Support/LGHUB/cache",
+        "$HOME/Library/Application Support/LGHUB/logs",
+        "$HOME/Library/Application Support/LGHUB/crashpad",
+        "$HOME/Library/Caches/com.logitech.Logi-Options"
+      ]
+    },
+    {
+      "id": "mac-portingkit-wine-like",
+      "name": "Porting Kit / Wineskin style caches",
+      "description": "Community Wine wrappers similar to Lutris on Linux: host caches only.",
+      "category": "wine-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "report_only": false,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Application Support/Porting Kit/tmp",
+        "$HOME/Library/Application Support/Porting Kit/logs",
+        "$HOME/Library/Caches/com.paulthetall.portingkit",
+        "$HOME/Library/Logs/Porting Kit",
+        "$HOME/Library/Application Support/Wineskin/Wrapper Logs"
+      ]
+    }
+  ]
+}

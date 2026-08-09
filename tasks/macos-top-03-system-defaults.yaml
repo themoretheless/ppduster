@@ -14,8 +14,7 @@ task:
       shell: allow
     - id: apply-defaults-script
       name: Plan defaults baseline script
-      type: run-command
-      program: bash
-      args: ["-lc", "$HOME/.config/macos/apply-defaults.sh"]
+      type: run-script
+      interpreter: bash
+      script: "$HOME/.config/macos/apply-defaults.sh"
       dangerous: true
-      shell: allow

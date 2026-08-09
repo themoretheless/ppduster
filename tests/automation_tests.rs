@@ -1,7 +1,10 @@
 use ppduster::automation::{
-    run_task, Action, AppStoreOperation, ArchiveFormat, LicenseMethod, LicenseProvider, PackTrust,
-    RunOptions, TaskFile, TaskPack, TaskSource,
+    run_task, Action, AppStoreOperation, ArchiveFormat, AuthPolicy, ElevationPolicy, LicenseMethod,
+    LicenseProvider, PackTrust, RunOptions, ScriptInterpreter, StepCondition, TaskFile, TaskPack,
+    TaskSource,
 };
+#[cfg(unix)]
+use ppduster::automation::{ActionOutcome, StepOutput, StepStatus};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -55,47 +58,6 @@ task:
     let rendered = serde_yaml::to_string(&task).unwrap();
     let reparsed = serde_yaml::from_str::<ppduster::automation::Task>(&rendered).unwrap();
     assert_eq!(reparsed.description, task.description);
-}
-
-#[test]
-fn programmatic_task_pack_constructor_preserves_source_provenance() {
-    let task = serde_yaml::from_str::<TaskFile>(
-        r#"
-task:
-  id: programmatic-task
-  name: Programmatic task
-  description: Verifies the supported in-memory task-pack constructor.
-  platform: any
-  steps:
-    - id: inspect
-      type: run-command
-      program: /usr/bin/true
-"#,
-    )
-    .unwrap()
-    .task;
-    let source = TaskSource {
-        path: PathBuf::from("programmatic-task.yaml"),
-        trust: PackTrust::Bundled,
-    };
-
-    let pack = TaskPack::from_tasks(vec![task], vec![source], false).unwrap();
-    assert_eq!(pack.resolve("programmatic-task").unwrap().steps.len(), 1);
-
-    let error = TaskPack::from_tasks(
-        Vec::new(),
-        vec![TaskSource {
-            path: PathBuf::from("extra-source.yaml"),
-            trust: PackTrust::Bundled,
-        }],
-        false,
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(
-        error.contains("count mismatch"),
-        "unexpected error: {error}"
-    );
 }
 
 #[test]
@@ -621,6 +583,76 @@ task:
 }
 
 #[test]
+fn nested_scenarios_namespace_exit_code_condition_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    write_task(
+        dir.path(),
+        "probe.yaml",
+        r#"
+task:
+  id: probe-scenario
+  name: Probe scenario
+  description: Produces a branchable script result with local step identifiers.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: /tmp/ppduster-probe.sh
+      success_exit_codes: [0, 10]
+    - id: branch
+      when: { type: exit-code, step: probe, codes: [10] }
+      type: run-command
+      program: /usr/bin/true
+"#,
+    );
+    write_task(
+        dir.path(),
+        "middle.yaml",
+        r#"
+task:
+  id: middle
+  name: Middle template
+  description: Adds one namespace level around the probe scenario.
+  platform: any
+  scenarios: [probe-scenario]
+"#,
+    );
+    write_task(
+        dir.path(),
+        "root.yaml",
+        r#"
+task:
+  id: root
+  name: Root template
+  description: Adds a second namespace level around the probe scenario.
+  platform: any
+  scenarios: [middle]
+"#,
+    );
+
+    let pack = load_bundled_tasks(dir.path());
+    let resolved = pack.resolve("root").unwrap();
+    assert_eq!(
+        resolved
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "middle/probe-scenario/probe",
+            "middle/probe-scenario/branch"
+        ]
+    );
+    let Some(StepCondition::ExitCode { step, codes }) = resolved.steps[1].when.as_ref() else {
+        panic!("expected an exit-code condition");
+    };
+    assert_eq!(step, "middle/probe-scenario/probe");
+    assert_eq!(codes, &[10]);
+}
+
+#[test]
 fn loads_bundled_task_pack() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
@@ -740,6 +772,57 @@ fn bundled_dev_setup_includes_macos_top_fifty_tasks() {
         pack.get("macos-developer-workstation").is_some(),
         "expected bundled task pack to include the developer workstation template"
     );
+    assert!(
+        pack.get("filesystem-basics").is_some(),
+        "expected bundled task pack to include the typed filesystem scenario"
+    );
+}
+
+#[test]
+fn bundled_app_store_tasks_do_not_request_elevation() {
+    let pack = TaskPack::load_many(
+        &[TaskSource {
+            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap();
+
+    for task_id in ["app-store-bootstrap", "macos-top-26-app-store"] {
+        let task = pack.get(task_id).unwrap();
+        assert!(task.steps.iter().all(|step| {
+            matches!(step.auth, AuthPolicy::None)
+                && matches!(step.allow_elevation, ElevationPolicy::Forbidden)
+        }));
+    }
+}
+
+#[test]
+fn bundled_git_scenarios_sync_main_instead_of_stopping_at_repository_presence() {
+    let pack = TaskPack::load_many(
+        &[TaskSource {
+            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap();
+
+    for (task_id, step_id) in [
+        ("dev-brew-bootstrap", "clone-repo"),
+        ("macos-top-02-dotfiles", "clone-dotfiles"),
+    ] {
+        let task = pack.get(task_id).unwrap();
+        let step = task.steps.iter().find(|step| step.id == step_id).unwrap();
+        assert!(matches!(
+            &step.action,
+            Action::GitClone {
+                branch: Some(branch),
+                ..
+            } if branch == "main"
+        ));
+    }
 }
 
 #[test]
@@ -793,7 +876,7 @@ task:
 }
 
 #[test]
-fn app_store_install_action_is_typed_and_requires_elevation() {
+fn app_store_install_action_is_typed_and_unprivileged() {
     let yaml = r#"
 task:
   id: app-store-demo
@@ -802,8 +885,6 @@ task:
   platform: macos
   steps:
     - id: install
-      auth: sudo
-      allow_elevation: allow
       type: app-store-install
       app_id: 497799835
       operation: install
@@ -820,22 +901,24 @@ task:
 }
 
 #[test]
-fn app_store_install_rejects_missing_elevation_declaration() {
+fn app_store_install_rejects_privilege_declarations() {
     let yaml = r#"
 task:
-  id: unsafe-app-store
-  name: Unsafe App Store task
-  description: Demonstrates that typed App Store steps require explicit elevation.
+  id: overprivileged-app-store
+  name: Overprivileged App Store task
+  description: Demonstrates that native App Store steps reject unnecessary privileges.
   platform: macos
   steps:
     - id: install
+      auth: sudo
+      allow_elevation: allow
       type: app-store-install
       app_id: 497799835
 "#;
 
     let task_file = serde_yaml::from_str::<TaskFile>(yaml).unwrap();
     let err = task_file.task.validate().unwrap_err();
-    assert!(err.contains("auth: sudo plus allow_elevation: allow"));
+    assert!(err.contains("must not request authentication or elevation"));
 }
 
 #[test]
@@ -985,8 +1068,6 @@ task:
   trust: external-allowed
   steps:
     - id: install-xcode
-      auth: sudo
-      allow_elevation: allow
       type: app-store-install
       app_id: 497799835
       operation: install
@@ -1000,7 +1081,6 @@ task:
             "setup",
             "run",
             "app-store-cli-demo",
-            "--allow-elevation",
             "--tasks-dir",
         ])
         .arg(dir.path())
@@ -1014,7 +1094,7 @@ task:
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout)
-        .contains("mas install Mac App Store application 497799835"));
+        .contains("native App Store install download for application 497799835"));
 }
 
 #[test]
@@ -1691,6 +1771,970 @@ task:
 
     let err = run_task(pack.get("shell-demo").unwrap(), &RunOptions::default()).unwrap_err();
     assert!(err.to_string().contains("--allow-shell"));
+}
+
+#[test]
+fn filesystem_action_schema_round_trips_with_and_expectations() {
+    let yaml = r#"
+task:
+  id: filesystem-schema
+  name: Filesystem schema
+  description: Exercises typed directory creation and path metadata assertions.
+  platform: any
+  trust: bundled-only
+  steps:
+    - id: create
+      type: create-directory
+      path: $TMPDIR/example/nested
+    - id: inspect
+      type: inspect-path
+      path: $TMPDIR/example/nested
+      recursive_size: true
+      expect:
+        exists: true
+        kind: directory
+        empty: false
+        min_size_bytes: 1
+        max_size_bytes: 4096
+        modified_at_or_after: "2000-01-01T00:00:00Z"
+        modified_at_or_before: "2100-01-01T00:00:00+00:00"
+"#;
+
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    task.validate().unwrap();
+    assert!(matches!(task.steps[0].action, Action::CreateDirectory(_)));
+    assert!(matches!(task.steps[1].action, Action::InspectPath(_)));
+
+    let rendered = serde_yaml::to_string(&task).unwrap();
+    let reparsed = serde_yaml::from_str::<ppduster::automation::Task>(&rendered).unwrap();
+    reparsed.validate().unwrap();
+    let Action::InspectPath(action) = &reparsed.steps[1].action else {
+        panic!("expected inspect-path action");
+    };
+    let expectation = action.expect.as_ref().unwrap();
+    assert_eq!(expectation.exists, Some(true));
+    assert_eq!(
+        expectation.kind,
+        Some(ppduster::automation::PathKind::Directory)
+    );
+    assert_eq!(expectation.min_size_bytes, Some(1));
+    assert_eq!(expectation.max_size_bytes, Some(4096));
+}
+
+#[test]
+fn extended_filesystem_actions_and_conditions_round_trip() {
+    let digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    let yaml = format!(
+        r#"
+task:
+  id: extended-filesystem-schema
+  name: Extended filesystem schema
+  description: Exercises exact writes, safe copies, recoverable removal, hashes, and boolean guards.
+  platform: any
+  trust: bundled-only
+  steps:
+    - id: write
+      require:
+        type: all
+        conditions:
+          - type: path
+            path: $TMPDIR
+            expect: {{ exists: true, kind: directory }}
+          - type: not
+            condition:
+              type: path
+              path: $TMPDIR
+              expect: {{ kind: symlink }}
+      type: write-file
+      path: $TMPDIR/ppduster/source.txt
+      content: abc
+      on_conflict: replace
+    - id: copy
+      when:
+        type: any
+        conditions:
+          - type: path
+            path: $TMPDIR/ppduster/source.txt
+            expect: {{ sha256: {digest} }}
+          - type: path
+            path: $TMPDIR/ppduster/copy.txt
+            expect: {{ exists: false }}
+      type: copy-path
+      src: $TMPDIR/ppduster/source.txt
+      dest: $TMPDIR/ppduster/copy.txt
+    - id: inspect
+      type: inspect-path
+      path: $TMPDIR/ppduster/copy.txt
+      sha256: true
+      expect:
+        sha256: {digest}
+    - id: remove
+      type: remove-path
+      path: $TMPDIR/ppduster/obsolete.txt
+"#
+    );
+
+    let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+    task.validate().unwrap();
+    assert!(matches!(task.steps[0].action, Action::WriteFile(_)));
+    assert!(matches!(task.steps[1].action, Action::CopyPath(_)));
+    assert!(matches!(task.steps[2].action, Action::InspectPath(_)));
+    assert!(matches!(task.steps[3].action, Action::RemovePath(_)));
+
+    let rendered = serde_yaml::to_string(&task).unwrap();
+    let reparsed = serde_yaml::from_str::<ppduster::automation::Task>(&rendered).unwrap();
+    reparsed.validate().unwrap();
+    let Action::InspectPath(inspect) = &reparsed.steps[2].action else {
+        panic!("expected inspect-path action");
+    };
+    assert!(inspect.sha256);
+    assert_eq!(
+        inspect
+            .expect
+            .as_ref()
+            .and_then(|expect| expect.sha256.as_deref()),
+        Some(digest)
+    );
+    assert!(reparsed.steps[0].require.is_some());
+    assert!(reparsed.steps[1].when.is_some());
+}
+
+#[test]
+fn extended_filesystem_schema_rejects_invalid_hashes_and_empty_boolean_conditions() {
+    for (name, guard, expected_error) in [
+        (
+            "bad-hash",
+            "type: path\n        path: $TMPDIR/file\n        expect: { sha256: deadbeef }",
+            "64 hexadecimal",
+        ),
+        (
+            "empty-all",
+            "type: all\n        conditions: []",
+            "at least one child",
+        ),
+        (
+            "empty-any",
+            "type: any\n        conditions: []",
+            "at least one child",
+        ),
+    ] {
+        let yaml = format!(
+            r#"
+task:
+  id: {name}
+  name: Invalid filesystem condition
+  description: Demonstrates strict validation of typed boolean path conditions.
+  platform: any
+  steps:
+    - id: guarded
+      require:
+        {guard}
+      type: create-directory
+      path: $TMPDIR/example
+"#
+        );
+        let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+        let error = task.validate().unwrap_err();
+        assert!(
+            error.contains(expected_error),
+            "case {name}: unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn filesystem_expectation_validation_rejects_contradictions() {
+    for (name, expectation, expected_error) in [
+        ("empty", "{}", "at least one assertion"),
+        (
+            "missing-metadata",
+            "{ exists: false, kind: file }",
+            "cannot be combined",
+        ),
+        (
+            "reversed-size",
+            "{ min_size_bytes: 10, max_size_bytes: 9 }",
+            "must not exceed",
+        ),
+        (
+            "empty-positive-size",
+            "{ empty: true, min_size_bytes: 1 }",
+            "positive min_size_bytes",
+        ),
+        (
+            "reversed-time",
+            "{ modified_at_or_after: '2100-01-01T00:00:00Z', modified_at_or_before: '2000-01-01T00:00:00Z' }",
+            "must not be later",
+        ),
+    ] {
+        let yaml = format!(
+            r#"
+task:
+  id: {name}
+  name: Invalid filesystem expectation
+  description: Demonstrates validation of contradictory path assertions.
+  platform: any
+  steps:
+    - id: inspect
+      type: inspect-path
+      path: $TMPDIR/example
+      expect: {expectation}
+"#
+        );
+        let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+        let error = task.validate().unwrap_err();
+        assert!(
+            error.contains(expected_error),
+            "case {name}: unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn inspect_path_rejects_unknown_expectation_fields_and_invalid_dates() {
+    for expectation in [
+        "unknown_predicate: true",
+        "modified_at_or_after: definitely-not-a-date",
+    ] {
+        let yaml = format!(
+            r#"
+task:
+  id: invalid-inspection
+  name: Invalid inspection
+  description: Demonstrates strict typed parsing for path expectations.
+  platform: any
+  steps:
+    - id: inspect
+      type: inspect-path
+      path: $TMPDIR/example
+      expect:
+        {expectation}
+"#
+        );
+        assert!(serde_yaml::from_str::<TaskFile>(&yaml).is_err());
+    }
+}
+
+#[test]
+fn inspect_path_cli_reports_json_in_dry_run_and_fails_unmet_expectations() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing");
+    fs::write(
+        dir.path().join("inspect.yaml"),
+        format!(
+            r#"
+task:
+  id: inspect-cli
+  name: Inspect CLI
+  description: Returns typed path metadata without applying filesystem changes.
+  platform: any
+  trust: external-allowed
+  steps:
+    - id: inspect
+      type: inspect-path
+      path: '{}'
+      expect:
+        exists: false
+"#,
+            missing.display()
+        ),
+    )
+    .unwrap();
+
+    let success = Command::new(bin())
+        .args([
+            "--output",
+            "json",
+            "--trust-external-packs",
+            "setup",
+            "run",
+            "inspect-cli",
+            "--tasks-dir",
+        ])
+        .arg(dir.path())
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run inspect-path dry-run");
+    assert!(
+        success.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&success.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&success.stdout).unwrap();
+    assert_eq!(json["steps"][0]["output"]["type"], "path-metadata");
+    assert_eq!(json["steps"][0]["output"]["value"]["exists"], false);
+
+    let yaml_path = dir.path().join("inspect.yaml");
+    let text = fs::read_to_string(&yaml_path)
+        .unwrap()
+        .replace("exists: false", "exists: true");
+    fs::write(yaml_path, text).unwrap();
+    let failure = Command::new(bin())
+        .args([
+            "--output",
+            "json",
+            "--trust-external-packs",
+            "setup",
+            "run",
+            "inspect-cli",
+            "--tasks-dir",
+        ])
+        .arg(dir.path())
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run failing inspect-path dry-run");
+    assert!(!failure.status.success());
+    assert!(String::from_utf8_lossy(&failure.stderr).contains("setup task inspect-cli failed"));
+}
+
+#[test]
+fn run_script_schema_parses_all_interpreters_and_round_trips() {
+    let yaml = r#"
+task:
+  id: script-schema
+  name: Script schema
+  description: Exercises typed script interpreters and their optional process settings.
+  platform: any
+  trust: bundled-only
+  steps:
+    - id: posix-sh
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: $HOME/.local/share/setup/prepare.sh
+    - id: bash-with-options
+      dangerous: true
+      type: run-script
+      interpreter: bash
+      script: /opt/example/bootstrap.bash
+      args: ["--label", "two words"]
+      cwd: $HOME/work
+      env:
+        SETUP_MODE: safe
+      success_exit_codes: [0, 10, 42]
+    - id: powershell
+      dangerous: true
+      type: run-script
+      interpreter: powershell
+      script: '%USERPROFILE%\setup\configure.ps1'
+"#;
+
+    let task_file = serde_yaml::from_str::<TaskFile>(yaml).unwrap();
+    task_file.task.validate().unwrap();
+
+    let Action::RunScript {
+        interpreter,
+        script,
+        args,
+        cwd,
+        env,
+        success_exit_codes,
+    } = &task_file.task.steps[0].action
+    else {
+        panic!("expected a run-script action");
+    };
+    assert_eq!(*interpreter, ScriptInterpreter::Sh);
+    assert_eq!(script, "$HOME/.local/share/setup/prepare.sh");
+    assert!(args.is_empty());
+    assert!(cwd.is_none());
+    assert!(env.is_empty());
+    assert_eq!(success_exit_codes, &[0]);
+
+    let Action::RunScript {
+        interpreter,
+        args,
+        cwd,
+        env,
+        success_exit_codes,
+        ..
+    } = &task_file.task.steps[1].action
+    else {
+        panic!("expected a run-script action");
+    };
+    assert_eq!(*interpreter, ScriptInterpreter::Bash);
+    assert_eq!(args, &["--label", "two words"]);
+    assert_eq!(cwd.as_deref(), Some("$HOME/work"));
+    assert_eq!(env.get("SETUP_MODE").map(String::as_str), Some("safe"));
+    assert_eq!(success_exit_codes, &[0, 10, 42]);
+
+    let Action::RunScript { interpreter, .. } = &task_file.task.steps[2].action else {
+        panic!("expected a run-script action");
+    };
+    assert_eq!(*interpreter, ScriptInterpreter::PowerShell);
+
+    let rendered = serde_yaml::to_string(&task_file).unwrap();
+    assert!(rendered.contains("interpreter: powershell"));
+    let reparsed = serde_yaml::from_str::<TaskFile>(&rendered).unwrap();
+    reparsed.task.validate().unwrap();
+    assert!(matches!(
+        reparsed.task.steps[0].action,
+        Action::RunScript {
+            interpreter: ScriptInterpreter::Sh,
+            ref success_exit_codes,
+            ..
+        } if success_exit_codes == &[0]
+    ));
+    assert!(matches!(
+        reparsed.task.steps[1].action,
+        Action::RunScript {
+            interpreter: ScriptInterpreter::Bash,
+            ref success_exit_codes,
+            ..
+        } if success_exit_codes == &[0, 10, 42]
+    ));
+    assert!(matches!(
+        reparsed.task.steps[2].action,
+        Action::RunScript {
+            interpreter: ScriptInterpreter::PowerShell,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn run_script_success_exit_codes_must_be_nonempty_and_unique() {
+    for (codes, expected_error) in [
+        ("[]", "must contain at least one exit code"),
+        ("[0, 10, 10]", "contains duplicate exit code 10"),
+    ] {
+        let yaml = format!(
+            r#"
+task:
+  id: invalid-script-exit-codes
+  name: Invalid script exit codes
+  description: Rejects ambiguous script success policies.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: /opt/example/probe.sh
+      success_exit_codes: {codes}
+"#
+        );
+
+        let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+        let error = task.validate().unwrap_err();
+        assert!(
+            error.contains("success_exit_codes") && error.contains(expected_error),
+            "unexpected error for {codes}: {error}"
+        );
+    }
+}
+
+#[test]
+fn exit_code_condition_parses_validates_and_round_trips() {
+    let yaml = r#"
+task:
+  id: conditional-script
+  name: Conditional script
+  description: Branches on an explicitly accepted script exit code.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: /opt/example/probe.sh
+      success_exit_codes: [0, 10]
+    - id: handle-probe-result
+      when:
+        type: exit-code
+        step: probe
+        codes: [10]
+      type: run-command
+      program: "true"
+"#;
+
+    let task_file = serde_yaml::from_str::<TaskFile>(yaml).unwrap();
+    task_file.task.validate().unwrap();
+    let expected_condition =
+        serde_yaml::from_str::<serde_yaml::Value>("type: exit-code\nstep: probe\ncodes: [10]\n")
+            .unwrap();
+    assert_eq!(
+        serde_yaml::to_value(task_file.task.steps[1].when.as_ref().unwrap()).unwrap(),
+        expected_condition
+    );
+
+    let rendered = serde_yaml::to_string(&task_file).unwrap();
+    let reparsed = serde_yaml::from_str::<TaskFile>(&rendered).unwrap();
+    reparsed.task.validate().unwrap();
+    assert_eq!(
+        serde_yaml::to_value(reparsed.task.steps[1].when.as_ref().unwrap()).unwrap(),
+        expected_condition
+    );
+}
+
+#[test]
+fn exit_code_condition_codes_must_be_nonempty_and_unique() {
+    for (codes, expected_error) in [
+        ("[]", "requires at least one code"),
+        ("[10, 10]", "contains duplicate code 10"),
+    ] {
+        let yaml = format!(
+            r#"
+task:
+  id: invalid-condition-codes
+  name: Invalid condition codes
+  description: Rejects ambiguous exit-code conditions.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: /opt/example/probe.sh
+      success_exit_codes: [0, 10]
+    - id: conditional
+      when:
+        type: exit-code
+        step: probe
+        codes: {codes}
+      type: run-command
+      program: "true"
+"#
+        );
+
+        let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+        let error = task.validate().unwrap_err();
+        assert!(
+            error.contains("exit-code condition") && error.contains(expected_error),
+            "unexpected error for {codes}: {error}"
+        );
+    }
+}
+
+#[test]
+fn exit_code_condition_rejects_future_step_reference() {
+    let yaml = r#"
+task:
+  id: future-condition-source
+  name: Future condition source
+  description: Conditions may only observe scripts that have already run.
+  platform: any
+  steps:
+    - id: conditional
+      when:
+        type: exit-code
+        step: probe
+        codes: [10]
+      type: run-command
+      program: "true"
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: /opt/example/probe.sh
+      success_exit_codes: [0, 10]
+"#;
+
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    let error = task.validate().unwrap_err();
+    assert!(
+        error.contains("conditional")
+            && error.contains("probe")
+            && error.contains("must reference an earlier step"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn exit_code_condition_rejects_non_script_step_reference() {
+    let yaml = r#"
+task:
+  id: non-script-condition-source
+  name: Non-script condition source
+  description: Exit-code conditions only observe typed script steps.
+  platform: any
+  steps:
+    - id: probe
+      type: run-command
+      program: "true"
+    - id: conditional
+      when:
+        type: exit-code
+        step: probe
+        codes: [0]
+      type: run-command
+      program: "true"
+"#;
+
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    let error = task.validate().unwrap_err();
+    assert!(
+        error.contains("conditional")
+            && error.contains("probe")
+            && error.contains("not a run-script step"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn exit_code_condition_rejects_code_not_accepted_by_source_script() {
+    let yaml = r#"
+task:
+  id: unreachable-condition-code
+  name: Unreachable condition code
+  description: A branch code must be retained as an accepted script result.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: /opt/example/probe.sh
+      success_exit_codes: [0, 10]
+    - id: conditional
+      when:
+        type: exit-code
+        step: probe
+        codes: [20]
+      type: run-command
+      program: "true"
+"#;
+
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    let error = task.validate().unwrap_err();
+    assert!(
+        error.contains("condition code 20")
+            && error.contains("probe")
+            && error.contains("success_exit_codes"),
+        "unexpected error: {error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn accepted_nonzero_script_exit_code_runs_only_the_matching_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("probe.sh");
+    let matching_directory = temp.path().join("matched");
+    let other_directory = temp.path().join("other");
+    fs::write(&script, "exit 10\n").unwrap();
+    let yaml = format!(
+        r#"
+task:
+  id: runtime-exit-code-branch
+  name: Runtime exit-code branch
+  description: Runs exactly the branch selected by an accepted nonzero script exit code.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: '{}'
+      success_exit_codes: [0, 10, 20]
+    - id: matching-branch
+      when:
+        type: exit-code
+        step: probe
+        codes: [10]
+      type: create-directory
+      path: '{}'
+    - id: other-branch
+      when:
+        type: exit-code
+        step: probe
+        codes: [20]
+      type: create-directory
+      path: '{}'
+"#,
+        script.display(),
+        matching_directory.display(),
+        other_directory.display()
+    );
+    let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+
+    let report = run_task(
+        &task,
+        &RunOptions {
+            apply: true,
+            allow_shell: true,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(
+        report.errors.is_empty(),
+        "unexpected errors: {:?}",
+        report.errors
+    );
+    assert_eq!(report.steps.len(), 3);
+    assert!(matches!(report.steps[0].status, StepStatus::Applied));
+    let Some(StepOutput::ProcessExit(process)) = report.steps[0].output.as_ref() else {
+        panic!("expected process-exit output for probe");
+    };
+    assert_eq!(process.exit_code, Some(10));
+    assert_eq!(process.termination_signal, None);
+    assert!(process.accepted);
+    assert_eq!(process.success_exit_codes, &[0, 10, 20]);
+
+    assert!(matches!(report.steps[1].status, StepStatus::Applied));
+    assert!(matches!(report.outcomes[1], ActionOutcome::Applied { .. }));
+    assert!(matching_directory.is_dir());
+
+    assert!(matches!(report.steps[2].status, StepStatus::Skipped));
+    assert!(matches!(
+        report.outcomes[2],
+        ActionOutcome::Skipped { ref reason }
+            if reason.contains("probe") && reason.contains("exit code 10")
+    ));
+    assert!(!other_directory.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn unexpected_script_exit_code_reports_process_output_and_blocks_later_steps() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("probe.sh");
+    let later_directory = temp.path().join("must-not-exist");
+    fs::write(&script, "exit 23\n").unwrap();
+    let yaml = format!(
+        r#"
+task:
+  id: runtime-unexpected-exit-code
+  name: Runtime unexpected exit code
+  description: Stops after a script returns a code outside its accepted set.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: '{}'
+      success_exit_codes: [0, 10]
+    - id: later
+      type: create-directory
+      path: '{}'
+"#,
+        script.display(),
+        later_directory.display()
+    );
+    let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+
+    let report = run_task(
+        &task,
+        &RunOptions {
+            apply: true,
+            allow_shell: true,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.errors.len(), 1);
+    assert!(report.errors[0].contains("exit code 23"));
+    assert!(report.errors[0].contains("success_exit_codes are [0, 10]"));
+    assert_eq!(report.steps.len(), 2);
+    assert!(matches!(report.steps[0].status, StepStatus::Failed));
+    assert!(matches!(report.outcomes[0], ActionOutcome::Blocked));
+    let Some(StepOutput::ProcessExit(process)) = report.steps[0].output.as_ref() else {
+        panic!("expected process-exit output for failed probe");
+    };
+    assert_eq!(process.exit_code, Some(23));
+    assert_eq!(process.termination_signal, None);
+    assert!(!process.accepted);
+    assert_eq!(process.success_exit_codes, &[0, 10]);
+
+    assert!(matches!(report.steps[1].status, StepStatus::Skipped));
+    assert!(matches!(report.outcomes[1], ActionOutcome::Blocked));
+    assert!(!later_directory.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn unavailable_script_exit_code_is_not_inverted_into_a_matching_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("probe.sh");
+    let forbidden_directory = temp.path().join("must-not-run");
+    fs::write(&script, "exit 10\n").unwrap();
+    let yaml = format!(
+        r#"
+task:
+  id: unavailable-exit-code
+  name: Unavailable exit code
+  description: Does not treat a missing process result as a negated exit-code match.
+  platform: any
+  steps:
+    - id: probe
+      check:
+        command_succeeds: ["/usr/bin/true"]
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: '{}'
+      success_exit_codes: [0, 10]
+    - id: must-not-run
+      when:
+        type: not
+        condition:
+          type: exit-code
+          step: probe
+          codes: [10]
+      type: create-directory
+      path: '{}'
+"#,
+        script.display(),
+        forbidden_directory.display()
+    );
+    let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+
+    let report = run_task(
+        &task,
+        &RunOptions {
+            apply: true,
+            allow_shell: true,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(report.errors.is_empty());
+    assert!(matches!(report.steps[0].status, StepStatus::Satisfied));
+    assert!(report.steps[0].output.is_none());
+    assert!(matches!(report.steps[1].status, StepStatus::Skipped));
+    assert!(matches!(
+        report.outcomes[1],
+        ActionOutcome::Skipped { ref reason }
+            if reason.contains("unavailable") && reason.contains("no exit code")
+    ));
+    assert!(!forbidden_directory.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn conditional_inspect_path_stays_planned_during_dry_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("probe.sh");
+    let missing = temp.path().join("missing");
+    fs::write(&script, "exit 0\n").unwrap();
+    let yaml = format!(
+        r#"
+task:
+  id: conditional-inspect-dry-run
+  name: Conditional inspect dry-run
+  description: Keeps guarded observations in the plan until their probe has run.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: '{}'
+    - id: inspect
+      when:
+        type: exit-code
+        step: probe
+        codes: [0]
+      type: inspect-path
+      path: '{}'
+      expect:
+        exists: true
+"#,
+        script.display(),
+        missing.display()
+    );
+    let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+
+    let report = run_task(
+        &task,
+        &RunOptions {
+            allow_shell: true,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(report.errors.is_empty());
+    assert_eq!(report.plans.len(), 2);
+    assert!(matches!(report.steps[0].status, StepStatus::Pending));
+    assert!(matches!(report.steps[1].status, StepStatus::Pending));
+    assert!(matches!(report.outcomes[1], ActionOutcome::Planned { .. }));
+    assert!(report.steps[1].output.is_none());
+}
+
+#[test]
+fn run_script_rejects_inline_source() {
+    let yaml = r#"
+task:
+  id: inline-script
+  name: Inline script
+  description: Demonstrates that run-script accepts a file path rather than inline source.
+  platform: any
+  steps:
+    - id: inline
+      dangerous: true
+      type: run-script
+      interpreter: bash
+      script: |
+        echo "this must remain in a script file"
+"#;
+
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    let error = task.validate().unwrap_err();
+    assert!(error.contains("file path"), "unexpected error: {error}");
+    assert!(error.contains("not inline"), "unexpected error: {error}");
+}
+
+#[test]
+fn run_script_requires_dangerous_declaration() {
+    let yaml = r#"
+task:
+  id: undeclared-script-risk
+  name: Undeclared script risk
+  description: Demonstrates that every script step must declare its dangerous execution risk.
+  platform: any
+  steps:
+    - id: script
+      type: run-script
+      interpreter: sh
+      script: /opt/example/setup.sh
+"#;
+
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    let error = task.validate().unwrap_err();
+    assert!(
+        error.contains("not marked dangerous"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn run_script_requires_allow_shell_permission() {
+    let yaml = r#"
+task:
+  id: script-permission
+  name: Script permission
+  description: Exercises the explicit shell permission gate for typed script execution.
+  platform: any
+  trust: bundled-only
+  steps:
+    - id: script
+      dangerous: true
+      type: run-script
+      interpreter: bash
+      script: $HOME/.local/share/setup/bootstrap.sh
+"#;
+
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    task.validate().unwrap();
+
+    let error = run_task(&task, &RunOptions::default()).unwrap_err();
+    assert!(error.to_string().contains("--allow-shell"));
+
+    let report = run_task(
+        &task,
+        &RunOptions {
+            allow_shell: true,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(report.plans.len(), 1);
+    assert!(report.plans[0].summary.contains("Bash"));
 }
 
 #[test]

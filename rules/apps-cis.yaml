@@ -1,0 +1,791 @@
+pack: apps-cis
+rules:
+
+  - id: cis-1c-cache
+    name: "1C:Enterprise client caches and temp"
+    description: 1C client cache/temp leaves under ~/.1cv8 and Library. Not configuration or infobase data directories.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.1c.enterprise
+      - $HOME/Library/Caches/com._1c.enterprise
+      - $HOME/Library/Caches/1cv8
+      - $HOME/Library/Logs/1C
+      - $HOME/Library/Logs/1cv8
+    exclude_globs:
+      - "**/1cv8.pfl"
+      - "**/conf/**"
+      - "**/cfg/**"
+      - "**/ib/**"
+      - "**/database/**"
+      - "**/*.1CD"
+      - "**/*.cfl"
+      - "**/appsrvrs/**"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: cis-1c-template-cache-report
+    name: 1C template and version residual report-only
+    description: Broader 1C Application Support residual under common names. Report-only to avoid config wipe.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Application Support/1C
+      - $HOME/Library/Application Support/1cv8
+      - $HOME/.1cv8
+    include_globs:
+      - "**/cache/**"
+      - "**/Cache/**"
+      - "**/tmp/**"
+      - "**/temp/**"
+      - "**/logs/**"
+    exclude_globs:
+      - "**/*.1CD"
+      - "**/conf/**"
+      - "**/ib/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cis-alfa-invest-residual
+    name: Alfa Invest residual caches
+    description: Alfa-Investments / Alfa Invest desktop residual caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/AlfaInvest/Cache
+      - $HOME/Library/Application Support/AlfaInvest/Code Cache
+      - $HOME/Library/Application Support/AlfaInvest/GPUCache
+      - $HOME/Library/Application Support/AlfaInvest/logs
+      - $HOME/Library/Application Support/Alfa Invest/Cache
+      - $HOME/Library/Application Support/Alfa Invest/logs
+      - $HOME/Library/Application Support/Alfa-Investments/Cache
+      - $HOME/Library/Application Support/Alfa-Investments/Code Cache
+      - $HOME/Library/Application Support/Alfa-Investments/GPUCache
+      - $HOME/Library/Application Support/Alfa-Investments/logs
+      - $HOME/Library/Application Support/Альфа-Инвестиции/Cache
+      - $HOME/Library/Application Support/Альфа-Инвестиции/logs
+      - $HOME/Library/Caches/ru.alfabank.invest
+      - $HOME/Library/Caches/ru.alfabank.investments
+      - $HOME/Library/Caches/com.alfabank.invest
+      - $HOME/Library/Logs/AlfaInvest
+      - $HOME/Library/Logs/Alfa Invest
+      - $HOME/Library/Logs/Alfa-Investments
+    exclude_globs:
+      - "**/Cookies*"
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Preferences"
+      - "**/Local State"
+      - "**/Secrets/**"
+      - "**/tokens/**"
+      - "**/Keys/**"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cis-amocrm-kommo-cache
+    name: AmoCRM / Kommo desktop residual caches
+    description: AmoCRM and rebranded Kommo desktop Electron residual caches if installed. Primarily web CRM; residual roots only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/amoCRM/Cache
+      - $HOME/Library/Application Support/amoCRM/Code Cache
+      - $HOME/Library/Application Support/amoCRM/GPUCache
+      - $HOME/Library/Application Support/amoCRM/logs
+      - $HOME/Library/Application Support/AmoCRM/Cache
+      - $HOME/Library/Application Support/AmoCRM/logs
+      - $HOME/Library/Application Support/Kommo/Cache
+      - $HOME/Library/Application Support/Kommo/Code Cache
+      - $HOME/Library/Application Support/Kommo/GPUCache
+      - $HOME/Library/Application Support/Kommo/logs
+      - $HOME/Library/Caches/com.amocrm.desktop
+      - $HOME/Library/Caches/com.kommo.desktop
+      - $HOME/Library/Caches/ru.amocrm.desktop
+      - $HOME/Library/Logs/amoCRM
+      - $HOME/Library/Logs/AmoCRM
+      - $HOME/Library/Logs/Kommo
+    exclude_globs:
+      - "**/Cookies*"
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Preferences"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cis-bitrix24-cache
+    name: Bitrix24 desktop caches and logs
+    description: Bitrix24 desktop (com.bitrixsoft.bitrix24desktop) container caches, group container caches, and regenerable .bxd cache leaves. Not full workspace data.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.bitrixsoft.bitrix24desktop/Data/Library/Caches
+      - $HOME/Library/Containers/com.bitrixsoft.bitrix24desktop/Data/Library/Logs
+      - $HOME/Library/Group Containers/com.bitrixsoft.bitrix24desktop/Library/Caches
+      - $HOME/Library/Group Containers/com.bitrixsoft.bitrix24desktop/Library/Logs
+      - $HOME/Library/Caches/com.bitrixsoft.bitrix24desktop
+      - $HOME/Library/Logs/Bitrix24
+      - $HOME/Library/HTTPStorages/com.bitrixsoft.bitrix24desktop
+      - $HOME/.bxd/cache
+      - $HOME/.bxd/Cache
+      - $HOME/.bxd/logs
+      - $HOME/.bxd/Logs
+      - $HOME/.bxd/tmp
+    exclude_globs:
+      - "**/database/**"
+      - "**/Databases/**"
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Cookies*"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cis-cryptopro-residual-logs
+    name: CryptoPro residual logs and tmp only (careful)
+    description: CryptoPro CSP residual log and tmp scratch only. NEVER key containers, user stores, or config. High caution; default off.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Logs/CryptoPro
+      - $HOME/Library/Logs/Crypto-Pro
+      - $HOME/Library/Logs/cprocsp
+      - $HOME/Library/Caches/ru.cryptopro
+      - $HOME/Library/Caches/com.cryptopro.csp
+    include_globs:
+      - "**/*.log"
+      - "**/*.LOG"
+      - "**/logs/**"
+      - "**/tmp/**"
+    exclude_globs:
+      - "**/keys/**"
+      - "**/users/**"
+      - "**/stores/**"
+      - "**/certs/**"
+      - "**/certificates/**"
+      - "**/*.key"
+      - "**/*.cer"
+      - "**/*.crt"
+      - "**/*.pfx"
+      - "**/*.p12"
+      - "**/license*"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: cis-cryptopro-var-tmp-report
+    name: CryptoPro /var/opt/cprocsp/tmp report-only
+    description: "CryptoPro shared tmp scratch under /var/opt/cprocsp/tmp. Report-only: may hold transient session files adjacent to key infrastructure."
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - /var/opt/cprocsp/tmp
+    include_globs:
+      - "**/*.log"
+      - "**/*.tmp"
+      - "**/*.pid"
+    exclude_globs:
+      - "**/keys/**"
+      - "**/users/**"
+      - "**/stores/**"
+      - "**/*key*"
+      - "**/*cert*"
+    delete_mode: contents
+    max_depth: 3
+
+  - id: cis-goskey-residual-careful
+    name: Goskey residual caches (careful, report-biased)
+    description: Goskey (Госключ) desktop residual caches/logs if any helper is installed. Default off; never private key material.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Caches/ru.gosuslugi.goskey
+      - $HOME/Library/Caches/ru.gosuslugi.goskluch
+      - $HOME/Library/Caches/com.gosuslugi.goskey
+      - $HOME/Library/Logs/Goskey
+      - $HOME/Library/Logs/Госключ
+      - $HOME/Library/Application Support/Goskey/Cache
+      - $HOME/Library/Application Support/Goskey/logs
+      - $HOME/Library/Application Support/Госключ/Cache
+      - $HOME/Library/Application Support/Госключ/logs
+    include_globs:
+      - "**/Cache/**"
+      - "**/Caches/**"
+      - "**/logs/**"
+      - "**/Logs/**"
+      - "**/*.log"
+    exclude_globs:
+      - "**/keys/**"
+      - "**/key/**"
+      - "**/private/**"
+      - "**/Tokens/**"
+      - "**/Secure/**"
+      - "**/*.key"
+      - "**/*.p12"
+      - "**/*.pfx"
+      - "**/*.cer"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: cis-kontur-ktalk-cache
+    name: Kontur Talk / ktalk Electron caches and logs
+    description: Kontur Talk (ktalk) Chromium caches, Crashpad, Webrtc stats, sentry breadcrumbs residual, and dated log files. Live-verified; used as Yandex Telemost successor and Contour/Kontur collab client.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/ktalk/Cache
+      - $HOME/Library/Application Support/ktalk/Code Cache
+      - $HOME/Library/Application Support/ktalk/GPUCache
+      - $HOME/Library/Application Support/ktalk/DawnGraphiteCache
+      - $HOME/Library/Application Support/ktalk/DawnWebGPUCache
+      - $HOME/Library/Application Support/ktalk/Service Worker
+      - $HOME/Library/Application Support/ktalk/blob_storage
+      - $HOME/Library/Application Support/ktalk/Crashpad
+      - $HOME/Library/Application Support/ktalk/WebrtcVideoStats
+      - $HOME/Library/Application Support/ktalk/Shared Dictionary
+      - $HOME/Library/Application Support/ktalk/sentry
+      - $HOME/Library/Caches/kontur.talk
+      - $HOME/Library/Caches/kontur.talk.ShipIt
+      - $HOME/Library/HTTPStorages/kontur.talk
+    exclude_globs:
+      - "**/Cookies*"
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Session Storage/**"
+      - "**/Preferences"
+      - "**/Local State"
+      - "**/config.json"
+      - "**/conference-window.json"
+      - "**/window-state.json"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cis-kontur-residual-cache
+    name: Kontur/Contour residual desktop caches
+    description: Additional Kontur ecosystem residual (Diadoc/Extern/Plugin helper) caches and logs beyond ktalk. Not CryptoPro keys.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Kontur/Cache
+      - $HOME/Library/Application Support/Kontur/logs
+      - $HOME/Library/Application Support/Diadoc/Cache
+      - $HOME/Library/Application Support/Diadoc/logs
+      - $HOME/Library/Application Support/Kontur.Extern/Cache
+      - $HOME/Library/Application Support/Kontur.Extern/logs
+      - $HOME/Library/Caches/ru.kontur
+      - $HOME/Library/Caches/ru.kontur.extern
+      - $HOME/Library/Caches/ru.kontur.diadoc
+      - $HOME/Library/Logs/Kontur
+      - $HOME/Library/Logs/Diadoc
+      - $HOME/Library/Logs/Kontur.Extern
+    exclude_globs:
+      - "**/certs/**"
+      - "**/certificates/**"
+      - "**/keys/**"
+      - "**/Tokens/**"
+      - "**/*.key"
+      - "**/*.pfx"
+      - "**/*.p12"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cis-mailru-agent-cache
+    name: Mail.ru Agent caches and logs
+    description: Mail.Ru Agent (bundle ru.mail.macagent) Library caches and logs. Not offline mail store.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/ru.mail.macagent
+      - $HOME/Library/Caches/ru.mail.agent
+      - $HOME/Library/Application Support/Mail.Ru Agent/Cache
+      - $HOME/Library/Application Support/Mail.Ru Agent/logs
+      - $HOME/Library/Application Support/MailRu/Agent/Cache
+      - $HOME/Library/Application Support/MailRu/Agent/logs
+      - $HOME/Library/Logs/Mail.Ru Agent
+      - $HOME/Library/Logs/MailRu Agent
+    exclude_globs:
+      - "**/mail/**"
+      - "**/Messages/**"
+      - "**/history/**"
+      - "**/Accounts/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cis-mailru-cloud-disko-cache
+    name: Mail.ru Cloud / Disk-O caches
+    description: "Mail Cloud desktop and Disk-O: mount client regenerable caches/logs. Not synced cloud file content."
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Disk-O/Cache
+      - $HOME/Library/Application Support/Disk-O/logs
+      - $HOME/Library/Application Support/Disk-O/Logs
+      - $HOME/Library/Application Support/Mail.Ru Cloud/Cache
+      - $HOME/Library/Application Support/Mail.Ru Cloud/logs
+      - $HOME/Library/Application Support/Cloud Mail.Ru/Cache
+      - $HOME/Library/Application Support/ru.mail.cloud/Cache
+      - $HOME/Library/Caches/ru.mail.cloud
+      - $HOME/Library/Caches/com.mailru.cloudmac
+      - $HOME/Library/Caches/Disk-O
+      - $HOME/Library/Logs/Disk-O
+      - $HOME/Library/Logs/Mail.Ru Cloud
+      - $HOME/Library/Logs/Cloud Mail.Ru
+    exclude_globs:
+      - "**/sync/**"
+      - "**/Sync/**"
+      - "**/files/**"
+      - "**/FileCache/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cis-myoffice-cache
+    name: MyOffice desktop caches and logs
+    description: MyOffice (New Cloud Technologies) desktop caches, CRL refresh residual, MySynchronizer working-folder caches, and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/New Cloud Technologies Ltd./MyOffice/Cache
+      - $HOME/Library/Application Support/New Cloud Technologies Ltd./MyOffice/Caches
+      - $HOME/Library/Application Support/New Cloud Technologies Ltd./MyOffice/logs
+      - $HOME/Library/Application Support/New Cloud Technologies Ltd./MyOffice/Logs
+      - $HOME/Library/Application Support/New Cloud Technologies Ltd./MyOffice/CRL
+      - $HOME/Library/Application Support/com.ncloudtech.cloudoffice.New-Cloud-Technologies.MySynchronizer/Cache
+      - $HOME/Library/Application Support/com.ncloudtech.cloudoffice.New-Cloud-Technologies.MySynchronizer/logs
+      - $HOME/Library/Caches/com.ncloudtech.myoffice
+      - $HOME/Library/Caches/ru.myoffice.desktop
+      - $HOME/Library/Caches/com.ncloudtech.cloudoffice
+      - $HOME/Library/Logs/MyOffice
+      - $HOME/Library/Logs/MySynchronizer
+    exclude_globs:
+      - "**/license/**"
+      - "**/License/**"
+      - "**/Licenses/**"
+      - "**/*.lic"
+      - "**/Documents/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cis-okru-residual-cache
+    name: OK.ru / Odnoklassniki residual desktop caches
+    description: Residual Odnoklassniki/OK desktop agent or Electron wrapper caches if installed. Primarily web today; leftover roots only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Odnoklassniki/Cache
+      - $HOME/Library/Application Support/Odnoklassniki/Code Cache
+      - $HOME/Library/Application Support/Odnoklassniki/GPUCache
+      - $HOME/Library/Application Support/OK/Cache
+      - $HOME/Library/Application Support/ok-messenger/Cache
+      - $HOME/Library/Caches/ru.ok.desktop
+      - $HOME/Library/Caches/ru.odnoklassniki.desktop
+      - $HOME/Library/Caches/com.odnoklassniki.mac
+      - $HOME/Library/Logs/Odnoklassniki
+      - $HOME/Library/Logs/OK
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cis-r7-office-cache
+    name: R7-Office (Р7-Офис) caches and logs
+    description: R7-Office desktop editors caches/logs. License directory under ru.nkt.r7-office is excluded.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/ru.nkt.r7-office/Cache
+      - $HOME/Library/Application Support/ru.nkt.r7-office/Caches
+      - $HOME/Library/Application Support/ru.nkt.r7-office/logs
+      - $HOME/Library/Application Support/ru.nkt.r7-office/Logs
+      - $HOME/Library/Application Support/r7-office/Cache
+      - $HOME/Library/Application Support/r7-office/logs
+      - $HOME/Library/Application Support/R7-Office/Cache
+      - $HOME/Library/Application Support/R7-Office/logs
+      - $HOME/Library/Caches/ru.nkt.r7-office
+      - $HOME/Library/Caches/com.r7office.desktop
+      - $HOME/Library/Logs/r7-office
+      - $HOME/Library/Logs/R7-Office
+    exclude_globs:
+      - "**/license/**"
+      - "**/License/**"
+      - "**/Licenses/**"
+      - "**/*.lic"
+      - "**/license"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cis-sberjazz-salutejazz-cache
+    name: SberJazz / SaluteJazz caches and logs
+    description: Sber Jazz video meetings client (SaluteJazz Application Support) Electron/Chromium caches and logs per Sber developer troubleshooting docs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/SaluteJazz/Cache
+      - $HOME/Library/Application Support/SaluteJazz/Code Cache
+      - $HOME/Library/Application Support/SaluteJazz/GPUCache
+      - $HOME/Library/Application Support/SaluteJazz/DawnGraphiteCache
+      - $HOME/Library/Application Support/SaluteJazz/DawnWebGPUCache
+      - $HOME/Library/Application Support/SaluteJazz/Service Worker
+      - $HOME/Library/Application Support/SaluteJazz/blob_storage
+      - $HOME/Library/Application Support/SaluteJazz/Crashpad
+      - $HOME/Library/Application Support/SaluteJazz/logs
+      - $HOME/Library/Application Support/SberJazz/Cache
+      - $HOME/Library/Application Support/SberJazz/Code Cache
+      - $HOME/Library/Application Support/SberJazz/GPUCache
+      - $HOME/Library/Application Support/SberJazz/logs
+      - $HOME/Library/Application Support/Jazz/Cache
+      - $HOME/Library/Caches/SaluteJazz
+      - $HOME/Library/Caches/SberJazz
+      - $HOME/Library/Caches/ru.sberbank.jazz
+      - $HOME/Library/Caches/ru.sberdevices.jazz
+      - $HOME/Library/Logs/SaluteJazz
+      - $HOME/Library/Logs/SberJazz
+    exclude_globs:
+      - "**/Cookies*"
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Preferences"
+      - "**/Local State"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cis-tinkoff-invest-residual
+    name: Tinkoff Invest / T-Invest residual caches
+    description: Tinkoff Investments / T-Bank Invest desktop residual Electron caches and logs. Not trading keys or session vaults.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/TinkoffInvest/Cache
+      - $HOME/Library/Application Support/TinkoffInvest/Code Cache
+      - $HOME/Library/Application Support/TinkoffInvest/GPUCache
+      - $HOME/Library/Application Support/TinkoffInvest/logs
+      - $HOME/Library/Application Support/Tinkoff Invest/Cache
+      - $HOME/Library/Application Support/Tinkoff Invest/Code Cache
+      - $HOME/Library/Application Support/Tinkoff Invest/GPUCache
+      - $HOME/Library/Application Support/Tinkoff Invest/logs
+      - $HOME/Library/Application Support/T-Invest/Cache
+      - $HOME/Library/Application Support/T-Invest/Code Cache
+      - $HOME/Library/Application Support/T-Invest/GPUCache
+      - $HOME/Library/Application Support/T-Invest/logs
+      - $HOME/Library/Application Support/Тинькофф Инвестиции/Cache
+      - $HOME/Library/Application Support/Тинькофф Инвестиции/logs
+      - $HOME/Library/Caches/ru.tinkoff.investing
+      - $HOME/Library/Caches/ru.tinkoff.invest
+      - $HOME/Library/Caches/com.tinkoff.investing
+      - $HOME/Library/Logs/TinkoffInvest
+      - $HOME/Library/Logs/T-Invest
+      - $HOME/Library/Logs/Tinkoff Invest
+    exclude_globs:
+      - "**/Cookies*"
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Session Storage/**"
+      - "**/Preferences"
+      - "**/Local State"
+      - "**/Secrets/**"
+      - "**/tokens/**"
+      - "**/Keys/**"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cis-trueconf-cache-logs
+    name: TrueConf client logs and caches
+    description: TrueConf Client sandboxed Logs/Crashlogs and Library Caches. Official support paths under org.trueconf.client container.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/org.trueconf.client/Data/Library/Application Support/TrueConf/Logs
+      - $HOME/Library/Containers/org.trueconf.client/Data/Library/Application Support/TrueConf/Crashlogs
+      - $HOME/Library/Containers/org.trueconf.client/Data/Library/Caches
+      - $HOME/Library/Containers/org.trueconf.client/Data/Library/Logs
+      - $HOME/Library/Caches/org.trueconf.client
+      - $HOME/Library/Caches/42f94da1.org.trueconf.client
+      - $HOME/Library/Logs/TrueConf
+      - $HOME/Library/Logs/TrueConf Client
+    exclude_globs:
+      - "**/*.pcm"
+      - "**/tc_configuration.txt"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cis-vk-calls-cache
+    name: VK Calls native/Electron caches
+    description: VK Calls desktop Application Support caches and logs. Brew zap root VK Calls; cache leaves only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/VK Calls/Cache
+      - $HOME/Library/Application Support/VK Calls/Code Cache
+      - $HOME/Library/Application Support/VK Calls/GPUCache
+      - $HOME/Library/Application Support/VK Calls/DawnGraphiteCache
+      - $HOME/Library/Application Support/VK Calls/DawnWebGPUCache
+      - $HOME/Library/Application Support/VK Calls/Service Worker
+      - $HOME/Library/Application Support/VK Calls/blob_storage
+      - $HOME/Library/Application Support/VK Calls/Crashpad
+      - $HOME/Library/Application Support/VK Calls/logs
+      - $HOME/Library/Caches/com.vk.calls.native.1
+      - $HOME/Library/Caches/com.vk.calls
+      - $HOME/Library/Logs/VK Calls
+    exclude_globs:
+      - "**/Cookies*"
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Preferences"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cis-vk-messenger-cache
+    name: VK Messenger desktop Electron caches
+    description: VK Messenger (VK Мессенджер) Chromium caches and logs. Bundle com.vk.messages. Leaves chat DBs and session storage.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/VK Messenger/Cache
+      - $HOME/Library/Application Support/VK Messenger/Code Cache
+      - $HOME/Library/Application Support/VK Messenger/GPUCache
+      - $HOME/Library/Application Support/VK Messenger/DawnGraphiteCache
+      - $HOME/Library/Application Support/VK Messenger/DawnWebGPUCache
+      - $HOME/Library/Application Support/VK Messenger/Service Worker
+      - $HOME/Library/Application Support/VK Messenger/blob_storage
+      - $HOME/Library/Application Support/VK Messenger/Crashpad
+      - $HOME/Library/Application Support/VK Messenger/logs
+      - $HOME/Library/Application Support/vk-messenger/Cache
+      - $HOME/Library/Application Support/vk-messenger/Code Cache
+      - $HOME/Library/Application Support/vk-messenger/GPUCache
+      - $HOME/Library/Application Support/vk-messenger/logs
+      - $HOME/Library/Application Support/VKМессенджер/Cache
+      - $HOME/Library/Application Support/VKМессенджер/Code Cache
+      - $HOME/Library/Application Support/VKМессенджер/GPUCache
+      - $HOME/Library/Caches/com.vk.messages
+      - $HOME/Library/Caches/com.vk.messages.helper
+      - $HOME/Library/Caches/com.vk.messages.ShipIt
+      - $HOME/Library/Logs/VK Messenger
+      - $HOME/Library/Logs/vk-messenger
+    exclude_globs:
+      - "**/Cookies*"
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Session Storage/**"
+      - "**/Preferences"
+      - "**/Local State"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cis-yandex-browser-cache-deep
+    name: Yandex Browser Chromium caches (deep leaves)
+    description: Yandex Browser HTTP/GPU/code/media/Dawn/Service Worker caches under Application Support and Library/Caches. Extends base macos-yandex-browser-cache with more leaves and channel roots.
+    category: browser-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Yandex
+      - $HOME/Library/Caches/ru.yandex.desktop.yandex-browser
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/Default/Cache
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/Default/Code Cache
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/Default/GPUCache
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/Default/Media Cache
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/Default/Service Worker/CacheStorage
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/Default/DawnCache
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/Default/DawnGraphiteCache
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/Default/DawnWebGPUCache
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/ShaderCache
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/GrShaderCache
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/GraphiteDawnCache
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/component_crx_cache
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/Crashpad
+    include_globs:
+      - "**/Cache/**"
+      - "**/Code Cache/**"
+      - "**/GPUCache/**"
+      - "**/Media Cache/**"
+      - "**/DawnCache/**"
+      - "**/DawnGraphiteCache/**"
+      - "**/DawnWebGPUCache/**"
+      - "**/ShaderCache/**"
+      - "**/GrShaderCache/**"
+      - "**/Service Worker/CacheStorage/**"
+      - "**/component_crx_cache/**"
+      - "**/Crashpad/**"
+    exclude_globs:
+      - "**/Cookies*"
+      - "**/Login Data*"
+      - "**/Web Data*"
+      - "**/History*"
+      - "**/Bookmarks*"
+      - "**/Preferences"
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Sessions/**"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: cis-yandex-browser-updater-logs
+    name: Yandex Browser updater and crash residual
+    description: Yandex Browser updater caches, crash dumps residual under Caches/Yandex, and user Logs.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/Yandex/YandexBrowser/Crashpad
+      - $HOME/Library/Logs/Yandex
+      - $HOME/Library/Logs/YandexBrowser
+      - $HOME/Library/Application Support/Yandex/YandexBrowser/Crashpad
+      - $HOME/.yandex/logs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cis-yandex-disk-cache
+    name: Yandex Disk client caches and logs
+    description: Yandex.Disk.2 desktop client regenerable caches/logs. Not the synced cloud folder content.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Yandex.Disk.2/Cache
+      - $HOME/Library/Application Support/Yandex.Disk.2/Code Cache
+      - $HOME/Library/Application Support/Yandex.Disk.2/GPUCache
+      - $HOME/Library/Application Support/Yandex.Disk.2/logs
+      - $HOME/Library/Application Support/Yandex.Disk.2/Logs
+      - $HOME/Library/Caches/ru.yandex.desktop.disk2
+      - $HOME/Library/Caches/Yandex.Disk.2
+      - $HOME/Library/Caches/ru.yandex.desktop.disk.screenshots
+      - $HOME/Library/Logs/Yandex.Disk.2
+      - $HOME/Library/Logs/Yandex Disk
+    exclude_globs:
+      - "**/sync/**"
+      - "**/Sync/**"
+      - "**/files/**"
+      - "**/database/**"
+      - "**/Databases/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cis-yandex-music-cache
+    name: Yandex Music Electron caches and logs
+    description: Official Yandex Music desktop Electron Chromium caches, NSCache, updater residual, and app logs. Verified on research host.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/YandexMusic/Cache
+      - $HOME/Library/Application Support/YandexMusic/Code Cache
+      - $HOME/Library/Application Support/YandexMusic/GPUCache
+      - $HOME/Library/Application Support/YandexMusic/DawnGraphiteCache
+      - $HOME/Library/Application Support/YandexMusic/DawnWebGPUCache
+      - $HOME/Library/Application Support/YandexMusic/blob_storage
+      - $HOME/Library/Application Support/YandexMusic/Shared Dictionary
+      - $HOME/Library/Application Support/YandexMusic/VideoDecodeStats
+      - $HOME/Library/Caches/ru.yandex.desktop.music
+      - $HOME/Library/Caches/ru.yandex.desktop.music.ShipIt
+      - $HOME/Library/Caches/yandexmusic-updater
+      - $HOME/Library/Logs/YandexMusic
+    exclude_globs:
+      - "**/Cookies*"
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Session Storage/**"
+      - "**/Preferences"
+      - "**/config.json"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cis-yandex-music-unofficial-cache
+    name: Yandex Music unofficial desktop cache
+    description: Community yandex-music-app Electron userData caches if installed via unofficial builds.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/yandex-music-app/Cache
+      - $HOME/Library/Application Support/yandex-music-app/Code Cache
+      - $HOME/Library/Application Support/yandex-music-app/GPUCache
+      - $HOME/Library/Application Support/yandex-music-app/logs
+      - $HOME/Library/Logs/yandex-music-app
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cis-yandex-telemost-residual
+    name: Yandex Telemost residual caches
+    description: Legacy Yandex.Telemost Application Support caches plus meetings bundle cache residual. Modern installs often share ktalk/Kontur Talk paths.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Yandex.Telemost/Cache
+      - $HOME/Library/Application Support/Yandex.Telemost/Code Cache
+      - $HOME/Library/Application Support/Yandex.Telemost/GPUCache
+      - $HOME/Library/Application Support/Yandex.Telemost/logs
+      - $HOME/Library/Application Support/Yandex.Telemost/Crashpad
+      - $HOME/Library/Caches/ru.yandex.Telemost
+      - $HOME/Library/Logs/Yandex.Telemost
+      - $HOME/Library/Logs/Telemost
+    delete_mode: contents
+    max_depth: 6

@@ -1,0 +1,1039 @@
+pack: apps-comms
+rules:
+
+  - id: app-1password-logs
+    name: 1Password logs only
+    description: 1Password diagnostic logs. Never vaults, keychain, or .op data.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/1Password
+      - $HOME/Library/Group Containers/2BUA8C4S2C.com.1password/Library/Logs
+      - $HOME/Library/Containers/com.1password.1password/Data/Library/Logs
+      - $HOME/Library/Containers/2BUA8C4S2C.com.1password.browser-helper/Data/Library/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-alfred-cache
+    name: Alfred launcher caches
+    description: Alfred app and preferences caches (not workflows/snippets).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.runningwithcrayons.Alfred
+      - $HOME/Library/Caches/com.runningwithcrayons.Alfred-Preferences
+      - $HOME/Library/Application Support/Alfred/Caches
+      - $HOME/Library/Application Support/Alfred 4/Caches
+      - $HOME/Library/Application Support/Alfred 5/Caches
+      - $HOME/Library/Logs/Alfred
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-anydesk-cache-logs
+    name: AnyDesk cache and logs
+    description: AnyDesk connection logs and cache; not address book if stored separately.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/AnyDesk
+      - $HOME/Library/Application Support/AnyDesk/cache
+      - $HOME/Library/Application Support/AnyDesk
+    include_globs:
+      - "**/*.trace"
+      - "**/cache/**"
+      - "**/*.log"
+      - "**/logs/**"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: app-bitwarden-cache
+    name: Bitwarden desktop Chromium caches and logs
+    description: Bitwarden Electron caches/logs; not encrypted vault data.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Bitwarden/Cache
+      - $HOME/Library/Application Support/Bitwarden/Code Cache
+      - $HOME/Library/Application Support/Bitwarden/GPUCache
+      - $HOME/Library/Application Support/Bitwarden/DawnGraphiteCache
+      - $HOME/Library/Application Support/Bitwarden/DawnWebGPUCache
+      - $HOME/Library/Application Support/Bitwarden/logs
+      - $HOME/Library/Application Support/Bitwarden/Crashpad
+      - $HOME/Library/Caches/com.bitwarden.desktop
+      - $HOME/Library/Logs/Bitwarden
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-bluejeans-goto-viber-cache
+    name: BlueJeans GoToMeeting Viber caches
+    description: Additional meeting/chat client caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/BlueJeans/Cache
+      - $HOME/Library/Application Support/BlueJeans/logs
+      - $HOME/Library/Caches/com.bluejeansnet.Blue
+      - $HOME/Library/Logs/BlueJeans
+      - $HOME/Library/Application Support/GoToMeeting/Logs
+      - $HOME/Library/Logs/GoToMeeting
+      - $HOME/Library/Caches/com.logmein.GoToMeeting
+      - $HOME/Library/Application Support/ViberPC/Cache
+      - $HOME/Library/Application Support/ViberPC/cache
+      - $HOME/Library/Caches/com.viber.osx
+      - $HOME/Library/Logs/Viber
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-box-cache
+    name: Box Drive caches and logs
+    description: Box desktop client caches and logs only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.box.desktop
+      - $HOME/Library/Caches/com.box.desktop.helper
+      - $HOME/Library/Application Support/Box/Box/Logs
+      - $HOME/Library/Application Support/Box/Box/Cache
+      - $HOME/Library/Logs/Box
+      - $HOME/Library/Logs/Box Sync
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-citrix-logs-cache
+    name: Citrix Workspace/Receiver logs and cache
+    description: Citrix client logs and local cache (not ICA profiles secrets).
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/Citrix Workspace
+      - $HOME/Library/Logs/Citrix Receiver
+      - $HOME/Library/Logs/Citrix Online Plugin
+      - $HOME/Library/Logs/Citrix
+      - $HOME/Library/Application Support/Citrix Receiver/Cache
+      - $HOME/Library/Application Support/Citrix Workspace/Cache
+      - $HOME/Library/Caches/com.citrix.receiver.nomas
+      - $HOME/Library/Caches/com.citrix.receiver.helper
+      - $HOME/Library/Caches/com.citrix.receiver.icaviewer.mac
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-cleanshot-cache
+    name: CleanShot X caches and logs
+    description: CleanShot temporary caches/logs; not saved screenshots folder.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/pl.maketheweb.cleanshotx
+      - $HOME/Library/Caches/com.getcleanshot.app
+      - $HOME/Library/Logs/CleanShot X
+      - $HOME/Library/Application Support/CleanShot/Cache
+      - $HOME/Library/Application Support/CleanShot X/Cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-collab-shipit-caches
+    name: Collab app ShipIt updater caches
+    description: Sparkle/ShipIt download caches for common Electron collab apps.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.figma.Desktop.ShipIt
+      - $HOME/Library/Caches/com.loom.desktop.ShipIt
+      - $HOME/Library/Caches/com.bitwarden.desktop.ShipIt
+      - $HOME/Library/Caches/notion.id.ShipIt
+      - $HOME/Library/Caches/com.microsoft.teams.ShipIt
+      - $HOME/Library/Caches/us.zoom.xos.ShipIt
+      - $HOME/Library/Caches/com.tinyspeck.slackmacgap.ShipIt
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-db-clients-cache
+    name: Beekeeper Sequel Ace DB client caches
+    description: Additional SQL client caches related to collab engineering stack.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/beekeeper-studio/Cache
+      - $HOME/Library/Application Support/beekeeper-studio/Code Cache
+      - $HOME/Library/Application Support/beekeeper-studio/GPUCache
+      - $HOME/Library/Application Support/beekeeper-studio/logs
+      - $HOME/Library/Caches/io.beekeeperstudio.desktop
+      - $HOME/Library/Containers/com.sequel-ace.sequel-ace/Data/Library/Caches
+      - $HOME/Library/Caches/com.sequel-ace.sequel-ace
+      - $HOME/Library/Logs/Sequel Ace
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-discord-channels-cache
+    name: Discord PTB/Canary/Development caches
+    description: Alternate Discord release channels Chromium cache dirs beyond stable trio.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/discordptb/Cache
+      - $HOME/Library/Application Support/discordptb/Code Cache
+      - $HOME/Library/Application Support/discordptb/GPUCache
+      - $HOME/Library/Application Support/discordptb/logs
+      - $HOME/Library/Application Support/discordcanary/Cache
+      - $HOME/Library/Application Support/discordcanary/Code Cache
+      - $HOME/Library/Application Support/discordcanary/GPUCache
+      - $HOME/Library/Application Support/discordcanary/logs
+      - $HOME/Library/Application Support/discorddevelopment/Cache
+      - $HOME/Library/Application Support/discorddevelopment/Code Cache
+      - $HOME/Library/Application Support/discorddevelopment/GPUCache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-discord-extra-cache
+    name: Discord extra Chromium caches
+    description: Discord Dawn/Service Worker/blob/Shared Dictionary and crash/logs beyond base Cache trio.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/discord/DawnGraphiteCache
+      - $HOME/Library/Application Support/discord/DawnWebGPUCache
+      - $HOME/Library/Application Support/discord/Service Worker
+      - $HOME/Library/Application Support/discord/blob_storage
+      - $HOME/Library/Application Support/discord/Shared Dictionary
+      - $HOME/Library/Application Support/discord/VideoDecodeStats
+      - $HOME/Library/Application Support/discord/Crashpad
+      - $HOME/Library/Application Support/discord/logs
+      - $HOME/Library/Caches/com.hnc.Discord
+      - $HOME/Library/Caches/com.hnc.Discord.ShipIt
+      - $HOME/Library/Logs/Discord
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-dropbox-cache
+    name: Dropbox client caches (not synced files)
+    description: Dropbox app caches and logs only. Never CloudStorage/Dropbox or user files.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.getdropbox.dropbox
+      - $HOME/Library/Caches/Dropbox
+      - $HOME/Library/Caches/com.dropbox.DropboxUpdater
+      - $HOME/Library/Logs/Dropbox
+      - $HOME/Library/Application Support/Dropbox/Cache
+      - $HOME/Library/Application Support/Dropbox/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-dropbox-offline-cache-report
+    name: Dropbox .dropbox.cache (report-only)
+    description: Legacy offline cache folder inside Dropbox root; may hold temporarily un-synced data.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - $HOME/Dropbox/.dropbox.cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-element-cache
+    name: Element (Matrix) desktop caches
+    description: Element Electron caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Element/Cache
+      - $HOME/Library/Application Support/Element/Code Cache
+      - $HOME/Library/Application Support/Element/GPUCache
+      - $HOME/Library/Application Support/Element/logs
+      - $HOME/Library/Application Support/element/Cache
+      - $HOME/Library/Application Support/element/Code Cache
+      - $HOME/Library/Application Support/element/GPUCache
+      - $HOME/Library/Application Support/element/logs
+      - $HOME/Library/Caches/im.riot.app
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-evernote-cache
+    name: Evernote caches and logs
+    description: Evernote desktop cache directories and logs (not local notebooks DB if present).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Evernote/Cache
+      - $HOME/Library/Application Support/Evernote/Code Cache
+      - $HOME/Library/Application Support/Evernote/GPUCache
+      - $HOME/Library/Application Support/Evernote/logs
+      - $HOME/Library/Caches/com.evernote.Evernote
+      - $HOME/Library/Caches/com.evernote.EvernoteHelper
+      - $HOME/Library/Logs/Evernote
+      - $HOME/Library/Logs/com.evernote.Evernote
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-figma-cache
+    name: Figma desktop caches and logs
+    description: Figma desktop Electron caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Figma/Cache
+      - $HOME/Library/Application Support/Figma/Code Cache
+      - $HOME/Library/Application Support/Figma/GPUCache
+      - $HOME/Library/Application Support/Figma/Service Worker
+      - $HOME/Library/Application Support/Figma/blob_storage
+      - $HOME/Library/Application Support/Figma/logs
+      - $HOME/Library/Caches/com.figma.Desktop
+      - $HOME/Library/Logs/Figma
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-google-drivefs-content-cache
+    name: Google DriveFS content_cache (offline files)
+    description: DriveFS per-account content_cache offline materializations.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Google/DriveFS
+    include_globs:
+      - "**/content_cache/**"
+      - "**/cef_cache/**"
+      - "**/Crashpad/**"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: app-google-drivefs-logs-cache
+    name: Google Drive for Desktop logs and metadata cache
+    description: DriveFS logs and non-content caches. Content cache is separate medium rule.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Google/DriveFS/Logs
+      - $HOME/Library/Logs/GoogleDrive
+      - $HOME/Library/Logs/com.google.drivefs
+      - $HOME/Library/Caches/com.google.drivefs
+      - $HOME/Library/Caches/com.google.GoogleDrive
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-insomnia-cache
+    name: Insomnia caches and logs
+    description: Insomnia HTTP client Chromium caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Insomnia/Cache
+      - $HOME/Library/Application Support/Insomnia/Code Cache
+      - $HOME/Library/Application Support/Insomnia/GPUCache
+      - $HOME/Library/Application Support/Insomnia/logs
+      - $HOME/Library/Application Support/Insomnia/blob_storage
+      - $HOME/Library/Caches/com.insomnia.app
+      - $HOME/Library/Logs/Insomnia
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-ktalk-yandex-collab
+    name: Yandex Telemost/kTalk caches
+    description: Yandex meeting/chat client caches and logs if installed.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/ktalk/Cache
+      - $HOME/Library/Application Support/ktalk/Code Cache
+      - $HOME/Library/Application Support/ktalk/GPUCache
+      - $HOME/Library/Application Support/ktalk/logs
+      - $HOME/Library/Logs/ktalk
+      - $HOME/Library/Caches/ru.yandex.desktop.meetings
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-linear-cache
+    name: Linear desktop caches and logs
+    description: Linear Electron Chromium caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Linear/Cache
+      - $HOME/Library/Application Support/Linear/Code Cache
+      - $HOME/Library/Application Support/Linear/GPUCache
+      - $HOME/Library/Application Support/Linear/DawnGraphiteCache
+      - $HOME/Library/Application Support/Linear/DawnWebGPUCache
+      - $HOME/Library/Application Support/Linear/Service Worker
+      - $HOME/Library/Application Support/Linear/blob_storage
+      - $HOME/Library/Application Support/Linear/logs
+      - $HOME/Library/Caches/com.linear
+      - $HOME/Library/Caches/com.linear.Linear
+      - $HOME/Library/Logs/Linear
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-loom-cache
+    name: Loom desktop caches and logs
+    description: Loom Electron caches/logs. Not user video library exports.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Loom/Cache
+      - $HOME/Library/Application Support/Loom/Code Cache
+      - $HOME/Library/Application Support/Loom/GPUCache
+      - $HOME/Library/Application Support/Loom/Service Worker
+      - $HOME/Library/Application Support/Loom/blob_storage
+      - $HOME/Library/Application Support/Loom/logs
+      - $HOME/Library/Caches/com.loom.desktop
+      - $HOME/Library/Logs/Loom
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-mattermost-rocket-cache
+    name: Mattermost and Rocket.Chat caches
+    description: Mattermost Desktop and Rocket.Chat Chromium caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Mattermost/Cache
+      - $HOME/Library/Application Support/Mattermost/Code Cache
+      - $HOME/Library/Application Support/Mattermost/GPUCache
+      - $HOME/Library/Application Support/Mattermost/logs
+      - $HOME/Library/Application Support/Rocket.Chat/Cache
+      - $HOME/Library/Application Support/Rocket.Chat/Code Cache
+      - $HOME/Library/Application Support/Rocket.Chat/GPUCache
+      - $HOME/Library/Application Support/Rocket.Chat/logs
+      - $HOME/Library/Caches/Mattermost.Desktop
+      - $HOME/Library/Caches/chat.rocket
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-messenger-wrappers-cache
+    name: Caprine Franz Rambox Station caches
+    description: Multi-service messenger shell Chromium caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Caprine/Cache
+      - $HOME/Library/Application Support/Caprine/Code Cache
+      - $HOME/Library/Application Support/Caprine/GPUCache
+      - $HOME/Library/Application Support/Caprine/logs
+      - $HOME/Library/Application Support/Franz/Cache
+      - $HOME/Library/Application Support/Franz/Code Cache
+      - $HOME/Library/Application Support/Franz/GPUCache
+      - $HOME/Library/Application Support/Rambox/Cache
+      - $HOME/Library/Application Support/Rambox/Code Cache
+      - $HOME/Library/Application Support/Rambox/GPUCache
+      - $HOME/Library/Application Support/Station/Cache
+      - $HOME/Library/Application Support/Station/Code Cache
+      - $HOME/Library/Application Support/Station/GPUCache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-microsoft-edgewebview-teams
+    name: Microsoft Edge WebView caches for Office/Teams
+    description: Shared WebView2/EdgeWebView cache used by Office/Teams components under user Caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Microsoft Edge WebView
+      - $HOME/Library/Caches/com.microsoft.edgemac.wdgExtension
+      - $HOME/Library/Caches/com.microsoft.teams2
+      - $HOME/Library/Caches/com.microsoft.SkypeForBusiness
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-miro-cache
+    name: Miro desktop caches
+    description: Miro (realtimeboard) Electron caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Miro/Cache
+      - $HOME/Library/Application Support/Miro/Code Cache
+      - $HOME/Library/Application Support/Miro/GPUCache
+      - $HOME/Library/Application Support/Miro/logs
+      - $HOME/Library/Application Support/RealtimeBoard/Cache
+      - $HOME/Library/Caches/com.realtimeboard
+      - $HOME/Library/Caches/com.miro.Miro
+      - $HOME/Library/Logs/Miro
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-notion-cache
+    name: Notion desktop caches and logs
+    description: Notion Electron caches (large offline page cache) and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Notion/Cache
+      - $HOME/Library/Application Support/Notion/Code Cache
+      - $HOME/Library/Application Support/Notion/GPUCache
+      - $HOME/Library/Application Support/Notion/DawnGraphiteCache
+      - $HOME/Library/Application Support/Notion/DawnWebGPUCache
+      - $HOME/Library/Application Support/Notion/Service Worker
+      - $HOME/Library/Application Support/Notion/blob_storage
+      - $HOME/Library/Application Support/Notion/logs
+      - $HOME/Library/Application Support/Notion/Crashpad
+      - $HOME/Library/Caches/Notion
+      - $HOME/Library/Caches/notion.id
+      - $HOME/Library/Logs/Notion
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-notion-calendar-cache-ext
+    name: Notion Calendar (Cron) caches
+    description: Notion Calendar / Cron Electron caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Notion Calendar/Cache
+      - $HOME/Library/Application Support/Notion Calendar/Code Cache
+      - $HOME/Library/Application Support/Notion Calendar/GPUCache
+      - $HOME/Library/Application Support/Notion Calendar/logs
+      - $HOME/Library/Caches/com.cron.electron
+      - $HOME/Library/Caches/com.cron.electron.ShipIt
+      - $HOME/Library/Logs/Notion Calendar
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-obsidian-cache-ext
+    name: Obsidian Electron caches (not vaults)
+    description: Obsidian app Chromium caches under Application Support/obsidian only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/obsidian/Code Cache
+      - $HOME/Library/Application Support/obsidian/GPUCache
+      - $HOME/Library/Application Support/obsidian/DawnGraphiteCache
+      - $HOME/Library/Application Support/obsidian/DawnWebGPUCache
+      - $HOME/Library/Application Support/obsidian/blob_storage
+      - $HOME/Library/Application Support/obsidian/Shared Dictionary
+      - $HOME/Library/Caches/md.obsidian
+      - $HOME/Library/Logs/obsidian
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-onedrive-cache
+    name: OneDrive caches and logs
+    description: OneDrive client caches/logs; not CloudStorage/OneDrive files.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.microsoft.OneDrive
+      - $HOME/Library/Caches/com.microsoft.OneDrive-mac
+      - $HOME/Library/Containers/com.microsoft.OneDrive-mac/Data/Library/Caches
+      - $HOME/Library/Containers/com.microsoft.OneDrive-mac/Data/Library/Logs
+      - $HOME/Library/Logs/OneDrive
+      - $HOME/Library/Logs/Microsoft OneDrive
+      - $HOME/Library/Logs/OneDrive.stdout.log
+      - $HOME/Library/Application Support/OneDrive/logs
+      - $HOME/Library/Application Support/OneDrive/cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-onenote-cache
+    name: OneNote for Mac caches and logs
+    description: OneNote container caches/logs. Not notebook package stores.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.microsoft.onenote.mac/Data/Library/Caches
+      - $HOME/Library/Containers/com.microsoft.onenote.mac/Data/Library/Logs
+      - $HOME/Library/Caches/com.microsoft.onenote.mac
+      - $HOME/Library/Logs/OneNote
+      - $HOME/Library/Logs/Microsoft OneNote
+      - $HOME/Library/Group Containers/UBF8T346G9.Office/OneNote/Cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-paste-cache
+    name: Paste app caches and logs
+    description: Paste clipboard manager regenerable caches (not full history DB by default).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.wiheads.paste
+      - $HOME/Library/Caches/com.pasteapp.mac
+      - $HOME/Library/Logs/Paste
+      - $HOME/Library/Application Support/com.wiheads.paste/Cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-pcloud-cache
+    name: pCloud desktop caches and logs
+    description: pCloud client caches (not mounted cloud files).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.pcloud.pcloud.macos
+      - $HOME/Library/Caches/bugsnag-shared-com.pcloud.pcloud.macos
+      - $HOME/Library/Application Support/com.pcloud.pcloud.macos/Cache
+      - $HOME/Library/Application Support/pCloud/Cache
+      - $HOME/Library/Logs/pCloud
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-postman-cache-ext
+    name: Postman caches and logs
+    description: Postman Chromium caches, fsCachedData, and logs. Not collections by default.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Postman/Cache
+      - $HOME/Library/Application Support/Postman/Code Cache
+      - $HOME/Library/Application Support/Postman/GPUCache
+      - $HOME/Library/Application Support/Postman/blob_storage
+      - $HOME/Library/Application Support/Postman/logs
+      - $HOME/Library/Application Support/Postman/Crashpad
+      - $HOME/Library/Caches/com.postmanlabs.mac
+      - $HOME/Library/Caches/com.postmanlabs.mac.ShipIt
+      - $HOME/Library/Logs/Postman
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-raycast-cache
+    name: Raycast caches and logs
+    description: Raycast app caches and logs (not extension settings).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.raycast.macos
+      - $HOME/Library/Logs/Raycast
+      - $HOME/Library/Logs/com.raycast.macos
+      - $HOME/Library/Application Support/com.raycast.macos/Cache
+      - $HOME/Library/Application Support/com.raycast.macos/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-ringcentral-cache
+    name: RingCentral and Glip caches
+    description: RingCentral Electron/Glip Chromium cache dirs and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/RingCentral/Cache
+      - $HOME/Library/Application Support/RingCentral/Code Cache
+      - $HOME/Library/Application Support/RingCentral/GPUCache
+      - $HOME/Library/Application Support/RingCentral/logs
+      - $HOME/Library/Application Support/Glip/Cache
+      - $HOME/Library/Application Support/Glip/Code Cache
+      - $HOME/Library/Application Support/Glip/GPUCache
+      - $HOME/Library/Application Support/Glip/logs
+      - $HOME/Library/Caches/com.ringcentral.glip
+      - $HOME/Library/Caches/com.ringcentral.RingCentral
+      - $HOME/Library/Logs/RingCentral
+      - $HOME/Library/Logs/Glip
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-signal-cache
+    name: Signal Desktop Chromium caches and logs
+    description: Signal cache dirs only; never sql/db.sqlite or config.json.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Signal/Cache
+      - $HOME/Library/Application Support/Signal/Code Cache
+      - $HOME/Library/Application Support/Signal/GPUCache
+      - $HOME/Library/Application Support/Signal/DawnGraphiteCache
+      - $HOME/Library/Application Support/Signal/DawnWebGPUCache
+      - $HOME/Library/Application Support/Signal/Service Worker
+      - $HOME/Library/Application Support/Signal/blob_storage
+      - $HOME/Library/Application Support/Signal/logs
+      - $HOME/Library/Application Support/Signal/Crashpad
+      - $HOME/Library/Caches/org.whispersystems.signal-desktop
+      - $HOME/Library/Caches/org.whispersystems.signal-desktop.ShipIt
+      - $HOME/Library/Logs/Signal
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-skype-cache
+    name: Skype for Desktop caches and logs
+    description: Modern Skype Electron caches plus legacy Content cache and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Microsoft/Skype for Desktop/Cache
+      - $HOME/Library/Application Support/Microsoft/Skype for Desktop/Code Cache
+      - $HOME/Library/Application Support/Microsoft/Skype for Desktop/GPUCache
+      - $HOME/Library/Application Support/Microsoft/Skype for Desktop/Service Worker
+      - $HOME/Library/Application Support/Microsoft/Skype for Desktop/blob_storage
+      - $HOME/Library/Application Support/Microsoft/Skype for Desktop/logs
+      - $HOME/Library/Application Support/Microsoft/Skype for Desktop/Crashpad
+      - $HOME/Library/Caches/com.skype.skype
+      - $HOME/Library/Logs/Skype Helper
+      - $HOME/Library/Logs/Skype
+      - $HOME/Library/Application Support/Skype/Content
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-slack-extra-cache
+    name: Slack extra Chromium caches and logs
+    description: Slack Dawn caches, Service Worker, blob_storage, Crashpad, app logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Slack/DawnGraphiteCache
+      - $HOME/Library/Application Support/Slack/DawnWebGPUCache
+      - $HOME/Library/Application Support/Slack/Service Worker
+      - $HOME/Library/Application Support/Slack/blob_storage
+      - $HOME/Library/Application Support/Slack/Shared Dictionary
+      - $HOME/Library/Application Support/Slack/Crashpad
+      - $HOME/Library/Application Support/Slack/logs
+      - $HOME/Library/Caches/com.tinyspeck.slackmacgap
+      - $HOME/Library/Caches/com.tinyspeck.slackmacgap.ShipIt
+      - $HOME/Library/Logs/Slack
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-spark-mail-cache
+    name: Spark mail client caches
+    description: Readdle Spark caches and logs (not mailbox data if offline).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.readdle.smartemail-Mac
+      - $HOME/Library/Containers/com.readdle.smartemail-Mac/Data/Library/Caches
+      - $HOME/Library/Logs/Spark
+      - $HOME/Library/Application Support/Spark Desktop/Cache
+      - $HOME/Library/Application Support/Spark Desktop/Code Cache
+      - $HOME/Library/Application Support/Spark Desktop/GPUCache
+      - $HOME/Library/Application Support/Spark Desktop/logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-tableplus-cache
+    name: TablePlus caches and logs
+    description: TablePlus UI/query caches and logs. Not connection configs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.tinyapp.TablePlus
+      - $HOME/Library/Logs/TablePlus
+      - $HOME/Library/Application Support/com.tinyapp.TablePlus/Cache
+      - $HOME/Library/Application Support/com.tinyapp.TablePlus/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-teams-classic-cache
+    name: Microsoft Teams classic Electron caches
+    description: Classic Teams desktop Chromium caches, Application Cache, blob, logs, tmp.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Microsoft/Teams/Cache
+      - $HOME/Library/Application Support/Microsoft/Teams/Code Cache
+      - $HOME/Library/Application Support/Microsoft/Teams/GPUCache
+      - $HOME/Library/Application Support/Microsoft/Teams/Application Cache/Cache
+      - $HOME/Library/Application Support/Microsoft/Teams/blob_storage
+      - $HOME/Library/Application Support/Microsoft/Teams/Service Worker
+      - $HOME/Library/Application Support/Microsoft/Teams/logs
+      - $HOME/Library/Application Support/Microsoft/Teams/tmp
+      - $HOME/Library/Application Support/Microsoft/Teams/DawnGraphiteCache
+      - $HOME/Library/Application Support/Microsoft/Teams/DawnWebGPUCache
+      - $HOME/Library/Caches/com.microsoft.teams
+      - $HOME/Library/Logs/Microsoft Teams
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-teams2-cache-logs
+    name: Microsoft Teams 2.x container caches and logs
+    description: New Teams (teams2) sandboxed Library Caches and Logs only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.microsoft.teams2/Data/Library/Caches
+      - $HOME/Library/Containers/com.microsoft.teams2/Data/Library/Logs
+      - $HOME/Library/Containers/com.microsoft.teams2.notificationcenter/Data/Library/Caches
+      - $HOME/Library/Containers/com.microsoft.teams2.notificationcenter/Data/Library/Logs
+      - $HOME/Library/Group Containers/UBF8T346G9.com.microsoft.teams/Library/Caches
+      - $HOME/Library/Group Containers/UBF8T346G9.com.microsoft.teams/Library/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-teamviewer-logs
+    name: TeamViewer logs and caches
+    description: TeamViewer log directory and app caches under user Library.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/TeamViewer
+      - $HOME/Library/Caches/com.teamviewer.TeamViewer
+      - $HOME/Library/Caches/com.teamviewer.TeamViewer.Desktop
+      - $HOME/Library/Application Support/TeamViewer/Cache
+      - $HOME/Library/Application Support/TeamViewer/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-telegram-cache-ext
+    name: Telegram NSCache and Sparkle caches
+    description: Telegram app Cache.db/WebKit/Sparkle under Library/Caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/ru.keepcoder.Telegram
+      - $HOME/Library/Logs/Telegram
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-telegram-media-cache
+    name: Telegram postbox media cache
+    description: Downloaded chat media under Telegram Group Container account postbox/media.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram
+    include_globs:
+      - "**/account-*/postbox/media/**"
+      - "**/account-*/postbox/media"
+    delete_mode: contents
+    max_depth: 10
+
+  - id: app-webex-cache
+    name: Webex and Cisco Spark caches and logs
+    description: Cisco Spark/Webex disk caches and meeting logs per Cisco clear-cache docs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Cisco-Systems.Spark
+      - $HOME/Library/Caches/Cisco Spark
+      - $HOME/Library/Caches/com.cisco.webex
+      - $HOME/Library/Caches/com.cisco.webexmeetingsapp
+      - $HOME/Library/Application Support/Cisco Spark/Cache
+      - $HOME/Library/Application Support/Cisco Spark/Code Cache
+      - $HOME/Library/Application Support/Cisco Spark/GPUCache
+      - $HOME/Library/Application Support/Cisco Spark/logs
+      - $HOME/Library/Application Support/Webex/Cache
+      - $HOME/Library/Application Support/Webex Meetings/Cache
+      - $HOME/Library/Logs/Cisco Spark
+      - $HOME/Library/Logs/Webex Meetings
+      - $HOME/Library/Logs/Webex
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-whatsapp-cache
+    name: WhatsApp Desktop caches and logs
+    description: WhatsApp Electron/container caches and logs. Not message store DBs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Containers/desktop.WhatsApp/Data/Library/Caches
+      - $HOME/Library/Containers/desktop.WhatsApp/Data/Library/Logs
+      - $HOME/Library/Containers/desktop.WhatsApp/Data/Library/Application Support/WhatsApp/Cache
+      - $HOME/Library/Containers/desktop.WhatsApp/Data/Library/Application Support/WhatsApp/Code Cache
+      - $HOME/Library/Containers/desktop.WhatsApp/Data/Library/Application Support/WhatsApp/GPUCache
+      - $HOME/Library/Containers/desktop.WhatsApp/Data/Library/Application Support/WhatsApp/Service Worker
+      - $HOME/Library/Containers/desktop.WhatsApp/Data/Library/Application Support/WhatsApp/blob_storage
+      - $HOME/Library/Containers/desktop.WhatsApp/Data/Library/Application Support/WhatsApp/DawnGraphiteCache
+      - $HOME/Library/Containers/desktop.WhatsApp/Data/Library/Application Support/WhatsApp/DawnWebGPUCache
+      - $HOME/Library/Containers/desktop.WhatsApp/Data/Library/Application Support/WhatsApp/logs
+      - $HOME/Library/Caches/net.whatsapp.WhatsApp
+      - $HOME/Library/Logs/WhatsApp
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-work-trackers-cache
+    name: Asana ClickUp Todoist Trello desktop caches
+    description: Work tracker Electron/desktop caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Asana/Cache
+      - $HOME/Library/Application Support/Asana/Code Cache
+      - $HOME/Library/Application Support/Asana/GPUCache
+      - $HOME/Library/Application Support/ClickUp/Cache
+      - $HOME/Library/Application Support/ClickUp/Code Cache
+      - $HOME/Library/Application Support/ClickUp/GPUCache
+      - $HOME/Library/Application Support/ClickUp/logs
+      - $HOME/Library/Application Support/Todoist/Cache
+      - $HOME/Library/Application Support/Todoist/Code Cache
+      - $HOME/Library/Application Support/Todoist/GPUCache
+      - $HOME/Library/Application Support/Trello/Cache
+      - $HOME/Library/Application Support/Trello/Code Cache
+      - $HOME/Library/Application Support/Trello/GPUCache
+      - $HOME/Library/Caches/com.todoist.mac.Todoist
+      - $HOME/Library/Caches/com.clickup.desktop-app
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-zoom-extra-cache-logs
+    name: Zoom extra caches and component logs
+    description: Zoom updater caches, CEF/WebView data caches, auxiliary logs. Not meeting recordings.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/zoom.us
+      - $HOME/Library/Logs/ZoomPhone
+      - $HOME/Library/Caches/ZoomUpdater
+      - $HOME/Library/Caches/us.zoom.ZoomAutoUpdater
+      - $HOME/Library/Caches/us.zoom.ZoomClips
+      - $HOME/Library/Application Support/zoom.us/data/CefCache
+      - $HOME/Library/Application Support/zoom.us/data/WebviewCache
+      - $HOME/Library/Application Support/zoom.us/data/ZoomDownload
+      - $HOME/Library/Application Support/zoom.us/data/CrashReports
+    exclude_globs:
+      - "**/Meeting*"
+      - "**/recording*"
+      - "**/Recordings/**"
+      - "**/*Recording*"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: app-zoom-plugins-logs
+    name: Zoom auxiliary logs and WebView2 cache
+    description: Zoom installer/aomhost/CptHost logs and Webview2 cache under user Library.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/zoomusinstall.log
+      - $HOME/Library/Logs/aomhostapp.log
+      - $HOME/Library/Logs/CptHost
+      - $HOME/Library/Application Support/zoom.us/data/Webview2Cache
+    delete_mode: contents
+    max_depth: 6

@@ -21,7 +21,7 @@ pub struct TaskSource {
     pub trust: PackTrust,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TaskPack {
     pub tasks: Vec<Task>,
     pub sources: Vec<TaskSource>,
@@ -30,58 +30,6 @@ pub struct TaskPack {
 }
 
 impl TaskPack {
-    /// Build a task pack from already parsed definitions and their one-to-one
-    /// source provenance.
-    ///
-    /// This is the supported constructor for programmatic callers. It applies
-    /// the same trust, platform, validation, and template checks as loading
-    /// definitions from disk.
-    pub fn from_tasks(
-        tasks: Vec<Task>,
-        sources: Vec<TaskSource>,
-        allow_external: bool,
-    ) -> Result<Self> {
-        if tasks.len() != sources.len() {
-            bail!(
-                "task/source count mismatch: {} task(s), {} source(s)",
-                tasks.len(),
-                sources.len()
-            );
-        }
-
-        let mut available_tasks = Vec::new();
-        let mut available_sources = Vec::new();
-        let mut origins = BTreeMap::new();
-        let mut unavailable = Vec::new();
-        let mut seen = BTreeSet::new();
-
-        for (task, source) in tasks.into_iter().zip(sources) {
-            validate_trust(&task, source.trust, allow_external, &source.path)?;
-            task.validate()
-                .map_err(anyhow::Error::msg)
-                .with_context(|| format!("validate task {}", task.id))?;
-            if !task.platform.matches_host() {
-                unavailable.push((task.id, task.platform));
-                continue;
-            }
-            if !seen.insert(task.id.clone()) {
-                bail!("duplicate task id {} in {}", task.id, source.path.display());
-            }
-            origins.insert(task.id.clone(), source.trust);
-            available_tasks.push(task);
-            available_sources.push(source);
-        }
-
-        let pack = Self {
-            tasks: available_tasks,
-            sources: available_sources,
-            origins,
-            unavailable,
-        };
-        pack.validate_templates()?;
-        Ok(pack)
-    }
-
     pub fn load_many(sources: &[TaskSource], allow_external: bool) -> Result<Self> {
         let mut tasks = Vec::new();
         let mut seen = BTreeSet::new();
@@ -138,19 +86,14 @@ impl TaskPack {
             unavailable,
         };
 
-        pack.validate_templates()?;
-
-        Ok(pack)
-    }
-
-    fn validate_templates(&self) -> Result<()> {
         // Resolve every template while loading so broken references, cycles,
         // trust downgrades, and expansion limits fail before a task can be run.
-        for task in &self.tasks {
-            self.resolve(&task.id)
+        for task in &pack.tasks {
+            pack.resolve(&task.id)
                 .with_context(|| format!("resolve task template {}", task.id))?;
         }
-        Ok(())
+
+        Ok(pack)
     }
 
     pub fn get(&self, id: &str) -> Option<&Task> {
@@ -188,6 +131,10 @@ impl TaskPack {
         let mut resolved = self.tasks[index].clone();
         resolved.resolved_scenarios = std::mem::take(&mut resolved.scenarios);
         resolved.steps = steps;
+        resolved
+            .validate_executable()
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("validate resolved scenario {}", resolved.id))?;
         Ok(resolved)
     }
 
@@ -303,6 +250,7 @@ impl TaskPack {
                 );
             }
             resolved.extend(child_steps.into_iter().map(|mut step| {
+                step.prefix_condition_step(scenario_id);
                 step.id = format!("{}/{}", scenario_id, step.id);
                 step
             }));

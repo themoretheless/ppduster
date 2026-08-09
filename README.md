@@ -50,6 +50,21 @@ searchable scenario library, step inspector, release-channel controls, permissio
 switches, dry-run planning, and explicit confirmation before supported scenarios are
 applied.
 
+For a scenario with a `git-clone` step, the inspector can load every repository visible
+to the current GitHub CLI account and select one or many of them. The selection replaces
+the first resolved git step with one ordinary clone-or-update step per repository,
+synchronizes `main`, and checks out under `<destination root>/<owner>/<repository>`, so
+plans and reports stay separate. Repositories without `main`, archived repositories, and
+empty repositories cannot be selected. The HTTPS/SSH choice is used for a new clone;
+an existing checkout keeps and fetches its verified `origin`.
+
+The picker never reads or stores a GitHub token: install `gh` and run
+`gh auth login --hostname github.com` before loading the list. Private HTTPS clones also
+need `gh auth setup-git --hostname github.com`; SSH clones need a configured GitHub key
+and SSH agent. The desktop app blocks Apply until the corresponding noninteractive
+credential helper or SSH-agent/known-host setup is present; an invalid credential is
+then reported by the ordinary per-repository git step.
+
 ```bash
 cargo run --bin ppduster-ui
 ```
@@ -63,7 +78,8 @@ open target/macos/ppduster.app
 
 Scenarios that need a terminal prompt, App Store authentication, or vendor license UI
 remain terminal-only. The desktop app produces the exact CLI command for them instead
-of attempting to capture credentials.
+of attempting to capture credentials. A repository selection is an in-memory scenario
+configuration and is applied from the desktop UI after its generated plan is reviewed.
 
 ## Usage
 
@@ -92,6 +108,49 @@ ppduster clean -c caches          # dry-run
 ppduster clean -c caches --yes    # to Trash
 ppduster clean -c temp --yes --permanent   # asks you to type DELETE
 ```
+
+## Mac App Store CLI
+
+`ppduster app-store` provides its own `mas`-style catalog, inventory, install,
+and update commands. It does not require Homebrew or the external `mas` binary,
+and it can run outside the repository without loading cleanup rules.
+
+```bash
+# Catalog and local inventory (read-only)
+ppduster app-store search Xcode --country US --limit 10
+ppduster app-store list
+ppduster app-store outdated
+ppduster app-store doctor
+
+# Installation/update is planned by default
+ppduster app-store install 497799835
+ppduster app-store upgrade
+
+# Explicitly enqueue with Apple's App Store services
+ppduster app-store install 497799835 --yes
+ppduster app-store install 640199958 --get --yes
+ppduster app-store upgrade --yes
+
+# Machine-readable output is available for every report
+ppduster -o json app-store list
+```
+
+The storefront defaults to the Mac's Apple locale and can be overridden with
+`--country` or `PPDUSTER_APP_STORE_COUNTRY`. Installed apps are identified by a
+non-empty App Store receipt and their bundle metadata; `outdated` compares those
+versions with Apple's catalog and reports incompatible or unmatched apps separately.
+Because Apple's catalog can lag behind App Store delivery, these are update candidates,
+not a transactional guarantee of the release the signed-in account will receive.
+
+Native install/update is macOS-only and uses isolated, runtime-checked private Apple
+frameworks because Apple does not publish a CLI installation API. This backend may
+need maintenance after macOS updates. The Mac App Store must already be signed in;
+ppduster never reads Apple Account credentials. `--get` is restricted to catalogued
+free apps, while paid apps must first be purchased in Apple's UI. Applying always
+requires `--yes`; omit it for a side-effect-free plan. By default ppduster waits for
+the receipt/version, while `--no-wait` returns after the bounded submission check. A
+`pending` result is deliberately not treated as a safe retry signal: rescan `list` and
+`outdated` first, because Apple's background service may still finish the request.
 
 ## Setup automation
 
@@ -136,13 +195,17 @@ ppduster setup run bambu-studio-install --channel release --yes
 ppduster setup run bambu-studio-install --channel beta
 ppduster setup run bambu-studio-install --channel beta --yes
 
-# Install/refresh the mas CLI used by app-store-install actions
+# Check native App Store prerequisites used by app-store-install actions
 ppduster setup run app-store-bootstrap
 ppduster setup run app-store-bootstrap --yes
 
 # A reusable template composed from six existing scenarios
 ppduster setup show macos-developer-workstation
 ppduster setup run macos-developer-workstation --allow-shell
+
+# Typed folder/file operations, SHA-256, and filesystem conditions
+ppduster setup run filesystem-basics
+ppduster setup run filesystem-basics --yes
 
 # External task packs are blocked unless explicitly trusted
 ppduster --trust-external-packs setup run dev-brew-bootstrap --tasks-dir /path/to/tasks
@@ -177,6 +240,273 @@ duplicate children, platform mismatches, excessive expansion, or a reference fro
 more-trusted pack to a less-trusted pack. A definition contains either `steps` or
 `scenarios`, never both.
 
+A `git-clone` step is idempotent when a branch is declared:
+
+```yaml
+- id: sync-repository
+  name: Clone or update repository
+  type: git-clone
+  repo: https://github.com/example/project.git
+  dest: $HOME/Library/Caches/project
+  branch: main
+```
+
+The declared `dest` is the folder being ensured. If it is absent (or is an empty
+directory), the repository is cloned. If the matching repository already exists,
+ppduster fetches `origin/main` and performs only a safe fast-forward. The result report
+distinguishes a new clone, an already current branch ref, and a repository that existed
+but was outdated and was updated. If another branch is checked out, that checkout and
+its local changes stay in place while the inactive local `main` ref is fast-forwarded,
+and the report says which active branch was preserved. Local changes that would block
+a required fast-forward, a mismatched origin, or diverged history are never reset,
+stashed, merged, or overwritten; the step stops with an explicit error instead.
+
+Filesystem scenarios do not need a shell. `create-directory` recursively creates
+missing parents and is idempotent: an existing real directory is reported as already
+satisfied, while a file or symlink at the destination is an error and is never
+replaced.
+
+An unconditional `inspect-path` is read-only and runs during both a normal dry-run and
+an applied run. It reports structured `path-metadata` in JSON as well as a human
+summary: existence, path kind, emptiness, modification time, an optional creation time
+when the filesystem provides it, and size. Files are always measured. For directories,
+set `recursive_size: true` to total regular-file bytes and count entries recursively
+(a size expectation also enables that measurement). `empty` means the directory has
+no immediate entries, while `modified_at` is the timestamp of the inspected entry,
+not the newest child. Set `sha256: true` to hash a regular file; declaring
+`expect.sha256` enables the same measurement automatically. SHA-256 is unavailable for
+directories and symlinks, and symlinks are never followed.
+
+```yaml
+- id: create-state-directory
+  name: Create state directory
+  type: create-directory
+  path: $HOME/.local/state/example
+
+- id: inspect-state-directory
+  name: Get size and dates
+  type: inspect-path
+  path: $HOME/.local/state/example
+  recursive_size: true
+  expect:
+    exists: true
+    kind: directory
+    empty: true
+    min_size_bytes: 0
+    max_size_bytes: 0
+    modified_at_or_after: 2000-01-01T00:00:00Z
+    modified_at_or_before: 2100-01-01T00:00:00Z
+```
+
+All populated `expect` fields are combined with logical AND. Size and timestamp
+boundaries are inclusive; timestamps use RFC 3339 and are compared as instants before
+being reported in UTC. `exists: false` must stand alone because a missing path has no
+type, size, emptiness, timestamps, or SHA-256. An unmet expectation marks the step
+failed and skips later steps. Omit `expect` to observe a missing path successfully as
+`exists: false`.
+
+`write-file` treats `content` as exact UTF-8 bytes. It performs no interpolation and
+does not add a newline; YAML's `|-` block style is useful when the final newline must
+be omitted. The default `on_conflict: fail` leaves a different existing file untouched,
+while an identical file is already satisfied. `on_conflict: replace` atomically
+replaces only a regular file. There is deliberately no append mode because appending
+cannot provide strict idempotency. Task YAML is plaintext, not a secret store: never
+embed passwords or tokens in `content`; use the dedicated secrets workflow instead.
+
+`copy-path` accepts `src` and the exact `dest`. It copies a regular file or directory
+without following symlinks. A source tree containing a symlink is rejected, an
+identical destination is already satisfied, and any different existing destination is
+left untouched with an error. `copy-path` has no overwrite or conflict-policy field.
+`remove-path` moves its declared path to the system Trash or Recycle Bin and never
+falls back to permanent deletion. A missing path is already satisfied; moving a final
+symlink moves the link itself rather than its target.
+
+```yaml
+- id: write-state
+  type: write-file
+  path: $HOME/.local/state/example/state.txt
+  content: |-
+    ready
+  on_conflict: fail
+
+- id: copy-state
+  type: copy-path
+  src: $HOME/.local/state/example/state.txt
+  dest: $HOME/.local/state/example/state-copy.txt
+
+- id: verify-state-copy
+  when:
+    type: path
+    path: $HOME/.local/state/example/state-copy.txt
+    expect: { exists: true }
+  type: inspect-path
+  path: $HOME/.local/state/example/state-copy.txt
+  sha256: true
+  expect:
+    kind: file
+    sha256: b24d6d33736ecd5604a4b17bc9c6481039fac362bb7df044ef1c10a2bfd21db6
+
+- id: remove-obsolete-marker
+  when:
+    type: path
+    path: $HOME/.local/state/example/obsolete.txt
+    expect: { exists: true }
+  type: remove-path
+  path: $HOME/.local/state/example/obsolete.txt
+```
+
+Steps can use `when` to skip optional work or `require` to enforce a prerequisite.
+Both fields contain a tagged condition tree: `type: path` reuses `PathExpectation`,
+`type: exit-code` observes an earlier script step, `type: all` and `type: any` contain
+a non-empty `conditions` list, and `type: not` contains one `condition`. For example:
+
+```yaml
+require:
+  type: all
+  conditions:
+    - type: path
+      path: $TMPDIR
+      expect:
+        exists: true
+        kind: directory
+    - type: any
+      conditions:
+        - type: path
+          path: $TMPDIR
+          expect: { kind: directory }
+        - type: path
+          path: $TMPDIR
+          expect: { kind: other }
+    - type: not
+      condition:
+        type: path
+        path: $TMPDIR
+        expect: { kind: symlink }
+```
+
+Guards are evaluated only during an applied run, immediately before their step, so
+they see changes made by earlier applied steps. A dry-run does not evaluate guards or
+simulate earlier mutations; a guarded `inspect-path` therefore stays planned, while an
+unconditional `inspect-path` remains observable in dry-run. Other guarded actions keep
+their normal dry-run planning and intrinsic idempotency checks. A false `when` marks
+the step skipped and continues the scenario. A false `require` fails the step and skips
+later work. `when` is evaluated before `require`; `not` negates only a condition
+mismatch, never an I/O error.
+
+The older `check.path_exists` and `check.command_succeeds` fields have a different,
+unchanged purpose: either one can declare a mutating step already satisfied so its
+action is skipped. They are not assertions or branching conditions.
+
+A `run-script` step executes an existing script file through an explicitly selected
+interpreter. `script` is a path, not inline source; `args`, `cwd`, and `env` are
+optional. `success_exit_codes` declares which normal process exit codes count as a
+successful step and defaults to `[0]`. Every script step must declare
+`dangerous: true`, and execution requires both the normal `--yes` apply flag and
+`--allow-shell`:
+
+```yaml
+- id: configure-posix
+  name: Apply the portable workstation baseline
+  type: run-script
+  interpreter: sh
+  script: $HOME/.config/workstation/configure.sh
+  args: ["--profile", "developer"]
+  success_exit_codes: [0]
+  cwd: $HOME/.config/workstation
+  env:
+    PPDUSTER_MODE: setup
+  dangerous: true
+
+- id: configure-bash
+  name: Apply Bash-specific setup
+  type: run-script
+  interpreter: bash
+  script: $HOME/.config/workstation/configure-bash.sh
+  dangerous: true
+
+- id: configure-windows
+  name: Apply the Windows workstation baseline
+  type: run-script
+  interpreter: powershell
+  script: "%USERPROFILE%/workstation/configure.ps1"
+  args: ["-Profile", "Developer"]
+  dangerous: true
+```
+
+The actual exit code is retained in the step report and shown even when a configured
+non-zero code is accepted. A normally terminated script whose code is not listed in
+`success_exit_codes` fails the step, halts the scenario, and skips every later step.
+Termination by a signal has no exit code, never matches
+`success_exit_codes`, and is always reported as a failure rather than being confused
+with an ordinary non-zero result.
+
+Machine-readable reports expose this result as structured output, for example:
+
+```json
+{
+  "type": "process-exit",
+  "value": {
+    "exit_code": 10,
+    "accepted": true,
+    "success_exit_codes": [0, 10, 20]
+  }
+}
+```
+
+For signal termination, `exit_code` is `null`, `accepted` is `false`, and
+`termination_signal` is included when the operating system exposes it.
+
+Later steps can branch declaratively on the actual code from an earlier script step.
+The probe must accept every code that represents a valid state; unexpected codes still
+fail the scenario before a branch is selected:
+
+```yaml
+- id: probe
+  name: Detect the workstation state
+  type: run-script
+  interpreter: sh
+  script: $HOME/.config/workstation/probe.sh
+  success_exit_codes: [0, 10, 20]
+  dangerous: true
+
+- id: configure-missing
+  name: Configure a missing workstation
+  when: { type: exit-code, step: probe, codes: [10] }
+  type: run-script
+  interpreter: bash
+  script: $HOME/.config/workstation/configure-bash.sh
+  dangerous: true
+
+- id: repair-outdated
+  name: Repair an outdated workstation
+  when: { type: exit-code, step: probe, codes: [20] }
+  type: run-script
+  interpreter: powershell
+  script: $HOME/.config/workstation/repair.ps1
+  dangerous: true
+```
+
+A dry-run cannot know the probe's future code, so its plan shows every conditional
+branch for review. During an applied run, each `when: exit-code` condition is evaluated
+after its referenced step completes; branches whose `codes` do not contain the actual
+code are marked skipped and are not executed. The referenced step must be an earlier
+`run-script` step, and every condition code must also appear in that step's
+`success_exit_codes`. Both code lists must be non-empty and contain no duplicates.
+
+The interpreter names map to these executables, tried in order:
+
+| `interpreter` | macOS / Linux | Windows |
+|---|---|---|
+| `sh` | `/bin/sh`, then `sh` | `sh.exe`, then `sh` |
+| `bash` | `bash`, then `/bin/bash` | `bash.exe`, then `bash` |
+| `powershell` | `pwsh`, then `powershell` | `pwsh.exe`, then `powershell.exe` |
+
+PowerShell scripts run with `-NoLogo -NoProfile -NonInteractive -File`; Windows also
+uses process-scoped `-ExecutionPolicy Bypass`. The script must be a regular file;
+script and `cwd` symlinks are rejected, and relative script paths are resolved from
+`cwd` when it is supplied. Script steps stay terminal-only in Scenario Flow, which
+shows the exact CLI command instead of trying to capture script interaction.
+
 Current safety posture:
 
 - separate from `rules/` and the scan/clean pipeline
@@ -185,6 +515,11 @@ Current safety posture:
 - shell-capable steps require `dangerous: true` and `--allow-shell`
 - elevated steps require `--allow-elevation`
 - external task packs require `--trust-external-packs`
+- `create-directory` expands only declared paths, blocks protected destinations, creates parents without overwriting, and rejects a symlink at the target
+- `inspect-path` performs read-only metadata and SHA-256 checks during dry-run when unconditional; recursive size walks never follow symlinks and fail rather than report a partial total
+- `write-file` is an exact, atomic, size-bounded write with no interpolation or append mode
+- `copy-path` never follows symlinks or overwrites different existing content
+- `remove-path` uses Trash/Recycle Bin only and never performs permanent deletion
 - download steps require `checksum.sha256`
 
 The `dev-dodopizza-package-registries` task creates `.npmrc` and `NuGet.Config`
@@ -248,7 +583,7 @@ environment; [older clients ignore the mapping](https://learn.microsoft.com/en-u
 
 - `extract-archive` supports `zip`, `tar`, `tar.gz`/`tgz`, `tar.bz2`, and `tar.xz`; it rejects links, special files, traversal, duplicate output files, oversized output, and existing destinations before atomically publishing the extracted directory
 - DMG installation verifies the image, mounts it read-only, validates the app signature and Gatekeeper assessment, stages the bundle in `~/Applications`, and refuses elevation or overwriting an existing app
-- typed `app-store-install` steps use a numeric App Store ID through a standard Homebrew `mas` installation; they require explicit elevation permission and an App Store account that owns the app
+- typed `app-store-install` steps use a numeric App Store ID through ppduster's native, runtime-checked backend; they must not request sudo/elevation and require an App Store account that owns the app
 - the sealed `activate-license` action accepts only a provider and method, and task loading rejects `license_key` / `license-key` fields at any nesting level; enter the key directly in the vendor UI
 
 An App Store installation step looks like this:
@@ -256,8 +591,6 @@ An App Store installation step looks like this:
 ```yaml
 - id: install-xcode
   name: Install Xcode
-  auth: sudo
-  allow_elevation: allow
   type: app-store-install
   app_id: 497799835
   operation: install
@@ -265,9 +598,11 @@ An App Store installation step looks like this:
 
 Use `operation: install` for an app already obtained or purchased by the signed-in
 Apple Account. Use `operation: get` to obtain and install a free app. Apply the task
-with `--yes --allow-elevation`; Apple Account authentication remains in Apple's UI.
-The bundled bootstrap installs the current Homebrew Core `mas` and therefore requires
-macOS 14 or newer.
+with `--yes`; Apple Account authentication remains in Apple's UI. Native App Store
+steps reject `auth: sudo` and `allow_elevation: allow` because the backend runs in the
+signed-in user session and does not invoke sudo.
+The bundled bootstrap performs read-only macOS and App Store metadata checks; it does
+not install Homebrew or the external `mas` utility.
 
 An archive extraction step can detect the format from its file name or accept an
 explicit `format`:
@@ -366,10 +701,10 @@ Path templates: `$HOME`, `~`, `$TMPDIR`, `$XDG_CACHE_HOME`, `$XDG_DATA_HOME`, `%
 
 ```
 src/           Rust library + CLI
-rules/         YAML rule packs (macos, linux, windows, dev, apps)
+rules/         YAML rule packs (reviewed core + quarantined extended packs)
 tasks/         Typed setup automation tasks
 tests/         Integration tests
-research/      Research notes from multi-agent analysis (when present)
+research/      Research notes and multi-agent macOS path batches
 ```
 
 ## Research basis
@@ -392,6 +727,12 @@ Open-source families covered in research batches: classic cleaners, duplicate fi
 - **Opt-in dev cleanup:** Xcode DerivedData, iOS DeviceSupport, and CoreSimulator caches/logs stay disabled by default because they are regenerable but can slow the next build or simulator launch.
 - **Report-only areas:** Xcode Archives and iOS device backups are listed for review but never auto-deleted.
 - **Intentionally excluded:** cookies, history, saved passwords, Mail data, Keychains, iCloud/mobile documents, and broad `~/Library/Application Support` or `~/Library/Containers` wipes.
+- **Extended packs (wave 1, 10 agents):** `macos-apple-extended`, `macos-browsers`, `macos-misc`, `dev-extended`, `dev-mobile`, `dev-ml`, `apps-comms`, `apps-creative`, `apps-gaming`, `apps-office-electron`.
+- **Extended packs (wave 2, 30 agents):** security/VPN, design UI, music DAW, CAD/print, photo RAW, education, finance, cloud CLIs, databases, virt, exotic pkg managers, webservers, observability, notes/PKM, social, streaming, backup/sync, PWA helpers, Continuity, fonts/icons, network proxies, JetBrains deep, Microsoft deep, Asia apps, CIS apps, JS monorepo, MDM, Homebrew deep, system logs, Containers residuals (30 YAML packs under `rules/`).
+- **Quarantine policy:** every research-generated extended rule is disabled and `report-only`. Even `--all --yes` cannot delete its findings. Promote rules to cleanup only after a path-level audit and a regression test; broad `Application Support` roots are not considered safe cleanup targets.
+- Together with core packs: **~1500+ rules** and **~7500+** path templates. Only reviewed core rules can delete; extended coverage is currently an opt-in inventory.
+- **Personal pack:** `apps-personal.yaml` is built from a **live inventory** of apps on this Mac (Claude, Codex, Kimi, Copilot, Steam, JetBrains, Edge, Telegram, etc.) and is also disabled/report-only.
+- **Research sources:** `research/macos-batch-01` … `41` JSON + `research/macos-merge-summary.json`.
 
 ## License
 

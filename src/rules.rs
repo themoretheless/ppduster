@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Risk level for a cleaning rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,9 +26,10 @@ impl Risk {
 }
 
 /// Platform filter for a rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Platform {
+    #[default]
     Any,
     Macos,
     Linux,
@@ -112,12 +113,6 @@ fn default_min_age() -> u64 {
 }
 fn default_max_depth() -> usize {
     12
-}
-
-impl Default for Platform {
-    fn default() -> Self {
-        Platform::Any
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,7 +216,7 @@ impl RulePack {
     }
 }
 
-fn validate_rule(rule: &Rule, source: &PathBuf) -> Result<()> {
+fn validate_rule(rule: &Rule, source: &Path) -> Result<()> {
     let rule_id = rule.id.trim();
     if rule_id.is_empty() {
         bail!("{}: rule missing non-empty id", source.display());
@@ -310,7 +305,7 @@ pub fn expand_path_template(template: &str) -> Option<PathBuf> {
 
     // Longest keys first so %LOCALAPPDATA% beats partials
     let mut keys = replacements;
-    keys.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    keys.sort_by_key(|item| std::cmp::Reverse(item.0.len()));
 
     for (key, path) in &keys {
         if s.contains(key) {

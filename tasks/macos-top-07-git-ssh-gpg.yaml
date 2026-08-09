@@ -14,11 +14,11 @@ task:
         command_succeeds: ["git", "--version"]
     - id: verify-ssh-dir
       name: Verify SSH directory
-      type: run-command
-      program: bash
-      args: ["-lc", "test -d \"$HOME/.ssh\""]
-      dangerous: true
-      shell: allow
+      type: inspect-path
+      path: $HOME/.ssh
+      expect:
+        exists: true
+        kind: directory
     - id: verify-gpg
       name: Verify GPG is installed
       type: run-command

@@ -1,0 +1,595 @@
+pack: apps-cad-print
+rules:
+
+  - id: cad-autocad-caches
+    name: AutoCAD for Mac caches
+    description: AutoCAD NSCache and Autodesk AutoCAD local cache trees.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.autodesk.AutoCAD
+      - $HOME/Library/Caches/com.autodesk.AutoCADLT
+      - $HOME/Library/Caches/Autodesk/AutoCAD
+      - $HOME/Library/Application Support/Autodesk/Local/AutoCAD
+      - $HOME/Library/Application Support/Autodesk/Local/AutoCAD LT
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cad-autocad-logs
+    name: AutoCAD for Mac logs
+    description: AutoCAD crash and session logs under Autodesk logs.
+    category: app-logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/Autodesk/AutoCAD
+      - $HOME/Library/Application Support/Autodesk/AutoCAD 2024/R24.3/logs
+      - $HOME/Library/Application Support/Autodesk/AutoCAD 2025/R25.0/logs
+      - $HOME/Library/Application Support/Autodesk/AutoCAD 2026/R26.0/logs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cad-bambu-studio-cache
+    name: Bambu Studio cache
+    description: Bambu Studio (PrusaSlicer fork) cache and NSCache.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/BambuStudio/cache
+      - $HOME/Library/Application Support/BambuStudio/log
+      - $HOME/Library/Application Support/BambuStudio/logs
+      - $HOME/Library/Caches/BambuStudio
+      - $HOME/Library/Caches/com.bambulab.bambu-studio
+      - $HOME/Library/Caches/com.bambulab.BambuStudio
+      - $HOME/Library/Logs/BambuStudio
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cad-blender-residual-caches
+    name: Blender residual version caches (extra)
+    description: Blender versioned cache dirs not fully covered by creative-blender rule (5.x and Foundation alternate layout) plus asset index cache.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Blender/3.6/cache
+      - $HOME/Library/Application Support/Blender/4.0/cache
+      - $HOME/Library/Application Support/Blender/4.1/cache
+      - $HOME/Library/Application Support/Blender/4.2/cache
+      - $HOME/Library/Application Support/Blender/4.3/cache
+      - $HOME/Library/Application Support/Blender/4.4/cache
+      - $HOME/Library/Application Support/Blender/4.5/cache
+      - $HOME/Library/Application Support/Blender/5.0/cache
+      - $HOME/Library/Application Support/Blender/5.1/cache
+      - $HOME/Library/Application Support/Blender/5.2/cache
+      - $HOME/Library/Caches/Blender
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cad-blender-temp-logs
+    name: Blender temp and crash logs residual
+    description: Blender crash logs under temp and Application Support log leftovers.
+    category: temp
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 3
+    paths:
+      - $HOME/Library/Application Support/Blender/5.0/logs
+      - $HOME/Library/Application Support/Blender/5.1/logs
+      - $HOME/Library/Application Support/Blender/5.2/logs
+      - $HOME/Library/Logs/Blender
+      - $TMPDIR/blender
+      - $HOME/Library/Application Support/Blender Foundation/Blender/Temp
+    delete_mode: contents
+    max_depth: 4
+
+  - id: cad-chitubox-cache
+    name: ChiTuBox cache, dumps, logs
+    description: CHITUBOX Basic/Pro Application Support cache, crash dumps, and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/CHITUBOX
+      - $HOME/Library/Application Support/chitubox
+      - $HOME/Library/Application Support/chitubox2_0
+      - $HOME/Library/Application Support/CHITUBOXBasic
+      - $HOME/Library/Application Support/CHITUBOXPro
+      - $HOME/Library/Caches/CHITUBOX
+      - $HOME/Library/Caches/com.chitubox.slicer
+      - $HOME/Library/Logs/CHITUBOX
+      - $HOME/Library/Logs/chitubox
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cad-cura-cache
+    name: Ultimaker Cura cache
+    description: Cura versioned cache (definitions cache, HTTP) under Application Support/cura.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/cura
+      - $HOME/Library/Application Support/Cura
+      - $HOME/Library/Caches/cura
+      - $HOME/Library/Caches/Cura
+      - $HOME/Library/Caches/Ultimaker B.V.
+      - $HOME/Library/Caches/nl.ultimaker.cura
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cad-cura-logs
+    name: Ultimaker Cura logs
+    description: cura.log and related Ultimaker Cura logs.
+    category: app-logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/cura
+      - $HOME/Library/Logs/Cura
+      - $HOME/Library/Logs/Ultimaker
+      - $HOME/Library/Application Support/cura/log
+      - $HOME/Library/Application Support/Cura/log
+    delete_mode: contents
+    max_depth: 4
+
+  - id: cad-edrawings-caches
+    name: SolidWorks eDrawings caches and logs
+    description: eDrawings for Mac viewer caches/logs (not SolidWorks part libraries).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.solidworks.eDrawings
+      - $HOME/Library/Caches/com.solidworks.edrawings
+      - $HOME/Library/Application Support/eDrawings/Cache
+      - $HOME/Library/Application Support/SolidWorks/eDrawings/Cache
+      - $HOME/Library/Logs/eDrawings
+      - $HOME/Library/Logs/SolidWorks/eDrawings
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cad-freecad-log-file
+    name: FreeCAD main log file
+    description: Primary FreeCAD.log written under Application Support/FreeCAD.
+    category: app-logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 3
+    paths:
+      - $HOME/Library/Application Support/FreeCAD
+    delete_mode: contents
+    max_depth: 2
+
+  - id: cad-freecad-logs-cache
+    name: FreeCAD logs and cache
+    description: FreeCAD.log and Cache directory under Application Support; optional Caches bundle IDs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/FreeCAD/Cache
+      - $HOME/Library/Application Support/FreeCAD/__pycache__
+      - $HOME/Library/Caches/FreeCAD
+      - $HOME/Library/Caches/org.freecadweb.FreeCAD
+      - $HOME/Library/Caches/org.freecad.FreeCAD
+      - $HOME/Library/Logs/FreeCAD
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cad-fusion-cip-telemetry
+    name: Autodesk Fusion CIP / telemetry caches
+    description: Customer Involvement Program and related Autodesk telemetry/temp under Application Support.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Autodesk/CIP
+      - $HOME/Library/Application Support/Autodesk/ADPSDK/DLS
+      - $HOME/Library/Application Support/Autodesk/ADPSDK/Logs
+      - $HOME/Library/Application Support/Autodesk/Compute Platform
+      - $HOME/Library/Application Support/Autodesk/Core
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cad-fusion-library-caches
+    name: Autodesk Fusion Library/Caches
+    description: Fusion 360 NSCache and related Autodesk Fusion cache bundles under ~/Library/Caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.autodesk.fusion360
+      - $HOME/Library/Caches/com.autodesk.fusion
+      - $HOME/Library/Caches/com.autodesk.Fusion360
+      - $HOME/Library/Caches/Autodesk/Autodesk Fusion 360
+      - $HOME/Library/Caches/Autodesk/Fusion 360
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cad-fusion-logs
+    name: Autodesk Fusion logs
+    description: Fusion installer/streamer and runtime logs under Library/Logs and Application Support.
+    category: app-logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/Autodesk/webdeploy
+      - $HOME/Library/Application Support/Autodesk/webdeploy/logs
+      - $HOME/Library/Application Support/Autodesk/Neutron Platform/Logs
+      - $HOME/Library/Application Support/Autodesk/Autodesk Fusion 360/logs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cad-fusion-neutron-temp
+    name: Fusion Neutron Platform temp/cache
+    description: Neutron Platform runtime temp and non-pref caches used by Fusion.
+    category: temp
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Autodesk/Neutron Platform/Options
+      - $HOME/Library/Application Support/Autodesk/Neutron/Server/Production/Cache
+      - $HOME/Library/Application Support/Autodesk/Neutron/Server/Staging/Cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cad-fusion-offline-design-cache
+    name: Fusion offline design cache (W.Login)
+    description: "Locally cached Fusion cloud designs under Autodesk Fusion 360/<user-id>/W.Login. Regenerable from cloud; large re-download."
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Application Support/Autodesk/Autodesk Fusion 360
+    delete_mode: contents
+    max_depth: 8
+
+  - id: cad-grasshopper-temp
+    name: Grasshopper temp and cache
+    description: Grasshopper component temp/cache under McNeel Application Support.
+    category: temp
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/McNeel/Rhinoceros/Grasshopper/Temp
+      - $HOME/Library/Application Support/McNeel/Rhinoceros/Grasshopper/Cache
+      - $HOME/Library/Application Support/Grasshopper/Temp
+      - $HOME/Library/Application Support/Grasshopper/Cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cad-lychee-cache
+    name: Lychee Slicer caches and logs
+    description: Mango3D LycheeSlicer Application Support caches, Electron GPU/Code caches, and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/LycheeSlicer/Cache
+      - $HOME/Library/Application Support/LycheeSlicer/Code Cache
+      - $HOME/Library/Application Support/LycheeSlicer/GPUCache
+      - $HOME/Library/Application Support/LycheeSlicer/DawnCache
+      - $HOME/Library/Application Support/LycheeSlicer/logs
+      - $HOME/Library/Application Support/LycheeSlicer/tmp
+      - $HOME/Library/Caches/LycheeSlicer
+      - $HOME/Library/Caches/com.mango3d.lycheeslicer
+      - $HOME/Library/Logs/LycheeSlicer
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cad-meshlab-caches
+    name: MeshLab caches and logs
+    description: MeshLab / PyMeshLab NSCache and Application Support temp.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/net.meshlab.MeshLab
+      - $HOME/Library/Caches/com.cnr.isti.vcg.meshlab
+      - $HOME/Library/Caches/MeshLab
+      - $HOME/Library/Application Support/MeshLab/cache
+      - $HOME/Library/Application Support/MeshLab/tmp
+      - $HOME/Library/Logs/MeshLab
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cad-meshmixer-caches
+    name: Autodesk Meshmixer caches and logs
+    description: Legacy Meshmixer Application Support temp/cache and NSCache (discontinued but still installed).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Autodesk/MeshmixerTemp
+      - $HOME/Library/Application Support/Autodesk/Meshmixer
+      - $HOME/Library/Caches/com.autodesk.meshmixer
+      - $HOME/Library/Caches/Meshmixer
+      - $HOME/Library/Logs/Meshmixer
+      - $HOME/Library/Logs/Autodesk/Meshmixer
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cad-onshape-desktop-caches
+    name: Onshape desktop / Electron caches
+    description: Onshape desktop shell or App Store helper Chromium caches (browser primary; desktop residual).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.onshape.Onshape
+      - $HOME/Library/Caches/com.onshape.mobile
+      - $HOME/Library/Caches/Onshape
+      - $HOME/Library/Application Support/Onshape/Cache
+      - $HOME/Library/Application Support/Onshape/Code Cache
+      - $HOME/Library/Application Support/Onshape/GPUCache
+      - $HOME/Library/Application Support/Onshape/DawnCache
+      - $HOME/Library/Logs/Onshape
+      - $HOME/Library/Containers/com.onshape.mobile/Data/Library/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cad-open3d-cache
+    name: Open3D dataset and cache
+    description: Open3D downloaded example datasets and library caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/open3d_data
+      - $HOME/.cache/Open3D
+      - $HOME/.cache/open3d
+      - $XDG_CACHE_HOME/Open3D
+      - $XDG_CACHE_HOME/open3d
+      - $HOME/Library/Caches/Open3D
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cad-openscad-caches-backups
+    name: OpenSCAD caches and auto-backups
+    description: OpenSCAD Application Support backups and NSCache; geometry cache regenerates on compile.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/OpenSCAD/backups
+      - $HOME/Library/Caches/org.openscad.OpenSCAD
+      - $HOME/Library/Caches/OpenSCAD
+      - $HOME/Library/Logs/OpenSCAD
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cad-orca-slicer-cache
+    name: OrcaSlicer cache and system profile cache
+    description: OrcaSlicer cache, logs, and regenerable system profile cache.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/OrcaSlicer/cache
+      - $HOME/Library/Application Support/OrcaSlicer/log
+      - $HOME/Library/Application Support/OrcaSlicer/logs
+      - $HOME/Library/Caches/OrcaSlicer
+      - $HOME/Library/Caches/com.softfever3d.orca-slicer
+      - $HOME/Library/Caches/io.github.softfever.OrcaSlicer
+      - $HOME/Library/Logs/OrcaSlicer
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cad-prusaslicer-cache
+    name: PrusaSlicer vendor/index cache
+    description: PrusaSlicer cache directory (vendor indices, locks, downloads) under Application Support.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/PrusaSlicer/cache
+      - $HOME/Library/Application Support/PrusaSlicer-alpha/cache
+      - $HOME/Library/Application Support/PrusaSlicer-beta/cache
+      - $HOME/Library/Caches/com.prusa3d.slic3r
+      - $HOME/Library/Caches/PrusaSlicer
+      - $HOME/Library/Caches/com.prusa3d.prusaslicer
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cad-prusaslicer-logs
+    name: PrusaSlicer logs
+    description: PrusaSlicer log files under Application Support and Library/Logs.
+    category: app-logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/PrusaSlicer/log
+      - $HOME/Library/Application Support/PrusaSlicer/logs
+      - $HOME/Library/Logs/PrusaSlicer
+      - $HOME/Library/Logs/com.prusa3d.slic3r
+    delete_mode: contents
+    max_depth: 4
+
+  - id: cad-rhino-caches
+    name: Rhino for Mac caches
+    description: McNeel Rhinoceros NSCache and Application Support cache/temp folders (not plugins).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.mcneel.rhinoceros
+      - $HOME/Library/Caches/com.mcneel.rhinoceros.Mac
+      - $HOME/Library/Caches/com.mcneel.rhinoceros.8
+      - $HOME/Library/Caches/com.mcneel.rhinoceros.7
+      - $HOME/Library/Application Support/McNeel/Rhinoceros/7.0/Cache
+      - $HOME/Library/Application Support/McNeel/Rhinoceros/8.0/Cache
+      - $HOME/Library/Application Support/McNeel/Rhinoceros/tmp
+      - $HOME/Library/Application Support/McNeel/Rhinoceros/Temp
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cad-rhino-logs
+    name: Rhino and Grasshopper logs
+    description: Rhino for Mac and Grasshopper diagnostic logs.
+    category: app-logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/McNeel
+      - $HOME/Library/Logs/Rhino
+      - $HOME/Library/Application Support/McNeel/Rhinoceros/7.0/logs
+      - $HOME/Library/Application Support/McNeel/Rhinoceros/8.0/logs
+      - $HOME/Library/Application Support/McNeel/Rhinoceros/Grasshopper/Logs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cad-shapr3d-caches
+    name: Shapr3D caches and tmp
+    description: Shapr3D App Store container Caches/tmp and non-sandbox Caches (not Documents workspaces).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.shapr3d.Shapr
+      - $HOME/Library/Caches/com.shapr3d.shapr
+      - $HOME/Library/Containers/com.shapr3d.Shapr/Data/Library/Caches
+      - $HOME/Library/Containers/com.shapr3d.Shapr/Data/tmp
+      - $HOME/Library/Containers/com.shapr3d.shapr/Data/Library/Caches
+      - $HOME/Library/Containers/com.shapr3d.shapr/Data/tmp
+      - $HOME/Library/Application Support/Shapr3D/tmp
+      - $HOME/Library/Application Support/Shapr3D/Cache
+      - $HOME/Library/Logs/Shapr3D
+      - $HOME/Library/Containers/com.shapr3d.Shapr/Data/Library/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cad-shared-autodesk-logs-misc
+    name: Shared Autodesk installer leftovers logs
+    description: Additional Autodesk shared log/temp under user Library for CAD installers.
+    category: app-logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Autodesk/InstallerLogs
+      - $HOME/Library/Application Support/Autodesk/ODIS/Log
+      - $HOME/Library/Application Support/Autodesk/ODIS/cache
+      - $HOME/Library/Logs/Autodesk.Fusion360.Installer
+      - $HOME/Library/Logs/Autodesk Fusion 360
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cad-sketchup-caches
+    name: SketchUp caches
+    description: Trimble SketchUp NSCache and versioned Application Support cache/webcache trees.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.sketchup.SketchUp.2023
+      - $HOME/Library/Caches/com.sketchup.SketchUp.2024
+      - $HOME/Library/Caches/com.sketchup.SketchUp.2025
+      - $HOME/Library/Caches/com.sketchup.SketchUp.2026
+      - $HOME/Library/Caches/com.sketchup.LayOut.2024
+      - $HOME/Library/Caches/com.sketchup.LayOut.2025
+      - $HOME/Library/Application Support/SketchUp 2023/SketchUp/Cache
+      - $HOME/Library/Application Support/SketchUp 2024/SketchUp/Cache
+      - $HOME/Library/Application Support/SketchUp 2025/SketchUp/Cache
+      - $HOME/Library/Application Support/SketchUp 2026/SketchUp/Cache
+      - $HOME/Library/Application Support/SketchUp 2024/SketchUp/WebCache
+      - $HOME/Library/Application Support/SketchUp 2025/SketchUp/WebCache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cad-sketchup-logs
+    name: SketchUp and LayOut logs
+    description: SketchUp/LayOut crash and diagnostic logs.
+    category: app-logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/SketchUp
+      - $HOME/Library/Logs/LayOut
+      - $HOME/Library/Application Support/SketchUp 2024/SketchUp/Logs
+      - $HOME/Library/Application Support/SketchUp 2025/SketchUp/Logs
+      - $HOME/Library/Application Support/SketchUp 2026/SketchUp/Logs
+    delete_mode: contents
+    max_depth: 4
+
+  - id: cad-super-slicer-cache
+    name: SuperSlicer cache
+    description: SuperSlicer (PrusaSlicer fork) cache and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/SuperSlicer/cache
+      - $HOME/Library/Application Support/Superslicer/cache
+      - $HOME/Library/Application Support/SuperSlicer/log
+      - $HOME/Library/Application Support/Superslicer/log
+      - $HOME/Library/Caches/SuperSlicer
+      - $HOME/Library/Caches/Superslicer
+      - $HOME/Library/Logs/SuperSlicer
+    delete_mode: contents
+    max_depth: 5

@@ -1,0 +1,457 @@
+pack: macos-system-logs
+rules:
+
+  - id: syslogs-appstore-residual
+    name: App Store residual logs and caches (user)
+    description: App Store container logs/HTTPStorages/WebKit residual and agent caches beyond baseline commerce rules.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.AppStore/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.AppStore/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.AppStore/Data/Library/WebKit
+      - $HOME/Library/Containers/com.apple.AppStore/Data/tmp
+      - $HOME/Library/HTTPStorages/com.apple.FileProviderDaemon.AppStoreService
+      - $HOME/Library/Group Containers/group.com.apple.appstoreagent/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.appstoreagent/Library/Logs
+      - $HOME/Library/Group Containers/group.com.apple.storekit/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.storekit/Library/Logs
+    exclude_globs:
+      - "**/*.binarycookies"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: syslogs-bluetooth-residual
+    name: Bluetooth user residual and diagnostic caches
+    description: Bluetooth user service folders, CloudKit bluetoothuserd cache, Bluetooth DE and settings container residual.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/CloudKit/com.apple.bluetoothuserd
+      - $HOME/Library/Caches/com.apple.bluetoothuserd
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.BluetoothDiagnosticExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.BluetoothDiagnosticExtension/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.BluetoothDiagnosticExtension/Data/tmp
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.BluetoothHeadset/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.BluetoothHeadset/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.BluetoothHeadset/Data/tmp
+      - $HOME/Library/Containers/com.apple.BluetoothSettings/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.BluetoothSettings/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.BluetoothSettings/Data/tmp
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.AppleBtcDiagnosis/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.AppleBtcDiagnosis/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.AppleBtcDiagnosis/Data/tmp
+    delete_mode: contents
+    max_depth: 6
+
+  - id: syslogs-control-center-caches
+    name: Control Center residual caches
+    description: Control Center application support residual and group-container caches.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/com.apple.controlcenter
+      - $HOME/Library/Group Containers/group.com.apple.controlcenter/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.controlcenter/Library/Logs
+      - $HOME/Library/Containers/com.apple.ControlCenter-Settings.extension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.ControlCenter-Settings.extension/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.ControlCenter-Settings.extension/Data/tmp
+      - $HOME/Library/Containers/com.apple.controlcenter.ControlCenterSettingsIntents/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.controlcenter.ControlCenterSettingsIntents/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.controlcenter.ControlCenterSettingsIntents/Data/tmp
+      - $HOME/Library/Containers/com.apple.controlcenter.ringlighthelper/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.controlcenter.ringlighthelper/Data/tmp
+      - $HOME/Library/Group Containers/group.com.apple.secure-control-center-preferences/Library/Caches
+    delete_mode: contents
+    max_depth: 5
+
+  - id: syslogs-crashreporter-app-support-deep
+    name: Application Support CrashReporter and DiagnosticReports residual
+    description: Per-app CrashReporter submission state plists and optional DiagnosticReports under Application Support.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Application Support/CrashReporter
+      - $HOME/Library/Application Support/DiagnosticReports
+    delete_mode: contents
+    max_depth: 3
+
+  - id: syslogs-crashreporter-diagnosticlogs
+    name: CrashReporter DiagnosticLogs and MobileDevice (user)
+    description: Nested DiagnosticLogs and MobileDevice trees under user CrashReporter (device and spotlight diagnostic leftovers).
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/CrashReporter/DiagnosticLogs
+      - $HOME/Library/Logs/CrashReporter/MobileDevice
+    include_globs:
+      - "**/*"
+      - "**/sysdiagnose*"
+      - "**/*sysdiagnose*"
+      - "**/*.log"
+      - "**/*.ips"
+      - "**/*.crash"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: syslogs-diagnostic-extensions-sysdiagnose-de
+    name: DiagnosticExtensions.sysdiagnose container residual
+    description: Caches/Logs/tmp under the sysdiagnose diagnostic extension sandbox.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.sysdiagnose/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.sysdiagnose/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.sysdiagnose/Data/tmp
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.sysdiagnose/Data/Library/HTTPStorages
+    delete_mode: contents
+    max_depth: 5
+
+  - id: syslogs-diagnosticextensionsd-tmpdir
+    name: diagnosticextensionsd TMPDIR residual
+    description: diagnosticextensionsd working directory under user TMPDIR.
+    category: temp
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 3
+    paths:
+      - $TMPDIR/diagnosticextensionsd
+    include_globs:
+      - "**/diagnosticextensionsd/**"
+      - "**/diagnosticextensionsd*"
+      - "**/*DiagnosticExtension*"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: syslogs-disk-utility-fsck
+    name: Disk Utility and fsck user leftovers
+    description: Disk image fsck residual, DiscRecording and fsck_hfs logs, DiskSpace/Storage diagnostic extension caches.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/DiskImages
+      - $HOME/Library/Application Support/DiskImages/com.apple.diskimages.fsck
+      - $HOME/Library/Containers/com.apple.DiskSpaceDiagnostics.diagnosticextension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiskSpaceDiagnostics.diagnosticextension/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiskSpaceDiagnostics.diagnosticextension/Data/tmp
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.StorageDESSD/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.StorageDESSD/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.StorageDESSD/Data/tmp
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.StorageDESDXC/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.StorageDESDXC/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.StorageDESDXC/Data/tmp
+    delete_mode: contents
+    max_depth: 4
+
+  - id: syslogs-dock-residual
+    name: Dock residual caches and logs
+    description: Dock controls container residual and dock-related CrashReporter state (not dock.plist layout).
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.dock.controls/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.dock.controls/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.dock.controls/Data/tmp
+      - $HOME/Library/Application Support/CrashReporter
+    include_globs:
+      - "**/com.apple.dock*"
+      - "**/*dock*"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: syslogs-install-log-user-copies
+    name: install.log user copies and installlog diagnostic extension
+    description: User-accessible install log copies via diagnostic extension container and home Logs globs.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.installlog/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.installlog/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.installlog/Data/tmp
+    include_globs:
+      - "**/install.log"
+      - "**/install.log.*"
+      - "**/*install*.log"
+      - "**/com.apple.diagnosticextensions.osx.installlog/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: syslogs-logarchive-home-deep
+    name: User home .logarchive bundles (deep)
+    description: Unified logging .logarchive bundles under user Logs and broader Library (Console exports, support dumps).
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library
+    include_globs:
+      - "**/*.logarchive"
+      - "**/*.logarchive/**"
+      - "**/system_logs.logarchive"
+      - "**/system_logs.logarchive/**"
+    exclude_globs:
+      - "Mobile Documents/**"
+      - "CloudStorage/**"
+      - "Messages/**"
+      - "Mail/**"
+      - "Keychains/**"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: syslogs-notification-center-caches-medium
+    name: Notification Center caches only (medium)
+    description: NC and notifications settings caches without touching the main UserNotifications DB root.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Group Containers/group.com.apple.UserNotifications/Library/Caches
+      - $HOME/Library/Containers/com.apple.notificationcenterui/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.Notifications-Settings.extension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.Notifications-Settings.extension/Data/tmp
+      - $HOME/Library/Containers/com.apple.notifications.NotificationsSettingsIntents/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.notifications.NotificationsSettingsIntents/Data/tmp
+    delete_mode: contents
+    max_depth: 5
+
+  - id: syslogs-notification-center-report
+    name: Notification Center DB residual (report-only)
+    description: UserNotifications group store and notificationcenterui residual; report only (medium privacy/state).
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Group Containers/group.com.apple.UserNotifications
+      - $HOME/Library/Group Containers/group.com.apple.UserNotifications/Library/UserNotifications
+      - $HOME/Library/Containers/com.apple.notificationcenterui/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.notificationcenterui/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.notificationcenterui/Data/Library/Preferences
+      - $HOME/Library/Containers/com.apple.Notifications-Settings.extension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.notifications.NotificationsSettingsIntents/Data/Library/Caches
+      - $HOME/Library/HTTPStorages/com.apple.iCloudNotificationAgent
+    delete_mode: contents
+    max_depth: 6
+
+  - id: syslogs-osanalytics-feedbacklogger
+    name: OSAnalytics IPS extension and feedbacklogger residual
+    description: osanalytics IPS extension container residual and Apple feedback/telemetry logger caches.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.osanalytics.IPSExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.osanalytics.IPSExtension/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.osanalytics.IPSExtension/Data/tmp
+      - $HOME/Library/Group Containers/group.com.apple.feedbacklogger/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.feedbacklogger/Library/Logs
+      - $HOME/Library/Group Containers/group.com.apple.feedbacklogger/com.apple.siri.telemetry
+    delete_mode: contents
+    max_depth: 6
+
+  - id: syslogs-power-thermal-residual
+    name: Power and thermal user residual
+    description: User-accessible power/thermal residual under PPM, homeenergyd, and HomeEnergy diagnostic extension.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.HomeEnergyDiagnosticExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.HomeEnergyDiagnosticExtension/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.HomeEnergyDiagnosticExtension/Data/tmp
+    include_globs:
+      - "**/power*.log"
+      - "**/Power*.log"
+      - "**/thermal*.log"
+      - "**/Thermal*.log"
+      - "**/powerlog*"
+      - "**/PowerLog*"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: syslogs-softwareupdate-user-caches
+    name: softwareupdated user HTTPStorages and related caches
+    description: User-scoped Software Update network caches and notification manager HTTP storage.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.SoftwareUpdateNotificationManager
+      - $HOME/Library/Containers/com.apple.SoftwareUpdate.SoftwareUpdateSettingsWidget/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.SoftwareUpdate.SoftwareUpdateSettingsWidget/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.SoftwareUpdate.SoftwareUpdateSettingsWidget/Data/tmp
+    exclude_globs:
+      - "**/*.binarycookies"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: syslogs-softwareupdatecore-var-tmp
+    name: SoftwareUpdateCore user residual under var/tmp
+    description: User-owned Software Update Core event/reporter residual under /private/var/tmp/SoftwareUpdateCore.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - /private/var/tmp/SoftwareUpdateCore
+      - /var/tmp/SoftwareUpdateCore
+    delete_mode: contents
+    max_depth: 4
+
+  - id: syslogs-storage-de-and-syslog-de
+    name: Storage and classic osx diagnostic extension residual
+    description: Storage SSD/SDXC DEs plus classic osx filevault/spotlight/syslog/systemprofile/timemachine DE caches.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.syslog/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.syslog/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.syslog/Data/tmp
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.spotlight/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.spotlight/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.spotlight/Data/tmp
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.filevault/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.filevault/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.filevault/Data/tmp
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.systemprofile/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.systemprofile/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.systemprofile/Data/tmp
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.timemachine/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.timemachine/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.diagnosticextensions.osx.timemachine/Data/tmp
+    delete_mode: contents
+    max_depth: 5
+
+  - id: syslogs-system-library-logs-report
+    name: System DiagnosticReports size (report-only)
+    description: Inventory note for /Library/Logs/DiagnosticReports which is not user-writable by default.
+    category: report-only
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - /private/var/log
+    delete_mode: contents
+    max_depth: 3
+
+  - id: syslogs-system-settings-residual
+    name: System Settings residual caches
+    description: System Settings / System Preferences menu cache, preference panes user cache, and container caches.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.Family-Settings.extension
+      - $HOME/Library/Containers/com.apple.systempreferences/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.systempreferences/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.systempreferences/Data/tmp
+      - $HOME/Library/Group Containers/com.apple.systempreferences.cache/Library/Caches
+      - $HOME/Library/Group Containers/com.apple.systempreferences.cache/com.apple.systemsettings.usercache
+      - $HOME/Library/Containers/com.apple.SystemProfiler.AboutExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.SystemProfiler.AboutExtension/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.SystemProfiler.AboutExtension/Data/tmp
+      - $HOME/Library/HTTPStorages/com.apple.SystemProfiler.AboutExtension
+    delete_mode: contents
+    max_depth: 5
+
+  - id: syslogs-usb-connectivity-de
+    name: USB and connectivity diagnostic residual
+    description: Connectivity and related hardware diagnostic extension residual (USB/device connectivity class).
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.ConnectivityDE/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.ConnectivityDE/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.ConnectivityDE/Data/tmp
+      - $HOME/Library/Containers/com.apple.NetworkInfo.DiagnosticExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.NetworkInfo.DiagnosticExtension/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.NetworkInfo.DiagnosticExtension/Data/tmp
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.CoreSensingDiagnosticExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.CoreSensingDiagnosticExtension/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.CoreSensingDiagnosticExtension/Data/tmp
+    delete_mode: contents
+    max_depth: 5
+
+  - id: syslogs-wifi-diagnostic-residual
+    name: WiFi user diagnostic and settings residual
+    description: WiFi diagnostic extensions, WiFiVelocity, wifi-settings-extension caches/logs.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.WiFi/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.WiFi/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.WiFi/Data/tmp
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.ConnectivityWiFiDE/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.ConnectivityWiFiDE/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.ConnectivityWiFiDE/Data/tmp
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.ConnectivityDE/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.ConnectivityDE/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.ConnectivityDE/Data/tmp
+      - $HOME/Library/Containers/com.apple.WiFiVelocity.DiagnosticExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.WiFiVelocity.DiagnosticExtension/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.WiFiVelocity.DiagnosticExtension/Data/tmp
+      - $HOME/Library/Containers/com.apple.wifi-settings-extension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.wifi-settings-extension/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.wifi-settings-extension/Data/tmp
+      - $HOME/Library/Containers/com.apple.wifiqa.NPTKit.NPTWiFiDiagnosticsExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.wifiqa.NPTKit.NPTWiFiDiagnosticsExtension/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.wifiqa.NPTKit.NPTWiFiDiagnosticsExtension/Data/tmp
+      - $HOME/Library/Containers/com.apple.NetworkInfo.DiagnosticExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.NetworkInfo.DiagnosticExtension/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.NetworkInfo.DiagnosticExtension/Data/tmp
+    delete_mode: contents
+    max_depth: 5

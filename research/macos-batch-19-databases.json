@@ -1,0 +1,1062 @@
+{
+  "batch": "19-databases",
+  "platform": "macos",
+  "platform_focus": "macos",
+  "title": "Local database tools: caches, logs, and data-dir inventory",
+  "notes": "Desktop DB clients and local server packages under $HOME and user-writable Homebrew prefixes. Regenerable UI/Electron caches and app logs may be low with age gates. Data directories (Postgres.app clusters, brew PostgreSQL/MySQL/Mongo/Redis data, Neo4j Desktop graphs, Redis dump.rdb, Docker named volumes / Docker.raw-backed volume store) are REPORT-ONLY. Residual Application Support trees after uninstall (TablePlus, Sequel Ace, Compass, RedisInsight, Beekeeper, DataGrip config) are report-only; they often hold connection profiles. CLI history (.mysql_history, litecli, redis-cli) is report-only (may contain secrets). Prefer native prune for Docker volumes. Does not auto-delete live database files or credentials stores. Overlaps intentionally catalogued with batch-07 cache-only rules; this batch owns residual roots and server data inventory.",
+  "path_count": 247,
+  "risk_policy": {
+    "ui_electron_caches_logs": "low with min_age_days",
+    "driver_download_caches": "low or medium",
+    "connection_config_residuals": "report-only",
+    "server_data_directories": "report-only (never default delete)",
+    "redis_rdb_dumps": "report-only",
+    "docker_volumes_raw": "report-only (native docker volume prune only)",
+    "cli_sql_history": "report-only (privacy: may hold secrets)"
+  },
+  "never_delete_examples": [
+    "$HOME/Library/Application Support/Postgres/var-*",
+    "/opt/homebrew/var/postgresql@*",
+    "/opt/homebrew/var/mysql",
+    "$HOME/dump.rdb",
+    "Docker named volumes and Docker.raw"
+  ],
+  "rules": [
+    {
+      "id": "db-postgresapp-logs",
+      "name": "Postgres.app server logs",
+      "description": "PostgreSQL log files under Postgres.app cluster var directories (not the data files themselves).",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Application Support/Postgres"
+      ],
+      "include_globs": [
+        "**/log/**",
+        "**/pg_log/**",
+        "**/*.log",
+        "**/postgresql-*.log",
+        "**/postgresql-*.csv"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "Only log/pg_log trees inside Application Support/Postgres. Never wipe var-XX base, base/, global/, pg_wal, or entire cluster."
+    },
+    {
+      "id": "db-postgresapp-data-report",
+      "name": "Postgres.app data directories (report-only)",
+      "description": "Default Postgres.app cluster data dirs (var-XX). Live databases; inventory only.",
+      "category": "db-data",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/Postgres"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Official default: ~/Library/Application Support/Postgres/var-XX. Deleting destroys all local DBs. Uninstall via Postgres.app docs only."
+    },
+    {
+      "id": "db-postgresapp-prefs-residual-report",
+      "name": "Postgres.app preferences residual (report-only)",
+      "description": "User defaults and leftover support after uninstall.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Preferences/com.postgresapp.Postgres2.plist",
+        "$HOME/Library/Preferences/com.postgresapp.Postgres.plist",
+        "$HOME/Library/Saved Application State/com.postgresapp.Postgres2.savedState",
+        "$HOME/Library/Caches/com.postgresapp.Postgres2"
+      ],
+      "delete_mode": "path",
+      "max_depth": 2,
+      "notes": "Prefs/saved state only; not var data. defaults delete com.postgresapp.Postgres2 is the documented uninstall step."
+    },
+    {
+      "id": "db-pgadmin-cache-logs",
+      "name": "pgAdmin 4 cache and logs",
+      "description": "pgAdmin desktop session cache, log files, and Electron-style app caches.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.pgadmin",
+        "$HOME/Library/Application Support/pgAdmin 4",
+        "$HOME/Library/Caches/pgAdmin 4",
+        "$HOME/Library/Caches/net.pgadmin.pgadmin4",
+        "$HOME/Library/Logs/pgAdmin 4"
+      ],
+      "include_globs": [
+        "**/*.log",
+        "**/pgadmin4.log",
+        "**/Cache/**",
+        "**/Code Cache/**",
+        "**/GPUCache/**",
+        "**/logs/**",
+        "**/Sessions/**",
+        "**/blob_storage/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Do not delete pgadmin4.db (server definitions) or storage encryption keys by default. Cache/logs only."
+    },
+    {
+      "id": "db-pgadmin-config-report",
+      "name": "pgAdmin 4 config and server store (report-only)",
+      "description": "pgadmin4.db and full Application Support tree holding saved servers.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.pgadmin",
+        "$HOME/Library/Application Support/pgAdmin 4"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Contains connection metadata and may embed secrets. Report residual size after uninstall only."
+    },
+    {
+      "id": "db-dbeaver-drivers-cache",
+      "name": "DBeaver downloaded drivers cache",
+      "description": "Auto-downloaded JDBC drivers under DBeaverData/drivers; re-fetched on demand.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/Library/DBeaverData/drivers",
+        "$HOME/Library/Application Support/DBeaverData/drivers"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Drivers re-download when connecting. Never touch secure/ or workspace connection configs."
+    },
+    {
+      "id": "db-dbeaver-workspace-logs",
+      "name": "DBeaver workspace and Eclipse logs",
+      "description": "Workspace .metadata logs and install-data runtime leftovers.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/DBeaverData",
+        "$HOME/Library/Application Support/DBeaverData",
+        "$HOME/Library/Caches/dbeaver",
+        "$HOME/Library/Logs/DBeaver"
+      ],
+      "include_globs": [
+        "**/.metadata/.log",
+        "**/.metadata/.plugins/**/*.log",
+        "**/logs/**",
+        "**/*.log",
+        "**/install-data/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "notes": "Logs and install-data only. Keep workspace6 projects, scripts, diagrams, and secure credentials."
+    },
+    {
+      "id": "db-dbeaver-workspace-report",
+      "name": "DBeaver workspace and secure store (report-only)",
+      "description": "Full DBeaverData workspace residual including connections and encrypted credentials.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/DBeaverData",
+        "$HOME/Library/Application Support/DBeaverData",
+        "$HOME/.dbeaver4",
+        "$HOME/.dbeaver"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Default modern path is ~/Library/DBeaverData. secure/ holds encrypted credentials. Old ~/.dbeaver* pre-6.1.3."
+    },
+    {
+      "id": "db-datagrip-caches-logs",
+      "name": "DataGrip caches and logs",
+      "description": "JetBrains DataGrip system caches and product logs (versioned product folders).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains",
+        "$HOME/Library/Logs/JetBrains"
+      ],
+      "include_globs": [
+        "**/DataGrip*/**",
+        "**/DataGrip*/caches/**",
+        "**/DataGrip*/index/**",
+        "**/DataGrip*/log/**",
+        "**/DataGrip*/*.log"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "Invalidate Caches equivalent. Reindexes on next launch. Not Application Support config."
+    },
+    {
+      "id": "db-datagrip-residual-report",
+      "name": "DataGrip config residual (report-only)",
+      "description": "DataGrip Application Support config trees left after uninstall (data sources, options).",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/JetBrains"
+      ],
+      "include_globs": [
+        "**/DataGrip*/**"
+      ],
+      "delete_mode": "path",
+      "max_depth": 4,
+      "notes": "Holds dataSources.xml-style connection metadata and plugins. Report residual only; not a pure cache."
+    },
+    {
+      "id": "db-tableplus-caches-logs",
+      "name": "TablePlus caches and logs",
+      "description": "TablePlus NSURL/app caches and log trees (not connection store).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.tinyapp.TablePlus",
+        "$HOME/Library/Logs/TablePlus",
+        "$HOME/Library/Application Support/com.tinyapp.TablePlus/Cache",
+        "$HOME/Library/Application Support/com.tinyapp.TablePlus/Logs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Overlaps batch-07; catalogued for DB-domain completeness. Keychain holds passwords."
+    },
+    {
+      "id": "db-tableplus-residual-report",
+      "name": "TablePlus residual Application Support (report-only)",
+      "description": "Full TablePlus support tree residual after uninstall (connections, workspace).",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/com.tinyapp.TablePlus",
+        "$HOME/Library/Preferences/com.tinyapp.TablePlus.plist",
+        "$HOME/Library/Saved Application State/com.tinyapp.TablePlus.savedState",
+        "$HOME/Library/Group Containers/*.com.tinyapp.TablePlus"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Connection favorites and app state. Passwords typically Keychain-backed."
+    },
+    {
+      "id": "db-sequel-ace-caches-logs",
+      "name": "Sequel Ace caches and logs",
+      "description": "Sequel Ace caches, container caches, and logs.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.sequel-ace.sequel-ace",
+        "$HOME/Library/Logs/Sequel Ace",
+        "$HOME/Library/Containers/com.sequel-ace.sequel-ace/Data/Library/Caches",
+        "$HOME/Library/Containers/com.sequel-ace.sequel-ace/Data/Library/Logs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Sandbox container caches/logs only. Favorites live elsewhere in container Support."
+    },
+    {
+      "id": "db-sequel-ace-residual-report",
+      "name": "Sequel Ace residual container (report-only)",
+      "description": "Sequel Ace sandbox container and prefs residual after uninstall.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Containers/com.sequel-ace.sequel-ace",
+        "$HOME/Library/Group Containers/*.com.sequel-ace.sequel-ace",
+        "$HOME/Library/Preferences/com.sequel-ace.sequel-ace.plist",
+        "$HOME/Library/Application Support/Sequel Ace"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Favorites and query history; passwords in Keychain. App Store sandbox path primary."
+    },
+    {
+      "id": "db-mysql-workbench-logs-cache",
+      "name": "MySQL Workbench logs and cache",
+      "description": "Workbench log directory and regenerable cache under Application Support.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Application Support/MySQL/Workbench/log",
+        "$HOME/Library/Application Support/MySQL/Workbench/cache",
+        "$HOME/Library/Application Support/Workbench/log",
+        "$HOME/Library/Caches/com.oracle.workbench.MySQLWorkbench",
+        "$HOME/Library/Logs/MySQLWorkbench"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Official base: ~/Library/Application Support/MySQL/Workbench/. Keep connections.xml and server_instances.xml."
+    },
+    {
+      "id": "db-mysql-workbench-data-report",
+      "name": "MySQL Workbench config residual (report-only)",
+      "description": "Full Workbench Application Support tree with connections and models.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/MySQL/Workbench",
+        "$HOME/Library/Application Support/MySQL",
+        "$HOME/Library/Preferences/com.oracle.workbench.MySQLWorkbench.plist"
+      ],
+      "delete_mode": "path",
+      "max_depth": 4,
+      "notes": "connections.xml may store credentials. Report residual only."
+    },
+    {
+      "id": "db-mongodb-compass-caches",
+      "name": "MongoDB Compass Electron caches and logs",
+      "description": "Compass Cache/Code Cache/GPUCache/logs (not connection favorities).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Application Support/MongoDB Compass/Cache",
+        "$HOME/Library/Application Support/MongoDB Compass/Code Cache",
+        "$HOME/Library/Application Support/MongoDB Compass/GPUCache",
+        "$HOME/Library/Application Support/MongoDB Compass/logs",
+        "$HOME/Library/Application Support/MongoDB Compass/blob_storage",
+        "$HOME/Library/Caches/com.mongodb.compass",
+        "$HOME/Library/Logs/MongoDB Compass"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Electron regenerable. Avoid wiping full Application Support root."
+    },
+    {
+      "id": "db-mongodb-compass-residual-report",
+      "name": "MongoDB Compass residual (report-only)",
+      "description": "Full Compass Application Support residual (connections, local storage).",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/MongoDB Compass",
+        "$HOME/Library/Application Support/MongoDB Compass Community Edition",
+        "$HOME/Library/Preferences/com.mongodb.compass.plist",
+        "$HOME/Library/Saved Application State/com.mongodb.compass.savedState"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "May hold saved connection strings. Residual after uninstall only."
+    },
+    {
+      "id": "db-redisinsight-caches",
+      "name": "RedisInsight Electron caches and logs",
+      "description": "RedisInsight / Redis Insight UI caches and logs.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Application Support/RedisInsight/Cache",
+        "$HOME/Library/Application Support/RedisInsight/Code Cache",
+        "$HOME/Library/Application Support/RedisInsight/GPUCache",
+        "$HOME/Library/Application Support/RedisInsight/logs",
+        "$HOME/Library/Application Support/RedisInsight-v2/Cache",
+        "$HOME/Library/Application Support/RedisInsight-v2/Code Cache",
+        "$HOME/Library/Application Support/RedisInsight-v2/GPUCache",
+        "$HOME/Library/Application Support/RedisInsight-v2/logs",
+        "$HOME/Library/Application Support/redisinsight/logs",
+        "$HOME/Library/Caches/org.redisdesktop.rds",
+        "$HOME/Library/Caches/org.redis.RedisInsight",
+        "$HOME/Library/Caches/com.electron.redisinsight"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Product renamed Redis Insight; both legacy RedisInsight and v2 paths listed."
+    },
+    {
+      "id": "db-redisinsight-residual-report",
+      "name": "RedisInsight residual (report-only)",
+      "description": "Full RedisInsight support tree residual with saved databases.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/RedisInsight",
+        "$HOME/Library/Application Support/RedisInsight-v2",
+        "$HOME/Library/Application Support/redisinsight",
+        "$HOME/Library/Preferences/org.redis.RedisInsight.plist"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Connection list and plugins. Not dump.rdb server data."
+    },
+    {
+      "id": "db-robo3t-caches-residual",
+      "name": "Robo 3T caches and residual",
+      "description": "Robo 3T (Robomongo) caches/logs low; full support tree report-only residual paths included separately.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/com.3t.robo3t",
+        "$HOME/Library/Caches/Robo 3T",
+        "$HOME/Library/Logs/Robo 3T",
+        "$HOME/Library/Logs/3T Software Labs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Legacy free Mongo GUI superseded by Studio 3T Community. Cache/log only here."
+    },
+    {
+      "id": "db-robo3t-residual-report",
+      "name": "Robo 3T residual (report-only)",
+      "description": "Robo 3T connection configs residual under 3T Software Labs.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/3T Software Labs/Robo 3T",
+        "$HOME/Library/Application Support/Robo 3T",
+        "$HOME/.3T/robo-3t",
+        "$HOME/Library/Preferences/com.3t.robo3t.plist"
+      ],
+      "delete_mode": "path",
+      "max_depth": 4,
+      "notes": "Saved connections JSON/XML residual after uninstall."
+    },
+    {
+      "id": "db-studio3t-caches-logs",
+      "name": "Studio 3T caches and logs",
+      "description": "Studio 3T app caches and log directories.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/com.3t.studio",
+        "$HOME/Library/Caches/Studio 3T",
+        "$HOME/Library/Logs/Studio 3T",
+        "$HOME/Library/Application Support/3T Software Labs/Studio 3T/logs",
+        "$HOME/Library/Application Support/3T Software Labs/Studio 3T/Cache"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Professional Mongo tooling. Keep connection/project roots out of default clean."
+    },
+    {
+      "id": "db-studio3t-residual-report",
+      "name": "Studio 3T residual (report-only)",
+      "description": "Studio 3T full Application Support residual (connections, projects).",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/3T Software Labs/Studio 3T",
+        "$HOME/Library/Application Support/3T Software Labs",
+        "$HOME/.3T/studio-3t",
+        "$HOME/Library/Preferences/com.3t.studio.plist"
+      ],
+      "delete_mode": "path",
+      "max_depth": 4,
+      "notes": "Connection profiles and IntelliShell history. Inventory residual only."
+    },
+    {
+      "id": "db-azure-data-studio-caches",
+      "name": "Azure Data Studio caches and logs",
+      "description": "VS Code-fork Electron caches and logs for Azure Data Studio.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Application Support/azuredatastudio/Cache",
+        "$HOME/Library/Application Support/azuredatastudio/CachedData",
+        "$HOME/Library/Application Support/azuredatastudio/Code Cache",
+        "$HOME/Library/Application Support/azuredatastudio/GPUCache",
+        "$HOME/Library/Application Support/azuredatastudio/CachedExtensions",
+        "$HOME/Library/Application Support/azuredatastudio/CachedExtensionVSIXs",
+        "$HOME/Library/Application Support/azuredatastudio/logs",
+        "$HOME/Library/Application Support/azuredatastudio/Crashpad",
+        "$HOME/Library/Caches/com.azuredatastudio.oss",
+        "$HOME/Library/Caches/com.microsoft.azuredatastudio"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Never wipe User/ settings or workspaceStorage connection state by default."
+    },
+    {
+      "id": "db-azure-data-studio-residual-report",
+      "name": "Azure Data Studio residual (report-only)",
+      "description": "Full azuredatastudio Application Support residual including User profiles.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/azuredatastudio",
+        "$HOME/Library/Preferences/com.azuredatastudio.oss.plist",
+        "$HOME/Library/Saved Application State/com.azuredatastudio.oss.savedState"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "User/ holds settings and connection profiles. Residual after uninstall."
+    },
+    {
+      "id": "db-sqlpro-caches-logs",
+      "name": "SQLPro family caches and logs",
+      "description": "SQLPro for SQLite/MySQL/Postgres caches, container caches, logs.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.hankinsoft.osx.sqlitepro",
+        "$HOME/Library/Caches/com.hankinsoft.osx.mysql",
+        "$HOME/Library/Caches/com.hankinsoft.osx.postgres",
+        "$HOME/Library/Caches/com.hankinsoft.osx.sqlprostudio",
+        "$HOME/Library/Logs/SQLPro",
+        "$HOME/Library/Containers/com.hankinsoft.osx.sqlitepro/Data/Library/Caches",
+        "$HOME/Library/Containers/com.hankinsoft.osx.mysql/Data/Library/Caches",
+        "$HOME/Library/Containers/com.hankinsoft.osx.postgres/Data/Library/Caches"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Hankinsoft SQLPro line (SQLite/MySQL/Postgres/Studio). Cache only."
+    },
+    {
+      "id": "db-sqlpro-residual-report",
+      "name": "SQLPro residual (report-only)",
+      "description": "SQLPro sandboxed containers and Application Support residual.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Containers/com.hankinsoft.osx.sqlitepro",
+        "$HOME/Library/Containers/com.hankinsoft.osx.mysql",
+        "$HOME/Library/Containers/com.hankinsoft.osx.postgres",
+        "$HOME/Library/Containers/com.hankinsoft.osx.sqlprostudio",
+        "$HOME/Library/Application Support/SQLPro for SQLite",
+        "$HOME/Library/Application Support/SQLPro for MySQL",
+        "$HOME/Library/Application Support/SQLPro for Postgres",
+        "$HOME/Library/Application Support/SQLPro Studio",
+        "$HOME/Library/Group Containers/*.com.hankinsoft.osx"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Favorites and query history. App Store container paths primary."
+    },
+    {
+      "id": "db-postico-caches-logs",
+      "name": "Postico caches and logs",
+      "description": "Postico / Postico 2 caches and logs.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/at.eggerapps.Postico",
+        "$HOME/Library/Caches/at.eggerapps.Postico2",
+        "$HOME/Library/Logs/Postico",
+        "$HOME/Library/Logs/Postico 2",
+        "$HOME/Library/Containers/at.eggerapps.Postico/Data/Library/Caches",
+        "$HOME/Library/Containers/at.eggerapps.Postico2/Data/Library/Caches"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Native Postgres client. Favorites are not in Caches."
+    },
+    {
+      "id": "db-postico-residual-report",
+      "name": "Postico residual (report-only)",
+      "description": "Postico containers and prefs residual after uninstall.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Containers/at.eggerapps.Postico",
+        "$HOME/Library/Containers/at.eggerapps.Postico2",
+        "$HOME/Library/Application Support/Postico",
+        "$HOME/Library/Application Support/Postico 2",
+        "$HOME/Library/Preferences/at.eggerapps.Postico.plist",
+        "$HOME/Library/Preferences/at.eggerapps.Postico2.plist",
+        "$HOME/Library/Group Containers/*.at.eggerapps.Postico"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Favorites and window state. Keychain for passwords."
+    },
+    {
+      "id": "db-beekeeper-caches",
+      "name": "Beekeeper Studio caches and logs",
+      "description": "Beekeeper Studio Electron caches and logs.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Application Support/beekeeper-studio/Cache",
+        "$HOME/Library/Application Support/beekeeper-studio/Code Cache",
+        "$HOME/Library/Application Support/beekeeper-studio/GPUCache",
+        "$HOME/Library/Application Support/beekeeper-studio/logs",
+        "$HOME/Library/Caches/io.beekeeperstudio.desktop",
+        "$HOME/Library/Caches/io.beekeeperstudio.desktop.ShipIt"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Overlaps batch-07. Cache/logs only."
+    },
+    {
+      "id": "db-beekeeper-residual-report",
+      "name": "Beekeeper Studio residual (report-only)",
+      "description": "Full Beekeeper Studio support residual with connection store.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/beekeeper-studio",
+        "$HOME/Library/Preferences/io.beekeeperstudio.desktop.plist",
+        "$HOME/Library/Saved Application State/io.beekeeperstudio.desktop.savedState"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "SQLite connection DB and encrypted secrets may live under Application Support root."
+    },
+    {
+      "id": "db-sqlitebrowser-caches",
+      "name": "DB Browser for SQLite caches",
+      "description": "sqlitebrowser caches and prefs-adjacent regenerable data.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/org.sqlitebrowser.sqlitebrowser",
+        "$HOME/Library/Caches/net.sourceforge.sqlitebrowser",
+        "$HOME/Library/Application Support/sqlitebrowser",
+        "$HOME/Library/Logs/sqlitebrowser"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "DB Browser for SQLite (sqlitebrowser). User .sqlite DB files are elsewhere (never auto-scan Documents)."
+    },
+    {
+      "id": "db-sqlitebrowser-residual-report",
+      "name": "sqlitebrowser residual prefs (report-only)",
+      "description": "Preferences residual for DB Browser for SQLite.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Preferences/org.sqlitebrowser.sqlitebrowser.plist",
+        "$HOME/Library/Preferences/net.sourceforge.sqlitebrowser.plist",
+        "$HOME/Library/Saved Application State/org.sqlitebrowser.sqlitebrowser.savedState"
+      ],
+      "delete_mode": "path",
+      "max_depth": 2,
+      "notes": "Recent files list may reference private DB paths."
+    },
+    {
+      "id": "db-cli-history-report",
+      "name": "SQL/Redis CLI history files (report-only)",
+      "description": "mysql, psql, sqlite, litecli, mycli, redis-cli interactive histories.",
+      "category": "privacy",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.mysql_history",
+        "$HOME/.psql_history",
+        "$HOME/.sqlite_history",
+        "$HOME/.litecli-history",
+        "$HOME/.mycli-history",
+        "$HOME/.rediscli_history",
+        "$HOME/.python_history",
+        "$HOME/.config/litecli",
+        "$HOME/.config/mycli",
+        "$HOME/.config/pgcli"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "May contain passwords typed in SQL, tokens, PII. NEVER default-enable. litecli/mycli also keep config under .config."
+    },
+    {
+      "id": "db-redis-dump-report",
+      "name": "Redis RDB dumps (report-only)",
+      "description": "dump.rdb and appendonly persistence files in common local locations.",
+      "category": "db-data",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/dump.rdb",
+        "$HOME/appendonly.aof",
+        "/opt/homebrew/var/db/redis",
+        "/usr/local/var/db/redis",
+        "/opt/homebrew/var/redis",
+        "/usr/local/var/redis",
+        "$HOME/Library/Application Support/redis"
+      ],
+      "include_globs": [
+        "**/dump.rdb",
+        "**/appendonly.aof",
+        "**/appendonly.aof.*"
+      ],
+      "delete_mode": "path",
+      "max_depth": 4,
+      "notes": "Live Redis persistence. Report size only; never auto-delete. Accidental cwd dump.rdb is common."
+    },
+    {
+      "id": "db-docker-volumes-report",
+      "name": "Docker Desktop volume and VM disk store (report-only)",
+      "description": "Host paths backing Docker volumes and the Docker.raw sparse disk (all images/volumes).",
+      "category": "db-data",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw",
+        "$HOME/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.qcow2",
+        "$HOME/Library/Containers/com.docker.docker/Data/com.docker.driver.amd64-linux/Docker.raw",
+        "$HOME/Library/Containers/com.docker.docker/Data/com.docker.driver.amd64-linux/Docker.qcow2",
+        "$HOME/Library/Containers/com.docker.docker/Data/docker.raw",
+        "$HOME/.docker/volumes"
+      ],
+      "native_hints": [
+        "docker system df -v",
+        "docker volume ls",
+        "docker volume prune",
+        "docker system prune --volumes"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Named volumes live inside the Linux VM disk, not as plain host folders. File-delete of Docker.raw destroys everything. Use docker volume prune / Desktop Clean/Purge. Overlaps virt/office-electron Docker report rules; catalogued for DB domain."
+    },
+    {
+      "id": "db-neo4j-desktop-caches-logs",
+      "name": "Neo4j Desktop caches and logs",
+      "description": "Neo4j Desktop Electron/app caches and instance logs outside graph data.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Application Support/Neo4j Desktop/Cache",
+        "$HOME/Library/Application Support/Neo4j Desktop/Code Cache",
+        "$HOME/Library/Application Support/Neo4j Desktop/GPUCache",
+        "$HOME/Library/Application Support/Neo4j Desktop/logs",
+        "$HOME/Library/Application Support/neo4j-desktop/Cache",
+        "$HOME/Library/Application Support/neo4j-desktop/logs",
+        "$HOME/Library/Caches/com.neo4j.neo4j-desktop",
+        "$HOME/Library/Logs/Neo4j Desktop"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "UI caches/logs only. Graph DB data under Application/relate-data or similar is separate."
+    },
+    {
+      "id": "db-neo4j-desktop-data-report",
+      "name": "Neo4j Desktop data directories (report-only)",
+      "description": "Neo4j Desktop projects, DBMS installs, and graph store data.",
+      "category": "db-data",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/Neo4j Desktop",
+        "$HOME/Library/Application Support/neo4j-desktop",
+        "$HOME/Library/Application Support/neo4j-desktop/Application",
+        "$HOME/Library/Application Support/Neo4j Desktop/Application",
+        "$HOME/.neo4j",
+        "$HOME/Documents/Neo4j"
+      ],
+      "delete_mode": "path",
+      "max_depth": 4,
+      "notes": "Docs: macOS ~/$HOME/Library/Application Support/neo4j-desktop/Application/*. NEO4J_DESKTOP_DATA_PATH may override. Never auto-wipe graph stores."
+    },
+    {
+      "id": "db-cassandra-devcenter-report",
+      "name": "Cassandra DevCenter residual (report-only)",
+      "description": "DataStax DevCenter workspace and prefs residual.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.devcenter",
+        "$HOME/Library/Application Support/DevCenter",
+        "$HOME/Library/Application Support/DataStax",
+        "$HOME/Library/Preferences/com.datastax.devcenter.plist",
+        "$HOME/Library/Caches/com.datastax.devcenter"
+      ],
+      "delete_mode": "path",
+      "max_depth": 4,
+      "notes": "Legacy Eclipse-based Cassandra client. Workspace may hold connection configs."
+    },
+    {
+      "id": "db-elasticsearch-logs",
+      "name": "Elasticsearch local logs",
+      "description": "Homebrew and common local Elasticsearch/OpenSearch log directories.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "/opt/homebrew/var/log/elasticsearch",
+        "/usr/local/var/log/elasticsearch",
+        "/opt/homebrew/var/log/opensearch",
+        "/usr/local/var/log/opensearch",
+        "$HOME/Library/Logs/Elasticsearch",
+        "$HOME/Library/Logs/elasticsearch",
+        "$HOME/Library/Logs/opensearch"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Local brew ES/OpenSearch logs only. Not cloud.cluster. Not data path."
+    },
+    {
+      "id": "db-elasticsearch-data-report",
+      "name": "Elasticsearch local data dirs (report-only)",
+      "description": "Homebrew Elasticsearch/OpenSearch index data directories.",
+      "category": "db-data",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "/opt/homebrew/var/lib/elasticsearch",
+        "/usr/local/var/lib/elasticsearch",
+        "/opt/homebrew/var/elasticsearch",
+        "/usr/local/var/elasticsearch",
+        "/opt/homebrew/var/lib/opensearch",
+        "/usr/local/var/lib/opensearch",
+        "$HOME/Library/Application Support/Elastic"
+      ],
+      "delete_mode": "path",
+      "max_depth": 4,
+      "notes": "Index data; deleting destroys local search state. Report size only."
+    },
+    {
+      "id": "db-homebrew-postgres-logs",
+      "name": "Homebrew PostgreSQL logs",
+      "description": "postgresql@N brew formula log directories.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "/opt/homebrew/var/log",
+        "/usr/local/var/log",
+        "$HOME/Library/Logs/Homebrew"
+      ],
+      "include_globs": [
+        "**/postgresql@*/*",
+        "**/postgres*.log",
+        "**/postgresql.log"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Only postgres log globs under var/log. Not system /var/log."
+    },
+    {
+      "id": "db-homebrew-server-data-report",
+      "name": "Homebrew DB server data dirs (report-only)",
+      "description": "postgresql@N, mysql, mariadb, mongodb-community data under Homebrew var.",
+      "category": "db-data",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "/opt/homebrew/var/postgresql@14",
+        "/opt/homebrew/var/postgresql@15",
+        "/opt/homebrew/var/postgresql@16",
+        "/opt/homebrew/var/postgresql@17",
+        "/opt/homebrew/var/postgresql@18",
+        "/opt/homebrew/var/postgres",
+        "/usr/local/var/postgresql@14",
+        "/usr/local/var/postgresql@15",
+        "/usr/local/var/postgresql@16",
+        "/usr/local/var/postgresql@17",
+        "/usr/local/var/postgres",
+        "/opt/homebrew/var/mysql",
+        "/usr/local/var/mysql",
+        "/opt/homebrew/var/mariadb",
+        "/usr/local/var/mariadb",
+        "/opt/homebrew/var/mongodb",
+        "/usr/local/var/mongodb"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Live brew database files. NEVER auto-delete. brew services stop first if user purges manually."
+    },
+    {
+      "id": "db-homebrew-mysql-mongo-logs",
+      "name": "Homebrew MySQL/MariaDB/MongoDB logs",
+      "description": "Error/slow query logs for brew MySQL family and MongoDB.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "/opt/homebrew/var/mysql",
+        "/usr/local/var/mysql",
+        "/opt/homebrew/var/log",
+        "/usr/local/var/log",
+        "/opt/homebrew/var/log/mongodb",
+        "/usr/local/var/log/mongodb",
+        "$HOME/Library/Logs/MySQL",
+        "$HOME/Library/Logs/mongodb"
+      ],
+      "include_globs": [
+        "**/*.err",
+        "**/mysql-*.log",
+        "**/mariadb*.log",
+        "**/slow_query.log",
+        "**/mongod.log",
+        "**/mongod.log.*"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Log/error globs only inside data/log roots. Do not wipe ibdata/ib_logfile or WiredTiger files."
+    },
+    {
+      "id": "db-pgcli-mycli-cache",
+      "name": "pgcli/mycli/litecli caches",
+      "description": "Completer caches and log files for enhanced SQL CLIs.",
+      "category": "app-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/.cache/pgcli",
+        "$HOME/.cache/mycli",
+        "$HOME/.cache/litecli",
+        "$HOME/Library/Caches/pgcli",
+        "$HOME/Library/Caches/mycli",
+        "$HOME/Library/Caches/litecli"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Auto-completer caches regenerate. History files are separate report-only rule."
+    },
+    {
+      "id": "db-sequel-pro-legacy-residual-report",
+      "name": "Sequel Pro legacy residual (report-only)",
+      "description": "Legacy Sequel Pro (pre-Ace) leftovers still found on older Macs.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/Sequel Pro",
+        "$HOME/Library/Caches/com.sequelpro.SequelPro",
+        "$HOME/Library/Preferences/com.sequelpro.SequelPro.plist",
+        "$HOME/Library/Logs/Sequel Pro"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Unmaintained predecessor of Sequel Ace. Favorites residual."
+    }
+  ]
+}

@@ -1,0 +1,679 @@
+{
+  "batch": "20-virt",
+  "platform": "macos",
+  "platform_focus": "macos",
+  "description": "Virtualization and local Kubernetes runtime caches/logs on macOS beyond Docker Desktop and Colima already covered elsewhere. path_count counts distinct path templates across rules. Disk images (.qcow2, .raw, .vdi, .vmdk, .pvm, .vmwarevm, .utm bundles, Lima/OrbStack/Multipass instance disks) are report-only or excluded from default clean. Prefer native prune commands where noted.",
+  "never_touch_notes": [
+    "Never default-delete .qcow2 / .raw / .vdi / .vmdk / .img guest disks",
+    "Never delete Parallels .pvm, VMware .vmwarevm, UTM .utm bundles, Tart ~/.tart/vms as default clean",
+    "Never wipe OrbStack Group Containers data img / disk.img as default",
+    "Never wipe Lima ~/.lima/<instance>/disk or _disk/datadisk as default",
+    "Never wipe Multipass instance vaults under multipassd data as default",
+    "Never wipe Vagrant boxes (~/.vagrant.d/boxes) as default clean (report-only)",
+    "Docker Desktop raw/qcow2 and Colima default instance remain covered by earlier batches; this batch does not re-enable their deletion"
+  ],
+  "path_count": 129,
+  "rules": [
+    {
+      "id": "virt-virtualbox-logs-caches",
+      "name": "VirtualBox host logs and app caches",
+      "description": "VirtualBox service/selector logs and macOS app caches. Regenerable; close VirtualBox first.",
+      "category": "vm-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/VirtualBox",
+        "$HOME/Library/Logs/VirtualBox",
+        "$HOME/Library/Caches/org.virtualbox.app.VirtualBox",
+        "$HOME/Library/Caches/com.oracle.virtualbox",
+        "$HOME/Library/Caches/VirtualBox",
+        "$HOME/.config/VirtualBox"
+      ],
+      "include_globs": [
+        "**/*.log",
+        "**/*.log.*",
+        "**/VBoxSVC.log*",
+        "**/selectorwindow.log*",
+        "**/VBoxHeadless.log*",
+        "**/Caches/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Target logs/caches only under Library/VirtualBox; leave VirtualBox.xml and machine registry if present. Prefer VBoxManage for diagnostics."
+    },
+    {
+      "id": "virt-virtualbox-vms-report",
+      "name": "VirtualBox VMs and hard disks (report-only)",
+      "description": "Default VM folder and HardDisks registry; report size only, never default wipe.",
+      "category": "vm-disk",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/VirtualBox VMs",
+        "$HOME/Library/VirtualBox/HardDisks",
+        "$HOME/Library/VirtualBox/Machines"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Contains .vdi/.vmdk and machine folders. User must remove VMs via VirtualBox UI/VBoxManage."
+    },
+    {
+      "id": "virt-vmware-fusion-caches-logs",
+      "name": "VMware Fusion caches and logs",
+      "description": "Fusion app caches, ShipIt update cache, host logs, Applications Menu cache, license backups.",
+      "category": "vm-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.vmware.fusion",
+        "$HOME/Library/Caches/com.vmware.fusion.ShipIt",
+        "$HOME/Library/Caches/com.vmware.fusionServices",
+        "$HOME/Library/Logs/VMware",
+        "$HOME/Library/Logs/VMware Fusion.log",
+        "$HOME/Library/Logs/VMware Fusion",
+        "$HOME/Library/Application Support/VMware Fusion/License Backups",
+        "$HOME/Library/Application Support/VMware Fusion Applications Menu"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "Not .vmwarevm bundles. Applications Menu rebuilds on next guest launch."
+    },
+    {
+      "id": "virt-vmware-fusion-vms-report",
+      "name": "VMware Fusion VM locations (report-only)",
+      "description": "Common default/custom locations for .vmwarevm packages; inventory only.",
+      "category": "vm-disk",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Documents/Virtual Machines.localized",
+        "$HOME/Virtual Machines.localized",
+        "$HOME/VMware Fusion VMs"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Actual VM path is user-chosen; these are common defaults only."
+    },
+    {
+      "id": "virt-parallels-caches-logs",
+      "name": "Parallels Desktop caches and logs (deeper)",
+      "description": "Parallels host caches, ShipIt, software caches, application menus, logs. Not .pvm VMs.",
+      "category": "vm-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.parallels.desktop.console",
+        "$HOME/Library/Caches/com.parallels.desktop.console.ShipIt",
+        "$HOME/Library/Caches/Parallels Software",
+        "$HOME/Library/Caches/com.parallels.desktop",
+        "$HOME/Library/Logs/parallels.log",
+        "$HOME/Library/Logs/Parallels",
+        "$HOME/Library/Logs/parallels-desktop.log",
+        "$HOME/Library/Parallels/Applications Menus",
+        "$HOME/Library/Parallels/Caches",
+        "$HOME/Library/Parallels/Updates"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "Never delete Documents/Parallels or $HOME/Parallels .pvm bundles."
+    },
+    {
+      "id": "virt-parallels-vms-report",
+      "name": "Parallels VM directories (report-only)",
+      "description": "Default Parallels VM store locations; report only.",
+      "category": "vm-disk",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Parallels",
+        "$HOME/Documents/Parallels"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": ".pvm packages hold entire VMs; remove only via Parallels Control Center."
+    },
+    {
+      "id": "virt-utm-caches-logs",
+      "name": "UTM caches and logs (not VM images)",
+      "description": "UTM app caches including downloaded IPSW restore images under container Caches, plus logs.",
+      "category": "vm-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.utmapp.UTM",
+        "$HOME/Library/Containers/com.utmapp.UTM/Data/Library/Caches",
+        "$HOME/Library/Logs/UTM",
+        "$HOME/Library/Containers/com.utmapp.UTM/Data/Library/Logs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "IPSW under container Caches is large and regenerable. Do not delete Data/Documents/*.utm."
+    },
+    {
+      "id": "virt-utm-vms-report",
+      "name": "UTM VM documents (report-only)",
+      "description": "Sandboxed UTM Documents tree with .utm VM packages; report only.",
+      "category": "vm-disk",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Containers/com.utmapp.UTM/Data/Documents"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Contains .utm bundles with disk images. Never default clean."
+    },
+    {
+      "id": "virt-qemu-caches",
+      "name": "QEMU host caches",
+      "description": "User-level QEMU cache directories when present (Homebrew/standalone). Not guest disk files.",
+      "category": "vm-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/qemu",
+        "$HOME/.cache/qemu",
+        "$HOME/Library/Caches/libvirt",
+        "$HOME/.cache/libvirt"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Never target arbitrary .qcow2/.raw elsewhere as default. Firmware is usually under Cellar/share, not cleaned here."
+    },
+    {
+      "id": "virt-qemu-disk-images-report",
+      "name": "Common QEMU disk image locations (report-only)",
+      "description": "Inventory-only common user folders that may hold qcow2/raw; never default wipe extensions.",
+      "category": "vm-disk",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/QEMU",
+        "$HOME/VMs",
+        "$HOME/.local/share/libvirt/images"
+      ],
+      "include_globs": [
+        "**/*.qcow2",
+        "**/*.raw",
+        "**/*.img"
+      ],
+      "delete_mode": "path",
+      "max_depth": 4,
+      "notes": "Explicit policy: never wipe .qcow2/.raw as default clean path."
+    },
+    {
+      "id": "virt-multipass-caches",
+      "name": "Multipass image and network caches",
+      "description": "Multipass download/network caches. On macOS daemon often stores under root Library; user-level caches if present.",
+      "category": "vm-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/multipass",
+        "$HOME/Library/Caches/multipassd",
+        "$HOME/.cache/multipass",
+        "$HOME/Library/Logs/Multipass",
+        "$HOME/Library/Logs/multipass",
+        "/private/var/root/Library/Caches/multipassd",
+        "/var/root/Library/Caches/multipassd"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "Root-owned paths need elevated scan/delete. Prefer multipass delete --purge and multipass purge for instances. network-cache under multipassd is regenerable."
+    },
+    {
+      "id": "virt-multipass-data-report",
+      "name": "Multipass instance data (report-only)",
+      "description": "Multipass vault/instance disks under multipassd data; report only.",
+      "category": "vm-disk",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/multipass",
+        "$HOME/Library/Application Support/multipassd",
+        "/private/var/root/Library/Application Support/multipassd",
+        "/var/root/Library/Application Support/multipassd",
+        "$HOME/.multipass"
+      ],
+      "delete_mode": "path",
+      "max_depth": 4,
+      "notes": "Instance disks live under multipassd data vaults. Use multipass delete --purge, not bulk rm."
+    },
+    {
+      "id": "virt-lima-download-cache",
+      "name": "Lima download cache (not instances)",
+      "description": "Standalone Lima image download cache at Library/Caches/lima. Safe to clear; re-downloads on next limactl start.",
+      "category": "vm-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/lima",
+        "$HOME/.cache/lima"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "notes": "Hard-coded ~/Library/Caches/lima on macOS per Lima docs. Does not remove ~/.lima instances."
+    },
+    {
+      "id": "virt-lima-instance-logs",
+      "name": "Lima instance serial and hostagent logs",
+      "description": "Aged serial/hostagent logs inside ~/.lima instances without touching disk images.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.lima"
+      ],
+      "include_globs": [
+        "**/serial.log",
+        "**/serial*.log",
+        "**/ha.stdout.log",
+        "**/ha.stderr.log"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Exclude disk, basedisk, diffdisk, datadisk, *.qcow2, *.raw. Stop instances first (limactl stop)."
+    },
+    {
+      "id": "virt-lima-instances-disks-report",
+      "name": "Lima instances and additional disks (report-only)",
+      "description": "Full Lima home including instance disks and _disk datadisks; report only.",
+      "category": "vm-disk",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.lima",
+        "$HOME/.lima/_disk"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "disk/diffdisk/basedisk and _disk/datadisk are VM storage. Use limactl delete. Never default-wipe qcow2/raw."
+    },
+    {
+      "id": "virt-orbstack-logs-caches",
+      "name": "OrbStack logs and app caches",
+      "description": "OrbStack host logs under ~/.orbstack/log and standard macOS app cache/log locations. Not data disks.",
+      "category": "vm-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.orbstack/log",
+        "$HOME/Library/Caches/dev.orbstack.OrbStack",
+        "$HOME/Library/Caches/dev.orbstack.OrbStack.ShipIt",
+        "$HOME/Library/Logs/OrbStack",
+        "$HOME/Library/Logs/dev.orbstack.OrbStack",
+        "$HOME/Library/Application Support/OrbStack/logs",
+        "$HOME/Library/HTTPStorages/dev.orbstack.OrbStack"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Leave ~/.orbstack/vmconfig and Group Containers data alone for clean; disks are report-only."
+    },
+    {
+      "id": "virt-orbstack-disks-report",
+      "name": "OrbStack data and disks (report-only)",
+      "description": "OrbStack VM/container data store including large data.img; report only.",
+      "category": "vm-disk",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.orbstack",
+        "$HOME/Library/Application Support/OrbStack",
+        "$HOME/Library/Group Containers/HUAQ24HBR6.dev.orbstack",
+        "$HOME/Library/Group Containers/HUAQ24HBR6.dev.orbstack/data"
+      ],
+      "delete_mode": "path",
+      "max_depth": 4,
+      "notes": "Default data is Group Containers HUAQ24HBR6.dev.orbstack/data (often multi-GB sparse image). Prefer OrbStack UI prune; ~/OrbStack is a mount view not storage."
+    },
+    {
+      "id": "virt-rancher-desktop-caches-logs",
+      "name": "Rancher Desktop caches and logs",
+      "description": "K3s image cache and Rancher Desktop logs. Factory reset keeps cache unless --cache; this targets caches/logs only.",
+      "category": "vm-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/rancher-desktop",
+        "$HOME/Library/Logs/rancher-desktop",
+        "$HOME/Library/Caches/rancher-desktop/k3s",
+        "$HOME/.rd/bin"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "rdctl reset --factory --cache is native alternative. Do not delete Application Support lima VM disk here."
+    },
+    {
+      "id": "virt-rancher-desktop-data-report",
+      "name": "Rancher Desktop data and Lima VM (report-only)",
+      "description": "Rancher Desktop application support, snapshots, and lima-backed VM state; report only.",
+      "category": "vm-disk",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/rancher-desktop",
+        "$HOME/Library/Application Support/Rancher Desktop",
+        "$HOME/Library/State/rancher-desktop",
+        "$HOME/.rd"
+      ],
+      "delete_mode": "path",
+      "max_depth": 4,
+      "notes": "Includes lima instance disks and snapshots. Use rdctl reset --factory for supported wipe."
+    },
+    {
+      "id": "virt-podman-desktop-caches-logs",
+      "name": "Podman Desktop Electron caches and logs",
+      "description": "Podman Desktop GUI logs and Chromium-style caches under Application Support. Not podman machine disks.",
+      "category": "vm-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/Podman Desktop",
+        "$HOME/Library/Application Support/Podman Desktop/Cache",
+        "$HOME/Library/Application Support/Podman Desktop/Code Cache",
+        "$HOME/Library/Application Support/Podman Desktop/GPUCache",
+        "$HOME/Library/Application Support/Podman Desktop/DawnGraphiteCache",
+        "$HOME/Library/Application Support/Podman Desktop/DawnWebGPUCache",
+        "$HOME/Library/Application Support/Podman Desktop/blob_storage",
+        "$HOME/Library/Caches/Podman Desktop",
+        "$HOME/Library/Caches/io.podman_desktop.PodmanDesktop"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "Logs under Library/Logs/Podman Desktop can grow large (plist append issue fixed in newer releases)."
+    },
+    {
+      "id": "virt-podman-machine-report",
+      "name": "Podman machine and container storage (report-only)",
+      "description": "Podman machine images, storage, and container graph under home; report only.",
+      "category": "vm-disk",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.local/share/containers",
+        "$HOME/.config/containers",
+        "$HOME/.podman",
+        "$HOME/.local/share/containers/podman/machine"
+      ],
+      "delete_mode": "path",
+      "max_depth": 4,
+      "notes": "Prefer podman system prune / podman machine rm. Never default-delete machine qcow2/raw."
+    },
+    {
+      "id": "virt-minikube-cache-logs",
+      "name": "minikube cache and logs (deeper)",
+      "description": "minikube ISO/image/preload caches and logs. Machines stay report-only elsewhere.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/.minikube/cache",
+        "$HOME/.minikube/cache/iso",
+        "$HOME/.minikube/cache/images",
+        "$HOME/.minikube/cache/preloaded",
+        "$HOME/.minikube/logs",
+        "$MINIKUBE_HOME/cache",
+        "$MINIKUBE_HOME/logs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "minikube cache delete / minikube delete --all --purge for native cleanup. Regenerates on next start."
+    },
+    {
+      "id": "virt-minikube-machines-report",
+      "name": "minikube machines and profiles (report-only)",
+      "description": "minikube VM disks and profile state; report only.",
+      "category": "vm-disk",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.minikube/machines",
+        "$HOME/.minikube/profiles",
+        "$HOME/.minikube"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Use minikube delete. Disk drivers may store large files under machines/."
+    },
+    {
+      "id": "virt-kind-state",
+      "name": "kind cluster state",
+      "description": "kind local cluster metadata under ~/.kind. Node images live in container runtime.",
+      "category": "dev",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.kind",
+        "$HOME/.local/share/kind"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Prefer kind delete cluster --all. Docker/Podman images for kindest/node remain in the runtime until pruned."
+    },
+    {
+      "id": "virt-k3d-state-caches",
+      "name": "k3d state and caches",
+      "description": "k3d config/state directories when present. Clusters are Docker containers; host metadata only here.",
+      "category": "dev",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.k3d",
+        "$HOME/.config/k3d",
+        "$HOME/Library/Caches/k3d",
+        "$HOME/.cache/k3d"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Prefer k3d cluster delete --all. Images remain in Docker until docker/podman prune."
+    },
+    {
+      "id": "virt-vagrant-tmp-logs",
+      "name": "Vagrant tmp and logs",
+      "description": "Vagrant temporary downloads and logs under ~/.vagrant.d. Not boxes.",
+      "category": "vm-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.vagrant.d/tmp",
+        "$HOME/.vagrant.d/logs",
+        "$HOME/.vagrant.d/data"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Boxes stay report-only. Incomplete box downloads often sit in tmp."
+    },
+    {
+      "id": "virt-vagrant-boxes-report",
+      "name": "Vagrant boxes (report-only)",
+      "description": "Downloaded Vagrant boxes under ~/.vagrant.d/boxes; large and user-managed.",
+      "category": "vm-disk",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.vagrant.d/boxes",
+        "$HOME/.vagrant.d"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Use vagrant box remove / vagrant box prune. Never default-wipe boxes."
+    },
+    {
+      "id": "virt-packer-cache",
+      "name": "Packer ISO and plugin caches",
+      "description": "Common PACKER_CACHE_DIR locations and plugin dir. Default packer_cache is cwd-relative and not listed.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/.cache/packer",
+        "$HOME/Library/Caches/packer",
+        "$HOME/.packer.d/plugins",
+        "$HOME/.packer.d/tmp",
+        "$PACKER_CACHE_DIR"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "ISOs in cache are large and regenerable. Plugins re-download on next packer init. Set PACKER_CACHE_DIR for a stable shared cache."
+    },
+    {
+      "id": "virt-tart-oci-ipsw-cache",
+      "name": "Tart OCI and IPSW cache",
+      "description": "Tart remote image cache under ~/.tart/cache (OCIs, IPSWs). VMs under vms/ stay report-only.",
+      "category": "vm-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.tart/cache",
+        "$HOME/.tart/cache/OCIs",
+        "$HOME/.tart/cache/IPSWs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "notes": "tart pull/clone auto-prunes when free space is low. TART_HOME defaults to ~/.tart."
+    },
+    {
+      "id": "virt-tart-vms-report",
+      "name": "Tart local VMs (report-only)",
+      "description": "Local Tart VM images under ~/.tart/vms; report only.",
+      "category": "vm-disk",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.tart/vms",
+        "$HOME/.tart"
+      ],
+      "delete_mode": "path",
+      "max_depth": 3,
+      "notes": "Use tart delete. Disk images for running CI/macOS guests live here."
+    },
+    {
+      "id": "virt-kube-client-caches",
+      "name": "kubectl and related client caches",
+      "description": "Client-side kubectl discovery/HTTP caches often used with local virt k8s stacks.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.kube/cache",
+        "$HOME/.kube/http-cache",
+        "$HOME/.cache/kubectl"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Does not touch kubeconfig. Safe regenerable client metadata."
+    },
+    {
+      "id": "virt-helm-charts-cache",
+      "name": "Helm chart cache",
+      "description": "Helm repository and chart cache commonly paired with local k8s (kind/k3d/minikube/Rancher).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/Library/Caches/helm",
+        "$HOME/.cache/helm",
+        "$HOME/.cache/helm/repository"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "helm repo update re-fetches indexes. Not kubeconfig."
+    }
+  ]
+}

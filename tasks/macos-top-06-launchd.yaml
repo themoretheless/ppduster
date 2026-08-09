@@ -7,9 +7,8 @@ task:
   steps:
     - id: ensure-launchagents-dir
       name: Ensure LaunchAgents directory exists
-      type: run-command
-      program: mkdir
-      args: ["-p", "$HOME/Library/LaunchAgents"]
+      type: create-directory
+      path: $HOME/Library/LaunchAgents
     - id: install-launchagent
       name: Plan LaunchAgent install
       type: run-command

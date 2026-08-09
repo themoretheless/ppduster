@@ -7,11 +7,8 @@ task:
   steps:
     - id: ensure-recovery-dir
       name: Ensure recovery assets directory exists
-      type: run-command
-      program: mkdir
-      args: ["-p", "$HOME/.local/state/macos-recovery"]
-      check:
-        path_exists: $HOME/.local/state/macos-recovery
+      type: create-directory
+      path: $HOME/.local/state/macos-recovery
     - id: plan-restore-manifest
       name: Plan restore manifest export
       type: run-command

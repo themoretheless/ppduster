@@ -1,0 +1,436 @@
+pack: macos-continuity
+rules:
+
+  - id: cont-airplay-receiver-residual
+    name: AirPlay receiver UI and diagnostic residual
+    description: AirPlayUIAgent and AirPlay diagnostic extension container Caches/tmp only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.AirPlayUIAgent/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.AirPlayUIAgent/Data/tmp
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.AirPlay/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiagnosticExtensions.AirPlay/Data/tmp
+      - $HOME/Library/Caches/com.apple.AirPlayUIAgent
+      - $HOME/Library/Caches/com.apple.AirPlayXPCHelper
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cont-biome-residual-report
+    name: Biome residual databases/streams/sync (report-only)
+    description: Biome personalization residual beyond tmp/compute already cleanable in apple-extended.
+    category: report-only
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Biome/databases
+      - $HOME/Library/Biome/streams
+      - $HOME/Library/Biome/sync
+      - $HOME/Library/Biome/sets
+      - $HOME/Library/Containers/com.apple.lighthouse.BiomeSELFIngestor/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.lighthouse.BiomeSELFIngestor/Data/tmp
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cont-bird-clouddocs-residual-report
+    name: iCloud Drive bird/CloudDocs residual (report-only careful)
+    description: bird/CloudDocs/iCloudDrive group Library/Caches and CloudDocs Application Support telemetry residual. Report-only; never File Provider Storage or Mobile Documents.
+    category: report-only
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Group Containers/com.apple.bird/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.CloudDocs/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.iCloudDrive/Library/Caches
+      - $HOME/Library/Application Support/CloudDocs/session
+      - $HOME/Library/Application Support/CloudDocs/device-tracking
+      - $HOME/Library/Containers/com.apple.CloudDocs.iCloudDriveFileProvider/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.CloudDocsDaemon.StorageManagement/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.iCloudDriveCore.diagnostic/Data/Library/Caches
+      - $HOME/Library/Caches/CloudKit/com.apple.bird
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cont-callhistory-db-report
+    name: CallHistory DB residual (report-only careful)
+    description: Call history store and transactions. Privacy-sensitive; report-only. Also lists CloudKit callhistory sync residual.
+    category: report-only
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/CallHistoryDB
+      - $HOME/Library/Application Support/CallHistoryTransactions
+      - $HOME/Library/Caches/CloudKit/com.apple.callhistory.sync-helper
+    delete_mode: contents
+    max_depth: 3
+
+  - id: cont-callservicesd-caches
+    name: callservicesd residual caches (medium careful)
+    description: telephonyutilities callservicesd and callintelligenced regenerable caches only, not CallHistoryDB.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Group Containers/group.com.apple.telephonyutilities.callservicesd/Library/Caches
+      - $HOME/Library/Application Support/com.apple.callintelligenced
+      - $HOME/Library/Caches/com.apple.callservicesd
+      - $HOME/Library/Containers/com.apple.calls.PhoneAppIntentsExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.calls.PhoneAppIntentsExtension/Data/tmp
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cont-cloudkit-residual-user-report
+    name: CloudKit residual user agent leaves (report-only)
+    description: Selected CloudKit agent cache leaves for Continuity/iMessage/FaceTime/knowledge residual. Report sizes; do not bulk-wipe entire CloudKit root.
+    category: report-only
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Caches/CloudKit/com.apple.facetimemessagestored
+      - $HOME/Library/Caches/CloudKit/com.apple.imagent
+      - $HOME/Library/Caches/CloudKit/com.apple.knowledge-agent
+      - $HOME/Library/Caches/CloudKit/com.apple.biomesyncd
+      - $HOME/Library/Caches/CloudKit/com.apple.suggestd
+      - $HOME/Library/Caches/CloudKit/com.apple.callhistory.sync-helper
+      - $HOME/Library/Caches/CloudKit/com.apple.identityservicesd
+      - $HOME/Library/Caches/CloudKit/com.apple.siriknowledged
+      - $HOME/Library/Caches/CloudKit/CloudKitMetadata
+      - $HOME/Library/Caches/CloudKit/cloudd_db
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cont-continuity-camera-residual
+    name: Continuity Camera residual extras
+    description: "Continuity Camera residual beyond streaming batch primary: onboarding container already listed in batch 26; adds CMIO-related user cache leaves if present."
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.ContinuityCaptureOnboardingUI/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.ContinuityCaptureOnboardingUI/Data/tmp
+      - $HOME/Library/Caches/com.apple.ContinuityCapture
+      - $HOME/Library/Caches/com.apple.cmio.ContinuityCaptureAgent
+      - $HOME/Library/Logs/ContinuityCapture
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cont-continuity-markup
+    name: Continuity Markup residual caches
+    description: MarkupUI Continuity Markup / markup photo extension regenerable caches and tmp.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.MarkupUI.Markup/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.MarkupUI.Markup/Data/tmp
+      - $HOME/Library/Containers/com.apple.MarkupUI.MarkupPhotoExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.MarkupUI.MarkupPhotoExtension/Data/tmp
+      - $HOME/Library/Caches/com.apple.MarkupUI.Markup
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cont-facetime-residual
+    name: FaceTime residual caches (not sqlite history)
+    description: "FaceTime group/container residual beyond streaming batch: group Caches, notification extension, facetimemessagestored CloudKit leave (cleanable container tmp only)."
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Group Containers/group.com.apple.FaceTime/Library/Caches
+      - $HOME/Library/Containers/com.apple.FaceTime/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.FaceTime/Data/tmp
+      - $HOME/Library/Containers/com.apple.FaceTime.FaceTimeNotificationExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.FaceTime.FaceTimeNotificationExtension/Data/tmp
+      - $HOME/Library/Containers/com.apple.FaceTime.RemotePeoplePicker/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.FaceTime.RemotePeoplePicker/Data/tmp
+      - $HOME/Library/Caches/com.apple.FaceTime
+      - $HOME/Library/Caches/com.apple.facetimemessagestored
+    exclude_globs:
+      - "**/*.sqlite*"
+      - "**/FaceTime.sqlite*"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cont-handoff-useractivityd-caches
+    name: Handoff useractivityd group caches
+    description: Regenerable Caches/Application Support under useractivityd group (Handoff activity metadata), not the shared-pasteboard tree.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Group Containers/group.com.apple.coreservices.useractivityd/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.coreservices.useractivityd/Library/Application Support
+      - $HOME/Library/Containers/com.apple.AirDrop-Handoff-Settings.extension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.AirDrop-Handoff-Settings.extension/Data/tmp
+      - $HOME/Library/Containers/com.apple.settings-intents.AirDropHandoffIntents/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.settings-intents.AirDropHandoffIntents/Data/tmp
+    exclude_globs:
+      - "**/shared-pasteboard/**"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cont-icloud-photos-agent-residual
+    name: iCloud Photos agent caches (not library)
+    description: photolibraryd, mstreamd, moments, CloudPhotosConfiguration agent caches only. Never Photos Library.photoslibrary or File Provider Storage originals.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.photolibraryd/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.mediastream.mstreamd/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.mediastream.mstreamd/Data/Library/MediaStream
+      - $HOME/Library/Containers/com.apple.CloudPhotosConfiguration/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.CloudPhotosConfiguration/Data/tmp
+      - $HOME/Library/Group Containers/group.com.apple.photolibraryd.private/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.moments/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.moments/tmp
+      - $HOME/Library/Caches/CloudKit/com.apple.cloudphotod
+    exclude_globs:
+      - "**/*.photoslibrary/**"
+      - "**/File Provider Storage/**"
+      - "**/moments.sqlite*"
+      - "**/Photos.sqlite*"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cont-intelligenceplatform-residual-report
+    name: IntelligencePlatform residual Artifacts (report-only)
+    description: IntelligencePlatform Artifacts and on-device knowledge residual. Full tree is report-only in apple-extended; documents residual Artifacts explicitly for Continuity/AI overlap.
+    category: report-only
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/IntelligencePlatform/Artifacts
+      - $HOME/Library/Containers/com.apple.intelligenceplatform.IntelligencePlatform.DiagnosticExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.intelligenceplatform.IntelligencePlatform.DiagnosticExtension/Data/tmp
+      - $HOME/Library/Containers/com.apple.intelligenceflow.IntelligenceFlowRuntime.IntelligenceFlowDiagnostics/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.intelligenceflow.IntelligenceFlowRuntime.IntelligenceFlowDiagnostics/Data/tmp
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cont-knowledgec-report
+    name: KnowledgeC store (report-only)
+    description: CoreDuet knowledgeC.db under Application Support/Knowledge. Privacy-sensitive activity knowledge graph.
+    category: report-only
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Knowledge
+      - $HOME/Library/Application Support/Knowledge/knowledgeC.db
+      - $HOME/Library/Application Support/Knowledge/knowledgeC.db-shm
+      - $HOME/Library/Application Support/Knowledge/knowledgeC.db-wal
+    delete_mode: contents
+    max_depth: 3
+
+  - id: cont-messages-regenerable-cache-report
+    name: Messages regenerable caches (report-only)
+    description: Explicit regenerable Messages cache leaves only. Messages content (chat.db, Attachments) is never-touch.
+    category: report-only
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Group Containers/com.apple.messages/Library/Caches
+      - $HOME/Library/Containers/com.apple.MobileSMS/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.MobileSMS/Data/tmp
+    exclude_globs:
+      - "**/chat.db*"
+      - "**/Attachments/**"
+      - "**/Drafts/**"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: cont-pasteboard-spotlight-history
+    name: CoreSpotlight PasteboardHistory residual
+    description: Spotlight PasteboardHistory metadata residual related to clipboard indexing.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Metadata/CoreSpotlight/PasteboardHistory
+    delete_mode: contents
+    max_depth: 4
+
+  - id: cont-proactive-duet-residual
+    name: Proactive and Duet residual streams/metrics
+    description: DuetExpertCenter residual subtrees (streams, metrics, feedback, caches) and proactive reporting residual. Parent DuetExpertCenter already cleanable in apple-extended; this documents residual depth and medium privacy stance.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/DuetExpertCenter/streams
+      - $HOME/Library/DuetExpertCenter/metrics
+      - $HOME/Library/DuetExpertCenter/feedback
+      - $HOME/Library/DuetExpertCenter/caches
+      - $HOME/Library/Containers/com.apple.proactive.AppleIntelligenceReportingSELFIngestor/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.proactive.AppleIntelligenceReportingSELFIngestor/Data/tmp
+      - $HOME/Library/Containers/com.apple.DEC.AppPredictionInternal.DiagnosticExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DEC.AppPredictionInternal.DiagnosticExtension/Data/tmp
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cont-push-usernotifications-residual
+    name: Push and UserNotifications residual caches
+    description: UserNotifications group caches, Notification Center UI residual, AOSPushRelay HTTPStorages.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Group Containers/group.com.apple.UserNotifications/Library/Caches
+      - $HOME/Library/Containers/com.apple.notificationcenterui/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.notificationcenterui/Data/tmp
+      - $HOME/Library/HTTPStorages/com.apple.AOSPushRelay
+      - $HOME/Library/Caches/com.apple.UserNotifications
+      - $HOME/Library/Caches/com.apple.apsd
+    exclude_globs:
+      - "**/*.binarycookies"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cont-sharingd-rapport-residual
+    name: sharingd and rapportd Continuity residual caches
+    description: Nearby Continuity transport residual under sharingd and rapportd group Library/Caches only.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Group Containers/group.com.apple.sharingd/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.rapportd/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.rapportd/Library/Application Support
+      - $HOME/Library/Caches/com.apple.sharingd
+      - $HOME/Library/Caches/com.apple.rapportd
+    exclude_globs:
+      - "**/AirDropIDMSDB/**"
+      - "**/RPIdentitySyncCache.plist"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cont-sidecar-screen-continuity
+    name: Sidecar and Screen Continuity caches
+    description: Screen Continuity / Sidecar / iPhone Mirroring related container and group caches.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.ScreenContinuity/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.ScreenContinuity/Data/tmp
+      - $HOME/Library/Group Containers/group.com.apple.ScreenContinuityServices/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.ScreenContinuityServices/Library/Application Support
+      - $HOME/Library/Group Containers/group.com.apple.replicatord/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.replicatord/Library/Application Support
+      - $HOME/Library/Caches/com.apple.ScreenContinuity
+      - $HOME/Library/Caches/com.apple.sidecar
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cont-siri-remembers-inference-report
+    name: Siri Remembers and inference residual (report-only)
+    description: Privacy-adjacent Siri Remembers and inference stores. Report-only.
+    category: report-only
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Group Containers/group.com.apple.siri.remembers
+      - $HOME/Library/Group Containers/group.com.apple.siri.inference
+      - $HOME/Library/Application Support/com.apple.siri.inference
+      - $HOME/Library/Application Support/com.apple.appleintelligencereporting.processing
+    delete_mode: contents
+    max_depth: 4
+
+  - id: cont-siri-suggestions-residual
+    name: Siri suggestions residual caches
+    description: Siri suggestions group Library/Caches residual and related suggestion container leaves. Full Suggestions tree remains report-only in apple-extended.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Group Containers/group.com.apple.siri.sirisuggestions/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.siri.userfeedbacklearning/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.siri.userfeedbacklearning/Segment
+      - $HOME/Library/Containers/com.apple.siri.SiriSuggestionsLightHousePlugin/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.siri.SiriSuggestionsLightHousePlugin/Data/tmp
+      - $HOME/Library/Caches/com.apple.siri.suggestions
+      - $HOME/Library/Caches/com.apple.suggestd
+    delete_mode: contents
+    max_depth: 5
+
+  - id: cont-universal-clipboard-pasteboard
+    name: Universal Clipboard shared-pasteboard staging
+    description: Handoff/Universal Clipboard staged pasteboard archives and items under useractivityd group. Known large reclaim surface.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 1
+    paths:
+      - $HOME/Library/Group Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard
+      - $HOME/Library/Group Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard/archives
+      - $HOME/Library/Group Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard/items
+    delete_mode: contents
+    max_depth: 6
+
+  - id: cont-watch-autounlock-report
+    name: Apple Watch AutoUnlock residual (report-only)
+    description: Sharing/AutoUnlock holds Watch unlock pairing material. Report size only; never auto-delete pairing records.
+    category: report-only
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Sharing/AutoUnlock
+      - $HOME/Library/Sharing/AutoUnlock/pairing-records.plist
+      - $HOME/Library/Sharing/AutoUnlock/ltk.plist
+    delete_mode: contents
+    max_depth: 4

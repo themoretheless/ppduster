@@ -1,22 +1,16 @@
 task:
   id: app-store-bootstrap
   name: Prepare Mac App Store automation
-  description: Install the current Homebrew mas CLI used by typed app-store-install steps and list installed Mac App Store applications. Requires macOS 14 or newer.
+  description: Verify the macOS baseline used by native App Store automation and safely inspect Spotlight metadata for installed App Store applications. Requires macOS 14 or newer and does not install third-party tooling.
   platform: macos
   trust: bundled-only
   steps:
     - id: verify-app-store-requirements
-      name: Verify mas macOS requirements
+      name: Verify native App Store macOS requirements
       type: macos-requirements
       minimum_version: "14.0"
-    - id: install-mas
-      name: Install mas CLI
-      type: brew-install
-      package: mas
-      check:
-        command_succeeds: ["brew", "list", "mas"]
-    - id: list-app-store-apps
-      name: List installed Mac App Store applications
+    - id: inspect-app-store-metadata
+      name: Inspect installed App Store receipt metadata
       type: run-command
-      program: mas
-      args: ["list"]
+      program: /usr/bin/mdfind
+      args: ["kMDItemAppStoreHasReceipt == 1"]
