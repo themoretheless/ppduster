@@ -7,11 +7,8 @@ task:
   steps:
     - id: create-rollback-dir
       name: Create rollback directory
-      type: run-command
-      program: mkdir
-      args: ["-p", "$HOME/.local/state/macos-rollback"]
-      check:
-        path_exists: $HOME/.local/state/macos-rollback
+      type: create-directory
+      path: $HOME/.local/state/macos-rollback
     - id: backup-preferences
       name: Backup global preferences
       type: run-command

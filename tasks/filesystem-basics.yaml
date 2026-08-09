@@ -1,0 +1,23 @@
+task:
+  id: filesystem-basics
+  name: Filesystem basics
+  description: Inspect a safe temporary root, create a nested directory without a shell, then report its type, recursive logical size, emptiness, and timestamps.
+  platform: any
+  trust: bundled-only
+  steps:
+    - id: inspect-temp-root
+      name: Verify the temporary root
+      type: inspect-path
+      path: $TMPDIR
+      expect:
+        exists: true
+        kind: directory
+    - id: create-example-directory
+      name: Create the example directory
+      type: create-directory
+      path: $TMPDIR/ppduster-filesystem-basics/nested
+    - id: inspect-example-directory
+      name: Get directory size and dates
+      type: inspect-path
+      path: $TMPDIR/ppduster-filesystem-basics/nested
+      recursive_size: true

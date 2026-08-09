@@ -7,11 +7,11 @@ task:
   steps:
     - id: inspect-tcc-db
       name: Inspect TCC database presence
-      type: run-command
-      program: bash
-      args: ["-lc", "test -f \"$HOME/Library/Application Support/com.apple.TCC/TCC.db\""]
-      dangerous: true
-      shell: allow
+      type: inspect-path
+      path: $HOME/Library/Application Support/com.apple.TCC/TCC.db
+      expect:
+        exists: true
+        kind: file
     - id: plan-pppc-profile
       name: Plan PPPC profile install
       type: run-command

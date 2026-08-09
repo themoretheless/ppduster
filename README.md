@@ -93,6 +93,49 @@ ppduster clean -c caches --yes    # to Trash
 ppduster clean -c temp --yes --permanent   # asks you to type DELETE
 ```
 
+## Mac App Store CLI
+
+`ppduster app-store` provides its own `mas`-style catalog, inventory, install,
+and update commands. It does not require Homebrew or the external `mas` binary,
+and it can run outside the repository without loading cleanup rules.
+
+```bash
+# Catalog and local inventory (read-only)
+ppduster app-store search Xcode --country US --limit 10
+ppduster app-store list
+ppduster app-store outdated
+ppduster app-store doctor
+
+# Installation/update is planned by default
+ppduster app-store install 497799835
+ppduster app-store upgrade
+
+# Explicitly enqueue with Apple's App Store services
+ppduster app-store install 497799835 --yes
+ppduster app-store install 640199958 --get --yes
+ppduster app-store upgrade --yes
+
+# Machine-readable output is available for every report
+ppduster -o json app-store list
+```
+
+The storefront defaults to the Mac's Apple locale and can be overridden with
+`--country` or `PPDUSTER_APP_STORE_COUNTRY`. Installed apps are identified by a
+non-empty App Store receipt and their bundle metadata; `outdated` compares those
+versions with Apple's catalog and reports incompatible or unmatched apps separately.
+Because Apple's catalog can lag behind App Store delivery, these are update candidates,
+not a transactional guarantee of the release the signed-in account will receive.
+
+Native install/update is macOS-only and uses isolated, runtime-checked private Apple
+frameworks because Apple does not publish a CLI installation API. This backend may
+need maintenance after macOS updates. The Mac App Store must already be signed in;
+ppduster never reads Apple Account credentials. `--get` is restricted to catalogued
+free apps, while paid apps must first be purchased in Apple's UI. Applying always
+requires `--yes`; omit it for a side-effect-free plan. By default ppduster waits for
+the receipt/version, while `--no-wait` returns after the bounded submission check. A
+`pending` result is deliberately not treated as a safe retry signal: rescan `list` and
+`outdated` first, because Apple's background service may still finish the request.
+
 ## Setup automation
 
 `ppduster setup` is a separate, safe-by-default task subsystem for constructive automation
@@ -123,13 +166,164 @@ ppduster setup run bambu-studio-install --channel release --yes
 ppduster setup run bambu-studio-install --channel beta
 ppduster setup run bambu-studio-install --channel beta --yes
 
-# Install/refresh the mas CLI used by app-store-install actions
+# Check native App Store prerequisites used by app-store-install actions
 ppduster setup run app-store-bootstrap
 ppduster setup run app-store-bootstrap --yes
+
+# A reusable template composed from six existing scenarios
+ppduster setup show macos-developer-workstation
+ppduster setup run macos-developer-workstation --allow-shell
+
+# Typed folder creation and read-only path metadata
+ppduster setup run filesystem-basics
+ppduster setup run filesystem-basics --yes
 
 # External task packs are blocked unless explicitly trusted
 ppduster --trust-external-packs setup run dev-brew-bootstrap --tasks-dir /path/to/tasks
 ```
+
+Every scenario must explain its outcome in `description`. YAML block scalars are
+recommended for a useful overview of changes, prerequisites, permissions, and what
+the scenario intentionally leaves alone. The UI and `setup run` combine that overview
+with a generated, action-by-action explanation of what will happen.
+
+A reusable template groups existing scenarios without copying their steps:
+
+```yaml
+task:
+  id: macos-developer-workstation
+  name: macOS developer workstation
+  description: |
+    Prepare a development workstation in a deliberate, reviewable order.
+    Child checks and safety gates remain active, and dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-top-01-brew-bootstrap
+    - macos-top-02-dotfiles
+    - macos-top-05-toolchains
+```
+
+Templates may include other templates. References are expanded in the listed order
+before execution so all shell, elevation, authentication, and destination policies are
+checked before the first change. Loading fails early on missing references, cycles,
+duplicate children, platform mismatches, excessive expansion, or a reference from a
+more-trusted pack to a less-trusted pack. A definition contains either `steps` or
+`scenarios`, never both.
+
+A `git-clone` step is idempotent when a branch is declared:
+
+```yaml
+- id: sync-repository
+  name: Clone or update repository
+  type: git-clone
+  repo: https://github.com/example/project.git
+  dest: $HOME/Library/Caches/project
+  branch: main
+```
+
+The declared `dest` is the folder being ensured. If it is absent (or is an empty
+directory), the repository is cloned. If the matching repository already exists,
+ppduster fetches `origin/main` and performs only a safe fast-forward. The result report
+distinguishes a new clone, an already current branch ref, and a repository that existed
+but was outdated and was updated. If another branch is checked out, that checkout and
+its local changes stay in place while the inactive local `main` ref is fast-forwarded,
+and the report says which active branch was preserved. Local changes that would block
+a required fast-forward, a mismatched origin, or diverged history are never reset,
+stashed, merged, or overwritten; the step stops with an explicit error instead.
+
+Filesystem scenarios do not need a shell. `create-directory` recursively creates
+missing parents and is idempotent: an existing real directory is reported as already
+satisfied, while a file or symlink at the destination is an error and is never
+replaced.
+
+`inspect-path` is read-only and runs during both a normal dry-run and an applied run.
+It reports structured `path-metadata` in JSON as well as a human summary: existence,
+path kind, emptiness, modification time, an optional creation time when the filesystem
+provides it, and size. Files are always measured. For directories, set
+`recursive_size: true` to total regular-file bytes and count entries recursively
+(a size expectation also enables that measurement). `empty` means the directory has
+no immediate entries, while `modified_at` is the timestamp of the inspected entry,
+not the newest child. Symlinks are listed as symlinks and are never followed.
+
+```yaml
+- id: create-state-directory
+  name: Create state directory
+  type: create-directory
+  path: $HOME/.local/state/example
+
+- id: inspect-state-directory
+  name: Get size and dates
+  type: inspect-path
+  path: $HOME/.local/state/example
+  recursive_size: true
+  expect:
+    exists: true
+    kind: directory
+    empty: true
+    min_size_bytes: 0
+    max_size_bytes: 0
+    modified_at_or_after: 2000-01-01T00:00:00Z
+    modified_at_or_before: 2100-01-01T00:00:00Z
+```
+
+All populated `expect` fields are combined with logical AND. Size and timestamp
+boundaries are inclusive; timestamps use RFC 3339 and are compared as instants before
+being reported in UTC. `exists: false` must stand alone because a missing path has no
+type, size, emptiness, or timestamps. An unmet expectation marks the step failed and
+skips later steps. Omit `expect` to observe a missing path successfully as
+`exists: false`.
+
+The older `check.path_exists` and `check.command_succeeds` fields have a different,
+unchanged purpose: either one can declare a mutating step already satisfied so its
+action is skipped. They are not assertions or branching conditions.
+
+A `run-script` step executes an existing script file through an explicitly selected
+interpreter. `script` is a path, not inline source; `args`, `cwd`, and `env` are
+optional. Every script step must declare `dangerous: true`, and execution requires
+both the normal `--yes` apply flag and `--allow-shell`:
+
+```yaml
+- id: configure-posix
+  name: Apply the portable workstation baseline
+  type: run-script
+  interpreter: sh
+  script: $HOME/.config/workstation/configure.sh
+  args: ["--profile", "developer"]
+  cwd: $HOME/.config/workstation
+  env:
+    PPDUSTER_MODE: setup
+  dangerous: true
+
+- id: configure-bash
+  name: Apply Bash-specific setup
+  type: run-script
+  interpreter: bash
+  script: $HOME/.config/workstation/configure-bash.sh
+  dangerous: true
+
+- id: configure-windows
+  name: Apply the Windows workstation baseline
+  type: run-script
+  interpreter: powershell
+  script: "%USERPROFILE%/workstation/configure.ps1"
+  args: ["-Profile", "Developer"]
+  dangerous: true
+```
+
+The interpreter names map to these executables, tried in order:
+
+| `interpreter` | macOS / Linux | Windows |
+|---|---|---|
+| `sh` | `/bin/sh`, then `sh` | `sh.exe`, then `sh` |
+| `bash` | `bash`, then `/bin/bash` | `bash.exe`, then `bash` |
+| `powershell` | `pwsh`, then `powershell` | `pwsh.exe`, then `powershell.exe` |
+
+PowerShell scripts run with `-NoLogo -NoProfile -NonInteractive -File`; Windows also
+uses process-scoped `-ExecutionPolicy Bypass`. The script must be a regular file;
+script and `cwd` symlinks are rejected, and relative script paths are resolved from
+`cwd` when it is supplied. Script steps stay terminal-only in Scenario Flow, which
+shows the exact CLI command instead of trying to capture script interaction.
 
 Current safety posture:
 
@@ -139,10 +333,12 @@ Current safety posture:
 - shell-capable steps require `dangerous: true` and `--allow-shell`
 - elevated steps require `--allow-elevation`
 - external task packs require `--trust-external-packs`
+- `create-directory` expands only declared paths, blocks protected destinations, creates parents without overwriting, and rejects a symlink at the target
+- `inspect-path` performs read-only metadata checks during dry-run; recursive size walks never follow symlinks and fail rather than report a partial total
 - download steps require `checksum.sha256`
 - `extract-archive` supports `zip`, `tar`, `tar.gz`/`tgz`, `tar.bz2`, and `tar.xz`; it rejects links, special files, traversal, duplicate output files, oversized output, and existing destinations before atomically publishing the extracted directory
 - DMG installation verifies the image, mounts it read-only, validates the app signature and Gatekeeper assessment, stages the bundle in `~/Applications`, and refuses elevation or overwriting an existing app
-- typed `app-store-install` steps use a numeric App Store ID through a standard Homebrew `mas` installation; they require explicit elevation permission and an App Store account that owns the app
+- typed `app-store-install` steps use a numeric App Store ID through ppduster's native, runtime-checked backend; they require explicit elevation permission and an App Store account that owns the app
 - the sealed `activate-license` action accepts only a provider and method, and task loading rejects `license_key` / `license-key` fields at any nesting level; enter the key directly in the vendor UI
 
 An App Store installation step looks like this:
@@ -160,8 +356,8 @@ An App Store installation step looks like this:
 Use `operation: install` for an app already obtained or purchased by the signed-in
 Apple Account. Use `operation: get` to obtain and install a free app. Apply the task
 with `--yes --allow-elevation`; Apple Account authentication remains in Apple's UI.
-The bundled bootstrap installs the current Homebrew Core `mas` and therefore requires
-macOS 14 or newer.
+The bundled bootstrap performs read-only macOS and App Store metadata checks; it does
+not install Homebrew or the external `mas` utility.
 
 An archive extraction step can detect the format from its file name or accept an
 explicit `format`:
@@ -260,9 +456,9 @@ Path templates: `$HOME`, `~`, `$TMPDIR`, `$XDG_CACHE_HOME`, `$XDG_DATA_HOME`, `%
 
 ```
 src/           Rust library + CLI
-rules/         YAML rule packs (macos, linux, windows, dev, apps)
+rules/         YAML rule packs (core + macOS extended packs)
 tests/         Integration tests
-research/      Research notes from multi-agent analysis (when present)
+research/      Research notes and multi-agent macOS path batches
 ```
 
 ## Research basis
@@ -285,6 +481,12 @@ Open-source families covered in research batches: classic cleaners, duplicate fi
 - **Opt-in dev cleanup:** Xcode DerivedData, iOS DeviceSupport, and CoreSimulator caches/logs stay disabled by default because they are regenerable but can slow the next build or simulator launch.
 - **Report-only areas:** Xcode Archives and iOS device backups are listed for review but never auto-deleted.
 - **Intentionally excluded:** cookies, history, saved passwords, Mail data, Keychains, iCloud/mobile documents, and broad `~/Library/Application Support` or `~/Library/Containers` wipes.
+- **Extended packs (wave 1, 10 agents):** `macos-apple-extended`, `macos-browsers`, `macos-misc`, `dev-extended`, `dev-mobile`, `dev-ml`, `apps-comms`, `apps-creative`, `apps-gaming`, `apps-office-electron`.
+- **Extended packs (wave 2, 30 agents):** security/VPN, design UI, music DAW, CAD/print, photo RAW, education, finance, cloud CLIs, databases, virt, exotic pkg managers, webservers, observability, notes/PKM, social, streaming, backup/sync, PWA helpers, Continuity, fonts/icons, network proxies, JetBrains deep, Microsoft deep, Asia apps, CIS apps, JS monorepo, MDM, Homebrew deep, system logs, Containers residuals (30 YAML packs under `rules/`).
+- **Quarantine policy:** every research-generated extended rule is disabled and `report-only`. Even `--all --yes` cannot delete its findings. Promote rules to cleanup only after a path-level audit and a regression test; broad `Application Support` roots are not considered safe cleanup targets.
+- Together with core packs: **~1500+ rules** and **~7500+** path templates. Only reviewed core rules can delete; extended coverage is currently an opt-in inventory.
+- **Personal pack:** `apps-personal.yaml` is built from a **live inventory** of apps on this Mac (Claude, Codex, Kimi, Copilot, Steam, JetBrains, Edge, Telegram, etc.) and is also disabled/report-only.
+- **Research sources:** `research/macos-batch-01` … `41` JSON + `research/macos-merge-summary.json`.
 
 ## License
 

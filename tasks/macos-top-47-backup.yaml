@@ -12,8 +12,7 @@ task:
       args: ["destinationinfo"]
     - id: plan-backup-script
       name: Plan backup runner
-      type: run-command
-      program: bash
-      args: ["-lc", "$HOME/.config/macos/run-backup.sh"]
+      type: run-script
+      interpreter: bash
+      script: "$HOME/.config/macos/run-backup.sh"
       dangerous: true
-      shell: allow

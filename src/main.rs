@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
+use ppduster::app_store;
+use ppduster::app_store_cli;
+use ppduster::app_store_installer::StoreOperation;
 use ppduster::audit;
 use ppduster::automation::{run_task, PackTrust, ReleaseChannel, RunOptions, TaskPack, TaskSource};
 use ppduster::clean;
@@ -8,6 +11,7 @@ use ppduster::report::{self, OutputFormat};
 use ppduster::rules::RulePack;
 use ppduster::scan::{self, ScanOptions};
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliOutput {
@@ -43,9 +47,10 @@ impl From<CliOutput> for OutputFormat {
 #[command(
     name = "ppduster",
     version,
-    about = "Safe junk cleaner: caches, logs, temp files, and leftovers",
+    about = "Safe cleaner, setup automation, and Mac App Store CLI",
     long_about = "ppduster scans known junk locations using versioned YAML rule packs.\n\
                   Default is always safe: dry-run, age filters, never-touch paths, trash delete.\n\
+                  On macOS it can also search, inventory, install, and update App Store apps.\n\
                   Inspired by lessons from BleachBit, CleanMyMac, CCleaner and 100+ OSS tools."
 )]
 struct Cli {
@@ -132,6 +137,12 @@ enum Commands {
         #[command(subcommand)]
         action: SetupCmd,
     },
+    /// Search, inspect, install, and update Mac App Store applications
+    #[command(alias = "store")]
+    AppStore {
+        #[command(subcommand)]
+        action: AppStoreCmd,
+    },
     /// Show recent audit entries
     Audit {
         #[arg(long, default_value_t = 20)]
@@ -162,6 +173,82 @@ enum SetupCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum AppStoreCmd {
+    /// Search the Mac App Store catalog
+    Search {
+        /// Search terms (all words are joined into one query)
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+        /// Two-letter App Store country code
+        #[arg(long)]
+        country: Option<String>,
+        /// Maximum number of catalog results
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+    },
+    /// List applications installed from the Mac App Store
+    #[command(alias = "installed")]
+    List {
+        /// Scan an additional applications directory
+        #[arg(long = "app-root")]
+        app_roots: Vec<PathBuf>,
+    },
+    /// List potential updates for installed App Store applications
+    Outdated {
+        /// Two-letter App Store country code
+        #[arg(long)]
+        country: Option<String>,
+        /// Scan an additional applications directory
+        #[arg(long = "app-root")]
+        app_roots: Vec<PathBuf>,
+    },
+    /// Install applications by numeric App Store (ADAM) ID
+    Install {
+        #[arg(required = true, num_args = 1..)]
+        app_ids: Vec<u64>,
+        /// Two-letter App Store country code
+        #[arg(long)]
+        country: Option<String>,
+        /// Obtain free apps before installing; paid purchases stay in App Store UI
+        #[arg(long)]
+        get: bool,
+        /// Apply the installation plan
+        #[arg(long)]
+        yes: bool,
+        /// Return after the bounded submission check instead of verifying installation
+        #[arg(long)]
+        no_wait: bool,
+        /// Maximum seconds to wait for receipt/version verification
+        #[arg(long, default_value_t = 3600)]
+        timeout: u64,
+    },
+    /// Update installed App Store applications with potential updates
+    #[command(alias = "update")]
+    Upgrade {
+        /// Optional numeric IDs; omit to update every compatible candidate
+        app_ids: Vec<u64>,
+        /// Two-letter App Store country code
+        #[arg(long)]
+        country: Option<String>,
+        /// Apply the update plan
+        #[arg(long)]
+        yes: bool,
+        /// Return after bounded submission checks instead of verifying versions
+        #[arg(long)]
+        no_wait: bool,
+        /// Maximum seconds to wait per application
+        #[arg(long, default_value_t = 3600)]
+        timeout: u64,
+    },
+    /// Check local inventory and native installer prerequisites
+    Doctor {
+        /// Scan an additional applications directory
+        #[arg(long = "app-root")]
+        app_roots: Vec<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum RulesCmd {
     List {
         #[arg(long)]
@@ -181,8 +268,6 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let rule_dirs = discover_rule_dirs(cli.rules_dir.as_ref())?;
-    let pack = load_pack_from_dirs(&rule_dirs)?;
     let output = OutputFormat::from(cli.output);
     let audit_path = audit::resolve_log_path(cli.audit_log.as_ref());
     let log_audit = |action: &str, outcome: &str, detail: Option<&str>| {
@@ -198,6 +283,7 @@ fn run() -> Result<()> {
             min_age,
             limit,
         } => {
+            let (_, pack) = load_rules_for_command(cli.rules_dir.as_ref())?;
             let opts = ScanOptions {
                 categories: flatten_categories(category),
                 include_disabled: all,
@@ -216,6 +302,7 @@ fn run() -> Result<()> {
             confirm_phrase,
             limit,
         } => {
+            let (_, pack) = load_rules_for_command(cli.rules_dir.as_ref())?;
             if permanent && yes {
                 eprintln!(
                     "{}",
@@ -252,21 +339,26 @@ fn run() -> Result<()> {
             report::print_clean(&result, output)?;
             Ok(())
         }
-        Commands::Rules { action } => match action {
-            RulesCmd::List { all } => {
-                report::print_rules(&pack, all, output)?;
-                Ok(())
+        Commands::Rules { action } => {
+            let (_, pack) = load_rules_for_command(cli.rules_dir.as_ref())?;
+            match action {
+                RulesCmd::List { all } => {
+                    report::print_rules(&pack, all, output)?;
+                    Ok(())
+                }
+                RulesCmd::Show { id } => {
+                    report::print_rule(&pack, &id, output)?;
+                    Ok(())
+                }
             }
-            RulesCmd::Show { id } => {
-                report::print_rule(&pack, &id, output)?;
-                Ok(())
-            }
-        },
+        }
         Commands::Categories { all } => {
+            let (_, pack) = load_rules_for_command(cli.rules_dir.as_ref())?;
             report::print_categories(&pack, all, output)?;
             Ok(())
         }
         Commands::Doctor => {
+            let (rule_dirs, pack) = load_rules_for_command(cli.rules_dir.as_ref())?;
             report::print_doctor(&pack, &rule_dirs, output)?;
             Ok(())
         }
@@ -275,7 +367,17 @@ fn run() -> Result<()> {
             match action {
                 SetupCmd::List => {
                     for task in &tasks.tasks {
-                        println!("{}\t{}", task.id, task.name);
+                        let kind = if task.is_template() {
+                            "template"
+                        } else {
+                            "scenario"
+                        };
+                        let description = task
+                            .description
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        println!("{}\t{}\t{}\t{}", task.id, kind, task.name, description);
                     }
                     Ok(())
                 }
@@ -294,11 +396,9 @@ fn run() -> Result<()> {
                     channel,
                     ..
                 } => {
-                    let task = tasks
-                        .get(&id)
-                        .ok_or_else(|| anyhow::anyhow!("unknown task id {}", id))?;
+                    let task = tasks.resolve(&id)?;
                     let report = run_task(
-                        task,
+                        &task,
                         &RunOptions {
                             apply: yes,
                             allow_shell,
@@ -319,6 +419,7 @@ fn run() -> Result<()> {
                 }
             }
         }
+        Commands::AppStore { action } => run_app_store(action, output),
         Commands::Audit { limit } => {
             let path = audit::resolve_log_path(cli.audit_log.as_ref()).unwrap_or_else(|| {
                 std::env::current_dir()
@@ -355,6 +456,95 @@ fn run() -> Result<()> {
         Err(err) => {
             log_audit("command", "failed", Some(&err.to_string()));
             Err(err)
+        }
+    }
+}
+
+fn run_app_store(action: AppStoreCmd, output: OutputFormat) -> Result<()> {
+    match action {
+        AppStoreCmd::Search {
+            query,
+            country,
+            limit,
+        } => {
+            let country = app_store_cli::resolve_country(country.as_deref())?;
+            let report = app_store::search(&query.join(" "), &country, limit)?;
+            app_store_cli::print_search(&report, output)
+        }
+        AppStoreCmd::List { app_roots } => {
+            let report = app_store::scan_installed(&app_roots)?;
+            app_store_cli::print_installed(&report, output)
+        }
+        AppStoreCmd::Outdated { country, app_roots } => {
+            let country = app_store_cli::resolve_country(country.as_deref())?;
+            let inventory = app_store::scan_installed(&app_roots)?;
+            let mut report = app_store::check_updates(&inventory.apps, &country)?;
+            report.warnings.extend(inventory.warnings);
+            app_store_cli::print_updates(&report, output)
+        }
+        AppStoreCmd::Install {
+            app_ids,
+            country,
+            get,
+            yes,
+            no_wait,
+            timeout,
+        } => {
+            let country = app_store_cli::resolve_country(country.as_deref())?;
+            let operation = if get {
+                StoreOperation::Get
+            } else {
+                StoreOperation::Install
+            };
+            let report = app_store_cli::install_apps(
+                &app_ids,
+                &country,
+                operation,
+                yes,
+                !no_wait,
+                Duration::from_secs(timeout),
+            );
+            app_store_cli::print_mutation(&report, output)?;
+            if report.has_failures() {
+                anyhow::bail!(
+                    "{} App Store installation request(s) failed",
+                    report.failed_count()
+                );
+            }
+            Ok(())
+        }
+        AppStoreCmd::Upgrade {
+            app_ids,
+            country,
+            yes,
+            no_wait,
+            timeout,
+        } => {
+            let country = app_store_cli::resolve_country(country.as_deref())?;
+            let selected = (!app_ids.is_empty()).then_some(app_ids.as_slice());
+            let report = app_store_cli::upgrade_apps(
+                selected,
+                &country,
+                yes,
+                !no_wait,
+                Duration::from_secs(timeout),
+            );
+            app_store_cli::print_mutation(&report, output)?;
+            if report.has_failures() {
+                anyhow::bail!(
+                    "{} App Store update request(s) failed",
+                    report.failed_count()
+                );
+            }
+            Ok(())
+        }
+        AppStoreCmd::Doctor { app_roots } => {
+            let report = app_store_cli::doctor(&app_roots);
+            app_store_cli::print_doctor(&report, output)?;
+            if !report.is_healthy() {
+                anyhow::bail!("Mac App Store integration is not healthy");
+            }
+            Ok(())
         }
     }
 }
@@ -402,6 +592,12 @@ fn load_pack_from_dirs(rule_dirs: &[PathBuf]) -> Result<RulePack> {
         );
     }
     RulePack::load_many(rule_dirs)
+}
+
+fn load_rules_for_command(extra: Option<&PathBuf>) -> Result<(Vec<PathBuf>, RulePack)> {
+    let rule_dirs = discover_rule_dirs(extra)?;
+    let pack = load_pack_from_dirs(&rule_dirs)?;
+    Ok((rule_dirs, pack))
 }
 
 fn flatten_categories(raw: Vec<String>) -> Vec<String> {

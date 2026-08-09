@@ -1,0 +1,17 @@
+task:
+  id: macos-developer-workstation
+  name: macOS developer workstation
+  description: |
+    Prepare a macOS workstation for command-line and application development by running six existing setup scenarios in a deliberate order.
+    The template bootstraps Homebrew, synchronizes a dotfiles repository, installs mise-based language toolchains, checks Git/SSH/GPG prerequisites, configures tmux, and installs modern CLI productivity tools.
+    Some child scenarios may use Git credentials or shell-capable commands, so review the complete dry-run plan and grant only the permissions it reports before applying changes.
+    The template reuses the child scenarios without copying their steps; their checks, trust requirements, safety gates, and already-satisfied behavior remain in effect.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-top-01-brew-bootstrap
+    - macos-top-02-dotfiles
+    - macos-top-05-toolchains
+    - macos-top-07-git-ssh-gpg
+    - macos-top-28-tmux
+    - macos-top-29-cli-ux
