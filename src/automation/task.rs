@@ -504,6 +504,8 @@ pub enum Action {
         source_step: String,
         array_path: String,
         item: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fields: Vec<String>,
     },
     ForEachGitCloneIfMissing {
         loop_step: String,
@@ -798,6 +800,7 @@ impl Step {
                 source_step,
                 array_path,
                 item,
+                fields,
             } => {
                 if source_step.trim().is_empty()
                     || array_path.trim().is_empty()
@@ -810,6 +813,18 @@ impl Step {
                 }
                 if source_step == &self.id {
                     return Err(format!("step {} for-each cannot reference itself", self.id));
+                }
+                let mut unique_fields = std::collections::BTreeSet::new();
+                for field in fields {
+                    if field.trim().is_empty()
+                        || field.contains('.')
+                        || !unique_fields.insert(field.as_str())
+                    {
+                        return Err(format!(
+                            "step {} for-each fields must be unique non-empty object keys",
+                            self.id
+                        ));
+                    }
                 }
             }
             Action::ForEachGitCloneIfMissing {
@@ -1542,6 +1557,12 @@ mod tests {
                         source_step: "repositories".into(),
                         array_path: "github.repositories".into(),
                         item: "repository".into(),
+                        fields: vec![
+                            "https_url".into(),
+                            "owner".into(),
+                            "name".into(),
+                            "default_branch".into(),
+                        ],
                     },
                 },
                 Step {

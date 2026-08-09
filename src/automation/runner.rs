@@ -362,11 +362,12 @@ fn run_task_with_interactivity(
                 source_step,
                 array_path,
                 item,
+                fields,
             } = &step.action
             {
                 let plan = plan_step(step, opts)?;
                 plans.push(plan.clone());
-                match resolve_for_each_items(source_step, array_path, &steps) {
+                match resolve_for_each_items(source_step, array_path, fields, &steps) {
                     Ok(items) => {
                         let count = items.len();
                         loop_contexts.insert(step.id.clone(), (item.clone(), items));
@@ -897,6 +898,7 @@ fn failed_step_report(step: &Step, plan: &ActionPlan, message: &str) -> StepRepo
 fn resolve_for_each_items(
     source_step: &str,
     array_path: &str,
+    fields: &[String],
     reports: &[StepReport],
 ) -> Result<Vec<serde_json::Value>> {
     let report = reports
@@ -916,10 +918,33 @@ fn resolve_for_each_items(
             .get(segment)
             .with_context(|| format!("context path {array_path} is missing segment {segment}"))?;
     }
-    current
+    let items = current
         .as_array()
         .cloned()
-        .with_context(|| format!("context path {array_path} is not an array"))
+        .with_context(|| format!("context path {array_path} is not an array"))?;
+    if fields.is_empty() {
+        return Ok(items);
+    }
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let object = item.as_object().with_context(|| {
+                format!(
+                    "context item {} at {array_path} is not an object",
+                    index + 1
+                )
+            })?;
+            let mut projected = serde_json::Map::new();
+            for field in fields {
+                let value = object.get(field).with_context(|| {
+                    format!("context item {} has no selected field {field}", index + 1)
+                })?;
+                projected.insert(field.clone(), value.clone());
+            }
+            Ok(serde_json::Value::Object(projected))
+        })
+        .collect()
 }
 
 fn item_value_at_path<'a>(
@@ -1335,8 +1360,14 @@ pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
             source_step,
             array_path,
             item,
+            fields,
         } => format!(
-            "iterate over array {array_path} from step {source_step}, exposing each element as {item}"
+            "iterate over array {array_path} from step {source_step}, exposing each element as {item}{}",
+            if fields.is_empty() {
+                String::new()
+            } else {
+                format!(" with selected fields {}", fields.join(", "))
+            }
         ),
         Action::ForEachGitCloneIfMissing {
             loop_step,
@@ -7961,9 +7992,22 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
             output: Some(output),
         }];
 
-        let items =
-            resolve_for_each_items("repositories", "github.repositories", &reports).unwrap();
+        let selected_fields = vec![
+            "https_url".into(),
+            "owner".into(),
+            "name".into(),
+            "default_branch".into(),
+        ];
+        let items = resolve_for_each_items(
+            "repositories",
+            "github.repositories",
+            &selected_fields,
+            &reports,
+        )
+        .unwrap();
         assert_eq!(items.len(), 1);
+        assert!(items[0].get("id").is_none());
+        assert!(items[0].get("ssh_url").is_none());
         assert_eq!(
             render_item_template("{{repository.https_url}}", "repository", &items[0]).unwrap(),
             "https://github.com/owner/repository"
