@@ -143,6 +143,18 @@ enum ComposerBlockKind {
     BrewInstall,
 }
 
+const GITHUB_REPOSITORY_CONTEXT_FIELDS: [(&str, &str); 9] = [
+    ("id", "string"),
+    ("owner", "string"),
+    ("name", "string"),
+    ("full_name", "string"),
+    ("https_url", "string"),
+    ("ssh_url", "string"),
+    ("default_branch", "string?"),
+    ("private", "bool"),
+    ("archived", "bool"),
+];
+
 impl ComposerBlockKind {
     const ALL: [Self; 12] = [
         Self::GithubListRepositories,
@@ -3255,28 +3267,44 @@ fn composer_output_context(kind: ComposerBlockKind) -> &'static str {
     }
 }
 
-fn composer_step_output_context(step: &Step) -> &'static str {
+fn composer_step_output_context(step: &Step) -> String {
     match &step.action {
         Action::GithubListRepositories => {
-            composer_output_context(ComposerBlockKind::GithubListRepositories)
+            composer_output_context(ComposerBlockKind::GithubListRepositories).into()
         }
-        Action::ForEach { .. } => "repository (элемент массива github.repositories[])",
+        Action::ForEach { item, fields, .. } => {
+            let selected =
+                |field: &str| fields.is_empty() || fields.iter().any(|value| value == field);
+            let body = GITHUB_REPOSITORY_CONTEXT_FIELDS
+                .iter()
+                .filter(|(field, _)| selected(field))
+                .map(|(field, kind)| format!("  {field}: {kind}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{item} {{\n{body}\n}}")
+        }
         Action::ForEachGitCloneIfMissing { .. } => {
-            composer_output_context(ComposerBlockKind::GitCloneIfMissing)
+            composer_output_context(ComposerBlockKind::GitCloneIfMissing).into()
         }
-        Action::GitInspect { .. } => composer_output_context(ComposerBlockKind::GitInspect),
+        Action::GitInspect { .. } => composer_output_context(ComposerBlockKind::GitInspect).into(),
         Action::GitCloneIfMissing { .. } => {
-            composer_output_context(ComposerBlockKind::GitCloneIfMissing)
+            composer_output_context(ComposerBlockKind::GitCloneIfMissing).into()
         }
-        Action::GitFetch { .. } => composer_output_context(ComposerBlockKind::GitFetch),
-        Action::GitFastForward { .. } => composer_output_context(ComposerBlockKind::GitFastForward),
-        Action::CreateDirectory(_) => composer_output_context(ComposerBlockKind::CreateDirectory),
-        Action::InspectPath(_) => composer_output_context(ComposerBlockKind::InspectPath),
-        Action::CopyPath(_) => composer_output_context(ComposerBlockKind::CopyPath),
-        Action::WriteFile(_) => composer_output_context(ComposerBlockKind::WriteFile),
-        Action::RemovePath(_) => composer_output_context(ComposerBlockKind::RemovePath),
-        Action::BrewInstall { .. } => composer_output_context(ComposerBlockKind::BrewInstall),
-        _ => "result.status, result.summary",
+        Action::GitFetch { .. } => composer_output_context(ComposerBlockKind::GitFetch).into(),
+        Action::GitFastForward { .. } => {
+            composer_output_context(ComposerBlockKind::GitFastForward).into()
+        }
+        Action::CreateDirectory(_) => {
+            composer_output_context(ComposerBlockKind::CreateDirectory).into()
+        }
+        Action::InspectPath(_) => composer_output_context(ComposerBlockKind::InspectPath).into(),
+        Action::CopyPath(_) => composer_output_context(ComposerBlockKind::CopyPath).into(),
+        Action::WriteFile(_) => composer_output_context(ComposerBlockKind::WriteFile).into(),
+        Action::RemovePath(_) => composer_output_context(ComposerBlockKind::RemovePath).into(),
+        Action::BrewInstall { .. } => {
+            composer_output_context(ComposerBlockKind::BrewInstall).into()
+        }
+        _ => "result.status, result.summary".into(),
     }
 }
 
@@ -3289,6 +3317,10 @@ fn composer_step(kind: ComposerBlockKind, id: String) -> Step {
             source_step: "list-github-repositories-1".into(),
             array_path: "github.repositories".into(),
             item: "repository".into(),
+            fields: GITHUB_REPOSITORY_CONTEXT_FIELDS
+                .iter()
+                .map(|(field, _)| (*field).into())
+                .collect(),
         },
         ComposerBlockKind::GitInspect => Action::GitInspect {
             repo: repository,
@@ -3518,10 +3550,64 @@ fn paint_composer_step_editor(ui: &mut egui::Ui, step: &mut Step, dark: bool) ->
             source_step,
             array_path,
             item,
+            fields,
         } => {
             changed |= composer_text_field(ui, "ID шага-источника", source_step);
             changed |= composer_text_field(ui, "Путь к массиву", array_path);
             changed |= composer_text_field(ui, "Имя элемента", item);
+            ui.add_space(7.0);
+            ui.label(
+                RichText::new("Поля для следующего блока")
+                    .size(9.0)
+                    .color(MUTED),
+            );
+            ui.horizontal(|ui| {
+                if ui.small_button("Все").clicked() {
+                    *fields = GITHUB_REPOSITORY_CONTEXT_FIELDS
+                        .iter()
+                        .map(|(field, _)| (*field).into())
+                        .collect();
+                    changed = true;
+                }
+                if ui.small_button("Для клонирования").clicked() {
+                    *fields = ["https_url", "owner", "name", "default_branch"]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect();
+                    changed = true;
+                }
+            });
+            Frame::new()
+                .fill(code_surface(dark))
+                .corner_radius(8)
+                .inner_margin(Margin::same(8))
+                .show(ui, |ui| {
+                    let inherited_all = fields.is_empty();
+                    for (field, kind) in GITHUB_REPOSITORY_CONTEXT_FIELDS {
+                        let mut selected =
+                            inherited_all || fields.iter().any(|value| value == field);
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut selected, "").changed() {
+                                if inherited_all {
+                                    *fields = GITHUB_REPOSITORY_CONTEXT_FIELDS
+                                        .iter()
+                                        .map(|(field, _)| (*field).into())
+                                        .collect();
+                                }
+                                if selected {
+                                    if !fields.iter().any(|value| value == field) {
+                                        fields.push(field.into());
+                                    }
+                                } else {
+                                    fields.retain(|value| value != field);
+                                }
+                                changed = true;
+                            }
+                            ui.label(RichText::new(field).monospace().size(9.0).color(PURPLE));
+                            ui.label(RichText::new(kind).monospace().size(8.0).color(MUTED));
+                        });
+                    }
+                });
             ui.label(
                 RichText::new(format!(
                     "В дочернем блоке используйте {{{{{item}.field}}}} — например, {{{{{item}.https_url}}}}."
@@ -4812,6 +4898,22 @@ project:
         for kind in ComposerBlockKind::ALL {
             assert!(!composer_output_context(kind).trim().is_empty());
         }
+    }
+
+    #[test]
+    fn foreach_output_context_contains_only_selected_fields() {
+        let mut step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        let Action::ForEach { fields, .. } = &mut step.action else {
+            unreachable!()
+        };
+        *fields = vec!["https_url".into(), "name".into()];
+
+        let context = composer_step_output_context(&step);
+        assert!(context.contains("repository {"));
+        assert!(context.contains("https_url: string"));
+        assert!(context.contains("name: string"));
+        assert!(!context.contains("ssh_url"));
+        assert!(!context.contains("default_branch"));
     }
 
     #[test]
