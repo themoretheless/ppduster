@@ -9,6 +9,7 @@ pub use runner::{
 };
 pub use task::{
     Action, ActivateLicenseAction, AppBundleIdentity, AppStoreInstallAction, AppStoreOperation,
-    AuthPolicy, BambuStudioReleaseAction, Check, Checksum, ElevationPolicy, LicenseMethod,
-    LicenseProvider, ReleaseChannel, ShellMode, Step, Task, TaskFile, TrustRequirement,
+    ArchiveFormat, AuthPolicy, BambuStudioReleaseAction, Check, Checksum, ElevationPolicy,
+    LicenseMethod, LicenseProvider, ReleaseChannel, ShellMode, Step, Task, TaskFile,
+    TrustRequirement,
 };

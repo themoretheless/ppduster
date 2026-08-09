@@ -164,6 +164,22 @@ pub struct BambuStudioReleaseAction {
     pub channel: ReleaseChannel,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArchiveFormat {
+    #[default]
+    Auto,
+    Zip,
+    Tar,
+    TarGz,
+    TarBz2,
+    TarXz,
+}
+
+fn default_archive_max_unpacked_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Action {
@@ -197,6 +213,10 @@ pub enum Action {
     ExtractArchive {
         src: String,
         dest: String,
+        #[serde(default)]
+        format: ArchiveFormat,
+        #[serde(default = "default_archive_max_unpacked_bytes")]
+        max_unpacked_bytes: u64,
     },
     InstallDmg {
         dmg: String,
@@ -279,9 +299,20 @@ impl Step {
                     ));
                 }
             }
-            Action::ExtractArchive { src, dest } => {
+            Action::ExtractArchive {
+                src,
+                dest,
+                max_unpacked_bytes,
+                ..
+            } => {
                 if src.trim().is_empty() || dest.trim().is_empty() {
                     return Err(format!("step {} requires src and dest", self.id));
+                }
+                if *max_unpacked_bytes == 0 {
+                    return Err(format!(
+                        "step {} max_unpacked_bytes must be greater than zero",
+                        self.id
+                    ));
                 }
             }
             Action::InstallDmg {

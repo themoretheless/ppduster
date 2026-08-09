@@ -117,6 +117,7 @@ Current safety posture:
 - elevated steps require `--allow-elevation`
 - external task packs require `--trust-external-packs`
 - download steps require `checksum.sha256`
+- `extract-archive` supports `zip`, `tar`, `tar.gz`/`tgz`, `tar.bz2`, and `tar.xz`; it rejects links, special files, traversal, duplicate output files, oversized output, and existing destinations before atomically publishing the extracted directory
 - DMG installation verifies the image, mounts it read-only, validates the app signature and Gatekeeper assessment, stages the bundle in `~/Applications`, and refuses elevation or overwriting an existing app
 - typed `app-store-install` steps use a numeric App Store ID through a standard Homebrew `mas` installation; they require explicit elevation permission and an App Store account that owns the app
 - the sealed `activate-license` action accepts only a provider and method, and task loading rejects `license_key` / `license-key` fields at any nesting level; enter the key directly in the vendor UI
@@ -138,6 +139,23 @@ Apple Account. Use `operation: get` to obtain and install a free app. Apply the 
 with `--yes --allow-elevation`; Apple Account authentication remains in Apple's UI.
 The bundled bootstrap installs the current Homebrew Core `mas` and therefore requires
 macOS 14 or newer.
+
+An archive extraction step can detect the format from its file name or accept an
+explicit `format`:
+
+```yaml
+- id: unpack-tool
+  type: extract-archive
+  src: $HOME/Library/Caches/ppduster/downloads/tool.tar.gz
+  dest: $HOME/Library/Caches/ppduster/unpacked/tool
+  check:
+    path_exists: $HOME/Library/Caches/ppduster/unpacked/tool
+  format: auto
+  max_unpacked_bytes: 10737418240
+```
+
+Allowed explicit formats are `zip`, `tar`, `tar-gz`, `tar-bz2`, and `tar-xz`.
+The default unpacked-size limit is 10 GiB.
 
 The bundled LightBurn task pins the official macOS 2.1.03 DMG and an independently
 computed SHA-256 (LightBurn does not publish a SHA-256 manifest for this release). It

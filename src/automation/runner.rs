@@ -1,6 +1,6 @@
 use crate::automation::task::{
-    Action, AppBundleIdentity, AppStoreOperation, AuthPolicy, ElevationPolicy, LicenseMethod,
-    LicenseProvider, ReleaseChannel, ShellMode, Step, Task,
+    Action, AppBundleIdentity, AppStoreOperation, ArchiveFormat, AuthPolicy, ElevationPolicy,
+    LicenseMethod, LicenseProvider, ReleaseChannel, ShellMode, Step, Task,
 };
 use crate::rules::expand_path_template;
 use crate::safety::{is_safe_rule_root, stays_under_root};
@@ -10,9 +10,9 @@ use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::IsTerminal;
-use std::io::{self, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use thiserror::Error;
@@ -415,8 +415,19 @@ fn plan_summary(step: &Step, opts: &RunOptions) -> Result<String> {
         Action::DownloadFile { url, dest, .. } => {
             format!("download {} to {} with sha256 verification", url, dest)
         }
-        Action::ExtractArchive { src, dest } => {
-            format!("extract {} into {} with traversal protection", src, dest)
+        Action::ExtractArchive {
+            src,
+            dest,
+            format,
+            max_unpacked_bytes,
+        } => {
+            format!(
+                "extract {} archive {} into {} atomically with traversal and link protection (maximum {} unpacked bytes)",
+                archive_format_name(*format),
+                src,
+                dest,
+                max_unpacked_bytes
+            )
         }
         Action::InstallDmg {
             dmg,
@@ -611,7 +622,12 @@ fn apply_step(step: &Step, opts: &RunOptions) -> Result<String> {
             dest,
             checksum,
         } => apply_download_file(url, dest, checksum),
-        Action::ExtractArchive { src, dest } => apply_extract_archive(src, dest),
+        Action::ExtractArchive {
+            src,
+            dest,
+            format,
+            max_unpacked_bytes,
+        } => apply_extract_archive(src, dest, *format, *max_unpacked_bytes),
         Action::InstallDmg {
             dmg,
             app_name,
@@ -946,55 +962,302 @@ fn apply_bambu_studio_release(channel: ReleaseChannel) -> Result<String> {
     ))
 }
 
-fn apply_extract_archive(src: &str, dest: &str) -> Result<String> {
+const MAX_ARCHIVE_ENTRIES: usize = 100_000;
+
+fn archive_format_name(format: ArchiveFormat) -> &'static str {
+    match format {
+        ArchiveFormat::Auto => "auto-detected",
+        ArchiveFormat::Zip => "zip",
+        ArchiveFormat::Tar => "tar",
+        ArchiveFormat::TarGz => "tar.gz",
+        ArchiveFormat::TarBz2 => "tar.bz2",
+        ArchiveFormat::TarXz => "tar.xz",
+    }
+}
+
+fn detect_archive_format(path: &Path, requested: ArchiveFormat) -> Result<ArchiveFormat> {
+    if requested != ArchiveFormat::Auto {
+        return Ok(requested);
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("archive file name is not valid UTF-8"))?
+        .to_ascii_lowercase();
+    if name.ends_with(".zip") {
+        Ok(ArchiveFormat::Zip)
+    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        Ok(ArchiveFormat::TarGz)
+    } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") || name.ends_with(".tbz") {
+        Ok(ArchiveFormat::TarBz2)
+    } else if name.ends_with(".tar.xz") || name.ends_with(".txz") {
+        Ok(ArchiveFormat::TarXz)
+    } else if name.ends_with(".tar") {
+        Ok(ArchiveFormat::Tar)
+    } else {
+        bail!(
+            "cannot detect archive format from {}; set format explicitly",
+            path.display()
+        )
+    }
+}
+
+fn apply_extract_archive(
+    src: &str,
+    dest: &str,
+    requested_format: ArchiveFormat,
+    max_unpacked_bytes: u64,
+) -> Result<String> {
     let src_path = expand_required_path(src)?;
     let dest_path = expand_required_path(dest)?;
-    if !src_path.exists() {
-        bail!("archive source not found: {}", src_path.display());
-    }
-    if dest_path.exists() && !dest_path.is_dir() {
+    let source_metadata = fs::symlink_metadata(&src_path)
+        .with_context(|| format!("inspect archive source {}", src_path.display()))?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
         bail!(
-            "archive destination exists and is not a directory: {}",
+            "archive source is not a regular file: {}",
+            src_path.display()
+        );
+    }
+    if path_entry_exists(&dest_path)? {
+        bail!(
+            "archive destination already exists; refusing to merge or overwrite: {}",
             dest_path.display()
         );
     }
-    fs::create_dir_all(&dest_path)
-        .with_context(|| format!("create archive destination {}", dest_path.display()))?;
+    let destination_parent = dest_path
+        .parent()
+        .ok_or_else(|| anyhow!("archive destination has no parent"))?;
+    fs::create_dir_all(destination_parent).with_context(|| {
+        format!(
+            "create archive destination parent {}",
+            destination_parent.display()
+        )
+    })?;
+    require_real_directory(destination_parent)?;
+    let format = detect_archive_format(&src_path, requested_format)?;
+    let staging = create_archive_staging_directory(destination_parent)?;
 
-    let manifest = Command::new("tar")
-        .arg("-tf")
-        .arg(&src_path)
-        .output()
-        .with_context(|| format!("list archive contents {}", src_path.display()))?;
-    if !manifest.status.success() {
-        bail!("failed to inspect archive {}", src_path.display());
+    let extract_result = match format {
+        ArchiveFormat::Zip => extract_zip_archive(&src_path, &staging, max_unpacked_bytes),
+        ArchiveFormat::Tar
+        | ArchiveFormat::TarGz
+        | ArchiveFormat::TarBz2
+        | ArchiveFormat::TarXz => {
+            extract_tar_archive(&src_path, &staging, format, max_unpacked_bytes)
+        }
+        ArchiveFormat::Auto => unreachable!(),
+    };
+    if let Err(extract_err) = extract_result {
+        if let Err(cleanup_err) = remove_archive_staging(destination_parent, &staging) {
+            return Err(extract_err.context(format!(
+                "also failed to remove archive staging directory: {cleanup_err:#}"
+            )));
+        }
+        return Err(extract_err);
     }
-    for line in String::from_utf8_lossy(&manifest.stdout).lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    if let Err(commit_err) = fs::rename(&staging, &dest_path) {
+        if let Err(cleanup_err) = remove_archive_staging(destination_parent, &staging) {
+            return Err(commit_err).context(format!(
+                "commit archive extraction failed and staging cleanup also failed: {cleanup_err:#}"
+            ));
         }
-        let rel = Path::new(trimmed);
-        if rel.is_absolute() || rel.components().any(|c| matches!(c, Component::ParentDir)) {
-            bail!("archive entry {} escapes the destination", trimmed);
-        }
-        let candidate = dest_path.join(rel);
-        if !candidate.starts_with(&dest_path) {
-            bail!("archive entry {} escapes the destination", trimmed);
-        }
+        return Err(commit_err)
+            .with_context(|| format!("commit extracted archive to {}", dest_path.display()));
     }
-
-    let status = Command::new("tar")
-        .args(["-xf", &src_path.to_string_lossy()])
-        .current_dir(&dest_path)
-        .status()
-        .with_context(|| format!("extract archive {}", src_path.display()))?;
-    status.exit_ok("tar extract")?;
     Ok(format!(
-        "extracted {} into {}",
+        "extracted {} archive {} into {}",
+        archive_format_name(format),
         src_path.display(),
         dest_path.display()
     ))
+}
+
+fn extract_zip_archive(src: &Path, staging: &Path, max_unpacked_bytes: u64) -> Result<()> {
+    let file = File::open(src).with_context(|| format!("open zip archive {}", src.display()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .with_context(|| format!("read zip archive {}", src.display()))?;
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        bail!("archive contains too many entries: {}", archive.len());
+    }
+    let mut total_bytes = 0u64;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .with_context(|| format!("read zip entry {index}"))?;
+        let rel = entry
+            .enclosed_name()
+            .ok_or_else(|| anyhow!("zip entry has an unsafe path: {}", entry.name()))?;
+        if entry.is_symlink() || (!entry.is_dir() && !entry.is_file()) {
+            bail!(
+                "archive links and special files are not allowed: {}",
+                entry.name()
+            );
+        }
+        let output = checked_archive_output_path(staging, &rel)?;
+        if entry.is_dir() {
+            fs::create_dir_all(&output)
+                .with_context(|| format!("create extracted directory {}", output.display()))?;
+            continue;
+        }
+        total_bytes = add_unpacked_size(total_bytes, entry.size(), max_unpacked_bytes)?;
+        create_archive_parent(staging, &output)?;
+        let mut output_file = create_extracted_file(&output)?;
+        let copied = io::copy(&mut entry, &mut output_file)
+            .with_context(|| format!("extract zip entry {}", entry.name()))?;
+        if copied != entry.size() {
+            bail!(
+                "zip entry size changed while extracting {}: expected {}, wrote {}",
+                entry.name(),
+                entry.size(),
+                copied
+            );
+        }
+        set_safe_file_permissions(&output, entry.unix_mode())?;
+    }
+    Ok(())
+}
+
+fn extract_tar_archive(
+    src: &Path,
+    staging: &Path,
+    format: ArchiveFormat,
+    max_unpacked_bytes: u64,
+) -> Result<()> {
+    let file = File::open(src).with_context(|| format!("open tar archive {}", src.display()))?;
+    let reader: Box<dyn Read> = match format {
+        ArchiveFormat::Tar => Box::new(BufReader::new(file)),
+        ArchiveFormat::TarGz => Box::new(flate2::read::GzDecoder::new(BufReader::new(file))),
+        ArchiveFormat::TarBz2 => Box::new(bzip2::read::BzDecoder::new(BufReader::new(file))),
+        ArchiveFormat::TarXz => Box::new(xz2::read::XzDecoder::new(BufReader::new(file))),
+        _ => bail!("invalid tar archive format"),
+    };
+    let mut archive = tar::Archive::new(reader);
+    let mut entry_count = 0usize;
+    let mut total_bytes = 0u64;
+    for entry in archive.entries().context("read tar archive entries")? {
+        entry_count += 1;
+        if entry_count > MAX_ARCHIVE_ENTRIES {
+            bail!("archive contains more than {MAX_ARCHIVE_ENTRIES} entries");
+        }
+        let mut entry = entry.context("read tar archive entry")?;
+        let entry_type = entry.header().entry_type();
+        if !entry_type.is_file() && !entry_type.is_dir() {
+            bail!("archive links and special files are not allowed");
+        }
+        let rel = entry.path().context("read tar entry path")?.into_owned();
+        let output = checked_archive_output_path(staging, &rel)?;
+        if entry_type.is_dir() {
+            fs::create_dir_all(&output)
+                .with_context(|| format!("create extracted directory {}", output.display()))?;
+            continue;
+        }
+        let size = entry.header().size().context("read tar entry size")?;
+        total_bytes = add_unpacked_size(total_bytes, size, max_unpacked_bytes)?;
+        create_archive_parent(staging, &output)?;
+        let mode = entry.header().mode().ok();
+        let mut output_file = create_extracted_file(&output)?;
+        let copied = io::copy(&mut entry, &mut output_file)
+            .with_context(|| format!("extract tar entry {}", rel.display()))?;
+        if copied != size {
+            bail!(
+                "tar entry size changed while extracting {}: expected {}, wrote {}",
+                rel.display(),
+                size,
+                copied
+            );
+        }
+        set_safe_file_permissions(&output, mode)?;
+    }
+    Ok(())
+}
+
+fn checked_archive_output_path(staging: &Path, rel: &Path) -> Result<PathBuf> {
+    if rel.as_os_str().is_empty()
+        || rel.is_absolute()
+        || rel.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        bail!("archive entry escapes the destination: {}", rel.display());
+    }
+    Ok(staging.join(rel))
+}
+
+fn create_archive_parent(staging: &Path, output: &Path) -> Result<()> {
+    let parent = output
+        .parent()
+        .ok_or_else(|| anyhow!("archive entry has no parent"))?;
+    if !parent.starts_with(staging) {
+        bail!("archive entry parent escapes the staging directory");
+    }
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create extracted file parent {}", parent.display()))
+}
+
+fn create_extracted_file(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("create extracted file {}", path.display()))
+}
+
+fn add_unpacked_size(current: u64, entry: u64, maximum: u64) -> Result<u64> {
+    let total = current
+        .checked_add(entry)
+        .ok_or_else(|| anyhow!("archive unpacked size overflow"))?;
+    if total > maximum {
+        bail!("archive exceeds max_unpacked_bytes ({maximum})");
+    }
+    Ok(total)
+}
+
+#[cfg(unix)]
+fn set_safe_file_permissions(path: &Path, archived_mode: Option<u32>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = archived_mode.is_some_and(|mode| mode & 0o111 != 0);
+    let mode = if executable { 0o755 } else { 0o644 };
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .with_context(|| format!("set safe permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_safe_file_permissions(_path: &Path, _archived_mode: Option<u32>) -> Result<()> {
+    Ok(())
+}
+
+fn create_archive_staging_directory(parent: &Path) -> Result<PathBuf> {
+    for index in 0..1_000u32 {
+        let candidate = parent.join(format!(".ppduster-archive-{}-{index}", std::process::id()));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("create archive staging directory {}", candidate.display())
+                })
+            }
+        }
+    }
+    bail!("could not allocate an archive staging directory")
+}
+
+fn remove_archive_staging(parent: &Path, staging: &Path) -> Result<()> {
+    let name = staging
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("invalid archive staging path {}", staging.display()))?;
+    if staging.parent() != Some(parent) || !name.starts_with(".ppduster-archive-") {
+        bail!(
+            "refusing to remove unexpected archive staging path {}",
+            staging.display()
+        );
+    }
+    fs::remove_dir_all(staging)
+        .with_context(|| format!("remove archive staging directory {}", staging.display()))
 }
 
 fn apply_install_dmg(
@@ -2239,10 +2502,183 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        let summary =
-            apply_extract_archive(&archive.to_string_lossy(), &dest.to_string_lossy()).unwrap();
+        let summary = apply_extract_archive(
+            &archive.to_string_lossy(),
+            &dest.to_string_lossy(),
+            ArchiveFormat::Auto,
+            1024 * 1024,
+        )
+        .unwrap();
         assert!(summary.contains("extracted"));
         assert!(dest.join("payload.txt").exists());
+    }
+
+    #[test]
+    fn zip_archive_is_detected_and_extracted() {
+        use zip::write::SimpleFileOptions;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("payload.zip");
+        let dest = tmp.path().join("out");
+        let file = File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file(
+                "bin/tool",
+                SimpleFileOptions::default().unix_permissions(0o755),
+            )
+            .unwrap();
+        writer.write_all(b"tool").unwrap();
+        writer.finish().unwrap();
+
+        apply_extract_archive(
+            &archive.to_string_lossy(),
+            &dest.to_string_lossy(),
+            ArchiveFormat::Auto,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(fs::read(dest.join("bin/tool")).unwrap(), b"tool");
+    }
+
+    #[test]
+    fn zip_traversal_and_existing_destinations_are_rejected_atomically() {
+        use zip::write::SimpleFileOptions;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("unsafe.zip");
+        let dest = tmp.path().join("out");
+        let file = File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("../escape.txt", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"escape").unwrap();
+        writer.finish().unwrap();
+
+        let err = apply_extract_archive(
+            &archive.to_string_lossy(),
+            &dest.to_string_lossy(),
+            ArchiveFormat::Zip,
+            1024,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unsafe path"));
+        assert!(!tmp.path().join("escape.txt").exists());
+        assert!(!dest.exists());
+
+        fs::create_dir(&dest).unwrap();
+        let err = apply_extract_archive(
+            &archive.to_string_lossy(),
+            &dest.to_string_lossy(),
+            ArchiveFormat::Zip,
+            1024,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("refusing to merge or overwrite"));
+    }
+
+    #[test]
+    fn archive_unpacked_size_limit_is_enforced() {
+        use zip::write::SimpleFileOptions;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("large.zip");
+        let dest = tmp.path().join("out");
+        let file = File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("payload.bin", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(&[0u8; 32]).unwrap();
+        writer.finish().unwrap();
+
+        let err = apply_extract_archive(
+            &archive.to_string_lossy(),
+            &dest.to_string_lossy(),
+            ArchiveFormat::Auto,
+            16,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("max_unpacked_bytes"));
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn archive_symlinks_are_rejected() {
+        use zip::write::SimpleFileOptions;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("link.zip");
+        let dest = tmp.path().join("out");
+        let file = File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .add_symlink("link", "../outside", SimpleFileOptions::default())
+            .unwrap();
+        writer.finish().unwrap();
+
+        let err = apply_extract_archive(
+            &archive.to_string_lossy(),
+            &dest.to_string_lossy(),
+            ArchiveFormat::Auto,
+            1024,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("links and special files"));
+        assert!(!dest.exists());
+    }
+
+    fn test_tar_bytes() -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let payload = b"compressed";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "payload.txt", &payload[..])
+            .unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    #[test]
+    fn compressed_tar_formats_are_auto_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tar_bytes = test_tar_bytes();
+
+        let gzip_path = tmp.path().join("payload.tgz");
+        let mut gzip = flate2::write::GzEncoder::new(
+            File::create(&gzip_path).unwrap(),
+            flate2::Compression::default(),
+        );
+        gzip.write_all(&tar_bytes).unwrap();
+        gzip.finish().unwrap();
+
+        let bzip_path = tmp.path().join("payload.tar.bz2");
+        let mut bzip = bzip2::write::BzEncoder::new(
+            File::create(&bzip_path).unwrap(),
+            bzip2::Compression::default(),
+        );
+        bzip.write_all(&tar_bytes).unwrap();
+        bzip.finish().unwrap();
+
+        let xz_path = tmp.path().join("payload.txz");
+        let mut xz = xz2::write::XzEncoder::new(File::create(&xz_path).unwrap(), 6);
+        xz.write_all(&tar_bytes).unwrap();
+        xz.finish().unwrap();
+
+        for (index, archive) in [gzip_path, bzip_path, xz_path].iter().enumerate() {
+            let dest = tmp.path().join(format!("out-{index}"));
+            apply_extract_archive(
+                &archive.to_string_lossy(),
+                &dest.to_string_lossy(),
+                ArchiveFormat::Auto,
+                1024,
+            )
+            .unwrap();
+            assert_eq!(fs::read(dest.join("payload.txt")).unwrap(), b"compressed");
+        }
     }
 
     #[test]

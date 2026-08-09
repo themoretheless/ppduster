@@ -1,6 +1,6 @@
 use ppduster::automation::{
-    run_task, Action, AppStoreOperation, LicenseMethod, LicenseProvider, PackTrust, RunOptions,
-    TaskFile, TaskPack, TaskSource,
+    run_task, Action, AppStoreOperation, ArchiveFormat, LicenseMethod, LicenseProvider, PackTrust,
+    RunOptions, TaskFile, TaskPack, TaskSource,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -150,6 +150,31 @@ fn bambu_studio_task_uses_dynamic_release_channel() {
         &task.steps[1].action,
         Action::BambuStudioRelease(action)
             if action.channel == ppduster::automation::ReleaseChannel::Release
+    ));
+}
+
+#[test]
+fn extract_archive_action_supports_explicit_format_and_safe_default_limit() {
+    let yaml = r#"
+task:
+  id: unpack-demo
+  name: Unpack demo
+  steps:
+    - id: unpack
+      type: extract-archive
+      src: $HOME/Library/Caches/input.tar.xz
+      dest: $HOME/Library/Caches/output
+      format: tar-xz
+"#;
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    task.validate().unwrap();
+    assert!(matches!(
+        &task.steps[0].action,
+        Action::ExtractArchive {
+            format: ArchiveFormat::TarXz,
+            max_unpacked_bytes: 10_737_418_240,
+            ..
+        }
     ));
 }
 
