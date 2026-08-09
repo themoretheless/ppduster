@@ -248,26 +248,42 @@ duplicate children, platform mismatches, excessive expansion, or a reference fro
 more-trusted pack to a less-trusted pack. A definition contains either `steps` or
 `scenarios`, never both.
 
-A `git-clone` step is idempotent when a branch is declared:
+A repository synchronization is expressed as atomic, independently reported steps:
 
 ```yaml
-- id: sync-repository
-  name: Clone or update repository
-  type: git-clone
+- id: inspect-repository
+  name: Check whether repository exists locally
+  type: git-inspect
+  repo: https://github.com/example/project.git
+  dest: $HOME/Library/Caches/project
+- id: clone-repository
+  name: Clone repository when missing
+  type: git-clone-if-missing
+  repo: https://github.com/example/project.git
+  dest: $HOME/Library/Caches/project
+  branch: main
+- id: fetch-repository
+  name: Fetch repository main
+  type: git-fetch
+  repo: https://github.com/example/project.git
+  dest: $HOME/Library/Caches/project
+  branch: main
+- id: update-main
+  name: Fast-forward repository main
+  type: git-fast-forward
   repo: https://github.com/example/project.git
   dest: $HOME/Library/Caches/project
   branch: main
 ```
 
-The declared `dest` is the folder being ensured. If it is absent (or is an empty
-directory), the repository is cloned. If the matching repository already exists,
-ppduster fetches `origin/main` and performs only a safe fast-forward. The result report
-distinguishes a new clone, an already current branch ref, and a repository that existed
-but was outdated and was updated. If another branch is checked out, that checkout and
-its local changes stay in place while the inactive local `main` ref is fast-forwarded,
-and the report says which active branch was preserved. Local changes that would block
-a required fast-forward, a mismatched origin, or diverged history are never reset,
-stashed, merged, or overwritten; the step stops with an explicit error instead.
+`git-inspect` observes whether `dest` is absent, empty, or the expected repository.
+`git-clone-if-missing` changes only an absent/empty destination. `git-fetch` updates
+only the declared `origin/<branch>` remote-tracking ref. `git-fast-forward` then moves
+only the local branch when the fetched history proves that update is safe. Each result
+has its own card, status, log, and error. If another branch is checked out, that checkout
+and its local changes stay in place while the inactive local `main` ref is fast-forwarded.
+Local changes that would block a required fast-forward, a mismatched origin, or diverged
+history are never reset, stashed, merged, or overwritten.
 
 Filesystem scenarios do not need a shell. `create-directory` recursively creates
 missing parents and is idempotent: an existing real directory is reported as already

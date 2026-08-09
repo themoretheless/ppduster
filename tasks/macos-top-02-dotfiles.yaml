@@ -1,14 +1,32 @@
 task:
   id: macos-top-02-dotfiles
   name: macOS dotfiles sync
-  description: Clone or fast-forward the dotfiles main branch, then verify the shell configuration target.
+  description: Inspect, clone, fetch, and safely fast-forward the dotfiles main branch as separate operations, then verify the shell configuration target.
   platform: macos
   trust: bundled-only
   steps:
+    - id: inspect-dotfiles
+      name: Check whether dotfiles repository exists locally
+      type: git-inspect
+      repo: https://github.com/example/dotfiles.git
+      dest: $HOME/.local/share/dotfiles
     - id: clone-dotfiles
-      name: Clone or update dotfiles repository
+      name: Clone dotfiles repository when missing
       auth: git-credential
-      type: git-clone
+      type: git-clone-if-missing
+      repo: https://github.com/example/dotfiles.git
+      dest: $HOME/.local/share/dotfiles
+      branch: main
+    - id: fetch-dotfiles
+      name: Fetch dotfiles main
+      auth: git-credential
+      type: git-fetch
+      repo: https://github.com/example/dotfiles.git
+      dest: $HOME/.local/share/dotfiles
+      branch: main
+    - id: update-dotfiles-main
+      name: Fast-forward dotfiles main
+      type: git-fast-forward
       repo: https://github.com/example/dotfiles.git
       dest: $HOME/.local/share/dotfiles
       branch: main
