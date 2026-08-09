@@ -922,84 +922,48 @@ fn project_group_entries<'a>(
     }
 }
 
-fn project_group_column_paths(
-    project: &ScenarioProject,
-    selected_group: &[usize],
-) -> Vec<Vec<usize>> {
-    let mut columns = vec![Vec::new()];
-    let mut path = Vec::new();
-    for index in selected_group {
-        path.push(*index);
-        let Some(entries) = project_group_entries(project, &path) else {
-            break;
-        };
-        if entries
-            .iter()
-            .any(|entry| matches!(entry, ProjectEntry::Group { .. }))
-        {
-            columns.push(path.clone());
-        }
-    }
-    columns
-}
-
-fn paint_project_group_columns(
+fn paint_project_group_tree(
     ui: &mut egui::Ui,
-    project: &ScenarioProject,
+    entries: &[ProjectEntry],
+    parent_path: &[usize],
     selected_group: &[usize],
     action: &mut Option<Vec<usize>>,
 ) {
-    let columns = project_group_column_paths(project, selected_group);
-    ScrollArea::horizontal()
-        .id_salt("project-group-columns")
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                for (column_index, parent_path) in columns.iter().enumerate() {
-                    if column_index > 0 {
-                        ui.separator();
-                    }
-                    ui.vertical(|ui| {
-                        ui.set_width(164.0);
-                        let title = if parent_path.is_empty() {
-                            "Верхний уровень"
-                        } else {
-                            match project_entry(&project.entries, parent_path) {
-                                Some(ProjectEntry::Group { name, .. }) => name,
-                                _ => "Группы",
-                            }
-                        };
-                        ui.label(RichText::new(title).strong().size(9.0).color(MUTED));
-                        ui.add_space(4.0);
-                        let Some(entries) = project_group_entries(project, parent_path) else {
-                            return;
-                        };
-                        for (index, entry) in entries.iter().enumerate() {
-                            let ProjectEntry::Group { name, entries, .. } = entry else {
-                                continue;
-                            };
-                            let mut path = parent_path.clone();
-                            path.push(index);
-                            let selected = path == selected_group;
-                            let has_subgroups = entries
-                                .iter()
-                                .any(|entry| matches!(entry, ProjectEntry::Group { .. }));
-                            let label = if has_subgroups {
-                                format!("{name}  ›")
-                            } else {
-                                name.clone()
-                            };
-                            if ui
-                                .add_sized([164.0, 28.0], egui::Button::selectable(selected, label))
-                                .clicked()
-                            {
-                                *action = Some(path);
-                            }
-                        }
-                    });
-                }
-            });
+    for (index, entry) in entries.iter().enumerate() {
+        let ProjectEntry::Group {
+            name,
+            entries: children,
+            ..
+        } = entry
+        else {
+            continue;
+        };
+        let mut path = parent_path.to_vec();
+        path.push(index);
+        let selected = path == selected_group;
+        let has_subgroups = children
+            .iter()
+            .any(|entry| matches!(entry, ProjectEntry::Group { .. }));
+        let label = RichText::new(name).strong().size(9.0).color(if selected {
+            PURPLE
+        } else {
+            ui.visuals().text_color()
         });
+
+        if has_subgroups {
+            let response = egui::CollapsingHeader::new(label)
+                .id_salt(("project-group", path.clone()))
+                .default_open(selected_group.starts_with(&path))
+                .show(ui, |ui| {
+                    paint_project_group_tree(ui, children, &path, selected_group, action);
+                });
+            if response.header_response.clicked() {
+                *action = Some(path);
+            }
+        } else if ui.selectable_label(selected, label).clicked() {
+            *action = Some(path);
+        }
+    }
 }
 
 fn validate_project(project: &ScenarioProject) -> Result<(), String> {
@@ -1176,17 +1140,8 @@ impl ScenarioApp {
     }
 
     fn left_library(&mut self, root: &mut egui::Ui) {
-        let panel_width = self
-            .custom_project
-            .as_ref()
-            .map(|project| {
-                let columns =
-                    project_group_column_paths(project, &self.selected_project_group).len();
-                (columns as f32 * 180.0 + 28.0).clamp(270.0, 568.0)
-            })
-            .unwrap_or(270.0);
         egui::Panel::left("library")
-            .exact_size(panel_width)
+            .exact_size(270.0)
             .resizable(false)
             .frame(
                 Frame::new()
@@ -1314,7 +1269,19 @@ impl ScenarioApp {
         ui.add_space(4.0);
         let project = self.custom_project.clone().expect("project checked above");
         let mut tree_action = None;
-        paint_project_group_columns(ui, &project, &self.selected_project_group, &mut tree_action);
+        ScrollArea::vertical()
+            .id_salt("project-group-tree")
+            .max_height(240.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                paint_project_group_tree(
+                    ui,
+                    &project.entries,
+                    &[],
+                    &self.selected_project_group,
+                    &mut tree_action,
+                );
+            });
         if let Some(path) = tree_action {
             self.selected_project_group = path.clone();
             let selected_is_inside = self
@@ -4165,18 +4132,10 @@ mod tests {
 
         assert_eq!(path, vec![0, 0, 0]);
         assert_eq!(reparsed.scenario(&path).unwrap().id, "nested-scenario");
-        assert_eq!(
-            project_group_column_paths(&reparsed, &[0]),
-            vec![Vec::<usize>::new(), vec![0]]
-        );
-        assert_eq!(
-            project_group_column_paths(&reparsed, &[0, 0]),
-            vec![Vec::<usize>::new(), vec![0]]
-        );
     }
 
     #[test]
-    fn project_yaml_drives_nested_group_columns() {
+    fn project_yaml_drives_nested_group_tree() {
         let yaml = r#"
 project:
   id: workstation
@@ -4193,10 +4152,6 @@ project:
 "#;
         let project = load_project_yaml(yaml).unwrap();
 
-        assert_eq!(
-            project_group_column_paths(&project, &[0]),
-            vec![Vec::<usize>::new(), vec![0]]
-        );
         let nested = project_group_entries(&project, &[0]).unwrap();
         assert!(matches!(
             nested.first(),
