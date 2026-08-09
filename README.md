@@ -48,18 +48,24 @@ Run from the repo root so `./rules` is found, or pass `--rules-dir /path/to/rule
 canvas. It presents every setup scenario as a connected route of typed steps, with a
 searchable scenario library, step inspector, release-channel controls, permission
 switches, dry-run planning, and explicit confirmation before supported scenarios are
-applied. The library can also save the selected scenario as a portable YAML file and
-load `.yaml`/`.yml` scenarios selected in the native file dialog. A loaded file is
-validated as an external task pack and may replace a bundled scenario with the same id
-for the current application session.
+applied. **New scenario** opens a visual project constructor. A project file owns a tree
+of arbitrarily nested groups, and every group can contain scenarios or more groups.
+Selecting a scenario opens only its blocks on the canvas; selecting a group changes the
+insertion location without replacing the current canvas. Add atomic Git, filesystem,
+and Homebrew blocks from the palette and edit their typed parameters on the right. Every
+scenario canvas starts with a permanent Start block. Its plus button, and the plus button
+on every following block, opens a searchable block picker that displays the planned typed
+output contract for downstream graph bindings. The current executable form remains an
+ordered task while graph execution is developed. The constructor saves the whole project
+as portable YAML. Loading a legacy standalone task
+YAML wraps it in an imported project group, so existing files remain usable. Loaded and
+saved files retain external-pack trust and never weaken normal permission gates.
 
-For a scenario that resolves to exactly one standalone `git-clone` step, the inspector
-can load repositories visible to the current GitHub CLI account and select one or many
-public repositories. The selection replaces that standalone step with one ordinary
-HTTPS clone-or-update step per repository, synchronizes `main`, and checks out under
-`<destination root>/<owner>/<repository>`, so plans and reports stay separate. A task
-with downstream steps is deliberately ineligible: replacing its clone could otherwise
-silently disconnect those steps from their original checkout. Private, archived,
+For the bundled GitHub repository scenario, the inspector can load repositories visible
+to the current GitHub CLI account and select one or many public repositories. Each
+selection materializes separate inspect, clone-if-missing, fetch, and fast-forward
+blocks under `<destination root>/<owner>/<repository>`, so plans, statuses, and errors
+stay separate. Private, archived,
 empty, and no-`main` repositories cannot be selected; SSH is not offered in the GUI.
 
 ppduster does not request or store a GitHub token. If `gh` is not authenticated, the

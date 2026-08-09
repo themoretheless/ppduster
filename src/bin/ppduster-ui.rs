@@ -5,10 +5,13 @@ use eframe::egui::{
 };
 use ppduster::automation::PackTrust;
 use ppduster::automation::{
-    describe_step, run_task, Action, AuthPolicy, ReleaseChannel, RunOptions, RunReport,
-    ScriptInterpreter, Step, StepStatus, Task, TaskFile, TaskPack, TaskSource, TrustRequirement,
+    describe_step, run_task, Action, AuthPolicy, CopyPathAction, CreateDirectoryAction,
+    InspectPathAction, ReleaseChannel, RemovePathAction, RunOptions, RunReport, ScriptInterpreter,
+    Step, StepStatus, Task, TaskFile, TaskPack, TaskSource, TrustRequirement, WriteConflictPolicy,
+    WriteFileAction,
 };
 use ppduster::github::{list_accessible_repositories, login_via_web, GithubRepository};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
@@ -34,6 +37,136 @@ struct ScenarioGroup {
     description: String,
     step_count: usize,
     step_summaries: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScenarioProjectFile {
+    project: ScenarioProject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScenarioProject {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    entries: Vec<ProjectEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum ProjectEntry {
+    Group {
+        id: String,
+        name: String,
+        #[serde(default)]
+        entries: Vec<ProjectEntry>,
+    },
+    Scenario {
+        task: Task,
+    },
+}
+
+impl ScenarioProject {
+    fn scenario(&self, path: &[usize]) -> Option<&Task> {
+        project_entry(&self.entries, path).and_then(|entry| match entry {
+            ProjectEntry::Scenario { task } => Some(task),
+            ProjectEntry::Group { .. } => None,
+        })
+    }
+
+    fn scenario_mut(&mut self, path: &[usize]) -> Option<&mut Task> {
+        project_entry_mut(&mut self.entries, path).and_then(|entry| match entry {
+            ProjectEntry::Scenario { task } => Some(task),
+            ProjectEntry::Group { .. } => None,
+        })
+    }
+}
+
+fn project_entry<'a>(entries: &'a [ProjectEntry], path: &[usize]) -> Option<&'a ProjectEntry> {
+    let (index, rest) = path.split_first()?;
+    let entry = entries.get(*index)?;
+    if rest.is_empty() {
+        return Some(entry);
+    }
+    match entry {
+        ProjectEntry::Group { entries, .. } => project_entry(entries, rest),
+        ProjectEntry::Scenario { .. } => None,
+    }
+}
+
+fn project_entry_mut<'a>(
+    entries: &'a mut [ProjectEntry],
+    path: &[usize],
+) -> Option<&'a mut ProjectEntry> {
+    let (index, rest) = path.split_first()?;
+    let entry = entries.get_mut(*index)?;
+    if rest.is_empty() {
+        return Some(entry);
+    }
+    match entry {
+        ProjectEntry::Group { entries, .. } => project_entry_mut(entries, rest),
+        ProjectEntry::Scenario { .. } => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ComposerBlockKind {
+    GitInspect,
+    GitCloneIfMissing,
+    GitFetch,
+    GitFastForward,
+    CreateDirectory,
+    InspectPath,
+    CopyPath,
+    WriteFile,
+    RemovePath,
+    BrewInstall,
+}
+
+impl ComposerBlockKind {
+    const ALL: [Self; 10] = [
+        Self::GitInspect,
+        Self::GitCloneIfMissing,
+        Self::GitFetch,
+        Self::GitFastForward,
+        Self::CreateDirectory,
+        Self::InspectPath,
+        Self::CopyPath,
+        Self::WriteFile,
+        Self::RemovePath,
+        Self::BrewInstall,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::GitInspect => "Проверить Git-репозиторий",
+            Self::GitCloneIfMissing => "Клонировать, если отсутствует",
+            Self::GitFetch => "Получить remote-ветку",
+            Self::GitFastForward => "Актуализировать ветку",
+            Self::CreateDirectory => "Создать папку",
+            Self::InspectPath => "Проверить путь",
+            Self::CopyPath => "Копировать путь",
+            Self::WriteFile => "Записать файл",
+            Self::RemovePath => "Переместить в корзину",
+            Self::BrewInstall => "Установить Homebrew-пакет",
+        }
+    }
+
+    fn category(self) -> &'static str {
+        match self {
+            Self::GitInspect | Self::GitCloneIfMissing | Self::GitFetch | Self::GitFastForward => {
+                "GIT"
+            }
+            Self::CreateDirectory
+            | Self::InspectPath
+            | Self::CopyPath
+            | Self::WriteFile
+            | Self::RemovePath => "ФАЙЛЫ",
+            Self::BrewInstall => "ПАКЕТЫ",
+        }
+    }
 }
 
 struct GithubPickerState {
@@ -100,8 +233,12 @@ struct ScenarioApp {
     running: bool,
     run_receiver: Option<Receiver<Result<RunReport, String>>>,
     github_picker: GithubPickerState,
-    imported_task_files: Vec<PathBuf>,
     file_message: Option<(bool, String)>,
+    custom_project: Option<ScenarioProject>,
+    selected_project_scenario: Option<Vec<usize>>,
+    selected_project_group: Vec<usize>,
+    block_picker_parent: Option<String>,
+    block_picker_search: String,
 }
 
 impl ScenarioApp {
@@ -136,12 +273,19 @@ impl ScenarioApp {
             running: false,
             run_receiver: None,
             github_picker: GithubPickerState::default(),
-            imported_task_files: Vec::new(),
             file_message: None,
+            custom_project: None,
+            selected_project_scenario: None,
+            selected_project_group: Vec::new(),
+            block_picker_parent: None,
+            block_picker_search: String::new(),
         }
     }
 
     fn selected_task(&self) -> Option<&Task> {
+        if let Some(project) = &self.custom_project {
+            return project.scenario(self.selected_project_scenario.as_deref()?);
+        }
         self.task_pack.as_ref()?.tasks.get(self.selected_task)
     }
 
@@ -149,6 +293,9 @@ impl ScenarioApp {
         let task = self
             .selected_task()
             .ok_or_else(|| anyhow::anyhow!("сценарий не выбран"))?;
+        if self.custom_project.is_some() {
+            return Ok(task.clone());
+        }
         let resolved = self
             .task_pack
             .as_ref()
@@ -167,6 +314,156 @@ impl ScenarioApp {
         self.report_applied = false;
         self.plan_error = None;
         self.confirm_run = false;
+    }
+
+    fn start_custom_scenario(&mut self) {
+        if self.running {
+            return;
+        }
+        let task = Task {
+            id: "custom-scenario".into(),
+            name: "Новый сценарий".into(),
+            description: "Сценарий, собранный из атомарных операций в ppduster.".into(),
+            platform: ppduster::rules::Platform::Macos,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            steps: Vec::new(),
+        };
+        self.custom_project = Some(ScenarioProject {
+            id: "scenario-project".into(),
+            name: "Новый проект".into(),
+            description: "Проект сценариев ppduster.".into(),
+            entries: vec![ProjectEntry::Group {
+                id: "main".into(),
+                name: "Основные сценарии".into(),
+                entries: vec![ProjectEntry::Scenario { task }],
+            }],
+        });
+        self.selected_project_scenario = Some(vec![0, 0]);
+        self.selected_project_group = vec![0];
+        self.selected_step = None;
+        self.github_picker.open = false;
+        self.github_picker.selected_ids.clear();
+        self.search.clear();
+        self.invalidate_plan();
+    }
+
+    fn add_composer_block(&mut self, kind: ComposerBlockKind) {
+        let Some(task) = self
+            .custom_project
+            .as_mut()
+            .and_then(|project| project.scenario_mut(self.selected_project_scenario.as_deref()?))
+        else {
+            return;
+        };
+        let base_id = composer_block_id(kind);
+        let mut suffix = task.steps.len() + 1;
+        let id = loop {
+            let candidate = format!("{base_id}-{suffix}");
+            if task.steps.iter().all(|step| step.id != candidate) {
+                break candidate;
+            }
+            suffix += 1;
+        };
+        task.steps.push(composer_step(kind, id));
+        self.selected_step = Some(task.steps.len() - 1);
+        self.block_picker_parent = None;
+        self.block_picker_search.clear();
+        self.invalidate_plan();
+    }
+
+    fn open_block_picker(&mut self, parent: impl Into<String>) {
+        if self.running || self.custom_project.is_none() {
+            return;
+        }
+        self.block_picker_parent = Some(parent.into());
+        self.block_picker_search.clear();
+    }
+
+    fn move_composer_step(&mut self, from: usize, to: usize) {
+        let Some(task) = self
+            .custom_project
+            .as_mut()
+            .and_then(|project| project.scenario_mut(self.selected_project_scenario.as_deref()?))
+        else {
+            return;
+        };
+        if from >= task.steps.len() || to >= task.steps.len() || from == to {
+            return;
+        }
+        let step = task.steps.remove(from);
+        task.steps.insert(to, step);
+        self.selected_step = Some(to);
+        self.invalidate_plan();
+    }
+
+    fn remove_composer_step(&mut self, index: usize) {
+        let Some(task) = self
+            .custom_project
+            .as_mut()
+            .and_then(|project| project.scenario_mut(self.selected_project_scenario.as_deref()?))
+        else {
+            return;
+        };
+        if index >= task.steps.len() {
+            return;
+        }
+        task.steps.remove(index);
+        self.selected_step = if task.steps.is_empty() {
+            None
+        } else {
+            Some(index.min(task.steps.len() - 1))
+        };
+        self.invalidate_plan();
+    }
+
+    fn add_project_group(&mut self) {
+        let path = self.selected_project_group.clone();
+        let Some(project) = self.custom_project.as_mut() else {
+            return;
+        };
+        let Some(entries) = project_group_entries_mut(project, &path) else {
+            return;
+        };
+        let ordinal = entries.len() + 1;
+        entries.push(ProjectEntry::Group {
+            id: format!("group-{ordinal}"),
+            name: format!("Новая группа {ordinal}"),
+            entries: Vec::new(),
+        });
+        let mut new_path = path;
+        new_path.push(entries.len() - 1);
+        self.selected_project_group = new_path;
+        self.invalidate_plan();
+    }
+
+    fn add_project_scenario(&mut self) {
+        let path = self.selected_project_group.clone();
+        let Some(project) = self.custom_project.as_mut() else {
+            return;
+        };
+        let Some(entries) = project_group_entries_mut(project, &path) else {
+            return;
+        };
+        let ordinal = entries.len() + 1;
+        entries.push(ProjectEntry::Scenario {
+            task: Task {
+                id: format!("scenario-{ordinal}"),
+                name: format!("Новый сценарий {ordinal}"),
+                description: "Сценарий, собранный из атомарных операций в ppduster.".into(),
+                platform: ppduster::rules::Platform::Macos,
+                trust: TrustRequirement::ExternalAllowed,
+                scenarios: Vec::new(),
+                resolved_scenarios: Vec::new(),
+                steps: Vec::new(),
+            },
+        });
+        let mut scenario_path = path;
+        scenario_path.push(entries.len() - 1);
+        self.selected_project_scenario = Some(scenario_path);
+        self.selected_step = None;
+        self.invalidate_plan();
     }
 
     fn start_github_repository_load(&mut self, ctx: &egui::Context) {
@@ -354,6 +651,9 @@ impl ScenarioApp {
             return;
         }
         self.selected_task = index;
+        self.custom_project = None;
+        self.selected_project_scenario = None;
+        self.selected_project_group.clear();
         self.selected_step = Some(0);
         self.github_picker.open = false;
         self.github_picker.selected_ids.clear();
@@ -362,7 +662,7 @@ impl ScenarioApp {
     }
 
     fn command_for_selected(&self) -> Option<String> {
-        if !self.github_picker.selected_ids.is_empty() {
+        if self.custom_project.is_some() || !self.github_picker.selected_ids.is_empty() {
             return None;
         }
         let task = self.selected_task()?;
@@ -389,9 +689,39 @@ impl ScenarioApp {
     }
 
     fn save_selected_scenario(&mut self) {
+        if let Some(project) = self.custom_project.clone() {
+            if let Err(error) = validate_project(&project) {
+                self.file_message = Some((true, format!("Проект нельзя сохранить: {error}")));
+                return;
+            }
+            let suggested_name = format!("{}.ppduster.yaml", project.id);
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("Проект ppduster", &["yaml", "yml"])
+                .set_file_name(&suggested_name)
+                .save_file()
+            else {
+                return;
+            };
+            let result = serde_yaml::to_string(&ScenarioProjectFile { project })
+                .map_err(anyhow::Error::from)
+                .and_then(|yaml| {
+                    fs::write(&path, yaml)
+                        .map_err(anyhow::Error::from)
+                        .with_context(|| format!("не удалось сохранить {}", path.display()))
+                });
+            self.file_message = Some(match result {
+                Ok(()) => (false, format!("Проект сохранён: {}", path.display())),
+                Err(error) => (true, format!("{error:#}")),
+            });
+            return;
+        }
         let Some(mut task) = self.selected_task().cloned() else {
             return;
         };
+        if let Err(error) = task.validate() {
+            self.file_message = Some((true, format!("Сценарий нельзя сохранить: {error}")));
+            return;
+        }
         // A file chosen by the user is external on its next load, even if its
         // source scenario was bundled with the application.
         task.trust = TrustRequirement::ExternalAllowed;
@@ -423,38 +753,141 @@ impl ScenarioApp {
         else {
             return;
         };
-        let task_id = fs::read_to_string(&path)
+        let loaded = fs::read_to_string(&path)
             .with_context(|| format!("не удалось прочитать {}", path.display()))
-            .and_then(|yaml| {
-                serde_yaml::from_str::<TaskFile>(&yaml)
-                    .map(|file| file.task.id)
-                    .with_context(|| format!("не удалось разобрать {}", path.display()))
+            .and_then(|yaml| load_project_yaml(&yaml))
+            .and_then(|project| {
+                validate_project(&project).map_err(anyhow::Error::msg)?;
+                Ok(project)
             });
-        let task_id = match task_id {
-            Ok(task_id) => task_id,
+        let mut project = match loaded {
+            Ok(project) => project,
             Err(error) => {
                 self.file_message = Some((true, format!("{error:#}")));
                 return;
             }
         };
-        let mut imported = self.imported_task_files.clone();
-        imported.retain(|existing| existing != &path);
-        imported.push(path.clone());
-        match load_tasks_with_files(&imported) {
-            Ok(pack) => {
-                let Some(selected_task) = pack.tasks.iter().position(|task| task.id == task_id)
-                else {
-                    self.file_message =
-                        Some((true, "Сценарий не предназначен для этой платформы".into()));
-                    return;
-                };
-                self.task_pack = Some(pack);
-                self.imported_task_files = imported;
-                self.select_task(selected_task);
-                self.load_error = None;
-                self.file_message = Some((false, format!("Сценарий загружен: {}", path.display())));
-            }
-            Err(error) => self.file_message = Some((true, format!("{error:#}"))),
+        make_project_external(&mut project.entries);
+        let selected = first_scenario_path(&project.entries, &mut Vec::new());
+        self.custom_project = Some(project);
+        self.selected_project_scenario = selected.clone();
+        self.selected_project_group = selected
+            .as_ref()
+            .map(|path| path[..path.len().saturating_sub(1)].to_vec())
+            .unwrap_or_default();
+        self.selected_step = selected.and_then(|path| {
+            self.custom_project
+                .as_ref()
+                .and_then(|project| project.scenario(&path))
+                .is_some_and(|task| !task.steps.is_empty())
+                .then_some(0)
+        });
+        self.load_error = None;
+        self.file_message = Some((false, format!("Проект загружен: {}", path.display())));
+    }
+
+    fn block_picker(&mut self, ctx: &egui::Context) {
+        let Some(parent) = self.block_picker_parent.clone() else {
+            return;
+        };
+        let mut selected = None;
+        let mut close = false;
+        egui::Modal::new(Id::new("composer-block-picker"))
+            .frame(
+                Frame::popup(&ctx.global_style())
+                    .fill(surface(self.dark))
+                    .corner_radius(14)
+                    .inner_margin(Margin::same(20)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(560.0);
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("Добавить следующий блок")
+                                .strong()
+                                .size(20.0)
+                                .color(text(self.dark)),
+                        );
+                        ui.label(
+                            RichText::new(format!("Продолжение от: {parent}"))
+                                .monospace()
+                                .size(9.0)
+                                .color(MUTED),
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Закрыть").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                ui.add_space(12.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.block_picker_search)
+                        .hint_text("Поиск доступного блока…")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(10.0);
+                let query = self.block_picker_search.trim().to_lowercase();
+                ScrollArea::vertical()
+                    .id_salt("composer-block-picker-list")
+                    .max_height(430.0)
+                    .show(ui, |ui| {
+                        for kind in ComposerBlockKind::ALL {
+                            let context = composer_output_context(kind);
+                            if !query.is_empty()
+                                && !kind.title().to_lowercase().contains(&query)
+                                && !kind.category().to_lowercase().contains(&query)
+                                && !context.to_lowercase().contains(&query)
+                            {
+                                continue;
+                            }
+                            let response = Frame::new()
+                                .fill(panel(self.dark))
+                                .stroke(Stroke::new(1.0, line(self.dark)))
+                                .corner_radius(10)
+                                .inner_margin(Margin::same(11))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(kind.title())
+                                                .strong()
+                                                .size(11.0)
+                                                .color(text(self.dark)),
+                                        );
+                                        ui.with_layout(
+                                            Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    RichText::new(kind.category())
+                                                        .size(8.0)
+                                                        .color(CYAN),
+                                                );
+                                            },
+                                        );
+                                    });
+                                    ui.label(
+                                        RichText::new(format!("Выход: {context}"))
+                                            .monospace()
+                                            .size(8.0)
+                                            .color(PURPLE),
+                                    );
+                                })
+                                .response
+                                .interact(Sense::click());
+                            if response.clicked() {
+                                selected = Some(kind);
+                            }
+                            ui.add_space(6.0);
+                        }
+                    });
+            });
+        if close {
+            self.block_picker_parent = None;
+        } else if let Some(kind) = selected {
+            self.add_composer_block(kind);
         }
     }
 }
@@ -468,9 +901,171 @@ impl eframe::App for ScenarioApp {
         self.left_library(ui);
         self.right_inspector(ui);
         self.canvas(ui);
+        self.block_picker(ui.ctx());
         self.github_repository_picker(ui.ctx());
         self.run_confirmation(ui.ctx());
     }
+}
+
+#[derive(Debug)]
+enum ProjectTreeAction {
+    SelectGroup(Vec<usize>),
+    SelectScenario(Vec<usize>),
+}
+
+fn project_group_entries_mut<'a>(
+    project: &'a mut ScenarioProject,
+    path: &[usize],
+) -> Option<&'a mut Vec<ProjectEntry>> {
+    if path.is_empty() {
+        return Some(&mut project.entries);
+    }
+    match project_entry_mut(&mut project.entries, path)? {
+        ProjectEntry::Group { entries, .. } => Some(entries),
+        ProjectEntry::Scenario { .. } => None,
+    }
+}
+
+fn paint_project_tree(
+    ui: &mut egui::Ui,
+    entries: &[ProjectEntry],
+    prefix: &mut Vec<usize>,
+    selected_scenario: Option<&[usize]>,
+    selected_group: &[usize],
+    dark: bool,
+    action: &mut Option<ProjectTreeAction>,
+) {
+    for (index, entry) in entries.iter().enumerate() {
+        prefix.push(index);
+        match entry {
+            ProjectEntry::Group { name, entries, .. } => {
+                let selected = prefix.as_slice() == selected_group;
+                let response = egui::CollapsingHeader::new(
+                    RichText::new(format!("{} {name}", if selected { "▣" } else { "▾" }))
+                        .strong()
+                        .size(9.0)
+                        .color(if selected { PURPLE } else { text(dark) }),
+                )
+                .id_salt(("project-group", prefix.clone()))
+                .default_open(true)
+                .show(ui, |ui| {
+                    paint_project_tree(
+                        ui,
+                        entries,
+                        prefix,
+                        selected_scenario,
+                        selected_group,
+                        dark,
+                        action,
+                    );
+                });
+                if response.header_response.clicked() {
+                    *action = Some(ProjectTreeAction::SelectGroup(prefix.clone()));
+                }
+            }
+            ProjectEntry::Scenario { task } => {
+                let selected = selected_scenario.is_some_and(|path| path == prefix.as_slice());
+                if ui
+                    .selectable_label(
+                        selected,
+                        RichText::new(format!("◇ {}", task.name))
+                            .size(9.0)
+                            .color(if selected { PURPLE } else { text(dark) }),
+                    )
+                    .clicked()
+                {
+                    *action = Some(ProjectTreeAction::SelectScenario(prefix.clone()));
+                }
+            }
+        }
+        prefix.pop();
+    }
+}
+
+fn validate_project(project: &ScenarioProject) -> Result<(), String> {
+    if project.id.trim().is_empty() {
+        return Err("project id must not be empty".into());
+    }
+    if project.name.trim().is_empty() {
+        return Err(format!("project {} name must not be empty", project.id));
+    }
+    let mut ids = BTreeSet::new();
+    validate_project_entries(&project.entries, &mut ids)
+}
+
+fn validate_project_entries(
+    entries: &[ProjectEntry],
+    scenario_ids: &mut BTreeSet<String>,
+) -> Result<(), String> {
+    for entry in entries {
+        match entry {
+            ProjectEntry::Group { id, name, entries } => {
+                if id.trim().is_empty() || name.trim().is_empty() {
+                    return Err("project groups require id and name".into());
+                }
+                validate_project_entries(entries, scenario_ids)?;
+            }
+            ProjectEntry::Scenario { task } => {
+                task.validate()?;
+                if !scenario_ids.insert(task.id.clone()) {
+                    return Err(format!(
+                        "project contains duplicate scenario id {}",
+                        task.id
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_project_yaml(yaml: &str) -> anyhow::Result<ScenarioProject> {
+    if let Ok(file) = serde_yaml::from_str::<ScenarioProjectFile>(yaml) {
+        return Ok(file.project);
+    }
+    let task = serde_yaml::from_str::<TaskFile>(yaml)
+        .context("файл не является проектом или сценарием ppduster")?
+        .task;
+    let id = format!("{}-project", task.id);
+    let name = format!("Проект: {}", task.name);
+    Ok(ScenarioProject {
+        id,
+        name,
+        description: "Импортирован из одиночного сценария ppduster.".into(),
+        entries: vec![ProjectEntry::Group {
+            id: "imported".into(),
+            name: "Импортированные сценарии".into(),
+            entries: vec![ProjectEntry::Scenario { task }],
+        }],
+    })
+}
+
+fn make_project_external(entries: &mut [ProjectEntry]) {
+    for entry in entries {
+        match entry {
+            ProjectEntry::Group { entries, .. } => make_project_external(entries),
+            ProjectEntry::Scenario { task } => {
+                task.trust = TrustRequirement::ExternalAllowed;
+                task.resolved_scenarios.clear();
+            }
+        }
+    }
+}
+
+fn first_scenario_path(entries: &[ProjectEntry], prefix: &mut Vec<usize>) -> Option<Vec<usize>> {
+    for (index, entry) in entries.iter().enumerate() {
+        prefix.push(index);
+        match entry {
+            ProjectEntry::Scenario { .. } => return Some(prefix.clone()),
+            ProjectEntry::Group { entries, .. } => {
+                if let Some(path) = first_scenario_path(entries, prefix) {
+                    return Some(path);
+                }
+            }
+        }
+        prefix.pop();
+    }
+    None
 }
 
 impl ScenarioApp {
@@ -573,6 +1168,10 @@ impl ScenarioApp {
             .show(root, |ui| {
                 ui.label(RichText::new("БИБЛИОТЕКА").strong().size(10.0).color(MUTED));
                 ui.add_space(4.0);
+                if self.custom_project.is_some() {
+                    self.composer_palette(ui);
+                    return;
+                }
                 ui.label(
                     RichText::new("Сценарии")
                         .strong()
@@ -580,6 +1179,18 @@ impl ScenarioApp {
                         .color(text(self.dark)),
                 );
                 ui.add_space(8.0);
+                if ui
+                    .add_enabled(
+                        !self.running,
+                        egui::Button::new("＋ Новый сценарий")
+                            .min_size(Vec2::new(ui.available_width(), 34.0)),
+                    )
+                    .clicked()
+                {
+                    self.start_custom_scenario();
+                    return;
+                }
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(!self.running, egui::Button::new("Загрузить…"))
@@ -728,6 +1339,155 @@ impl ScenarioApp {
             });
     }
 
+    fn composer_palette(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Конструктор")
+                    .strong()
+                    .size(22.0)
+                    .color(text(self.dark)),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Закрыть").clicked() {
+                    self.custom_project = None;
+                    self.selected_project_scenario = None;
+                    self.selected_project_group.clear();
+                    self.selected_step = Some(0);
+                    self.invalidate_plan();
+                }
+            });
+        });
+        if self.custom_project.is_none() {
+            return;
+        }
+        let project_name = self
+            .custom_project
+            .as_ref()
+            .map(|project| project.name.as_str())
+            .unwrap_or("Проект");
+        ui.label(RichText::new(project_name).size(9.0).color(MUTED));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!self.running, egui::Button::new("Загрузить…"))
+                .clicked()
+            {
+                self.load_scenario_file();
+            }
+            if ui
+                .add_enabled(!self.running, egui::Button::new("Сохранить…"))
+                .clicked()
+            {
+                self.save_selected_scenario();
+            }
+        });
+        if let Some((is_error, message)) = &self.file_message {
+            ui.label(
+                RichText::new(message)
+                    .size(8.0)
+                    .color(if *is_error { ORANGE } else { CYAN }),
+            );
+        }
+        ui.add_space(8.0);
+        section_label(ui, "ПРОЕКТ");
+        ui.horizontal(|ui| {
+            if ui.button("＋ Группа").clicked() {
+                self.add_project_group();
+            }
+            if ui.button("＋ Сценарий").clicked() {
+                self.add_project_scenario();
+            }
+        });
+        ui.add_space(4.0);
+        let entries = self
+            .custom_project
+            .as_ref()
+            .map(|project| project.entries.clone())
+            .unwrap_or_default();
+        let mut tree_action = None;
+        paint_project_tree(
+            ui,
+            &entries,
+            &mut Vec::new(),
+            self.selected_project_scenario.as_deref(),
+            &self.selected_project_group,
+            self.dark,
+            &mut tree_action,
+        );
+        if let Some(action) = tree_action {
+            match action {
+                ProjectTreeAction::SelectGroup(path) => self.selected_project_group = path,
+                ProjectTreeAction::SelectScenario(path) => {
+                    self.selected_project_group = path[..path.len().saturating_sub(1)].to_vec();
+                    self.selected_project_scenario = Some(path);
+                    self.selected_step = Some(0);
+                    self.invalidate_plan();
+                }
+            }
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+        section_label(ui, "АТОМАРНЫЕ БЛОКИ");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .hint_text("Поиск блока…")
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(8.0);
+        ui.separator();
+
+        let query = self.search.trim().to_lowercase();
+        let mut add = None;
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let mut previous_category = "";
+                for kind in ComposerBlockKind::ALL {
+                    if !query.is_empty()
+                        && !kind.title().to_lowercase().contains(&query)
+                        && !kind.category().to_lowercase().contains(&query)
+                    {
+                        continue;
+                    }
+                    if kind.category() != previous_category {
+                        ui.add_space(10.0);
+                        section_label(ui, kind.category());
+                        previous_category = kind.category();
+                    }
+                    let response = Frame::new()
+                        .fill(panel(self.dark))
+                        .stroke(Stroke::new(1.0, line(self.dark)))
+                        .corner_radius(9)
+                        .inner_margin(Margin::same(9))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                RichText::new(kind.title())
+                                    .strong()
+                                    .size(10.0)
+                                    .color(text(self.dark)),
+                            );
+                            ui.label(
+                                RichText::new(format!("＋ {}", composer_block_id(kind)))
+                                    .monospace()
+                                    .size(8.0)
+                                    .color(PURPLE),
+                            );
+                        })
+                        .response
+                        .interact(Sense::click());
+                    if response.clicked() {
+                        add = Some(kind);
+                    }
+                    ui.add_space(6.0);
+                }
+            });
+        if let Some(kind) = add {
+            self.add_composer_block(kind);
+        }
+    }
+
     fn right_inspector(&mut self, root: &mut egui::Ui) {
         egui::Panel::right("inspector")
             .exact_size(360.0)
@@ -741,6 +1501,10 @@ impl ScenarioApp {
             .show(root, |ui| {
                 ui.label(RichText::new("ИНСПЕКТОР").strong().size(10.0).color(MUTED));
                 ui.add_space(6.0);
+                if self.custom_project.is_some() {
+                    self.composer_inspector(ui);
+                    return;
+                }
                 let Some(task) = self.selected_task().cloned() else {
                     if let Some(error) = &self.load_error {
                         error_box(ui, error, self.dark);
@@ -1198,6 +1962,155 @@ impl ScenarioApp {
             });
     }
 
+    fn composer_inspector(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        let mut move_to = None;
+        let mut remove = None;
+        let selected = self.selected_step;
+        {
+            let selected_path = self.selected_project_scenario.clone();
+            let Some(task) = self
+                .custom_project
+                .as_mut()
+                .and_then(|project| project.scenario_mut(selected_path.as_deref()?))
+            else {
+                return;
+            };
+            ui.label(
+                RichText::new("Пользовательский сценарий")
+                    .strong()
+                    .size(18.0)
+                    .color(text(self.dark)),
+            );
+            ui.add_space(10.0);
+            section_label(ui, "СЦЕНАРИЙ");
+            ui.label(RichText::new("Название").size(9.0).color(MUTED));
+            changed |= ui.text_edit_singleline(&mut task.name).changed();
+            ui.label(RichText::new("ID").size(9.0).color(MUTED));
+            changed |= ui.text_edit_singleline(&mut task.id).changed();
+            ui.label(RichText::new("Описание").size(9.0).color(MUTED));
+            changed |= ui
+                .add(egui::TextEdit::multiline(&mut task.description).desired_rows(3))
+                .changed();
+            ui.add_space(12.0);
+
+            section_label(ui, "ВЫБРАННЫЙ БЛОК");
+            if let Some(index) = selected.filter(|index| *index < task.steps.len()) {
+                let step_count = task.steps.len();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(index > 0, egui::Button::new("← Раньше"))
+                        .clicked()
+                    {
+                        move_to = Some(index - 1);
+                    }
+                    if ui
+                        .add_enabled(index + 1 < step_count, egui::Button::new("Позже →"))
+                        .clicked()
+                    {
+                        move_to = Some(index + 1);
+                    }
+                    if ui.button("Удалить").clicked() {
+                        remove = Some(index);
+                    }
+                });
+                ui.add_space(8.0);
+                changed |= paint_composer_step_editor(ui, &mut task.steps[index], self.dark);
+                ui.add_space(12.0);
+                section_label(ui, "ВЫХОДНОЙ КОНТЕКСТ");
+                ui.label(
+                    RichText::new(composer_step_output_context(&task.steps[index]))
+                        .monospace()
+                        .size(8.0)
+                        .color(PURPLE),
+                );
+                ui.label(
+                    RichText::new(
+                        "Поля контекста доступны условиям и следующим блокам по ID этого блока.",
+                    )
+                    .size(8.0)
+                    .color(MUTED),
+                );
+            } else {
+                ui.label(
+                    RichText::new("Выберите блок на канвасе или добавьте его из палитры слева.")
+                        .size(9.0)
+                        .color(MUTED),
+                );
+            }
+        }
+        if changed {
+            self.invalidate_plan();
+        }
+        if let Some(target) = move_to {
+            if let Some(index) = selected {
+                self.move_composer_step(index, target);
+            }
+        }
+        if let Some(index) = remove {
+            self.remove_composer_step(index);
+        }
+
+        ui.add_space(14.0);
+        let validation = self
+            .selected_task()
+            .ok_or_else(|| "сценарий не выбран".to_owned())
+            .and_then(|task| task.validate());
+        match &validation {
+            Ok(()) => ui.label(
+                RichText::new("Сценарий корректен и готов к сохранению.")
+                    .size(9.0)
+                    .color(CYAN),
+            ),
+            Err(error) => ui.label(RichText::new(error).size(9.0).color(ORANGE)),
+        };
+        ui.add_space(8.0);
+        if ui
+            .add_enabled(
+                validation.is_ok() && !self.running,
+                egui::Button::new("Проверить план")
+                    .min_size(Vec2::new(ui.available_width(), 34.0))
+                    .fill(PURPLE),
+            )
+            .clicked()
+        {
+            self.build_plan();
+        }
+        let can_run = validation.is_ok()
+            && self
+                .report
+                .as_ref()
+                .is_some_and(|report| report.errors.is_empty())
+            && !self.report_applied
+            && !self.running;
+        if ui
+            .add_enabled(
+                can_run,
+                egui::Button::new("Запустить сценарий")
+                    .min_size(Vec2::new(ui.available_width(), 34.0))
+                    .fill(ORANGE),
+            )
+            .clicked()
+        {
+            self.confirm_run = true;
+        }
+        if let Some(error) = &self.plan_error {
+            ui.add_space(8.0);
+            error_box(ui, error, self.dark);
+        } else if let Some(report) = &self.report {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(if self.report_applied {
+                    format!("Выполнено шагов: {}", report.steps.len())
+                } else {
+                    format!("План готов: {} шагов", report.steps.len())
+                })
+                .size(9.0)
+                .color(CYAN),
+            );
+        }
+    }
+
     fn canvas(&mut self, root: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(Frame::new().fill(canvas(self.dark)))
@@ -1237,10 +2150,11 @@ impl ScenarioApp {
                 } else {
                     Vec::new()
                 };
+                let is_composer = self.custom_project.is_some();
                 let node_count = if task.is_template() {
                     groups.len()
                 } else {
-                    resolved.steps.len()
+                    resolved.steps.len() + usize::from(is_composer)
                 };
                 ScrollArea::both()
                     .auto_shrink([false, false])
@@ -1298,8 +2212,66 @@ impl ScenarioApp {
                                 report_offset += group.step_count;
                             }
                         } else {
+                            let step_positions = if is_composer {
+                                if let Some(position) = positions.first() {
+                                    let rect = Rect::from_min_size(*position, node_size);
+                                    painter.rect_filled(rect, 13.0, panel(self.dark));
+                                    painter.rect_stroke(
+                                        rect,
+                                        13.0,
+                                        Stroke::new(2.0, CYAN),
+                                        StrokeKind::Inside,
+                                    );
+                                    painter.text(
+                                        rect.left_top() + Vec2::new(18.0, 22.0),
+                                        Align2::LEFT_TOP,
+                                        "СТАРТ",
+                                        FontId::proportional(10.0),
+                                        CYAN,
+                                    );
+                                    painter.text(
+                                        rect.left_top() + Vec2::new(18.0, 48.0),
+                                        Align2::LEFT_TOP,
+                                        "Начало сценария",
+                                        FontId::proportional(17.0),
+                                        text(self.dark),
+                                    );
+                                    painter.text(
+                                        rect.left_top() + Vec2::new(18.0, 78.0),
+                                        Align2::LEFT_TOP,
+                                        "Контекст проекта",
+                                        FontId::monospace(9.0),
+                                        MUTED,
+                                    );
+                                    let plus_rect = Rect::from_center_size(
+                                        Pos2::new(rect.right() - 20.0, rect.center().y),
+                                        Vec2::splat(30.0),
+                                    );
+                                    painter.circle_filled(plus_rect.center(), 14.0, PURPLE);
+                                    painter.text(
+                                        plus_rect.center(),
+                                        Align2::CENTER_CENTER,
+                                        "+",
+                                        FontId::proportional(21.0),
+                                        Color32::WHITE,
+                                    );
+                                    if ui
+                                        .interact(
+                                            plus_rect,
+                                            Id::new(("scenario-start-plus", task.id.as_str())),
+                                            Sense::click(),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.open_block_picker("start");
+                                    }
+                                }
+                                &positions[1..]
+                            } else {
+                                positions.as_slice()
+                            };
                             for (index, (step, position)) in
-                                resolved.steps.iter().zip(positions.iter()).enumerate()
+                                resolved.steps.iter().zip(step_positions.iter()).enumerate()
                             {
                                 let rect = Rect::from_min_size(*position, node_size);
                                 let selected = self.selected_step == Some(index);
@@ -1323,6 +2295,30 @@ impl ScenarioApp {
                                         .map(|report| &report.status),
                                     self.dark,
                                 );
+                                if is_composer {
+                                    let plus_rect = Rect::from_center_size(
+                                        Pos2::new(rect.right() - 18.0, rect.center().y),
+                                        Vec2::splat(28.0),
+                                    );
+                                    painter.circle_filled(plus_rect.center(), 12.0, PURPLE);
+                                    painter.text(
+                                        plus_rect.center(),
+                                        Align2::CENTER_CENTER,
+                                        "+",
+                                        FontId::proportional(18.0),
+                                        Color32::WHITE,
+                                    );
+                                    if ui
+                                        .interact(
+                                            plus_rect,
+                                            Id::new(("scenario-step-plus", step.id.as_str())),
+                                            Sense::click(),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.open_block_picker(step.id.clone());
+                                    }
+                                }
                             }
                         }
 
@@ -2002,6 +2998,126 @@ fn task_matches_query(task: &Task, normalized_query: &str) -> bool {
             .any(|scenario| scenario.to_lowercase().contains(normalized_query))
 }
 
+fn composer_block_id(kind: ComposerBlockKind) -> &'static str {
+    match kind {
+        ComposerBlockKind::GitInspect => "inspect-repository",
+        ComposerBlockKind::GitCloneIfMissing => "clone-repository",
+        ComposerBlockKind::GitFetch => "fetch-repository",
+        ComposerBlockKind::GitFastForward => "update-branch",
+        ComposerBlockKind::CreateDirectory => "create-directory",
+        ComposerBlockKind::InspectPath => "inspect-path",
+        ComposerBlockKind::CopyPath => "copy-path",
+        ComposerBlockKind::WriteFile => "write-file",
+        ComposerBlockKind::RemovePath => "remove-path",
+        ComposerBlockKind::BrewInstall => "install-package",
+    }
+}
+
+fn composer_output_context(kind: ComposerBlockKind) -> &'static str {
+    match kind {
+        ComposerBlockKind::GitInspect => {
+            "repository.exists, repository.path, repository.remote_url"
+        }
+        ComposerBlockKind::GitCloneIfMissing => {
+            "repository.path, repository.remote_url, repository.branch, repository.cloned"
+        }
+        ComposerBlockKind::GitFetch => {
+            "repository.path, repository.remote_url, repository.branch, repository.fetched"
+        }
+        ComposerBlockKind::GitFastForward => {
+            "repository.path, repository.branch, repository.updated"
+        }
+        ComposerBlockKind::CreateDirectory => "path.value, path.created",
+        ComposerBlockKind::InspectPath => {
+            "path.value, path.exists, path.kind, path.size_bytes, path.sha256"
+        }
+        ComposerBlockKind::CopyPath => "path.source, path.destination, path.copied",
+        ComposerBlockKind::WriteFile => "file.path, file.bytes, file.changed",
+        ComposerBlockKind::RemovePath => "path.value, path.removed",
+        ComposerBlockKind::BrewInstall => "package.name, package.cask, package.installed",
+    }
+}
+
+fn composer_step_output_context(step: &Step) -> &'static str {
+    match &step.action {
+        Action::GitInspect { .. } => composer_output_context(ComposerBlockKind::GitInspect),
+        Action::GitCloneIfMissing { .. } => {
+            composer_output_context(ComposerBlockKind::GitCloneIfMissing)
+        }
+        Action::GitFetch { .. } => composer_output_context(ComposerBlockKind::GitFetch),
+        Action::GitFastForward { .. } => composer_output_context(ComposerBlockKind::GitFastForward),
+        Action::CreateDirectory(_) => composer_output_context(ComposerBlockKind::CreateDirectory),
+        Action::InspectPath(_) => composer_output_context(ComposerBlockKind::InspectPath),
+        Action::CopyPath(_) => composer_output_context(ComposerBlockKind::CopyPath),
+        Action::WriteFile(_) => composer_output_context(ComposerBlockKind::WriteFile),
+        Action::RemovePath(_) => composer_output_context(ComposerBlockKind::RemovePath),
+        Action::BrewInstall { .. } => composer_output_context(ComposerBlockKind::BrewInstall),
+        _ => "result.status, result.summary",
+    }
+}
+
+fn composer_step(kind: ComposerBlockKind, id: String) -> Step {
+    let repository = "https://github.com/owner/repository.git".to_owned();
+    let destination = "$HOME/Developer/owner/repository".to_owned();
+    let action = match kind {
+        ComposerBlockKind::GitInspect => Action::GitInspect {
+            repo: repository,
+            dest: destination,
+        },
+        ComposerBlockKind::GitCloneIfMissing => Action::GitCloneIfMissing {
+            repo: repository,
+            dest: destination,
+            branch: Some("main".into()),
+        },
+        ComposerBlockKind::GitFetch => Action::GitFetch {
+            repo: repository,
+            dest: destination,
+            branch: "main".into(),
+        },
+        ComposerBlockKind::GitFastForward => Action::GitFastForward {
+            repo: repository,
+            dest: destination,
+            branch: "main".into(),
+        },
+        ComposerBlockKind::CreateDirectory => Action::CreateDirectory(CreateDirectoryAction {
+            path: "$HOME/Developer/project".into(),
+        }),
+        ComposerBlockKind::InspectPath => Action::InspectPath(InspectPathAction {
+            path: "$HOME/Developer/project".into(),
+            recursive_size: false,
+            sha256: false,
+            expect: None,
+        }),
+        ComposerBlockKind::CopyPath => Action::CopyPath(CopyPathAction {
+            src: "$HOME/Developer/source".into(),
+            dest: "$HOME/Developer/destination".into(),
+        }),
+        ComposerBlockKind::WriteFile => Action::WriteFile(WriteFileAction {
+            path: "$HOME/Developer/project/example.txt".into(),
+            content: String::new(),
+            on_conflict: WriteConflictPolicy::Fail,
+        }),
+        ComposerBlockKind::RemovePath => Action::RemovePath(RemovePathAction {
+            path: "$HOME/Library/Caches/example".into(),
+        }),
+        ComposerBlockKind::BrewInstall => Action::BrewInstall {
+            package: "ripgrep".into(),
+            cask: false,
+        },
+    };
+    Step {
+        id,
+        name: kind.title().into(),
+        auth: AuthPolicy::None,
+        check: None,
+        dangerous: false,
+        allow_elevation: Default::default(),
+        when: None,
+        require: None,
+        action,
+    }
+}
+
 fn describe_task_steps(task: &Task, options: &RunOptions) -> Vec<String> {
     task.steps
         .iter()
@@ -2148,6 +3264,115 @@ fn paint_step_inspector(ui: &mut egui::Ui, step: &Step, options: Option<&RunOpti
         .show(ui, |ui| {
             ui.label(RichText::new(yaml).monospace().size(9.0).color(text(dark)));
         });
+}
+
+fn paint_composer_step_editor(ui: &mut egui::Ui, step: &mut Step, dark: bool) -> bool {
+    let mut changed = false;
+    let is_git_fetch = matches!(&step.action, Action::GitFetch { .. });
+    ui.label(RichText::new("Название блока").size(9.0).color(MUTED));
+    changed |= ui.text_edit_singleline(&mut step.name).changed();
+    ui.label(RichText::new("ID блока").size(9.0).color(MUTED));
+    changed |= ui.text_edit_singleline(&mut step.id).changed();
+    ui.add_space(8.0);
+    match &mut step.action {
+        Action::GitInspect { repo, dest } => {
+            changed |= composer_text_field(ui, "Repository URL", repo);
+            changed |= composer_text_field(ui, "Локальная папка", dest);
+        }
+        Action::GitCloneIfMissing { repo, dest, branch } => {
+            changed |= composer_text_field(ui, "Repository URL", repo);
+            changed |= composer_text_field(ui, "Локальная папка", dest);
+            changed |=
+                composer_text_field(ui, "Ветка", branch.get_or_insert_with(|| "main".into()));
+            changed |= composer_git_auth(ui, &mut step.auth);
+        }
+        Action::GitFetch { repo, dest, branch } | Action::GitFastForward { repo, dest, branch } => {
+            changed |= composer_text_field(ui, "Repository URL", repo);
+            changed |= composer_text_field(ui, "Локальная папка", dest);
+            changed |= composer_text_field(ui, "Ветка", branch);
+            if is_git_fetch {
+                changed |= composer_git_auth(ui, &mut step.auth);
+            }
+        }
+        Action::CreateDirectory(action) => {
+            changed |= composer_text_field(ui, "Путь", &mut action.path);
+        }
+        Action::InspectPath(action) => {
+            changed |= composer_text_field(ui, "Путь", &mut action.path);
+            changed |= ui
+                .checkbox(&mut action.recursive_size, "Рекурсивно считать размер")
+                .changed();
+            changed |= ui
+                .checkbox(&mut action.sha256, "Вычислить SHA-256")
+                .changed();
+        }
+        Action::CopyPath(action) => {
+            changed |= composer_text_field(ui, "Источник", &mut action.src);
+            changed |= composer_text_field(ui, "Назначение", &mut action.dest);
+        }
+        Action::WriteFile(action) => {
+            changed |= composer_text_field(ui, "Путь", &mut action.path);
+            ui.label(RichText::new("Содержимое").size(9.0).color(MUTED));
+            changed |= ui
+                .add(egui::TextEdit::multiline(&mut action.content).desired_rows(5))
+                .changed();
+            let mut replace = matches!(action.on_conflict, WriteConflictPolicy::Replace);
+            if ui
+                .checkbox(&mut replace, "Заменять отличающийся файл")
+                .changed()
+            {
+                action.on_conflict = if replace {
+                    WriteConflictPolicy::Replace
+                } else {
+                    WriteConflictPolicy::Fail
+                };
+                changed = true;
+            }
+        }
+        Action::RemovePath(action) => {
+            changed |= composer_text_field(ui, "Путь", &mut action.path);
+        }
+        Action::BrewInstall { package, cask } => {
+            changed |= composer_text_field(ui, "Пакет", package);
+            changed |= ui.checkbox(cask, "Cask").changed();
+        }
+        _ => {
+            ui.label(
+                RichText::new("Редактор параметров для этого типа блока пока недоступен.")
+                    .size(9.0)
+                    .color(ORANGE),
+            );
+        }
+    }
+    ui.add_space(8.0);
+    ui.label(
+        RichText::new("Изменения сразу отражаются на канвасе и в сохраняемом YAML.")
+            .size(8.0)
+            .color(if changed { PURPLE } else { text(dark) }),
+    );
+    changed
+}
+
+fn composer_text_field(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
+    ui.label(RichText::new(label).size(9.0).color(MUTED));
+    ui.text_edit_singleline(value).changed()
+}
+
+fn composer_git_auth(ui: &mut egui::Ui, auth: &mut AuthPolicy) -> bool {
+    let mut enabled = matches!(auth, AuthPolicy::GitCredential);
+    if ui
+        .checkbox(&mut enabled, "Использовать Git credentials")
+        .changed()
+    {
+        *auth = if enabled {
+            AuthPolicy::GitCredential
+        } else {
+            AuthPolicy::None
+        };
+        true
+    } else {
+        false
+    }
 }
 
 fn paint_connectors(painter: &egui::Painter, positions: &[Pos2], node_size: Vec2) {
@@ -2970,6 +4195,130 @@ mod tests {
         assert!(dotted_id.starts_with("acme-foo-bar-"));
         assert!(github_step_slug(&dashed).starts_with("acme-foo-bar-"));
         assert_ne!(dotted_id, github_step_slug(&dashed));
+    }
+
+    #[test]
+    fn composer_builds_and_round_trips_atomic_git_blocks() {
+        let mut task = Task {
+            id: "custom-git-sync".into(),
+            name: "Custom Git sync".into(),
+            description: "A custom scenario assembled from atomic Git blocks.".into(),
+            platform: ppduster::rules::Platform::Macos,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            steps: Vec::new(),
+        };
+        for (index, kind) in [
+            ComposerBlockKind::GitInspect,
+            ComposerBlockKind::GitCloneIfMissing,
+            ComposerBlockKind::GitFetch,
+            ComposerBlockKind::GitFastForward,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            task.steps
+                .push(composer_step(kind, format!("step-{}", index + 1)));
+        }
+
+        task.validate().unwrap();
+        let yaml = serde_yaml::to_string(&TaskFile { task }).unwrap();
+        let reparsed: TaskFile = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(reparsed.task.steps.len(), 4);
+        assert!(matches!(
+            reparsed.task.steps[0].action,
+            Action::GitInspect { .. }
+        ));
+        assert!(matches!(
+            reparsed.task.steps[1].action,
+            Action::GitCloneIfMissing { .. }
+        ));
+        assert!(matches!(
+            reparsed.task.steps[2].action,
+            Action::GitFetch { .. }
+        ));
+        assert!(matches!(
+            reparsed.task.steps[3].action,
+            Action::GitFastForward { .. }
+        ));
+    }
+
+    #[test]
+    fn project_round_trips_nested_groups_and_selects_first_scenario() {
+        let task = Task {
+            id: "nested-scenario".into(),
+            name: "Nested scenario".into(),
+            description: "A scenario stored below two project groups.".into(),
+            platform: ppduster::rules::Platform::Macos,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            steps: vec![composer_step(
+                ComposerBlockKind::GitInspect,
+                "inspect".into(),
+            )],
+        };
+        let project = ScenarioProject {
+            id: "workstation".into(),
+            name: "Workstation".into(),
+            description: "Developer workstation project.".into(),
+            entries: vec![ProjectEntry::Group {
+                id: "git".into(),
+                name: "Git".into(),
+                entries: vec![ProjectEntry::Group {
+                    id: "repositories".into(),
+                    name: "Repositories".into(),
+                    entries: vec![ProjectEntry::Scenario { task }],
+                }],
+            }],
+        };
+
+        validate_project(&project).unwrap();
+        let yaml = serde_yaml::to_string(&ScenarioProjectFile { project }).unwrap();
+        let reparsed = load_project_yaml(&yaml).unwrap();
+        let path = first_scenario_path(&reparsed.entries, &mut Vec::new()).unwrap();
+
+        assert_eq!(path, vec![0, 0, 0]);
+        assert_eq!(reparsed.scenario(&path).unwrap().id, "nested-scenario");
+    }
+
+    #[test]
+    fn project_loader_wraps_legacy_single_scenario_files() {
+        let task = Task {
+            id: "legacy".into(),
+            name: "Legacy".into(),
+            description: "A legacy standalone scenario.".into(),
+            platform: ppduster::rules::Platform::Macos,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            steps: vec![composer_step(
+                ComposerBlockKind::CreateDirectory,
+                "create".into(),
+            )],
+        };
+        let yaml = serde_yaml::to_string(&TaskFile { task }).unwrap();
+        let project = load_project_yaml(&yaml).unwrap();
+        let path = first_scenario_path(&project.entries, &mut Vec::new()).unwrap();
+
+        assert_eq!(project.scenario(&path).unwrap().id, "legacy");
+    }
+
+    #[test]
+    fn composer_blocks_publish_searchable_output_context_contracts() {
+        assert_eq!(
+            composer_output_context(ComposerBlockKind::GitInspect),
+            "repository.exists, repository.path, repository.remote_url"
+        );
+        assert!(composer_output_context(ComposerBlockKind::InspectPath).contains("path.sha256"));
+        assert!(
+            composer_output_context(ComposerBlockKind::GitCloneIfMissing)
+                .contains("repository.cloned")
+        );
+        for kind in ComposerBlockKind::ALL {
+            assert!(!composer_output_context(kind).trim().is_empty());
+        }
     }
 
     fn standalone_github_picker_task(pack: &TaskPack) -> Task {
