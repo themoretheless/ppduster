@@ -317,7 +317,7 @@ impl ScenarioApp {
         self.confirm_run = false;
     }
 
-    fn start_custom_scenario(&mut self) {
+    fn start_custom_project(&mut self) {
         if self.running {
             return;
         }
@@ -713,7 +713,7 @@ impl ScenarioApp {
         task.trust = TrustRequirement::ExternalAllowed;
         let suggested_name = format!("{}.yaml", task.id);
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("Сценарий YAML", &["yaml", "yml"])
+            .add_filter("Проект или сценарий YAML", &["yaml", "yml"])
             .set_file_name(&suggested_name)
             .save_file()
         else {
@@ -734,7 +734,7 @@ impl ScenarioApp {
 
     fn load_scenario_file(&mut self) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("Сценарий YAML", &["yaml", "yml"])
+            .add_filter("Проект YAML", &["yaml", "yml"])
             .pick_file()
         else {
             return;
@@ -1202,165 +1202,53 @@ impl ScenarioApp {
                     return;
                 }
                 ui.label(
-                    RichText::new("Группы")
+                    RichText::new("Проект")
                         .strong()
                         .size(22.0)
                         .color(text(self.dark)),
                 );
-                if let Some(task) = self.selected_task().filter(|task| task.is_template()) {
-                    ui.label(RichText::new(&task.name).size(9.0).color(MUTED));
-                }
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Откройте YAML проекта — группы в левой панели будут взяты из project.entries.",
+                        )
+                        .size(9.0)
+                        .color(MUTED),
+                    )
+                    .wrap(),
+                );
                 ui.add_space(8.0);
                 if ui
                     .add_enabled(
                         !self.running,
-                        egui::Button::new("＋ Новая группа")
+                        egui::Button::new("Открыть project YAML…")
                             .min_size(Vec2::new(ui.available_width(), 34.0)),
                     )
                     .clicked()
                 {
-                    self.start_custom_scenario();
+                    self.load_scenario_file();
                     return;
                 }
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.running, egui::Button::new("Загрузить…"))
-                        .clicked()
-                    {
-                        self.load_scenario_file();
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.running && self.selected_task().is_some(),
-                            egui::Button::new("Сохранить…"),
-                        )
-                        .clicked()
-                    {
-                        self.save_selected_scenario();
-                    }
-                });
+                if ui
+                    .add_enabled(
+                        !self.running,
+                        egui::Button::new("＋ Новый проект")
+                            .min_size(Vec2::new(ui.available_width(), 32.0)),
+                    )
+                    .clicked()
+                {
+                    self.start_custom_project();
+                    return;
+                }
                 if let Some((is_error, message)) = &self.file_message {
+                    ui.add_space(8.0);
                     ui.label(RichText::new(message).size(8.0).color(if *is_error {
                         ORANGE
                     } else {
                         CYAN
                     }));
                 }
-                ui.add_space(10.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.search)
-                        .hint_text("Поиск группы…")
-                        .desired_width(f32::INFINITY),
-                );
-                ui.add_space(10.0);
-                ui.separator();
-
-                let query = self.search.trim().to_lowercase();
-                let visible = self
-                    .task_pack
-                    .as_ref()
-                    .and_then(|pack| pack.tasks.get(self.selected_task).map(|task| (pack, task)))
-                    .map(|(pack, task)| {
-                        let group_ids = if task.is_template() {
-                            task.scenarios.clone()
-                        } else {
-                            vec![task.id.clone()]
-                        };
-                        group_ids
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(index, id)| {
-                                let group = pack.get(id)?;
-                                task_matches_query(group, &query).then(|| {
-                                    (
-                                        index,
-                                        group.name.clone(),
-                                        group.id.clone(),
-                                        pack.resolve(&group.id)
-                                            .map(|resolved| resolved.steps.len())
-                                            .unwrap_or(group.steps.len()),
-                                        group.platform.as_str().to_string(),
-                                    )
-                                })
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-
-                ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.add_space(8.0);
-                        for (index, name, id, step_count, platform) in visible {
-                            let selected = self.selected_step == Some(index);
-                            let response = Frame::new()
-                                .fill(if selected {
-                                    translucent(PURPLE, if self.dark { 42 } else { 18 })
-                                } else {
-                                    panel(self.dark)
-                                })
-                                .stroke(Stroke::new(
-                                    1.0,
-                                    if selected { PURPLE } else { line(self.dark) },
-                                ))
-                                .corner_radius(11)
-                                .inner_margin(Margin::symmetric(11, 10))
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    ui.horizontal(|ui| {
-                                        ui.vertical(|ui| {
-                                            ui.label(
-                                                RichText::new(name)
-                                                    .strong()
-                                                    .size(11.0)
-                                                    .color(text(self.dark)),
-                                            );
-                                            ui.label(
-                                                RichText::new(id)
-                                                    .monospace()
-                                                    .size(8.0)
-                                                    .color(MUTED),
-                                            );
-                                        });
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
-                                                ui.label(
-                                                    RichText::new(format!("{step_count}"))
-                                                        .strong()
-                                                        .size(10.0)
-                                                        .color(if selected {
-                                                            PURPLE
-                                                        } else {
-                                                            MUTED
-                                                        }),
-                                                );
-                                            },
-                                        );
-                                    });
-                                    ui.add_space(5.0);
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new(platform.to_uppercase())
-                                                .size(8.0)
-                                                .color(CYAN),
-                                        );
-                                        ui.label(
-                                            RichText::new(format!("{step_count} шагов"))
-                                                .size(8.0)
-                                                .color(MUTED),
-                                        );
-                                    });
-                                })
-                                .response
-                                .interact(Sense::click());
-                            if response.clicked() {
-                                self.selected_step = Some(index);
-                            }
-                            ui.add_space(7.0);
-                        }
-                    });
             });
     }
 
@@ -3004,17 +2892,6 @@ fn github_step_slug(repository: &GithubRepository) -> String {
     format!("{}-{}", slug.trim_matches('-'), hex::encode(&digest[..16]))
 }
 
-fn task_matches_query(task: &Task, normalized_query: &str) -> bool {
-    normalized_query.is_empty()
-        || task.name.to_lowercase().contains(normalized_query)
-        || task.id.to_lowercase().contains(normalized_query)
-        || task.description.to_lowercase().contains(normalized_query)
-        || task
-            .scenarios
-            .iter()
-            .any(|scenario| scenario.to_lowercase().contains(normalized_query))
-}
-
 fn composer_block_id(kind: ComposerBlockKind) -> &'static str {
     match kind {
         ComposerBlockKind::GitInspect => "inspect-repository",
@@ -4067,16 +3944,6 @@ mod tests {
     }
 
     #[test]
-    fn search_matches_description_and_nested_scenario_ids() {
-        let pack = load_tasks().unwrap();
-        let template = pack.get("macos-developer-workstation").unwrap();
-
-        assert!(task_matches_query(template, "deliberate order"));
-        assert!(task_matches_query(template, &template.scenarios[0]));
-        assert!(!task_matches_query(template, "definitely-not-a-scenario"));
-    }
-
-    #[test]
     fn inspector_describes_every_resolved_step() {
         let pack = load_tasks().unwrap();
         let resolved = pack.resolve("macos-developer-workstation").unwrap();
@@ -4306,6 +4173,35 @@ mod tests {
             project_group_column_paths(&reparsed, &[0, 0]),
             vec![Vec::<usize>::new(), vec![0]]
         );
+    }
+
+    #[test]
+    fn project_yaml_drives_nested_group_columns() {
+        let yaml = r#"
+project:
+  id: workstation
+  name: Workstation
+  entries:
+    - type: group
+      id: development
+      name: Development
+      entries:
+        - type: group
+          id: git
+          name: Git
+          entries: []
+"#;
+        let project = load_project_yaml(yaml).unwrap();
+
+        assert_eq!(
+            project_group_column_paths(&project, &[0]),
+            vec![Vec::<usize>::new(), vec![0]]
+        );
+        let nested = project_group_entries(&project, &[0]).unwrap();
+        assert!(matches!(
+            nested.first(),
+            Some(ProjectEntry::Group { id, name, .. }) if id == "git" && name == "Git"
+        ));
     }
 
     #[test]
