@@ -2,14 +2,31 @@ task:
   id: github-repositories
   name: GitHub repositories
   description: >-
-    Sign in with GitHub CLI when needed, choose one or more public repositories
-    in the desktop UI, and clone or safely synchronize their main branches.
+    Get the public repository list through GitHub CLI, then show repository
+    inspection, clone, fetch, and safe main fast-forward as separate operations.
   platform: macos
   trust: bundled-only
   steps:
+    - id: inspect-repository
+      name: Check whether GitHub repository exists locally
+      type: git-inspect
+      repo: https://github.com/example/example.git
+      dest: $HOME/Developer/example/example
     - id: clone-repository
-      name: Clone or update GitHub repository
-      type: git-clone
+      name: Clone GitHub repository when missing
+      type: git-clone-if-missing
+      repo: https://github.com/example/example.git
+      dest: $HOME/Developer/example/example
+      branch: main
+    - id: fetch-repository
+      name: Fetch GitHub repository main
+      type: git-fetch
+      repo: https://github.com/example/example.git
+      dest: $HOME/Developer/example/example
+      branch: main
+    - id: update-main
+      name: Fast-forward GitHub repository main
+      type: git-fast-forward
       repo: https://github.com/example/example.git
       dest: $HOME/Developer/example/example
       branch: main

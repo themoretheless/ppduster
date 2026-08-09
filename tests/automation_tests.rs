@@ -860,7 +860,7 @@ fn bundled_app_store_tasks_do_not_request_elevation() {
 }
 
 #[test]
-fn bundled_git_scenarios_sync_main_instead_of_stopping_at_repository_presence() {
+fn bundled_git_scenarios_expose_atomic_inspect_clone_fetch_and_update_steps() {
     let pack = TaskPack::load_many(
         &[TaskSource {
             path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
@@ -870,18 +870,45 @@ fn bundled_git_scenarios_sync_main_instead_of_stopping_at_repository_presence() 
     )
     .unwrap();
 
-    for (task_id, step_id) in [
-        ("dev-brew-bootstrap", "clone-repo"),
-        ("macos-top-02-dotfiles", "clone-dotfiles"),
+    for (task_id, step_ids) in [
+        (
+            "dev-brew-bootstrap",
+            ["inspect-repo", "clone-repo", "fetch-repo", "update-main"],
+        ),
+        (
+            "macos-top-02-dotfiles",
+            [
+                "inspect-dotfiles",
+                "clone-dotfiles",
+                "fetch-dotfiles",
+                "update-dotfiles-main",
+            ],
+        ),
     ] {
         let task = pack.get(task_id).unwrap();
-        let step = task.steps.iter().find(|step| step.id == step_id).unwrap();
+        let actions = step_ids.map(|step_id| {
+            &task
+                .steps
+                .iter()
+                .find(|step| step.id == step_id)
+                .unwrap()
+                .action
+        });
+        assert!(matches!(actions[0], Action::GitInspect { .. }));
         assert!(matches!(
-            &step.action,
-            Action::GitClone {
+            actions[1],
+            Action::GitCloneIfMissing {
                 branch: Some(branch),
                 ..
             } if branch == "main"
+        ));
+        assert!(matches!(
+            actions[2],
+            Action::GitFetch { branch, .. } if branch == "main"
+        ));
+        assert!(matches!(
+            actions[3],
+            Action::GitFastForward { branch, .. } if branch == "main"
         ));
     }
 }

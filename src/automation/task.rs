@@ -510,6 +510,26 @@ pub enum Action {
         #[serde(default)]
         branch: Option<String>,
     },
+    GitInspect {
+        repo: String,
+        dest: String,
+    },
+    GitCloneIfMissing {
+        repo: String,
+        dest: String,
+        #[serde(default)]
+        branch: Option<String>,
+    },
+    GitFetch {
+        repo: String,
+        dest: String,
+        branch: String,
+    },
+    GitFastForward {
+        repo: String,
+        dest: String,
+        branch: String,
+    },
     BrewInstall {
         package: String,
         #[serde(default)]
@@ -791,6 +811,28 @@ impl Step {
                     .is_some_and(|branch| branch.trim().is_empty())
                 {
                     return Err(format!("step {} git branch must not be empty", self.id));
+                }
+            }
+            Action::GitInspect { repo, dest } => {
+                if repo.trim().is_empty() || dest.trim().is_empty() {
+                    return Err(format!("step {} requires repo and dest", self.id));
+                }
+            }
+            Action::GitCloneIfMissing { repo, dest, branch } => {
+                if repo.trim().is_empty() || dest.trim().is_empty() {
+                    return Err(format!("step {} requires repo and dest", self.id));
+                }
+                if branch
+                    .as_ref()
+                    .is_some_and(|branch| branch.trim().is_empty())
+                {
+                    return Err(format!("step {} git branch must not be empty", self.id));
+                }
+            }
+            Action::GitFetch { repo, dest, branch }
+            | Action::GitFastForward { repo, dest, branch } => {
+                if repo.trim().is_empty() || dest.trim().is_empty() || branch.trim().is_empty() {
+                    return Err(format!("step {} requires repo, dest, and branch", self.id));
                 }
             }
             Action::BrewInstall { package, .. } => {

@@ -753,7 +753,7 @@ impl ScenarioApp {
                     .task_pack
                     .as_ref()
                     .and_then(|pack| pack.resolve(&task.id).ok())
-                    .is_some_and(|resolved| github_picker_source_step(&resolved).is_some());
+                    .is_some_and(|resolved| github_picker_source_steps(&resolved).is_some());
                 let resolved = self.resolved_selected_task();
                 let resolved_task = resolved.as_ref().ok().cloned();
                 let resolution_error = resolved.err().map(|error| format!("{error:#}"));
@@ -1811,12 +1811,14 @@ fn materialize_github_repositories(
         anyhow::bail!("корневая папка GitHub не должна содержать '..'");
     }
 
-    let source_step = github_picker_source_step(&task).cloned().ok_or_else(|| {
-        anyhow::anyhow!(
-            "сценарий {} должен состоять ровно из одного git-clone шага для безопасной настройки через GitHub picker",
-            task.id
-        )
-    })?;
+    let source_steps = github_picker_source_steps(&task)
+        .map(<[Step]>::to_vec)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "сценарий {} должен состоять из атомарных шагов git-inspect, git-clone-if-missing, git-fetch и git-fast-forward",
+                task.id
+            )
+        })?;
     let mut selected = Vec::with_capacity(selected_ids.len());
     for id in selected_ids {
         let repository = repositories
@@ -1848,7 +1850,7 @@ fn materialize_github_repositories(
             .cmp(&right.name_with_owner.to_lowercase())
             .then_with(|| left.id.cmp(&right.id))
     });
-    let mut generated_steps = Vec::with_capacity(selected.len());
+    let mut generated_steps = Vec::with_capacity(selected.len() * source_steps.len());
     for repository in selected {
         validate_github_repository_identity(repository)?;
         let branch = repository.main_branch.as_deref().ok_or_else(|| {
@@ -1864,23 +1866,62 @@ fn materialize_github_repositories(
             );
         }
 
-        let mut step = source_step.clone();
-        step.id = format!("{}/{}", source_step.id, github_step_slug(repository));
-        step.name = format!("Clone or update {}", repository.name_with_owner);
-        step.check = None;
-        // The picker only materializes public github.com HTTPS URLs. No
-        // credential prompt is needed in the background UI worker.
-        step.auth = AuthPolicy::None;
-        step.action = Action::GitClone {
-            repo: github_clone_url(repository),
-            dest: PathBuf::from(destination_root)
-                .join(&repository.owner)
-                .join(&repository.name)
-                .display()
-                .to_string(),
-            branch: Some(branch.to_owned()),
-        };
-        generated_steps.push(step);
+        let slug = github_step_slug(repository);
+        let repo = github_clone_url(repository);
+        let dest = PathBuf::from(destination_root)
+            .join(&repository.owner)
+            .join(&repository.name)
+            .display()
+            .to_string();
+        for source_step in &source_steps {
+            let mut step = source_step.clone();
+            step.id = format!("{}/{}", source_step.id, slug);
+            step.name = match &source_step.action {
+                Action::GitInspect { .. } => {
+                    format!(
+                        "Check whether {} exists locally",
+                        repository.name_with_owner
+                    )
+                }
+                Action::GitCloneIfMissing { .. } => {
+                    format!("Clone {} when missing", repository.name_with_owner)
+                }
+                Action::GitFetch { .. } => {
+                    format!("Fetch {} main", repository.name_with_owner)
+                }
+                Action::GitFastForward { .. } => {
+                    format!("Fast-forward {} main", repository.name_with_owner)
+                }
+                _ => unreachable!("GitHub picker template was validated above"),
+            };
+            step.check = None;
+            // The picker only materializes public github.com HTTPS URLs. No
+            // credential prompt is needed in the background UI worker.
+            step.auth = AuthPolicy::None;
+            step.action = match &source_step.action {
+                Action::GitInspect { .. } => Action::GitInspect {
+                    repo: repo.clone(),
+                    dest: dest.clone(),
+                },
+                Action::GitCloneIfMissing { .. } => Action::GitCloneIfMissing {
+                    repo: repo.clone(),
+                    dest: dest.clone(),
+                    branch: Some(branch.to_owned()),
+                },
+                Action::GitFetch { .. } => Action::GitFetch {
+                    repo: repo.clone(),
+                    dest: dest.clone(),
+                    branch: branch.to_owned(),
+                },
+                Action::GitFastForward { .. } => Action::GitFastForward {
+                    repo: repo.clone(),
+                    dest: dest.clone(),
+                    branch: branch.to_owned(),
+                },
+                _ => unreachable!("GitHub picker template was validated above"),
+            };
+            generated_steps.push(step);
+        }
     }
 
     task.steps.splice(.., generated_steps);
@@ -1888,9 +1929,16 @@ fn materialize_github_repositories(
     Ok(task)
 }
 
-fn github_picker_source_step(task: &Task) -> Option<&Step> {
+fn github_picker_source_steps(task: &Task) -> Option<&[Step]> {
     match task.steps.as_slice() {
-        [step] if matches!(step.action, Action::GitClone { .. }) => Some(step),
+        [inspect, clone, fetch, update]
+            if matches!(inspect.action, Action::GitInspect { .. })
+                && matches!(clone.action, Action::GitCloneIfMissing { .. })
+                && matches!(fetch.action, Action::GitFetch { .. })
+                && matches!(update.action, Action::GitFastForward { .. }) =>
+        {
+            Some(task.steps.as_slice())
+        }
         _ => None,
     }
 }
@@ -2006,7 +2054,15 @@ fn scenario_groups(
             let source_step_id = base
                 .steps
                 .iter()
-                .find(|step| matches!(step.action, Action::GitClone { .. }))
+                .find(|step| {
+                    matches!(
+                        step.action,
+                        Action::GitInspect { .. }
+                            | Action::GitCloneIfMissing { .. }
+                            | Action::GitFetch { .. }
+                            | Action::GitFastForward { .. }
+                    )
+                })
                 .map(|step| step.id.as_str())
                 .ok_or_else(|| {
                     anyhow::anyhow!(
@@ -2396,7 +2452,13 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, dark: bool) {
 fn action_color(action: &Action) -> Color32 {
     match action {
         Action::CreateDirectory(_) | Action::InspectPath(_) | Action::WriteFile(_) => CYAN,
-        Action::CopyPath(_) | Action::DownloadFile { .. } | Action::GitClone { .. } => PURPLE,
+        Action::CopyPath(_)
+        | Action::DownloadFile { .. }
+        | Action::GitClone { .. }
+        | Action::GitCloneIfMissing { .. }
+        | Action::GitFetch { .. }
+        | Action::GitFastForward { .. } => PURPLE,
+        Action::GitInspect { .. } => CYAN,
         Action::RemovePath(_)
         | Action::ExtractArchive { .. }
         | Action::InstallDmg { .. }
@@ -2417,7 +2479,10 @@ fn action_icon(action: &Action) -> &'static str {
         Action::CopyPath(_) => "COPY",
         Action::WriteFile(_) => "TXT",
         Action::RemovePath(_) => "DEL",
-        Action::GitClone { .. } => "⌘",
+        Action::GitClone { .. } | Action::GitCloneIfMissing { .. } => "⌘",
+        Action::GitInspect { .. } => "G?",
+        Action::GitFetch { .. } => "↓G",
+        Action::GitFastForward { .. } => "FF",
         Action::BrewInstall { .. } => "B",
         Action::RunCommand { .. } => ">_",
         Action::RunScript { interpreter, .. } => match interpreter {
@@ -2443,7 +2508,10 @@ fn action_eyebrow(action: &Action) -> &'static str {
         Action::CopyPath(_) => "Копирование",
         Action::WriteFile(_) => "Запись файла",
         Action::RemovePath(_) => "Корзина",
-        Action::GitClone { .. } => "Источник",
+        Action::GitClone { .. } | Action::GitCloneIfMissing { .. } => "Клонирование",
+        Action::GitInspect { .. } => "Проверка Git",
+        Action::GitFetch { .. } => "Получение Git",
+        Action::GitFastForward { .. } => "Актуализация Git",
         Action::BrewInstall { .. } | Action::AppStoreInstall(_) => "Пакет",
         Action::RunCommand { .. } => "Команда",
         Action::RunScript { interpreter, .. } => match interpreter {
@@ -2520,7 +2588,12 @@ fn task_has_unready_git_credentials(task: &Task) -> bool {
         matches!(step.auth, AuthPolicy::GitCredential)
             && matches!(
                 &step.action,
-                Action::GitClone { repo, .. } if !git_clone_auth_ready(repo)
+                Action::GitClone { repo, .. }
+                    | Action::GitInspect { repo, .. }
+                    | Action::GitCloneIfMissing { repo, .. }
+                    | Action::GitFetch { repo, .. }
+                    | Action::GitFastForward { repo, .. }
+                    if !git_clone_auth_ready(repo)
             )
     })
 }
@@ -2537,6 +2610,10 @@ fn action_supports_gui_run(action: &Action) -> bool {
         | Action::WriteFile(_)
         | Action::RemovePath(_)
         | Action::GitClone { .. }
+        | Action::GitInspect { .. }
+        | Action::GitCloneIfMissing { .. }
+        | Action::GitFetch { .. }
+        | Action::GitFastForward { .. }
         | Action::BrewInstall { .. }
         | Action::RunCommand { .. }
         | Action::DownloadFile { .. }
@@ -2768,7 +2845,7 @@ mod tests {
     }
 
     #[test]
-    fn github_selection_expands_to_one_typed_git_step_per_repository() {
+    fn github_selection_expands_to_atomic_git_steps_per_repository() {
         let pack = load_tasks().unwrap();
         let task = standalone_github_picker_task(&pack);
         let repositories = vec![
@@ -2781,9 +2858,13 @@ mod tests {
             materialize_github_repositories(task, &repositories, &selected_ids, "/tmp/workspaces")
                 .unwrap();
 
-        assert_eq!(configured.steps.len(), 2);
-        assert!(configured.steps[0].id.starts_with("clone-repo/acme-api-"));
-        assert!(configured.steps[1].id.starts_with("clone-repo/zeta-api-"));
+        assert_eq!(configured.steps.len(), 8);
+        assert!(configured.steps[0]
+            .id
+            .starts_with("inspect-repository/acme-api-"));
+        assert!(configured.steps[4]
+            .id
+            .starts_with("inspect-repository/zeta-api-"));
         assert_ne!(configured.steps[0].id, configured.steps[1].id);
         assert!(configured
             .steps
@@ -2791,23 +2872,36 @@ mod tests {
             .all(|step| matches!(step.auth, AuthPolicy::None)));
         assert!(matches!(
             &configured.steps[0].action,
-            Action::GitClone { repo, dest, branch }
+            Action::GitInspect { repo, dest }
+                if repo == "https://github.com/acme/api.git"
+                    && dest == "/tmp/workspaces/acme/api"
+        ));
+        assert!(matches!(
+            &configured.steps[1].action,
+            Action::GitCloneIfMissing { repo, dest, branch }
                 if repo == "https://github.com/acme/api.git"
                     && dest == "/tmp/workspaces/acme/api"
                     && branch.as_deref() == Some("main")
         ));
         assert!(matches!(
-            &configured.steps[1].action,
-            Action::GitClone { repo, dest, branch }
-                if repo == "https://github.com/zeta/api.git"
-                    && dest == "/tmp/workspaces/zeta/api"
-                    && branch.as_deref() == Some("main")
+            &configured.steps[2].action,
+            Action::GitFetch { repo, dest, branch }
+                if repo == "https://github.com/acme/api.git"
+                    && dest == "/tmp/workspaces/acme/api"
+                    && branch == "main"
+        ));
+        assert!(matches!(
+            &configured.steps[3].action,
+            Action::GitFastForward { repo, dest, branch }
+                if repo == "https://github.com/acme/api.git"
+                    && dest == "/tmp/workspaces/acme/api"
+                    && branch == "main"
         ));
 
         let report = run_task(&configured, &RunOptions::default()).unwrap();
-        assert_eq!(report.steps.len(), 2);
+        assert_eq!(report.steps.len(), 8);
         assert!(report.steps[0].summary.contains("acme/api"));
-        assert!(report.steps[1].summary.contains("zeta/api"));
+        assert!(report.steps[4].summary.contains("zeta/api"));
     }
 
     #[test]
@@ -2853,7 +2947,7 @@ mod tests {
         assert!(error.contains("публичный HTTPS"));
 
         let task_with_downstream_step = pack.resolve("dev-brew-bootstrap").unwrap();
-        assert!(github_picker_source_step(&task_with_downstream_step).is_none());
+        assert!(github_picker_source_steps(&task_with_downstream_step).is_none());
         let public = github_repository("R1", "acme/public", "main");
         let error = materialize_github_repositories(
             task_with_downstream_step,
@@ -2863,7 +2957,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("ровно из одного git-clone шага"));
+        assert!(error.contains("атомарных шагов"));
     }
 
     #[test]
@@ -2879,9 +2973,7 @@ mod tests {
     }
 
     fn standalone_github_picker_task(pack: &TaskPack) -> Task {
-        let mut task = pack.resolve("dev-brew-bootstrap").unwrap();
-        task.steps.truncate(1);
-        task
+        pack.resolve("github-repositories").unwrap()
     }
 
     fn github_repository(

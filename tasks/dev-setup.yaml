@@ -1,13 +1,30 @@
 task:
   id: dev-brew-bootstrap
   name: Dev brew bootstrap
-  description: Clone or fast-forward the ppduster main branch and install ripgrep when needed; the sync step reports the repository state before and after.
+  description: Inspect, clone, fetch, and safely fast-forward the ppduster main branch as separate operations, then install ripgrep when needed.
   platform: macos
   trust: bundled-only
   steps:
+    - id: inspect-repo
+      name: Check whether repository exists locally
+      type: git-inspect
+      repo: https://github.com/themoretheless/ppduster.git
+      dest: $HOME/Library/Caches/ppduster-bootstrap
     - id: clone-repo
-      name: Clone or update repository
-      type: git-clone
+      name: Clone repository when missing
+      type: git-clone-if-missing
+      repo: https://github.com/themoretheless/ppduster.git
+      dest: $HOME/Library/Caches/ppduster-bootstrap
+      branch: main
+    - id: fetch-repo
+      name: Fetch repository main
+      type: git-fetch
+      repo: https://github.com/themoretheless/ppduster.git
+      dest: $HOME/Library/Caches/ppduster-bootstrap
+      branch: main
+    - id: update-main
+      name: Fast-forward repository main
+      type: git-fast-forward
       repo: https://github.com/themoretheless/ppduster.git
       dest: $HOME/Library/Caches/ppduster-bootstrap
       branch: main

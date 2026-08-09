@@ -325,8 +325,8 @@ fn run_task_with_interactivity(
                 }
             }
         }
-        // An unconditional path inspection is deliberately read-only, so it
-        // runs during both a normal dry-run and an applied run. Conditional
+        // Unconditional typed inspections are deliberately read-only, so they
+        // run during both a normal dry-run and an applied run. Conditional
         // inspections remain planned during dry-run because their prerequisite
         // process output does not exist until apply time.
         let should_observe_inspect = opts.apply || (step.when.is_none() && step.require.is_none());
@@ -382,6 +382,47 @@ fn run_task_with_interactivity(
                     }
                     Err(error) => {
                         let message = format!("step {} path inspection failed: {error:#}", step.id);
+                        steps.push(StepReport {
+                            step_id: step.id.clone(),
+                            step_name: step_name(step),
+                            summary: planned_summary,
+                            status: StepStatus::Failed,
+                            prerequisites,
+                            logs: vec![StepLogEntry {
+                                step_id: step.id.clone(),
+                                message: format!("failed: {message}"),
+                            }],
+                            output: None,
+                        });
+                        errors.push(message);
+                        outcomes.push(ActionOutcome::Blocked);
+                        halted = true;
+                    }
+                }
+                continue;
+            }
+            if let Action::GitInspect { repo, dest } = &step.action {
+                let prerequisites = prerequisites_for_step(step);
+                let planned_summary = describe_step(step, opts)?;
+                match apply_git_inspect(repo, dest) {
+                    Ok(ApplyStepResult::AlreadySatisfied(summary)) => {
+                        steps.push(StepReport {
+                            step_id: step.id.clone(),
+                            step_name: step_name(step),
+                            summary: summary.clone(),
+                            status: StepStatus::Satisfied,
+                            prerequisites,
+                            logs: vec![StepLogEntry {
+                                step_id: step.id.clone(),
+                                message: summary.clone(),
+                            }],
+                            output: None,
+                        });
+                        outcomes.push(ActionOutcome::Observed { summary });
+                    }
+                    Ok(_) => unreachable!("git inspection is read-only"),
+                    Err(error) => {
+                        let message = format!("step {} git inspection failed: {error:#}", step.id);
                         steps.push(StepReport {
                             step_id: step.id.clone(),
                             step_name: step_name(step),
@@ -654,7 +695,11 @@ fn validate_destinations(step: &Step) -> Result<()> {
                 )
             })?;
         }
-        Action::GitClone { dest, .. } => {
+        Action::GitClone { dest, .. }
+        | Action::GitInspect { dest, .. }
+        | Action::GitCloneIfMissing { dest, .. }
+        | Action::GitFetch { dest, .. }
+        | Action::GitFastForward { dest, .. } => {
             let Some(path) = expand_path_template(dest) else {
                 bail!("step {} has unexpanded destination {}", step.id, dest);
             };
@@ -977,6 +1022,35 @@ pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
                 .as_deref()
                 .map(|branch| format!("branch {branch}"))
                 .unwrap_or_else(|| "the checked-out branch".into())
+        ),
+        Action::GitInspect { repo, dest } => format!(
+            "inspect whether {} contains the expected git repository {} without changing it",
+            dest, repo
+        ),
+        Action::GitCloneIfMissing { repo, dest, branch } => format!(
+            "clone git repository {} into {} only when it is absent{} (hooks and submodules disabled)",
+            repo,
+            dest,
+            branch
+                .as_deref()
+                .map(|branch| format!("; branch {branch}"))
+                .unwrap_or_default()
+        ),
+        Action::GitFetch {
+            repo,
+            dest,
+            branch,
+        } => format!(
+            "fetch origin/{} for the verified repository {} at {} without changing local branches",
+            branch, repo, dest
+        ),
+        Action::GitFastForward {
+            repo,
+            dest,
+            branch,
+        } => format!(
+            "safely fast-forward local {} to the already fetched origin/{} for {} at {}; never reset, stash, merge, or overwrite local work",
+            branch, branch, repo, dest
         ),
         Action::BrewInstall { package, cask } => {
             format!(
@@ -1422,6 +1496,12 @@ fn apply_step(step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
         Action::GitClone { repo, dest, branch } => {
             apply_git_clone_or_update(repo, dest, branch.as_deref())
         }
+        Action::GitInspect { repo, dest } => apply_git_inspect(repo, dest),
+        Action::GitCloneIfMissing { repo, dest, branch } => {
+            apply_git_clone_if_missing(repo, dest, branch.as_deref())
+        }
+        Action::GitFetch { repo, dest, branch } => apply_git_fetch(repo, dest, branch),
+        Action::GitFastForward { repo, dest, branch } => apply_git_fast_forward(repo, dest, branch),
         Action::BrewInstall { package, cask } => {
             apply_brew_install(package, *cask).map(ApplyStepResult::Applied)
         }
@@ -2549,6 +2629,224 @@ fn apply_git_clone_or_update(
         dest_path.display(),
         target_branch,
         target_branch,
+        ahead,
+        behind
+    )
+}
+
+fn apply_git_inspect(repo: &str, dest: &str) -> Result<ApplyStepResult> {
+    let dest_path = expand_required_path(dest)?;
+    validate_resolved_git_destination(&dest_path)?;
+    if !dest_path.exists() {
+        return Ok(ApplyStepResult::AlreadySatisfied(format!(
+            "repository is absent at {}",
+            dest_path.display()
+        )));
+    }
+    if fs::symlink_metadata(&dest_path)?.file_type().is_symlink() {
+        bail!(
+            "git destination must not be a symlink: {}",
+            dest_path.display()
+        );
+    }
+    if dest_path.is_dir()
+        && fs::read_dir(&dest_path)
+            .with_context(|| format!("inspect git destination {}", dest_path.display()))?
+            .next()
+            .is_none()
+    {
+        return Ok(ApplyStepResult::AlreadySatisfied(format!(
+            "repository is absent; destination is an empty directory at {}",
+            dest_path.display()
+        )));
+    }
+    validate_existing_git_repository(&dest_path, repo)?;
+    let active_branch =
+        current_git_branch(&dest_path)?.unwrap_or_else(|| "detached HEAD".to_owned());
+    Ok(ApplyStepResult::AlreadySatisfied(format!(
+        "expected repository exists at {}; active checkout: {}",
+        dest_path.display(),
+        active_branch
+    )))
+}
+
+fn apply_git_clone_if_missing(
+    repo: &str,
+    dest: &str,
+    branch: Option<&str>,
+) -> Result<ApplyStepResult> {
+    let dest_path = expand_required_path(dest)?;
+    validate_resolved_git_destination(&dest_path)?;
+    if dest_path.exists() && fs::symlink_metadata(&dest_path)?.file_type().is_symlink() {
+        bail!(
+            "git destination must not be a symlink: {}",
+            dest_path.display()
+        );
+    }
+    let destination_is_empty = dest_path.is_dir()
+        && fs::read_dir(&dest_path)
+            .with_context(|| format!("inspect git destination {}", dest_path.display()))?
+            .next()
+            .is_none();
+    if !dest_path.exists() || destination_is_empty {
+        return clone_git_repository(repo, &dest_path, branch);
+    }
+    validate_existing_git_repository(&dest_path, repo)?;
+    Ok(ApplyStepResult::AlreadySatisfied(format!(
+        "clone not needed; expected repository already exists at {}",
+        dest_path.display()
+    )))
+}
+
+fn apply_git_fetch(repo: &str, dest: &str, branch: &str) -> Result<ApplyStepResult> {
+    validate_git_branch_name(branch)?;
+    let dest_path = expand_required_path(dest)?;
+    validate_resolved_git_destination(&dest_path)?;
+    validate_existing_git_repository(&dest_path, repo)?;
+    let remote_ref = format!("refs/remotes/origin/{branch}");
+    let before = git_ref_sha(&dest_path, &remote_ref)?;
+    let refspec = format!("+refs/heads/{branch}:{remote_ref}");
+    git_stdout(
+        &dest_path,
+        &[
+            "fetch",
+            "--no-tags",
+            "--recurse-submodules=no",
+            "origin",
+            &refspec,
+        ],
+        &format!("fetch origin/{branch}"),
+    )?;
+    let after = git_ref_sha(&dest_path, &remote_ref)?.ok_or_else(|| {
+        anyhow!(
+            "origin does not provide branch {} for repository at {}",
+            branch,
+            dest_path.display()
+        )
+    })?;
+    if before.as_deref() == Some(after.as_str()) {
+        Ok(ApplyStepResult::AlreadySatisfied(format!(
+            "fetched origin/{}; remote ref was already current at {}",
+            branch,
+            short_git_sha(&after)
+        )))
+    } else {
+        Ok(ApplyStepResult::Applied(format!(
+            "fetched origin/{}; remote ref {} -> {}",
+            branch,
+            before.as_deref().map(short_git_sha).unwrap_or("absent"),
+            short_git_sha(&after)
+        )))
+    }
+}
+
+fn apply_git_fast_forward(repo: &str, dest: &str, branch: &str) -> Result<ApplyStepResult> {
+    validate_git_branch_name(branch)?;
+    let dest_path = expand_required_path(dest)?;
+    validate_resolved_git_destination(&dest_path)?;
+    validate_existing_git_repository(&dest_path, repo)?;
+    let active_branch = current_git_branch(&dest_path)?;
+    let remote_ref = format!("refs/remotes/origin/{branch}");
+    let local_ref = format!("refs/heads/{branch}");
+    let remote_sha = git_ref_sha(&dest_path, &remote_ref)?.ok_or_else(|| {
+        anyhow!(
+            "origin/{} has not been fetched for repository at {}",
+            branch,
+            dest_path.display()
+        )
+    })?;
+    let Some(local_sha) = git_ref_sha(&dest_path, &local_ref)? else {
+        if active_branch.as_deref() == Some(branch) {
+            bail!(
+                "local branch {} has no commit at {}; refusing to overwrite its working tree",
+                branch,
+                dest_path.display()
+            );
+        }
+        update_inactive_git_branch(&dest_path, &local_ref, &remote_ref, branch)?;
+        let preservation_note =
+            checkout_preservation_note(&dest_path, active_branch.as_deref(), branch)?;
+        return Ok(ApplyStepResult::Applied(format!(
+            "local {} was missing and was created at {}{}",
+            branch,
+            short_git_sha(&remote_sha),
+            preservation_note
+        )));
+    };
+
+    if local_sha == remote_sha {
+        let preservation_note =
+            checkout_preservation_note(&dest_path, active_branch.as_deref(), branch)?;
+        return Ok(ApplyStepResult::AlreadySatisfied(format!(
+            "{} branch ref was already up to date at {}{}",
+            branch,
+            short_git_sha(&local_sha),
+            preservation_note
+        )));
+    }
+    if git_is_ancestor(&dest_path, &local_ref, &remote_ref)? {
+        let behind = git_commit_count(&dest_path, &format!("{local_ref}..{remote_ref}"))?;
+        if active_branch.as_deref() == Some(branch) {
+            if let Some(blocker) = git_fast_forward_blocker(&dest_path, &local_ref, &remote_ref)? {
+                bail!(
+                    "{} was outdated by {} commit(s), but {}; left local files unchanged",
+                    branch,
+                    behind,
+                    blocker
+                );
+            }
+            git_stdout(
+                &dest_path,
+                &["merge", "--ff-only", &remote_ref],
+                &format!("fast-forward {branch}"),
+            )?;
+        } else {
+            update_inactive_git_branch(&dest_path, &local_ref, &remote_ref, branch)?;
+        }
+        let updated_sha = git_ref_sha(&dest_path, &local_ref)?.ok_or_else(|| {
+            anyhow!(
+                "local branch {} disappeared while updating {}",
+                branch,
+                dest_path.display()
+            )
+        })?;
+        if updated_sha != remote_sha {
+            bail!(
+                "local branch {} changed concurrently while updating {}",
+                branch,
+                dest_path.display()
+            );
+        }
+        let preservation_note =
+            checkout_preservation_note(&dest_path, active_branch.as_deref(), branch)?;
+        return Ok(ApplyStepResult::Applied(format!(
+            "{} was outdated by {} commit(s) and was updated {} -> {}{}",
+            branch,
+            behind,
+            short_git_sha(&local_sha),
+            short_git_sha(&updated_sha),
+            preservation_note
+        )));
+    }
+    if git_is_ancestor(&dest_path, &remote_ref, &local_ref)? {
+        let ahead = git_commit_count(&dest_path, &format!("{remote_ref}..{local_ref}"))?;
+        let preservation_note =
+            checkout_preservation_note(&dest_path, active_branch.as_deref(), branch)?;
+        return Ok(ApplyStepResult::AlreadySatisfied(format!(
+            "{} already contains origin/{} and is ahead by {} local commit(s); left unchanged at {}{}",
+            branch,
+            branch,
+            ahead,
+            short_git_sha(&local_sha),
+            preservation_note
+        )));
+    }
+    let ahead = git_commit_count(&dest_path, &format!("{remote_ref}..{local_ref}"))?;
+    let behind = git_commit_count(&dest_path, &format!("{local_ref}..{remote_ref}"))?;
+    bail!(
+        "{} diverged from origin/{} (ahead {}, behind {}); left local history unchanged",
+        branch,
+        branch,
         ahead,
         behind
     )
@@ -4820,7 +5118,14 @@ fn is_satisfied(step: &Step, run_command_checks: bool) -> Result<Option<String>>
     // Repository presence is not repository freshness. A git-clone action must
     // reach its apply phase so it can fetch the requested branch and decide
     // whether the existing checkout is current, behind, ahead, or diverged.
-    if matches!(&step.action, Action::GitClone { .. }) {
+    if matches!(
+        &step.action,
+        Action::GitClone { .. }
+            | Action::GitInspect { .. }
+            | Action::GitCloneIfMissing { .. }
+            | Action::GitFetch { .. }
+            | Action::GitFastForward { .. }
+    ) {
         return Ok(None);
     }
     if run_command_checks {
@@ -4988,6 +5293,43 @@ mod tests {
                 branch: Some("main".into()),
             },
         })
+    }
+
+    fn atomic_git_sync_task(remote: &Path, destination: &Path) -> Task {
+        let repo = remote.to_string_lossy().into_owned();
+        let dest = destination.to_string_lossy().into_owned();
+        let mut task = base_task(plain_step(
+            "inspect-repository",
+            Action::GitInspect {
+                repo: repo.clone(),
+                dest: dest.clone(),
+            },
+        ));
+        task.steps.push(plain_step(
+            "clone-repository",
+            Action::GitCloneIfMissing {
+                repo: repo.clone(),
+                dest: dest.clone(),
+                branch: Some("main".into()),
+            },
+        ));
+        task.steps.push(plain_step(
+            "fetch-repository",
+            Action::GitFetch {
+                repo: repo.clone(),
+                dest: dest.clone(),
+                branch: "main".into(),
+            },
+        ));
+        task.steps.push(plain_step(
+            "update-main",
+            Action::GitFastForward {
+                repo,
+                dest,
+                branch: "main".into(),
+            },
+        ));
+        task
     }
 
     fn apply_test_task(task: &Task) -> RunReport {
@@ -5988,6 +6330,32 @@ mod tests {
             &["status", "--porcelain=v1", "--untracked-files=normal"]
         )
         .is_empty());
+    }
+
+    #[test]
+    fn atomic_git_steps_report_inspect_clone_fetch_and_fast_forward_separately() {
+        let repository = init_git_test_repository();
+        let destination = repository._temp.path().join("atomic-checkout");
+        let task = atomic_git_sync_task(&repository.remote, &destination);
+
+        let cloned = apply_test_task(&task);
+        assert_eq!(cloned.steps.len(), 4);
+        assert!(matches!(cloned.steps[0].status, StepStatus::Satisfied));
+        assert!(cloned.steps[0].summary.contains("absent"));
+        assert!(matches!(cloned.steps[1].status, StepStatus::Applied));
+        assert!(matches!(cloned.steps[2].status, StepStatus::Satisfied));
+        assert!(matches!(cloned.steps[3].status, StepStatus::Satisfied));
+
+        let remote_sha = push_git_test_commit(&repository, "atomic remote update\n");
+        let updated = apply_test_task(&task);
+        assert!(matches!(updated.steps[0].status, StepStatus::Satisfied));
+        assert!(updated.steps[0]
+            .summary
+            .contains("expected repository exists"));
+        assert!(matches!(updated.steps[1].status, StepStatus::Satisfied));
+        assert!(matches!(updated.steps[2].status, StepStatus::Applied));
+        assert!(matches!(updated.steps[3].status, StepStatus::Applied));
+        assert_eq!(test_git(&destination, &["rev-parse", "HEAD"]), remote_sha);
     }
 
     #[test]
