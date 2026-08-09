@@ -1,0 +1,15 @@
+task:
+  id: bambu-studio-install
+  name: Install or update Bambu Studio
+  description: Resolve the latest official Bambu Studio release or beta, compare it with the signed installed version, and install only when newer. Requires macOS 10.15 or newer.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: verify-bambu-studio-requirements
+      name: Verify Bambu Studio macOS requirements
+      type: macos-requirements
+      minimum_version: "10.15"
+    - id: install-bambu-studio
+      name: Install latest signed Bambu Studio app
+      type: bambu-studio-release
+      channel: release

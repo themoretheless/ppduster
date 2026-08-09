@@ -10,6 +10,8 @@ pub use runner::{
     StepReport, StepStatus,
 };
 pub use task::{
-    Action, AuthPolicy, Check, Checksum, ElevationPolicy, EncryptedSecretsSpec,
-    NpmRegistryFileSpec, NugetRegistryFileSpec, ShellMode, Step, Task, TaskFile, TrustRequirement,
+    Action, ActivateLicenseAction, AppBundleIdentity, AppStoreInstallAction, AppStoreOperation,
+    ArchiveFormat, AuthPolicy, BambuStudioReleaseAction, Check, Checksum, ElevationPolicy,
+    EncryptedSecretsSpec, LicenseMethod, LicenseProvider, NpmRegistryFileSpec,
+    NugetRegistryFileSpec, ReleaseChannel, ShellMode, Step, Task, TaskFile, TrustRequirement,
 };

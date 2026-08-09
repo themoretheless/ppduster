@@ -6,7 +6,7 @@ use ppduster::automation::package_secrets::{
     exec_for_task as exec_with_package_secrets, init_for_task as init_package_secrets,
     vault_path_for_task, PackageTool, PasswordMode, SecretInitMode,
 };
-use ppduster::automation::{run_task, PackTrust, RunOptions, TaskPack, TaskSource};
+use ppduster::automation::{run_task, PackTrust, ReleaseChannel, RunOptions, TaskPack, TaskSource};
 use ppduster::clean;
 use ppduster::report::{self, OutputFormat};
 use ppduster::rules::RulePack;
@@ -19,6 +19,21 @@ use std::path::PathBuf;
 enum CliOutput {
     Table,
     Json,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliReleaseChannel {
+    Release,
+    Beta,
+}
+
+impl From<CliReleaseChannel> for ReleaseChannel {
+    fn from(value: CliReleaseChannel) -> Self {
+        match value {
+            CliReleaseChannel::Release => Self::Release,
+            CliReleaseChannel::Beta => Self::Beta,
+        }
+    }
 }
 
 impl From<CliOutput> for OutputFormat {
@@ -144,6 +159,9 @@ enum SetupCmd {
         allow_shell: bool,
         #[arg(long)]
         allow_elevation: bool,
+        /// Override the release channel for tasks that support it
+        #[arg(long, value_enum)]
+        channel: Option<CliReleaseChannel>,
         #[arg(long)]
         tasks_dir: Vec<PathBuf>,
     },
@@ -338,6 +356,7 @@ fn run() -> Result<()> {
                 yes,
                 allow_shell,
                 allow_elevation,
+                channel,
                 tasks_dir,
             } => {
                 let tasks = load_tasks(&tasks_dir, cli.trust_external_packs)?;
@@ -350,17 +369,18 @@ fn run() -> Result<()> {
                         apply: yes,
                         allow_shell,
                         allow_elevation,
+                        release_channel: channel.map(Into::into),
                     },
                 )?;
                 report::print_setup(&report, output)?;
-                if !report.errors.is_empty() {
-                    Err(anyhow::anyhow!(
-                        "setup task {} failed: {}",
-                        report.task_id,
-                        report.errors.join("; ")
-                    ))
-                } else {
+                if report.errors.is_empty() {
                     Ok(())
+                } else {
+                    anyhow::bail!(
+                        "setup task {} failed in {} step(s)",
+                        report.task_id,
+                        report.errors.len()
+                    )
                 }
             }
             SetupCmd::Secrets { action } => {

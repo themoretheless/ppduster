@@ -42,6 +42,29 @@ cargo build --release
 
 Run from the repo root so `./rules` is found, or pass `--rules-dir /path/to/rules`.
 
+## Scenario Flow UI
+
+`ppduster-ui` is a native `egui` application inspired by Peregon's visual pipeline
+canvas. It presents every setup scenario as a connected route of typed steps, with a
+searchable scenario library, step inspector, release-channel controls, permission
+switches, dry-run planning, and explicit confirmation before supported scenarios are
+applied.
+
+```bash
+cargo run --bin ppduster-ui
+```
+
+Create a native macOS application bundle:
+
+```bash
+./scripts/build-macos-app.sh
+open target/macos/ppduster.app
+```
+
+Scenarios that need a terminal prompt, App Store authentication, or vendor license UI
+remain terminal-only. The desktop app produces the exact CLI command for them instead
+of attempting to capture credentials.
+
 ## Usage
 
 ```bash
@@ -99,9 +122,23 @@ ppduster setup run dev-dodopizza-package-registries --yes
 # create a separate password-encrypted credential vault (hidden prompts)
 ppduster setup secrets init dev-dodopizza-package-registries
 
-# decrypt only in memory and expose credentials only to the direct child process
+# decrypt only in memory and expose credentials to the guarded child environment
 ppduster setup secrets exec dev-dodopizza-package-registries npm -- ci
 ppduster setup secrets exec dev-dodopizza-package-registries dotnet -- restore
+
+# LightBurn 2.1.03: inspect the plan, then download/install/confirm activation
+ppduster setup run lightburn-install-activate
+ppduster setup run lightburn-install-activate --yes
+
+# Bambu Studio: choose latest stable release or latest beta
+ppduster setup run bambu-studio-install --channel release
+ppduster setup run bambu-studio-install --channel release --yes
+ppduster setup run bambu-studio-install --channel beta
+ppduster setup run bambu-studio-install --channel beta --yes
+
+# Install/refresh the mas CLI used by app-store-install actions
+ppduster setup run app-store-bootstrap
+ppduster setup run app-store-bootstrap --yes
 
 # External task packs are blocked unless explicitly trusted
 ppduster --trust-external-packs setup run dev-brew-bootstrap --tasks-dir /path/to/tasks
@@ -116,7 +153,6 @@ Current safety posture:
 - elevated steps require `--allow-elevation`
 - external task packs require `--trust-external-packs`
 - download steps require `checksum.sha256`
-- archive extraction validates every entry for traversal before applying
 
 The `dev-dodopizza-package-registries` task creates `.npmrc` and `NuGet.Config`
 in the current project root. Those files never contain credential values: they contain
@@ -176,6 +212,66 @@ project, including packages also published publicly. If the private IDs use a
 narrower namespace, change the task to that confirmed scope/prefix first. NuGet
 Package Source Mapping requires NuGet 6.0+ or .NET SDK 6.0.100+ in every restore
 environment; [older clients ignore the mapping](https://learn.microsoft.com/en-us/nuget/consume-packages/package-source-mapping#package-source-mapping-rules).
+
+- `extract-archive` supports `zip`, `tar`, `tar.gz`/`tgz`, `tar.bz2`, and `tar.xz`; it rejects links, special files, traversal, duplicate output files, oversized output, and existing destinations before atomically publishing the extracted directory
+- DMG installation verifies the image, mounts it read-only, validates the app signature and Gatekeeper assessment, stages the bundle in `~/Applications`, and refuses elevation or overwriting an existing app
+- typed `app-store-install` steps use a numeric App Store ID through a standard Homebrew `mas` installation; they require explicit elevation permission and an App Store account that owns the app
+- the sealed `activate-license` action accepts only a provider and method, and task loading rejects `license_key` / `license-key` fields at any nesting level; enter the key directly in the vendor UI
+
+An App Store installation step looks like this:
+
+```yaml
+- id: install-xcode
+  name: Install Xcode
+  auth: sudo
+  allow_elevation: allow
+  type: app-store-install
+  app_id: 497799835
+  operation: install
+```
+
+Use `operation: install` for an app already obtained or purchased by the signed-in
+Apple Account. Use `operation: get` to obtain and install a free app. Apply the task
+with `--yes --allow-elevation`; Apple Account authentication remains in Apple's UI.
+The bundled bootstrap installs the current Homebrew Core `mas` and therefore requires
+macOS 14 or newer.
+
+An archive extraction step can detect the format from its file name or accept an
+explicit `format`:
+
+```yaml
+- id: unpack-tool
+  type: extract-archive
+  src: $HOME/Library/Caches/ppduster/downloads/tool.tar.gz
+  dest: $HOME/Library/Caches/ppduster/unpacked/tool
+  check:
+    path_exists: $HOME/Library/Caches/ppduster/unpacked/tool
+  format: auto
+  max_unpacked_bytes: 10737418240
+```
+
+Allowed explicit formats are `zip`, `tar`, `tar-gz`, `tar-bz2`, and `tar-xz`.
+The default unpacked-size limit is 10 GiB.
+
+The bundled LightBurn task pins the official macOS 2.1.03 DMG and an independently
+computed SHA-256 (LightBurn does not publish a SHA-256 manifest for this release). It
+requires macOS 12 or newer; Apple Silicon also requires Rosetta. After installation,
+the task verifies the pinned bundle ID, signing team, and exact version before it
+launches a new LightBurn instance from `~/Applications` (any running LightBurn must be
+closed first). An unactivated copy shows the License Page automatically;
+otherwise use **Help → License Management**. Paste the key exactly, including dashes,
+complete activation, then type `ACTIVATED` in the terminal. `ppduster` does not see the
+key. Version 2.1.03 must also fall within the key's update-validity period.
+
+LightBurn's documented `-l` command is intentionally not used: after normal activation
+it converts a closed installation to System Locked mode (and is also the first step for
+a specially tagged Floating key), while exposing the key in the process argument list.
+
+The bundled Bambu Studio task resolves the latest stable release by default; pass
+`--channel beta` to select the newest prerelease. On apply it reads the official GitHub
+asset SHA-256, verifies the exact `com.bambulab.bambu-studio` bundle and signing team,
+and compares the signed installed version before updating `~/Applications`. Equal or
+newer installed versions are left untouched.
 
 Bundled macOS setup starters currently cover the top 50 bootstrap areas, starting with:
 

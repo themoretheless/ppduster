@@ -1,0 +1,22 @@
+task:
+  id: app-store-bootstrap
+  name: Prepare Mac App Store automation
+  description: Install the current Homebrew mas CLI used by typed app-store-install steps and list installed Mac App Store applications. Requires macOS 14 or newer.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: verify-app-store-requirements
+      name: Verify mas macOS requirements
+      type: macos-requirements
+      minimum_version: "14.0"
+    - id: install-mas
+      name: Install mas CLI
+      type: brew-install
+      package: mas
+      check:
+        command_succeeds: ["brew", "list", "mas"]
+    - id: list-app-store-apps
+      name: List installed Mac App Store applications
+      type: run-command
+      program: mas
+      args: ["list"]

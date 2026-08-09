@@ -1,8 +1,17 @@
-use ppduster::automation::{run_task, PackTrust, RunOptions, TaskPack, TaskSource};
+use ppduster::automation::{
+    run_task, Action, AppStoreOperation, ArchiveFormat, LicenseMethod, LicenseProvider, PackTrust,
+    RunOptions, TaskFile, TaskPack, TaskSource,
+};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+
+fn bin() -> PathBuf {
+    std::env::var("CARGO_BIN_EXE_ppduster")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/ppduster"))
+}
 
 #[test]
 fn loads_bundled_task_pack() {
@@ -106,6 +115,287 @@ fn bundled_dev_setup_includes_macos_top_fifty_tasks() {
             "expected bundled task pack to include {id}"
         );
     }
+
+    assert!(
+        pack.get("lightburn-install-activate").is_some(),
+        "expected bundled task pack to include the LightBurn scenario"
+    );
+    assert!(
+        pack.get("bambu-studio-install").is_some(),
+        "expected bundled task pack to include the Bambu Studio scenario"
+    );
+    assert!(
+        pack.get("app-store-bootstrap").is_some(),
+        "expected bundled task pack to include the App Store bootstrap scenario"
+    );
+}
+
+#[test]
+fn bambu_studio_task_uses_dynamic_release_channel() {
+    let pack = TaskPack::load_many(
+        &[TaskSource {
+            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap();
+    let task = pack.get("bambu-studio-install").unwrap();
+
+    assert_eq!(task.steps.len(), 2);
+    assert!(matches!(
+        &task.steps[0].action,
+        Action::MacosRequirements { minimum_version, .. } if minimum_version == "10.15"
+    ));
+    assert!(matches!(
+        &task.steps[1].action,
+        Action::BambuStudioRelease(action)
+            if action.channel == ppduster::automation::ReleaseChannel::Release
+    ));
+}
+
+#[test]
+fn extract_archive_action_supports_explicit_format_and_safe_default_limit() {
+    let yaml = r#"
+task:
+  id: unpack-demo
+  name: Unpack demo
+  steps:
+    - id: unpack
+      type: extract-archive
+      src: $HOME/Library/Caches/input.tar.xz
+      dest: $HOME/Library/Caches/output
+      format: tar-xz
+"#;
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    task.validate().unwrap();
+    assert!(matches!(
+        &task.steps[0].action,
+        Action::ExtractArchive {
+            format: ArchiveFormat::TarXz,
+            max_unpacked_bytes: 10_737_418_240,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn app_store_install_action_is_typed_and_requires_elevation() {
+    let yaml = r#"
+task:
+  id: app-store-demo
+  name: App Store demo
+  platform: macos
+  steps:
+    - id: install
+      auth: sudo
+      allow_elevation: allow
+      type: app-store-install
+      app_id: 497799835
+      operation: install
+"#;
+
+    let task_file = serde_yaml::from_str::<TaskFile>(yaml).unwrap();
+    task_file.task.validate().unwrap();
+    assert!(matches!(
+        &task_file.task.steps[0].action,
+        Action::AppStoreInstall(action)
+            if action.app_id == 497799835
+                && action.operation == AppStoreOperation::Install
+    ));
+}
+
+#[test]
+fn app_store_install_rejects_missing_elevation_declaration() {
+    let yaml = r#"
+task:
+  id: unsafe-app-store
+  name: Unsafe App Store task
+  platform: macos
+  steps:
+    - id: install
+      type: app-store-install
+      app_id: 497799835
+"#;
+
+    let task_file = serde_yaml::from_str::<TaskFile>(yaml).unwrap();
+    let err = task_file.task.validate().unwrap_err();
+    assert!(err.contains("auth: sudo plus allow_elevation: allow"));
+}
+
+#[test]
+fn lightburn_task_downloads_installs_then_uses_vendor_ui() {
+    let pack = TaskPack::load_many(
+        &[TaskSource {
+            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap();
+    let task = pack.get("lightburn-install-activate").unwrap();
+
+    assert_eq!(task.steps.len(), 4);
+    assert!(matches!(
+        &task.steps[0].action,
+        Action::MacosRequirements { .. }
+    ));
+    assert!(matches!(&task.steps[1].action, Action::DownloadFile { .. }));
+    assert!(matches!(
+        &task.steps[2].action,
+        Action::InstallDmg {
+            identity: Some(identity),
+            ..
+        } if identity.bundle_identifier == "com.LightBurnSoftware.LightBurn"
+            && identity.team_identifier == "UWZQ3LL82C"
+            && identity.version == "2.1.03"
+    ));
+    assert!(matches!(
+        &task.steps[3].action,
+        Action::ActivateLicense(action)
+            if action.provider == LicenseProvider::LightBurn
+                && action.method == LicenseMethod::VendorUi
+    ));
+
+    let rendered = serde_yaml::to_string(task).unwrap();
+    assert!(!rendered.contains("license_key"));
+    assert!(!rendered.contains("license-key"));
+}
+
+#[test]
+fn activate_license_rejects_embedded_secret_fields() {
+    let yaml = r#"
+task:
+  id: unsafe-license
+  name: Unsafe license
+  platform: macos
+  steps:
+    - id: activate
+      type: activate-license
+      provider: light-burn
+      method: vendor-ui
+      license_key: CANARY-SECRET
+"#;
+
+    let err = serde_yaml::from_str::<TaskFile>(yaml).unwrap_err();
+    assert!(err.to_string().contains("unknown field"));
+    assert!(!format!("{err:?}").contains("CANARY-SECRET"));
+}
+
+#[test]
+fn task_pack_rejects_license_key_fields_at_any_yaml_level() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("unsafe-license.yaml"),
+        r#"
+task:
+  id: unsafe-license
+  name: Unsafe license
+  platform: any
+  steps:
+    - id: activate
+      check:
+        license-key: CANARY-NESTED-SECRET
+      type: activate-license
+      provider: light-burn
+      method: vendor-ui
+"#,
+    )
+    .unwrap();
+
+    let err = TaskPack::load_many(
+        &[TaskSource {
+            path: dir.path().to_path_buf(),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("forbidden field license-key"));
+    assert!(!format!("{err:?}").contains("CANARY-NESTED-SECRET"));
+}
+
+#[test]
+fn setup_cli_returns_failure_when_an_applied_step_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("failing.yaml"),
+        r#"
+task:
+  id: failing-setup
+  name: Failing setup
+  platform: any
+  trust: external-allowed
+  steps:
+    - id: fail
+      type: run-command
+      program: /usr/bin/false
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(bin())
+        .args([
+            "--trust-external-packs",
+            "setup",
+            "run",
+            "failing-setup",
+            "--yes",
+            "--tasks-dir",
+        ])
+        .arg(dir.path())
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run failing setup task");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("setup task failing-setup failed"));
+}
+
+#[test]
+fn setup_cli_plans_typed_app_store_install() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("app-store.yaml"),
+        r#"
+task:
+  id: app-store-cli-demo
+  name: App Store CLI demo
+  platform: macos
+  trust: external-allowed
+  steps:
+    - id: install-xcode
+      auth: sudo
+      allow_elevation: allow
+      type: app-store-install
+      app_id: 497799835
+      operation: install
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(bin())
+        .args([
+            "--trust-external-packs",
+            "setup",
+            "run",
+            "app-store-cli-demo",
+            "--allow-elevation",
+            "--tasks-dir",
+        ])
+        .arg(dir.path())
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("plan App Store setup task");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("mas install Mac App Store application 497799835"));
 }
 
 #[test]

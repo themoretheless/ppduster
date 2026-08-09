@@ -1,17 +1,21 @@
 use crate::automation::package_registry;
-use crate::automation::task::{Action, AuthPolicy, ElevationPolicy, ShellMode, Step, Task};
+use crate::automation::task::{
+    Action, AppBundleIdentity, AppStoreOperation, ArchiveFormat, AuthPolicy, ElevationPolicy,
+    LicenseMethod, LicenseProvider, ReleaseChannel, ShellMode, Step, Task,
+};
 use crate::rules::expand_path_template;
 use crate::safety::{is_safe_rule_root, stays_under_root};
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::IsTerminal;
-use std::io::{self, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -25,6 +29,7 @@ pub struct RunOptions {
     pub apply: bool,
     pub allow_shell: bool,
     pub allow_elevation: bool,
+    pub release_channel: Option<ReleaseChannel>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,7 +97,29 @@ struct AuthState {
 }
 
 pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
+    run_task_with_interactivity(task, opts, terminal_is_interactive())
+}
+
+fn run_task_with_interactivity(
+    task: &Task,
+    opts: &RunOptions,
+    terminal_interactive: bool,
+) -> Result<RunReport> {
     task.validate().map_err(AutomationError::Message)?;
+    if opts.release_channel.is_some()
+        && !task
+            .steps
+            .iter()
+            .any(|step| matches!(step.action, Action::BambuStudioRelease(_)))
+    {
+        bail!("--channel is only supported by tasks with a bambu-studio-release step");
+    }
+    // Validate every policy gate before the first applied step so a missing
+    // acknowledgement cannot leave a task partially applied.
+    for step in &task.steps {
+        enforce_step_policy(step, opts, terminal_interactive)?;
+    }
+
     let mut plans = Vec::new();
     let mut outcomes = Vec::new();
     let mut steps = Vec::new();
@@ -102,7 +129,7 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
 
     for step in &task.steps {
         if halted {
-            let plan = plan_step(step)?;
+            let plan = plan_step(step, opts)?;
             plans.push(plan.clone());
             outcomes.push(ActionOutcome::Blocked);
             steps.push(StepReport {
@@ -118,13 +145,12 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
             });
             continue;
         }
-        enforce_step_policy(step, opts)?;
         let satisfaction = is_satisfied(step, opts.apply)?;
         if let Some(reason) = satisfaction {
             steps.push(StepReport {
                 step_id: step.id.clone(),
                 step_name: step_name(step),
-                summary: plan_summary(step)?,
+                summary: plan_summary(step, opts)?,
                 status: StepStatus::Satisfied,
                 prerequisites: prerequisites_for_step(step),
                 logs: vec![StepLogEntry {
@@ -135,7 +161,7 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
             outcomes.push(ActionOutcome::AlreadySatisfied { reason });
             continue;
         }
-        let plan = plan_step(step)?;
+        let plan = plan_step(step, opts)?;
         plans.push(plan.clone());
         let step_idx = steps.len();
         steps.push(StepReport {
@@ -173,12 +199,31 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
                     message: "authorization granted; resuming".into(),
                 });
             }
-            steps[step_idx].status = StepStatus::Running;
+            if matches!(
+                &step.action,
+                Action::ActivateLicense(_) | Action::AppStoreInstall(_)
+            ) {
+                steps[step_idx].status = StepStatus::WaitingForAttention;
+                steps[step_idx].logs.push(StepLogEntry {
+                    step_id: step.id.clone(),
+                    message: match &step.action {
+                        Action::ActivateLicense(_) => {
+                            "waiting for license activation in the vendor UI".into()
+                        }
+                        Action::AppStoreInstall(_) => {
+                            "waiting for any required App Store authentication".into()
+                        }
+                        _ => unreachable!(),
+                    },
+                });
+            } else {
+                steps[step_idx].status = StepStatus::Running;
+            }
             steps[step_idx].logs.push(StepLogEntry {
                 step_id: step.id.clone(),
                 message: "running".into(),
             });
-            let summary = match apply_step(step) {
+            let summary = match apply_step(step, opts) {
                 Ok(summary) => summary,
                 Err(err) => {
                     let message = err.to_string();
@@ -213,7 +258,7 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
     })
 }
 
-fn enforce_step_policy(step: &Step, opts: &RunOptions) -> Result<()> {
+fn enforce_step_policy(step: &Step, opts: &RunOptions, terminal_interactive: bool) -> Result<()> {
     if matches!(step.allow_elevation, ElevationPolicy::Allow) && !opts.allow_elevation {
         return Err(AutomationError::Message(format!(
             "step {} requires --allow-elevation",
@@ -230,7 +275,39 @@ fn enforce_step_policy(step: &Step, opts: &RunOptions) -> Result<()> {
             .into());
         }
     }
+    if opts.apply && matches!(&step.action, Action::ActivateLicense(_)) && !terminal_interactive {
+        return Err(AutomationError::Message(format!(
+            "step {} requires an interactive terminal for vendor UI license activation",
+            step.id
+        ))
+        .into());
+    }
     validate_destinations(step)?;
+    if opts.apply {
+        validate_existing_dmg_install(step)?;
+    }
+    Ok(())
+}
+
+fn validate_existing_dmg_install(step: &Step) -> Result<()> {
+    let Action::InstallDmg {
+        app_name: Some(app_name),
+        target,
+        identity: Some(identity),
+        ..
+    } = &step.action
+    else {
+        return Ok(());
+    };
+    let destination = dmg_install_destination(app_name, target.as_deref())?;
+    if path_entry_exists(&destination)? {
+        verify_app_identity(&destination, identity).with_context(|| {
+            format!(
+                "existing application does not match the pinned identity and version: {}",
+                destination.display()
+            )
+        })?;
+    }
     Ok(())
 }
 
@@ -250,18 +327,48 @@ fn validate_destinations(step: &Step) -> Result<()> {
                 );
             }
         }
+        Action::InstallDmg { target, .. } => validate_dmg_target(step, target.as_deref())?,
         _ => {}
     }
     Ok(())
+}
+
+fn validate_dmg_target(step: &Step, target: Option<&str>) -> Result<()> {
+    let raw_target = target.unwrap_or("$HOME/Applications");
+    let target_path = expand_required_path(raw_target)?;
+    let home_apps = dirs::home_dir()
+        .ok_or_else(|| anyhow!("home directory unavailable"))?
+        .join("Applications");
+
+    if target_path != home_apps {
+        bail!(
+            "step {} dmg target {} is not allowed; install-dmg is restricted to $HOME/Applications",
+            step.id,
+            target_path.display()
+        );
+    }
+    if !matches!(step.auth, AuthPolicy::None)
+        || !matches!(step.allow_elevation, ElevationPolicy::Forbidden)
+    {
+        bail!(
+            "step {} install-dmg must not request authentication or elevation",
+            step.id
+        );
+    }
+    Ok(())
+}
+
+fn dmg_install_destination(app_name: &str, target: Option<&str>) -> Result<PathBuf> {
+    Ok(expand_required_path(target.unwrap_or("$HOME/Applications"))?.join(app_name))
 }
 
 fn parent_or_self(path: &Path) -> &Path {
     path.parent().unwrap_or(path)
 }
 
-fn plan_step(step: &Step) -> Result<ActionPlan> {
+fn plan_step(step: &Step, opts: &RunOptions) -> Result<ActionPlan> {
     let prerequisites = prerequisites_for_step(step);
-    let summary = plan_summary(step)?;
+    let summary = plan_summary(step, opts)?;
     Ok(ActionPlan {
         step_id: step.id.clone(),
         step_name: step_name(step),
@@ -270,7 +377,7 @@ fn plan_step(step: &Step) -> Result<ActionPlan> {
     })
 }
 
-fn plan_summary(step: &Step) -> Result<String> {
+fn plan_summary(step: &Step, opts: &RunOptions) -> Result<String> {
     Ok(match &step.action {
         Action::GitClone { repo, dest, branch } => format!(
             "git clone {} {}{} with hooks disabled and no submodules",
@@ -315,19 +422,74 @@ fn plan_summary(step: &Step) -> Result<String> {
         Action::DownloadFile { url, dest, .. } => {
             format!("download {} to {} with sha256 verification", url, dest)
         }
-        Action::ExtractArchive { src, dest } => {
-            format!("extract {} into {} with traversal protection", src, dest)
+        Action::ExtractArchive {
+            src,
+            dest,
+            format,
+            max_unpacked_bytes,
+        } => {
+            format!(
+                "extract {} archive {} into {} atomically with traversal and link protection (maximum {} unpacked bytes)",
+                archive_format_name(*format),
+                src,
+                dest,
+                max_unpacked_bytes
+            )
         }
-        Action::InstallDmg { dmg, app_name } => format!(
-            "mount {} read-only, validate signature, install {}",
+        Action::InstallDmg {
             dmg,
-            app_name.as_deref().unwrap_or("application")
-        ),
+            app_name,
+            target,
+            identity,
+        } => {
+            let identity_summary = identity
+                .as_ref()
+                .map(|identity| {
+                    format!(
+                        ", require bundle {} version {} signed by team {}",
+                        identity.bundle_identifier, identity.version, identity.team_identifier
+                    )
+                })
+                .unwrap_or_default();
+            format!(
+                "verify and mount {} read-only, validate signature{}, install {} into {}",
+                dmg,
+                identity_summary,
+                app_name.as_deref().unwrap_or("the only .app bundle"),
+                target.as_deref().unwrap_or("$HOME/Applications")
+            )
+        }
         Action::InstallPkg { pkg, target } => format!(
             "validate pkg signature for {} and install to {}",
             pkg,
             target.as_deref().unwrap_or("/")
         ),
+        Action::MacosRequirements {
+            minimum_version,
+            require_rosetta_on_apple_silicon,
+        } => format!(
+            "require macOS {} or newer{}",
+            minimum_version,
+            if *require_rosetta_on_apple_silicon {
+                " and Rosetta on Apple Silicon"
+            } else {
+                ""
+            }
+        ),
+        Action::AppStoreInstall(action) => format!(
+            "mas {} Mac App Store application {}",
+            app_store_operation_name(action.operation),
+            action.app_id
+        ),
+        Action::BambuStudioRelease(action) => format!(
+            "resolve the latest Bambu Studio {} from the official GitHub releases, compare its version with the signed installed app, and install only when newer",
+            release_channel_name(opts.release_channel.unwrap_or(action.channel))
+        ),
+        Action::ActivateLicense(action) => match (&action.provider, &action.method) {
+            (LicenseProvider::LightBurn, LicenseMethod::VendorUi) =>
+                "launch LightBurn and wait for user-confirmed activation in its License Page; the license key is entered only in LightBurn"
+                    .into(),
+        },
     })
 }
 
@@ -343,6 +505,24 @@ fn prerequisites_for_step(step: &Step) -> Vec<String> {
             "authenticate with sudo once if the session does not already have an active sudo timestamp; later elevated steps can reuse it until the sudo timeout expires"
                 .into(),
         ),
+    }
+    if matches!(&step.action, Action::ActivateLicense(_)) {
+        prerequisites.push(
+            "enter the license key only in the vendor application; ppduster does not read, store, or log it"
+                .into(),
+        );
+    }
+    if let Action::AppStoreInstall(action) = &step.action {
+        prerequisites.push(
+            "sign in to the Mac App Store with the Apple Account that owns the application; authentication stays in Apple's UI"
+                .into(),
+        );
+        if matches!(action.operation, AppStoreOperation::Install) {
+            prerequisites.push(
+                "the application must already be obtained or purchased; use operation: get for a free app that is not yet associated with the account"
+                    .into(),
+            );
+        }
     }
     prerequisites
 }
@@ -377,7 +557,7 @@ fn ensure_auth(step: &Step, state: &mut AuthState) -> Result<()> {
             prompt_once(
                 "sudo authentication is required. Press Enter to continue; you may be prompted for your password once.",
             )?;
-            Command::new("sudo")
+            Command::new("/usr/bin/sudo")
                 .arg("-v")
                 .status()
                 .context("refresh sudo credentials")?
@@ -411,7 +591,7 @@ fn git_has_credential_helper() -> bool {
 }
 
 fn sudo_auth_ready() -> Result<bool> {
-    Ok(Command::new("sudo")
+    Ok(Command::new("/usr/bin/sudo")
         .args(["-n", "true"])
         .status()
         .context("check sudo credential cache")?
@@ -433,7 +613,7 @@ fn prompt_once(message: &str) -> Result<()> {
     Ok(())
 }
 
-fn apply_step(step: &Step) -> Result<String> {
+fn apply_step(step: &Step, opts: &RunOptions) -> Result<String> {
     match &step.action {
         Action::GitClone { repo, dest, branch } => apply_git_clone(repo, dest, branch.as_deref()),
         Action::BrewInstall { package, cask } => apply_brew_install(package, *cask),
@@ -454,9 +634,34 @@ fn apply_step(step: &Step) -> Result<String> {
             dest,
             checksum,
         } => apply_download_file(url, dest, checksum),
-        Action::ExtractArchive { src, dest } => apply_extract_archive(src, dest),
-        Action::InstallDmg { dmg, app_name } => apply_install_dmg(dmg, app_name.as_deref()),
+        Action::ExtractArchive {
+            src,
+            dest,
+            format,
+            max_unpacked_bytes,
+        } => apply_extract_archive(src, dest, *format, *max_unpacked_bytes),
+        Action::InstallDmg {
+            dmg,
+            app_name,
+            target,
+            identity,
+        } => apply_install_dmg(
+            dmg,
+            app_name.as_deref(),
+            target.as_deref(),
+            identity.as_ref(),
+            false,
+        ),
         Action::InstallPkg { pkg, target } => apply_install_pkg(pkg, target.as_deref()),
+        Action::MacosRequirements {
+            minimum_version,
+            require_rosetta_on_apple_silicon,
+        } => apply_macos_requirements(minimum_version, *require_rosetta_on_apple_silicon),
+        Action::AppStoreInstall(action) => apply_app_store_install(action.app_id, action.operation),
+        Action::BambuStudioRelease(action) => {
+            apply_bambu_studio_release(opts.release_channel.unwrap_or(action.channel))
+        }
+        Action::ActivateLicense(action) => apply_activate_license(action.provider, action.method),
     }
 }
 
@@ -524,20 +729,27 @@ fn apply_download_file(
         fs::create_dir_all(parent)
             .with_context(|| format!("create download parent {}", parent.display()))?;
     }
-    let temp_path = unique_temp_path(&dest_path)?;
-    let status = Command::new("curl")
-        .args([
-            "-L",
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--output",
-            &temp_path.to_string_lossy(),
-            url,
-        ])
+    let (temp_path, temp_file) = create_unique_temp_file(&dest_path)?;
+    let curl_program = if cfg!(target_os = "macos") {
+        "/usr/bin/curl"
+    } else {
+        "curl"
+    };
+    let status = match Command::new(curl_program)
+        .args(["-L", "--fail", "--silent", "--show-error", url])
+        .stdout(Stdio::from(temp_file))
         .status()
-        .with_context(|| format!("download {}", url))?;
-    status.exit_ok("curl download")?;
+    {
+        Ok(status) => status,
+        Err(err) => {
+            fs::remove_file(&temp_path).ok();
+            return Err(err).with_context(|| format!("download {}", url));
+        }
+    };
+    if !status.success() {
+        fs::remove_file(&temp_path).ok();
+        status.exit_ok("curl download")?;
+    }
     if !checksum.sha256.trim().is_empty() {
         let expected = checksum.sha256.trim();
         let actual = sha256_file(&temp_path)?;
@@ -551,7 +763,7 @@ fn apply_download_file(
             );
         }
     }
-    if dest_path.exists() {
+    if path_entry_exists(&dest_path)? {
         fs::remove_file(&dest_path)
             .with_context(|| format!("replace existing destination {}", dest_path.display()))?;
     }
@@ -560,90 +772,1266 @@ fn apply_download_file(
     Ok(format!("downloaded {} to {}", url, dest_path.display()))
 }
 
-fn apply_extract_archive(src: &str, dest: &str) -> Result<String> {
+const BAMBU_RELEASES_API: &str =
+    "https://api.github.com/repos/bambulab/BambuStudio/releases?per_page=30";
+const BAMBU_DOWNLOAD_PREFIX: &str = "https://github.com/bambulab/BambuStudio/releases/download/";
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+    published_at: String,
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+    digest: Option<String>,
+}
+
+struct ResolvedBambuRelease {
+    tag: String,
+    version: String,
+    asset_name: String,
+    download_url: String,
+    sha256: String,
+}
+
+fn release_channel_name(channel: ReleaseChannel) -> &'static str {
+    match channel {
+        ReleaseChannel::Release => "release",
+        ReleaseChannel::Beta => "beta",
+    }
+}
+
+fn fetch_bambu_releases() -> Result<Vec<GithubRelease>> {
+    let curl_program = if cfg!(target_os = "macos") {
+        "/usr/bin/curl"
+    } else {
+        "curl"
+    };
+    let output = Command::new(curl_program)
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--max-filesize",
+            "5242880",
+            "--header",
+            "Accept: application/vnd.github+json",
+            "--header",
+            "X-GitHub-Api-Version: 2022-11-28",
+            BAMBU_RELEASES_API,
+        ])
+        .output()
+        .context("fetch official Bambu Studio release metadata")?;
+    if !output.status.success() {
+        bail!(
+            "fetch official Bambu Studio release metadata failed: {}",
+            command_error_detail(&output)
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("parse Bambu Studio release metadata")
+}
+
+fn resolve_bambu_release(
+    releases: &[GithubRelease],
+    channel: ReleaseChannel,
+) -> Result<ResolvedBambuRelease> {
+    let release = releases
+        .iter()
+        .filter(|release| {
+            !release.draft
+                && match channel {
+                    ReleaseChannel::Release => !release.prerelease,
+                    ReleaseChannel::Beta => release.prerelease,
+                }
+        })
+        .max_by(|left, right| left.published_at.cmp(&right.published_at))
+        .ok_or_else(|| {
+            anyhow!(
+                "official Bambu Studio repository has no {} release",
+                release_channel_name(channel)
+            )
+        })?;
+
+    let mut assets = release.assets.iter().filter(|asset| {
+        asset.name.starts_with("Bambu_Studio_mac-v")
+            && asset.name.ends_with(".dmg")
+            && !asset.name.contains("pre_release")
+    });
+    let asset = assets.next().ok_or_else(|| {
+        anyhow!(
+            "Bambu Studio {} has no unambiguous macOS DMG",
+            release.tag_name
+        )
+    })?;
+    if assets.next().is_some() {
+        bail!(
+            "Bambu Studio {} has multiple matching macOS DMGs; refusing an ambiguous download",
+            release.tag_name
+        );
+    }
+    if Path::new(&asset.name).components().count() != 1 {
+        bail!("Bambu Studio release contains an unsafe asset name");
+    }
+    if !asset
+        .browser_download_url
+        .starts_with(BAMBU_DOWNLOAD_PREFIX)
+    {
+        bail!("Bambu Studio asset URL is outside the official GitHub repository");
+    }
+    let digest = asset
+        .digest
+        .as_deref()
+        .and_then(|value| value.strip_prefix("sha256:"))
+        .ok_or_else(|| anyhow!("Bambu Studio macOS asset has no official SHA-256 digest"))?;
+    if digest.len() != 64 || !digest.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        bail!("Bambu Studio macOS asset has an invalid SHA-256 digest");
+    }
+    let version = asset
+        .name
+        .strip_prefix("Bambu_Studio_mac-v")
+        .and_then(|rest| rest.split_once('-').map(|(version, _)| version))
+        .ok_or_else(|| anyhow!("cannot derive Bambu Studio version from asset name"))?;
+    parse_version(version)?;
+
+    Ok(ResolvedBambuRelease {
+        tag: release.tag_name.clone(),
+        version: version.to_string(),
+        asset_name: asset.name.clone(),
+        download_url: asset.browser_download_url.clone(),
+        sha256: digest.to_ascii_lowercase(),
+    })
+}
+
+fn apply_bambu_studio_release(channel: ReleaseChannel) -> Result<String> {
+    if !cfg!(target_os = "macos") {
+        bail!("bambu-studio-release is only supported on macOS");
+    }
+    let resolved = resolve_bambu_release(&fetch_bambu_releases()?, channel)?;
+    let install_root = expand_required_path("$HOME/Applications")?;
+    let destination = install_root.join("BambuStudio.app");
+
+    if path_entry_exists(&destination)? {
+        let installed_version = verify_bambu_app_and_read_version(&destination)?;
+        if compare_versions(&installed_version, &resolved.version)? != Ordering::Less {
+            return Ok(format!(
+                "Bambu Studio {} is already installed; latest {} is {} ({})",
+                installed_version,
+                release_channel_name(channel),
+                resolved.version,
+                resolved.tag
+            ));
+        }
+        let running = Command::new("/usr/bin/pgrep")
+            .args(["-x", "BambuStudio"])
+            .status()
+            .context("check whether Bambu Studio is running")?;
+        if running.success() {
+            bail!("Bambu Studio is running; quit it before updating");
+        }
+        if running.code() != Some(1) {
+            bail!("could not determine whether Bambu Studio is running");
+        }
+    }
+
+    let cache_path = dirs::home_dir()
+        .ok_or_else(|| anyhow!("home directory unavailable"))?
+        .join("Library/Caches/ppduster/downloads")
+        .join(&resolved.asset_name);
+    let cache = cache_path.to_string_lossy().into_owned();
+    apply_download_file(
+        &resolved.download_url,
+        &cache,
+        &crate::automation::task::Checksum {
+            sha256: resolved.sha256.clone(),
+        },
+    )?;
+    let identity = AppBundleIdentity {
+        bundle_identifier: "com.bambulab.bambu-studio".into(),
+        team_identifier: "T3UBR9Y3B2".into(),
+        version: resolved.version.clone(),
+    };
+    apply_install_dmg(
+        &cache,
+        Some("BambuStudio.app"),
+        Some("$HOME/Applications"),
+        Some(&identity),
+        true,
+    )?;
+    Ok(format!(
+        "installed Bambu Studio {} from latest {} ({})",
+        resolved.version,
+        release_channel_name(channel),
+        resolved.tag
+    ))
+}
+
+const MAX_ARCHIVE_ENTRIES: usize = 100_000;
+
+fn archive_format_name(format: ArchiveFormat) -> &'static str {
+    match format {
+        ArchiveFormat::Auto => "auto-detected",
+        ArchiveFormat::Zip => "zip",
+        ArchiveFormat::Tar => "tar",
+        ArchiveFormat::TarGz => "tar.gz",
+        ArchiveFormat::TarBz2 => "tar.bz2",
+        ArchiveFormat::TarXz => "tar.xz",
+    }
+}
+
+fn detect_archive_format(path: &Path, requested: ArchiveFormat) -> Result<ArchiveFormat> {
+    if requested != ArchiveFormat::Auto {
+        return Ok(requested);
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("archive file name is not valid UTF-8"))?
+        .to_ascii_lowercase();
+    if name.ends_with(".zip") {
+        Ok(ArchiveFormat::Zip)
+    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        Ok(ArchiveFormat::TarGz)
+    } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") || name.ends_with(".tbz") {
+        Ok(ArchiveFormat::TarBz2)
+    } else if name.ends_with(".tar.xz") || name.ends_with(".txz") {
+        Ok(ArchiveFormat::TarXz)
+    } else if name.ends_with(".tar") {
+        Ok(ArchiveFormat::Tar)
+    } else {
+        bail!(
+            "cannot detect archive format from {}; set format explicitly",
+            path.display()
+        )
+    }
+}
+
+fn apply_extract_archive(
+    src: &str,
+    dest: &str,
+    requested_format: ArchiveFormat,
+    max_unpacked_bytes: u64,
+) -> Result<String> {
     let src_path = expand_required_path(src)?;
     let dest_path = expand_required_path(dest)?;
-    if !src_path.exists() {
-        bail!("archive source not found: {}", src_path.display());
-    }
-    if dest_path.exists() && !dest_path.is_dir() {
+    let source_metadata = fs::symlink_metadata(&src_path)
+        .with_context(|| format!("inspect archive source {}", src_path.display()))?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
         bail!(
-            "archive destination exists and is not a directory: {}",
+            "archive source is not a regular file: {}",
+            src_path.display()
+        );
+    }
+    if path_entry_exists(&dest_path)? {
+        bail!(
+            "archive destination already exists; refusing to merge or overwrite: {}",
             dest_path.display()
         );
     }
-    fs::create_dir_all(&dest_path)
-        .with_context(|| format!("create archive destination {}", dest_path.display()))?;
+    let destination_parent = dest_path
+        .parent()
+        .ok_or_else(|| anyhow!("archive destination has no parent"))?;
+    fs::create_dir_all(destination_parent).with_context(|| {
+        format!(
+            "create archive destination parent {}",
+            destination_parent.display()
+        )
+    })?;
+    require_real_directory(destination_parent)?;
+    let format = detect_archive_format(&src_path, requested_format)?;
+    let staging = create_archive_staging_directory(destination_parent)?;
 
-    let manifest = Command::new("tar")
-        .arg("-tf")
-        .arg(&src_path)
-        .output()
-        .with_context(|| format!("list archive contents {}", src_path.display()))?;
-    if !manifest.status.success() {
-        bail!("failed to inspect archive {}", src_path.display());
+    let extract_result = match format {
+        ArchiveFormat::Zip => extract_zip_archive(&src_path, &staging, max_unpacked_bytes),
+        ArchiveFormat::Tar
+        | ArchiveFormat::TarGz
+        | ArchiveFormat::TarBz2
+        | ArchiveFormat::TarXz => {
+            extract_tar_archive(&src_path, &staging, format, max_unpacked_bytes)
+        }
+        ArchiveFormat::Auto => unreachable!(),
+    };
+    if let Err(extract_err) = extract_result {
+        if let Err(cleanup_err) = remove_archive_staging(destination_parent, &staging) {
+            return Err(extract_err.context(format!(
+                "also failed to remove archive staging directory: {cleanup_err:#}"
+            )));
+        }
+        return Err(extract_err);
     }
-    for line in String::from_utf8_lossy(&manifest.stdout).lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    if let Err(commit_err) = fs::rename(&staging, &dest_path) {
+        if let Err(cleanup_err) = remove_archive_staging(destination_parent, &staging) {
+            return Err(commit_err).context(format!(
+                "commit archive extraction failed and staging cleanup also failed: {cleanup_err:#}"
+            ));
         }
-        let rel = Path::new(trimmed);
-        if rel.is_absolute() || rel.components().any(|c| matches!(c, Component::ParentDir)) {
-            bail!("archive entry {} escapes the destination", trimmed);
-        }
-        let candidate = dest_path.join(rel);
-        if !candidate.starts_with(&dest_path) {
-            bail!("archive entry {} escapes the destination", trimmed);
-        }
+        return Err(commit_err)
+            .with_context(|| format!("commit extracted archive to {}", dest_path.display()));
     }
-
-    let status = Command::new("tar")
-        .args(["-xf", &src_path.to_string_lossy()])
-        .current_dir(&dest_path)
-        .status()
-        .with_context(|| format!("extract archive {}", src_path.display()))?;
-    status.exit_ok("tar extract")?;
     Ok(format!(
-        "extracted {} into {}",
+        "extracted {} archive {} into {}",
+        archive_format_name(format),
         src_path.display(),
         dest_path.display()
     ))
 }
 
-fn apply_install_dmg(dmg: &str, app_name: Option<&str>) -> Result<String> {
+fn extract_zip_archive(src: &Path, staging: &Path, max_unpacked_bytes: u64) -> Result<()> {
+    let file = File::open(src).with_context(|| format!("open zip archive {}", src.display()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .with_context(|| format!("read zip archive {}", src.display()))?;
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        bail!("archive contains too many entries: {}", archive.len());
+    }
+    let mut total_bytes = 0u64;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .with_context(|| format!("read zip entry {index}"))?;
+        let rel = entry
+            .enclosed_name()
+            .ok_or_else(|| anyhow!("zip entry has an unsafe path: {}", entry.name()))?;
+        if entry.is_symlink() || (!entry.is_dir() && !entry.is_file()) {
+            bail!(
+                "archive links and special files are not allowed: {}",
+                entry.name()
+            );
+        }
+        let output = checked_archive_output_path(staging, &rel)?;
+        if entry.is_dir() {
+            fs::create_dir_all(&output)
+                .with_context(|| format!("create extracted directory {}", output.display()))?;
+            continue;
+        }
+        total_bytes = add_unpacked_size(total_bytes, entry.size(), max_unpacked_bytes)?;
+        create_archive_parent(staging, &output)?;
+        let mut output_file = create_extracted_file(&output)?;
+        let copied = io::copy(&mut entry, &mut output_file)
+            .with_context(|| format!("extract zip entry {}", entry.name()))?;
+        if copied != entry.size() {
+            bail!(
+                "zip entry size changed while extracting {}: expected {}, wrote {}",
+                entry.name(),
+                entry.size(),
+                copied
+            );
+        }
+        set_safe_file_permissions(&output, entry.unix_mode())?;
+    }
+    Ok(())
+}
+
+fn extract_tar_archive(
+    src: &Path,
+    staging: &Path,
+    format: ArchiveFormat,
+    max_unpacked_bytes: u64,
+) -> Result<()> {
+    let file = File::open(src).with_context(|| format!("open tar archive {}", src.display()))?;
+    let reader: Box<dyn Read> = match format {
+        ArchiveFormat::Tar => Box::new(BufReader::new(file)),
+        ArchiveFormat::TarGz => Box::new(flate2::read::GzDecoder::new(BufReader::new(file))),
+        ArchiveFormat::TarBz2 => Box::new(bzip2::read::BzDecoder::new(BufReader::new(file))),
+        ArchiveFormat::TarXz => Box::new(xz2::read::XzDecoder::new(BufReader::new(file))),
+        _ => bail!("invalid tar archive format"),
+    };
+    let mut archive = tar::Archive::new(reader);
+    let mut entry_count = 0usize;
+    let mut total_bytes = 0u64;
+    for entry in archive.entries().context("read tar archive entries")? {
+        entry_count += 1;
+        if entry_count > MAX_ARCHIVE_ENTRIES {
+            bail!("archive contains more than {MAX_ARCHIVE_ENTRIES} entries");
+        }
+        let mut entry = entry.context("read tar archive entry")?;
+        let entry_type = entry.header().entry_type();
+        if !entry_type.is_file() && !entry_type.is_dir() {
+            bail!("archive links and special files are not allowed");
+        }
+        let rel = entry.path().context("read tar entry path")?.into_owned();
+        let output = checked_archive_output_path(staging, &rel)?;
+        if entry_type.is_dir() {
+            fs::create_dir_all(&output)
+                .with_context(|| format!("create extracted directory {}", output.display()))?;
+            continue;
+        }
+        let size = entry.header().size().context("read tar entry size")?;
+        total_bytes = add_unpacked_size(total_bytes, size, max_unpacked_bytes)?;
+        create_archive_parent(staging, &output)?;
+        let mode = entry.header().mode().ok();
+        let mut output_file = create_extracted_file(&output)?;
+        let copied = io::copy(&mut entry, &mut output_file)
+            .with_context(|| format!("extract tar entry {}", rel.display()))?;
+        if copied != size {
+            bail!(
+                "tar entry size changed while extracting {}: expected {}, wrote {}",
+                rel.display(),
+                size,
+                copied
+            );
+        }
+        set_safe_file_permissions(&output, mode)?;
+    }
+    Ok(())
+}
+
+fn checked_archive_output_path(staging: &Path, rel: &Path) -> Result<PathBuf> {
+    if rel.as_os_str().is_empty()
+        || rel.is_absolute()
+        || rel.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        bail!("archive entry escapes the destination: {}", rel.display());
+    }
+    Ok(staging.join(rel))
+}
+
+fn create_archive_parent(staging: &Path, output: &Path) -> Result<()> {
+    let parent = output
+        .parent()
+        .ok_or_else(|| anyhow!("archive entry has no parent"))?;
+    if !parent.starts_with(staging) {
+        bail!("archive entry parent escapes the staging directory");
+    }
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create extracted file parent {}", parent.display()))
+}
+
+fn create_extracted_file(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("create extracted file {}", path.display()))
+}
+
+fn add_unpacked_size(current: u64, entry: u64, maximum: u64) -> Result<u64> {
+    let total = current
+        .checked_add(entry)
+        .ok_or_else(|| anyhow!("archive unpacked size overflow"))?;
+    if total > maximum {
+        bail!("archive exceeds max_unpacked_bytes ({maximum})");
+    }
+    Ok(total)
+}
+
+#[cfg(unix)]
+fn set_safe_file_permissions(path: &Path, archived_mode: Option<u32>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = archived_mode.is_some_and(|mode| mode & 0o111 != 0);
+    let mode = if executable { 0o755 } else { 0o644 };
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .with_context(|| format!("set safe permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_safe_file_permissions(_path: &Path, _archived_mode: Option<u32>) -> Result<()> {
+    Ok(())
+}
+
+fn create_archive_staging_directory(parent: &Path) -> Result<PathBuf> {
+    for index in 0..1_000u32 {
+        let candidate = parent.join(format!(".ppduster-archive-{}-{index}", std::process::id()));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("create archive staging directory {}", candidate.display())
+                })
+            }
+        }
+    }
+    bail!("could not allocate an archive staging directory")
+}
+
+fn remove_archive_staging(parent: &Path, staging: &Path) -> Result<()> {
+    let name = staging
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("invalid archive staging path {}", staging.display()))?;
+    if staging.parent() != Some(parent) || !name.starts_with(".ppduster-archive-") {
+        bail!(
+            "refusing to remove unexpected archive staging path {}",
+            staging.display()
+        );
+    }
+    fs::remove_dir_all(staging)
+        .with_context(|| format!("remove archive staging directory {}", staging.display()))
+}
+
+fn apply_install_dmg(
+    dmg: &str,
+    app_name: Option<&str>,
+    target: Option<&str>,
+    identity: Option<&AppBundleIdentity>,
+    replace_existing: bool,
+) -> Result<String> {
+    if !cfg!(target_os = "macos") {
+        bail!("install-dmg is only supported on macOS");
+    }
     let dmg_path = expand_required_path(dmg)?;
-    if !dmg_path.exists() {
+    if !dmg_path.is_file() {
         bail!("dmg not found: {}", dmg_path.display());
     }
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("home directory unavailable"))?;
-    let install_root = home.join("Applications");
-    fs::create_dir_all(&install_root)
-        .with_context(|| format!("create install root {}", install_root.display()))?;
-    let app_label = app_name
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            dmg_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("app")
-        });
-    let install_dir = install_root.join(app_label);
-    fs::create_dir_all(&install_dir)
-        .with_context(|| format!("create install dir {}", install_dir.display()))?;
-    let target_path = install_dir.join(dmg_path.file_name().unwrap_or_default());
-    fs::copy(&dmg_path, &target_path).with_context(|| {
-        format!(
-            "copy dmg {} to {}",
+
+    verify_dmg(&dmg_path)?;
+    let mount = MountedDmg::attach(&dmg_path)?;
+    let install_result = (|| {
+        let source_app = find_mounted_app(mount.path(), app_name)?;
+        verify_installable_app(&source_app, identity)?;
+
+        let install_root = expand_required_path(target.unwrap_or("$HOME/Applications"))?;
+        fs::create_dir_all(&install_root)
+            .with_context(|| format!("create install root {}", install_root.display()))?;
+        require_real_directory(&install_root)?;
+
+        let bundle_name = source_app
+            .file_name()
+            .ok_or_else(|| anyhow!("mounted app has no bundle name"))?;
+        let destination = install_root.join(bundle_name);
+        let destination_exists = path_entry_exists(&destination)?;
+        if destination_exists && !replace_existing {
+            bail!(
+                "application already exists: {}; remove it explicitly before reinstalling",
+                destination.display()
+            );
+        }
+        if destination_exists {
+            let expected = identity.ok_or_else(|| {
+                anyhow!("replacing an application requires an exact signed identity")
+            })?;
+            verify_app_publisher(&destination, expected).with_context(|| {
+                format!(
+                    "refuse to replace an application from a different publisher: {}",
+                    destination.display()
+                )
+            })?;
+        }
+
+        let staging = unique_app_staging_path(&install_root, bundle_name)?;
+        if let Err(copy_err) = copy_app_bundle(&source_app, &staging) {
+            if let Err(cleanup_err) = remove_staged_app(&install_root, &staging) {
+                return Err(copy_err.context(format!(
+                    "also failed to remove staging app: {cleanup_err:#}"
+                )));
+            }
+            return Err(copy_err);
+        }
+        if let Err(verify_err) = verify_installable_app(&staging, identity) {
+            if let Err(cleanup_err) = remove_staged_app(&install_root, &staging) {
+                return Err(verify_err.context(format!(
+                    "also failed to remove staging app: {cleanup_err:#}"
+                )));
+            }
+            return Err(verify_err.context(format!("verify staged app {}", staging.display())));
+        }
+        let commit_result = if destination_exists {
+            replace_with_staged_app(&install_root, &staging, &destination, identity)
+        } else {
+            commit_staged_app(&staging, &destination)
+        };
+        if let Err(commit_err) = commit_result {
+            if let Err(cleanup_err) = remove_staged_app(&install_root, &staging) {
+                return Err(commit_err.context(format!(
+                    "also failed to remove staging app: {cleanup_err:#}"
+                )));
+            }
+            return Err(commit_err);
+        }
+        verify_installable_app(&destination, identity)
+            .with_context(|| format!("verify installed app {}", destination.display()))?;
+        Ok(destination)
+    })();
+
+    let detach_result = mount.detach();
+    let destination = match (install_result, detach_result) {
+        (Ok(destination), Ok(())) => destination,
+        (Ok(_), Err(detach_err)) => return Err(detach_err),
+        (Err(install_err), Ok(())) => return Err(install_err),
+        (Err(install_err), Err(detach_err)) => {
+            return Err(install_err.context(format!("also failed to detach dmg: {detach_err:#}")))
+        }
+    };
+
+    Ok(format!(
+        "installed application from {} into {}",
+        dmg_path.display(),
+        destination.display()
+    ))
+}
+
+struct MountedDmg {
+    mount_point: PathBuf,
+    attached: bool,
+}
+
+impl MountedDmg {
+    fn attach(dmg_path: &Path) -> Result<Self> {
+        let mount_point = unique_temp_directory("ppduster-dmg")?;
+        let output = Command::new("/usr/bin/hdiutil")
+            .args(["attach", "-readonly", "-nobrowse", "-mountpoint"])
+            .arg(&mount_point)
+            .arg(dmg_path)
+            .output()
+            .with_context(|| format!("mount dmg {}", dmg_path.display()))?;
+        if !output.status.success() {
+            fs::remove_dir_all(&mount_point).ok();
+            bail!(
+                "mount dmg {} failed: {}",
+                dmg_path.display(),
+                command_error_detail(&output)
+            );
+        }
+        Ok(Self {
+            mount_point,
+            attached: true,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.mount_point
+    }
+
+    fn detach(mut self) -> Result<()> {
+        let output = Command::new("/usr/bin/hdiutil")
+            .arg("detach")
+            .arg(&self.mount_point)
+            .output()
+            .with_context(|| format!("detach dmg at {}", self.mount_point.display()))?;
+        if !output.status.success() {
+            bail!(
+                "detach dmg at {} failed: {}",
+                self.mount_point.display(),
+                command_error_detail(&output)
+            );
+        }
+        self.attached = false;
+        fs::remove_dir_all(&self.mount_point).with_context(|| {
+            format!(
+                "remove temporary mount point {}",
+                self.mount_point.display()
+            )
+        })?;
+        Ok(())
+    }
+}
+
+impl Drop for MountedDmg {
+    fn drop(&mut self) {
+        if self.attached {
+            let detached = Command::new("/usr/bin/hdiutil")
+                .arg("detach")
+                .arg(&self.mount_point)
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if detached {
+                self.attached = false;
+                let _ = fs::remove_dir_all(&self.mount_point);
+            }
+        }
+    }
+}
+
+fn verify_dmg(dmg_path: &Path) -> Result<()> {
+    let output = Command::new("/usr/bin/hdiutil")
+        .arg("verify")
+        .arg(dmg_path)
+        .output()
+        .with_context(|| format!("verify dmg {}", dmg_path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "dmg verification failed for {}: {}",
             dmg_path.display(),
-            target_path.display()
+            command_error_detail(&output)
+        );
+    }
+    Ok(())
+}
+
+fn find_mounted_app(mount_point: &Path, app_name: Option<&str>) -> Result<PathBuf> {
+    let source_app = if let Some(app_name) = app_name {
+        mount_point.join(app_name)
+    } else {
+        let mut candidates = fs::read_dir(mount_point)
+            .with_context(|| format!("read mounted dmg {}", mount_point.display()))?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("app"))
+            .collect::<Vec<_>>();
+        candidates.sort();
+        match candidates.as_slice() {
+            [only] => only.clone(),
+            [] => bail!("mounted dmg contains no .app bundle"),
+            _ => bail!("mounted dmg contains multiple .app bundles; set app_name"),
+        }
+    };
+
+    let metadata = fs::symlink_metadata(&source_app)
+        .with_context(|| format!("inspect app bundle {}", source_app.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!(
+            "app bundle is not a real directory: {}",
+            source_app.display()
+        );
+    }
+    let canonical_mount = mount_point
+        .canonicalize()
+        .with_context(|| format!("canonicalize mount point {}", mount_point.display()))?;
+    let canonical_app = source_app
+        .canonicalize()
+        .with_context(|| format!("canonicalize app bundle {}", source_app.display()))?;
+    if !canonical_app.starts_with(&canonical_mount) {
+        bail!("app bundle escapes mounted dmg: {}", source_app.display());
+    }
+    Ok(source_app)
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("inspect path {}", path.display())),
+    }
+}
+
+fn require_real_directory(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect directory {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!(
+            "expected a real directory, not a symlink: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn verify_installable_app(app_path: &Path, identity: Option<&AppBundleIdentity>) -> Result<()> {
+    match identity {
+        Some(identity) => verify_app_identity(app_path, identity),
+        None => verify_app_signature(app_path),
+    }
+}
+
+fn verify_app_signature(app_path: &Path) -> Result<()> {
+    require_real_directory(app_path)?;
+    let codesign = Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(app_path)
+        .output()
+        .with_context(|| format!("verify code signature for {}", app_path.display()))?;
+    if !codesign.status.success() {
+        bail!(
+            "code signature verification failed for {}: {}",
+            app_path.display(),
+            command_error_detail(&codesign)
+        );
+    }
+
+    let assessment = Command::new("/usr/sbin/spctl")
+        .args(["--assess", "--type", "execute"])
+        .arg(app_path)
+        .output()
+        .with_context(|| format!("assess app trust for {}", app_path.display()))?;
+    if !assessment.status.success() {
+        bail!(
+            "Gatekeeper assessment failed for {}: {}",
+            app_path.display(),
+            command_error_detail(&assessment)
+        );
+    }
+    Ok(())
+}
+
+fn app_identity_requirement(identity: &AppBundleIdentity) -> String {
+    format!(
+        "=identifier \"{}\" and anchor apple generic and certificate leaf[subject.OU] = \"{}\" and info[CFBundleShortVersionString] = \"{}\"",
+        identity.bundle_identifier, identity.team_identifier, identity.version
+    )
+}
+
+fn app_identity_verification_arguments(identity: &AppBundleIdentity) -> Vec<OsString> {
+    vec![
+        "--verify".into(),
+        "--deep".into(),
+        "--strict".into(),
+        "--test-requirement".into(),
+        app_identity_requirement(identity).into(),
+    ]
+}
+
+fn verify_app_identity(app_path: &Path, identity: &AppBundleIdentity) -> Result<()> {
+    verify_app_signature(app_path)?;
+    let arguments = app_identity_verification_arguments(identity);
+    let output = Command::new("/usr/bin/codesign")
+        .args(arguments)
+        .arg(app_path)
+        .output()
+        .with_context(|| format!("verify app identity for {}", app_path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "app identity verification failed for {}: {}",
+            app_path.display(),
+            command_error_detail(&output)
+        );
+    }
+    Ok(())
+}
+
+fn app_publisher_requirement(identity: &AppBundleIdentity) -> String {
+    format!(
+        "=identifier \"{}\" and anchor apple generic and certificate leaf[subject.OU] = \"{}\"",
+        identity.bundle_identifier, identity.team_identifier
+    )
+}
+
+fn verify_app_publisher(app_path: &Path, identity: &AppBundleIdentity) -> Result<()> {
+    verify_app_signature(app_path)?;
+    let output = Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict", "--test-requirement"])
+        .arg(app_publisher_requirement(identity))
+        .arg(app_path)
+        .output()
+        .with_context(|| format!("verify app publisher for {}", app_path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "app publisher verification failed for {}: {}",
+            app_path.display(),
+            command_error_detail(&output)
+        );
+    }
+    Ok(())
+}
+
+fn read_app_version(app_path: &Path) -> Result<String> {
+    let info_plist = app_path.join("Contents/Info.plist");
+    let output = Command::new("/usr/bin/plutil")
+        .args(["-extract", "CFBundleShortVersionString", "raw", "-o", "-"])
+        .arg(&info_plist)
+        .output()
+        .with_context(|| format!("read app version from {}", info_plist.display()))?;
+    if !output.status.success() {
+        bail!(
+            "read app version from {} failed: {}",
+            info_plist.display(),
+            command_error_detail(&output)
+        );
+    }
+    let version = String::from_utf8(output.stdout).context("app version is not UTF-8")?;
+    let version = version.trim().to_string();
+    parse_version(&version)?;
+    Ok(version)
+}
+
+fn verify_bambu_app_and_read_version(app_path: &Path) -> Result<String> {
+    let version = read_app_version(app_path)?;
+    let identity = AppBundleIdentity {
+        bundle_identifier: "com.bambulab.bambu-studio".into(),
+        team_identifier: "T3UBR9Y3B2".into(),
+        version: version.clone(),
+    };
+    verify_app_identity(app_path, &identity)?;
+    Ok(version)
+}
+
+fn copy_app_bundle(source: &Path, destination: &Path) -> Result<()> {
+    let output = Command::new("/usr/bin/ditto")
+        .arg(source)
+        .arg(destination)
+        .output()
+        .with_context(|| format!("copy app bundle into {}", destination.display()))?;
+    if !output.status.success() {
+        bail!(
+            "copy app bundle into {} failed: {}",
+            destination.display(),
+            command_error_detail(&output)
+        );
+    }
+    Ok(())
+}
+
+fn unique_app_staging_path(install_root: &Path, bundle_name: &std::ffi::OsStr) -> Result<PathBuf> {
+    let bundle_name = bundle_name.to_string_lossy();
+    for index in 0..1_000u32 {
+        let candidate = install_root.join(format!(
+            ".{bundle_name}.ppduster-{}-{index}.app",
+            std::process::id()
+        ));
+        if !path_entry_exists(&candidate)? {
+            return Ok(candidate);
+        }
+    }
+    bail!("could not allocate an application staging path")
+}
+
+fn commit_staged_app(staging: &Path, destination: &Path) -> Result<()> {
+    if path_entry_exists(destination)? {
+        bail!(
+            "application appeared while installing: {}; refusing to overwrite it",
+            destination.display()
+        );
+    }
+
+    fs::rename(staging, destination).with_context(|| {
+        format!(
+            "move staged app {} into {}",
+            staging.display(),
+            destination.display()
         )
     })?;
+    Ok(())
+}
+
+fn replace_with_staged_app(
+    install_root: &Path,
+    staging: &Path,
+    destination: &Path,
+    identity: Option<&AppBundleIdentity>,
+) -> Result<()> {
+    let bundle_name = destination
+        .file_name()
+        .ok_or_else(|| anyhow!("application destination has no bundle name"))?;
+    let backup = unique_app_backup_path(install_root, bundle_name)?;
+    fs::rename(destination, &backup).with_context(|| {
+        format!(
+            "move existing app {} to rollback location",
+            destination.display()
+        )
+    })?;
+    if let Err(commit_err) = fs::rename(staging, destination) {
+        fs::rename(&backup, destination).with_context(|| {
+            format!(
+                "restore {} after update commit failed: {commit_err}",
+                destination.display()
+            )
+        })?;
+        return Err(commit_err).with_context(|| format!("replace app {}", destination.display()));
+    }
+    if let Err(verify_err) = verify_installable_app(destination, identity) {
+        remove_replacement_app(install_root, destination)?;
+        fs::rename(&backup, destination).with_context(|| {
+            format!(
+                "restore {} after installed app verification failed",
+                destination.display()
+            )
+        })?;
+        return Err(verify_err).context("verify replacement app");
+    }
+    remove_backup_app(install_root, &backup)?;
+    Ok(())
+}
+
+fn unique_app_backup_path(install_root: &Path, bundle_name: &std::ffi::OsStr) -> Result<PathBuf> {
+    let bundle_name = bundle_name.to_string_lossy();
+    for index in 0..1_000u32 {
+        let candidate = install_root.join(format!(
+            ".{bundle_name}.ppduster-backup-{}-{index}.app",
+            std::process::id()
+        ));
+        if !path_entry_exists(&candidate)? {
+            return Ok(candidate);
+        }
+    }
+    bail!("could not allocate an application rollback path")
+}
+
+fn remove_backup_app(install_root: &Path, backup: &Path) -> Result<()> {
+    let file_name = backup
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("invalid backup app path {}", backup.display()))?;
+    if backup.parent() != Some(install_root)
+        || !file_name.starts_with('.')
+        || !file_name.contains(".app.ppduster-backup-")
+        || !file_name.ends_with(".app")
+    {
+        bail!(
+            "refusing to remove unexpected backup path {}",
+            backup.display()
+        );
+    }
+    fs::remove_dir_all(backup).with_context(|| format!("remove rollback app {}", backup.display()))
+}
+
+fn remove_replacement_app(install_root: &Path, destination: &Path) -> Result<()> {
+    if destination.parent() != Some(install_root)
+        || destination.file_name().and_then(|name| name.to_str()) != Some("BambuStudio.app")
+    {
+        bail!(
+            "refusing to remove unexpected replacement path {}",
+            destination.display()
+        );
+    }
+    fs::remove_dir_all(destination)
+        .with_context(|| format!("remove failed replacement {}", destination.display()))
+}
+
+fn remove_staged_app(install_root: &Path, staging: &Path) -> Result<()> {
+    let file_name = staging
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("invalid staging app path {}", staging.display()))?;
+    if staging.parent() != Some(install_root)
+        || !file_name.starts_with('.')
+        || !file_name.contains(".app.ppduster-")
+        || !file_name.ends_with(".app")
+    {
+        bail!(
+            "refusing to remove unexpected staging path {}",
+            staging.display()
+        );
+    }
+    if !path_entry_exists(staging)? {
+        return Ok(());
+    }
+
+    fs::remove_dir_all(staging)
+        .with_context(|| format!("remove staged app {}", staging.display()))?;
+    Ok(())
+}
+
+fn command_error_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    if detail.is_empty() {
+        format!("exit status {}", output.status)
+    } else {
+        detail.to_string()
+    }
+}
+
+fn unique_temp_directory(prefix: &str) -> Result<PathBuf> {
+    let root = std::env::temp_dir();
+    for index in 0..1_000u32 {
+        let candidate = root.join(format!("{prefix}-{}-{index}", std::process::id()));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("create mount point {}", candidate.display()))
+            }
+        }
+    }
+    bail!("could not allocate a temporary dmg mount point")
+}
+
+fn apply_macos_requirements(
+    minimum_version: &str,
+    require_rosetta_on_apple_silicon: bool,
+) -> Result<String> {
+    if !cfg!(target_os = "macos") {
+        bail!("macos-requirements is only supported on macOS");
+    }
+
+    let version_output = Command::new("/usr/bin/sw_vers")
+        .arg("-productVersion")
+        .output()
+        .context("read macOS version")?;
+    if !version_output.status.success() {
+        bail!(
+            "read macOS version failed: {}",
+            command_error_detail(&version_output)
+        );
+    }
+    let current_version = String::from_utf8_lossy(&version_output.stdout)
+        .trim()
+        .to_owned();
+    if !version_at_least(&current_version, minimum_version)? {
+        bail!(
+            "macOS {} is unsupported; this task requires macOS {} or newer",
+            current_version,
+            minimum_version
+        );
+    }
+
+    let mut rosetta_checked = false;
+    if require_rosetta_on_apple_silicon {
+        let architecture_output = Command::new("/usr/bin/uname")
+            .arg("-m")
+            .output()
+            .context("read Mac architecture")?;
+        if !architecture_output.status.success() {
+            bail!(
+                "read Mac architecture failed: {}",
+                command_error_detail(&architecture_output)
+            );
+        }
+        let architecture = String::from_utf8_lossy(&architecture_output.stdout);
+        if architecture.trim() == "arm64" {
+            rosetta_checked = true;
+            let rosetta = Command::new("/usr/sbin/pkgutil")
+                .args(["--pkg-info", "com.apple.pkg.RosettaUpdateAuto"])
+                .output()
+                .context("check Rosetta package receipt")?;
+            if !rosetta.status.success() {
+                bail!(
+                    "Rosetta is required on Apple Silicon but is not installed; install it with Apple's softwareupdate tool before retrying"
+                );
+            }
+        }
+    }
+
     Ok(format!(
-        "staged dmg {} into {}",
-        dmg_path.display(),
-        target_path.display()
+        "macOS {} satisfies minimum {}{}",
+        current_version,
+        minimum_version,
+        if rosetta_checked {
+            "; Rosetta is installed"
+        } else {
+            ""
+        }
+    ))
+}
+
+fn version_at_least(current: &str, minimum: &str) -> Result<bool> {
+    Ok(compare_versions(current, minimum)? != Ordering::Less)
+}
+
+fn compare_versions(left: &str, right: &str) -> Result<Ordering> {
+    let left = parse_version(left)?;
+    let right = parse_version(right)?;
+    let component_count = left.len().max(right.len());
+    for index in 0..component_count {
+        let left_component = *left.get(index).unwrap_or(&0);
+        let right_component = *right.get(index).unwrap_or(&0);
+        match left_component.cmp(&right_component) {
+            Ordering::Equal => {}
+            ordering => return Ok(ordering),
+        }
+    }
+    Ok(Ordering::Equal)
+}
+
+fn parse_version(value: &str) -> Result<Vec<u64>> {
+    if value.trim().is_empty() {
+        bail!("version must not be empty");
+    }
+    value
+        .trim()
+        .split('.')
+        .map(|component| {
+            component
+                .parse::<u64>()
+                .with_context(|| format!("invalid version component {component:?} in {value:?}"))
+        })
+        .collect()
+}
+
+fn app_store_operation_name(operation: AppStoreOperation) -> &'static str {
+    match operation {
+        AppStoreOperation::Install => "install",
+        AppStoreOperation::Get => "get",
+    }
+}
+
+fn app_store_command_arguments(app_id: u64, operation: AppStoreOperation) -> Vec<OsString> {
+    vec![
+        app_store_operation_name(operation).into(),
+        app_id.to_string().into(),
+    ]
+}
+
+fn resolve_mas_binary() -> Result<PathBuf> {
+    let candidates = ["/opt/homebrew/bin/mas", "/usr/local/bin/mas"];
+    let allowed_roots = ["/opt/homebrew/Cellar/mas", "/usr/local/Cellar/mas"];
+    for candidate in candidates {
+        let path = Path::new(candidate);
+        let Ok(canonical) = path.canonicalize() else {
+            continue;
+        };
+        if canonical.is_file()
+            && allowed_roots
+                .iter()
+                .any(|root| canonical.starts_with(Path::new(root)))
+        {
+            return Ok(canonical);
+        }
+    }
+    bail!(
+        "mas is unavailable from a standard Homebrew installation; run the bundled app-store-bootstrap task first"
+    )
+}
+
+fn mas_list_contains_app(output: &str, app_id: u64) -> bool {
+    let expected = app_id.to_string();
+    output.lines().any(|line| {
+        line.split_whitespace()
+            .next()
+            .is_some_and(|value| value == expected)
+    })
+}
+
+fn app_store_app_is_installed(mas: &Path, app_id: u64) -> Result<bool> {
+    let output = Command::new(mas)
+        .args(["list", &app_id.to_string()])
+        .output()
+        .with_context(|| format!("check Mac App Store application {}", app_id))?;
+    if !output.status.success() {
+        bail!(
+            "mas list failed while checking application {}: {}",
+            app_id,
+            command_error_detail(&output)
+        );
+    }
+    Ok(mas_list_contains_app(
+        &String::from_utf8_lossy(&output.stdout),
+        app_id,
+    ))
+}
+
+fn apply_app_store_install(app_id: u64, operation: AppStoreOperation) -> Result<String> {
+    if !cfg!(target_os = "macos") {
+        bail!("app-store-install is only supported on macOS");
+    }
+    let mas = resolve_mas_binary()?;
+    if app_store_app_is_installed(&mas, app_id)? {
+        return Ok(format!(
+            "Mac App Store application {} is already installed",
+            app_id
+        ));
+    }
+    let arguments = app_store_command_arguments(app_id, operation);
+    let output = Command::new(&mas)
+        .args(arguments)
+        .output()
+        .with_context(|| {
+            format!(
+                "mas {} Mac App Store application {}",
+                app_store_operation_name(operation),
+                app_id
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "mas {} failed for Mac App Store application {}: {}",
+            app_store_operation_name(operation),
+            app_id,
+            command_error_detail(&output)
+        );
+    }
+    Ok(format!(
+        "mas {} completed for Mac App Store application {}",
+        app_store_operation_name(operation),
+        app_id
     ))
 }
 
@@ -676,6 +2064,138 @@ fn apply_install_pkg(pkg: &str, target: Option<&str>) -> Result<String> {
     ))
 }
 
+fn apply_activate_license(provider: LicenseProvider, method: LicenseMethod) -> Result<String> {
+    if !cfg!(target_os = "macos") {
+        bail!("LightBurn vendor UI activation is only supported on macOS");
+    }
+    let interactive = terminal_is_interactive();
+    apply_activate_license_with(
+        provider,
+        method,
+        interactive,
+        launch_license_ui,
+        prompt_activation_confirmation,
+    )
+}
+
+fn terminal_is_interactive() -> bool {
+    io::stdin().is_terminal() && io::stderr().is_terminal()
+}
+
+fn apply_activate_license_with<Launch, Confirm>(
+    provider: LicenseProvider,
+    method: LicenseMethod,
+    interactive: bool,
+    mut launch: Launch,
+    mut confirm: Confirm,
+) -> Result<String>
+where
+    Launch: FnMut(LicenseProvider) -> Result<()>,
+    Confirm: FnMut(&str) -> Result<bool>,
+{
+    if !interactive {
+        bail!(
+            "license activation requires an interactive terminal; the key must be entered directly in the vendor UI"
+        );
+    }
+
+    match (provider, method) {
+        (LicenseProvider::LightBurn, LicenseMethod::VendorUi) => {
+            launch(provider)?;
+            eprintln!(
+                "LightBurn is open. Enter the license key in its License Page (or Help -> License Management), then activate it."
+            );
+            if !confirm(
+                "Type ACTIVATED here only after LightBurn reports a successful activation: ",
+            )? {
+                bail!("LightBurn activation was not confirmed; expected ACTIVATED");
+            }
+            Ok(
+                "user confirmed LightBurn activation in the vendor UI; ppduster did not read or store the license key"
+                    .into(),
+            )
+        }
+    }
+}
+
+fn launch_license_ui(provider: LicenseProvider) -> Result<()> {
+    let app_path = license_application_path(provider)?;
+    match provider {
+        LicenseProvider::LightBurn => verify_lightburn_identity(&app_path)?,
+    }
+    require_license_application_stopped(provider)?;
+    let arguments = license_launch_arguments(&app_path);
+    Command::new("/usr/bin/open")
+        .args(arguments)
+        .status()
+        .with_context(|| format!("open {} license UI", app_path.display()))?
+        .exit_ok(&format!("open {}", app_path.display()))?;
+    Ok(())
+}
+
+fn license_application_path(provider: LicenseProvider) -> Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("home directory unavailable"))?;
+    match provider {
+        LicenseProvider::LightBurn => Ok(home.join("Applications/LightBurn.app")),
+    }
+}
+
+fn require_license_application_stopped(provider: LicenseProvider) -> Result<()> {
+    let process_name = match provider {
+        LicenseProvider::LightBurn => "LightBurn",
+    };
+    let status = Command::new("/usr/bin/pgrep")
+        .args(["-x", process_name])
+        .status()
+        .with_context(|| format!("check for running {} processes", process_name))?;
+    match status.code() {
+        Some(1) => Ok(()),
+        Some(0) => bail!(
+            "{} is already running; quit every instance and rerun so ppduster can open the verified app bundle",
+            process_name
+        ),
+        Some(code) => bail!("checking for running {} failed with exit code {}", process_name, code),
+        None => bail!("checking for running {} terminated by signal", process_name),
+    }
+}
+
+fn license_launch_arguments(app_path: &Path) -> Vec<OsString> {
+    vec!["-n".into(), app_path.as_os_str().to_owned()]
+}
+
+const LIGHTBURN_BUNDLE_IDENTIFIER: &str = "com.LightBurnSoftware.LightBurn";
+const LIGHTBURN_TEAM_IDENTIFIER: &str = "UWZQ3LL82C";
+const LIGHTBURN_VERSION: &str = "2.1.03";
+
+fn verify_lightburn_identity(app_path: &Path) -> Result<()> {
+    let identity = AppBundleIdentity {
+        bundle_identifier: LIGHTBURN_BUNDLE_IDENTIFIER.into(),
+        team_identifier: LIGHTBURN_TEAM_IDENTIFIER.into(),
+        version: LIGHTBURN_VERSION.into(),
+    };
+    verify_app_identity(app_path, &identity).with_context(|| {
+        format!(
+            "refuse to open untrusted LightBurn app at {}",
+            app_path.display()
+        )
+    })
+}
+
+fn prompt_activation_confirmation(prompt: &str) -> Result<bool> {
+    eprint!("{prompt}");
+    io::stderr()
+        .flush()
+        .context("flush activation confirmation prompt")?;
+    let mut line = String::new();
+    let bytes = io::stdin()
+        .read_line(&mut line)
+        .context("read activation confirmation")?;
+    if bytes == 0 {
+        bail!("activation confirmation ended before ACTIVATED was entered");
+    }
+    Ok(line.trim() == "ACTIVATED")
+}
+
 fn apply_run_command(
     program: &str,
     args: &[String],
@@ -685,11 +2205,16 @@ fn apply_run_command(
 ) -> Result<String> {
     let mut command = if matches!(shell, ShellMode::Allow) {
         let shell_command = render_shell_command(program, args);
-        let mut shell_runner = Command::new("sh");
+        let mut shell_runner = Command::new("/bin/sh");
         shell_runner.arg("-lc").arg(shell_command);
         shell_runner
     } else {
-        let mut direct = Command::new(program);
+        let trusted_program = if program == "sudo" {
+            "/usr/bin/sudo"
+        } else {
+            program
+        };
+        let mut direct = Command::new(trusted_program);
         direct.args(expand_args(args)?);
         direct
     };
@@ -707,13 +2232,23 @@ fn apply_run_command(
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("read {} for checksum", path.display()))?;
+    let mut file =
+        fs::File::open(path).with_context(|| format!("open {} for checksum", path.display()))?;
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let bytes_read = file
+            .read(&mut buffer)
+            .with_context(|| format!("read {} for checksum", path.display()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn unique_temp_path(dest: &Path) -> Result<PathBuf> {
+fn create_unique_temp_file(dest: &Path) -> Result<(PathBuf, fs::File)> {
     let mut index = 0u64;
     loop {
         let candidate = if let Some(ext) = dest.extension() {
@@ -724,8 +2259,17 @@ fn unique_temp_path(dest: &Path) -> Result<PathBuf> {
         } else {
             dest.with_extension(format!("part.{}", index))
         };
-        if !candidate.exists() {
-            return Ok(candidate);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("create temporary download {}", candidate.display()))
+            }
         }
         index += 1;
     }
@@ -812,6 +2356,34 @@ fn is_satisfied(step: &Step, run_command_checks: bool) -> Result<Option<String>>
                 return Ok(Some(reason));
             }
         }
+        if let Action::AppStoreInstall(action) = &step.action {
+            let mas = resolve_mas_binary()?;
+            if app_store_app_is_installed(&mas, action.app_id)? {
+                return Ok(Some(format!(
+                    "Mac App Store application {} is already installed",
+                    action.app_id
+                )));
+            }
+        }
+        if let Action::InstallDmg {
+            app_name: Some(app_name),
+            target,
+            identity: Some(identity),
+            ..
+        } = &step.action
+        {
+            let destination = dmg_install_destination(app_name, target.as_deref())?;
+            if path_entry_exists(&destination)? {
+                verify_app_identity(&destination, identity)?;
+                return Ok(Some(format!(
+                    "verified {} version {} signed by team {} at {}",
+                    identity.bundle_identifier,
+                    identity.version,
+                    identity.team_identifier,
+                    destination.display()
+                )));
+            }
+        }
     }
 
     let Some(check) = &step.check else {
@@ -847,7 +2419,10 @@ pub fn extracted_path_is_safe(root: &Path, rel: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automation::task::{Checksum, Task, TrustRequirement};
+    use crate::automation::task::{
+        ActivateLicenseAction, AppBundleIdentity, AppStoreInstallAction, Checksum, Task,
+        TrustRequirement,
+    };
     use std::path::PathBuf;
 
     fn base_task(step: Step) -> Task {
@@ -949,10 +2524,183 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        let summary =
-            apply_extract_archive(&archive.to_string_lossy(), &dest.to_string_lossy()).unwrap();
+        let summary = apply_extract_archive(
+            &archive.to_string_lossy(),
+            &dest.to_string_lossy(),
+            ArchiveFormat::Auto,
+            1024 * 1024,
+        )
+        .unwrap();
         assert!(summary.contains("extracted"));
         assert!(dest.join("payload.txt").exists());
+    }
+
+    #[test]
+    fn zip_archive_is_detected_and_extracted() {
+        use zip::write::SimpleFileOptions;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("payload.zip");
+        let dest = tmp.path().join("out");
+        let file = File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file(
+                "bin/tool",
+                SimpleFileOptions::default().unix_permissions(0o755),
+            )
+            .unwrap();
+        writer.write_all(b"tool").unwrap();
+        writer.finish().unwrap();
+
+        apply_extract_archive(
+            &archive.to_string_lossy(),
+            &dest.to_string_lossy(),
+            ArchiveFormat::Auto,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(fs::read(dest.join("bin/tool")).unwrap(), b"tool");
+    }
+
+    #[test]
+    fn zip_traversal_and_existing_destinations_are_rejected_atomically() {
+        use zip::write::SimpleFileOptions;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("unsafe.zip");
+        let dest = tmp.path().join("out");
+        let file = File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("../escape.txt", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"escape").unwrap();
+        writer.finish().unwrap();
+
+        let err = apply_extract_archive(
+            &archive.to_string_lossy(),
+            &dest.to_string_lossy(),
+            ArchiveFormat::Zip,
+            1024,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unsafe path"));
+        assert!(!tmp.path().join("escape.txt").exists());
+        assert!(!dest.exists());
+
+        fs::create_dir(&dest).unwrap();
+        let err = apply_extract_archive(
+            &archive.to_string_lossy(),
+            &dest.to_string_lossy(),
+            ArchiveFormat::Zip,
+            1024,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("refusing to merge or overwrite"));
+    }
+
+    #[test]
+    fn archive_unpacked_size_limit_is_enforced() {
+        use zip::write::SimpleFileOptions;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("large.zip");
+        let dest = tmp.path().join("out");
+        let file = File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("payload.bin", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(&[0u8; 32]).unwrap();
+        writer.finish().unwrap();
+
+        let err = apply_extract_archive(
+            &archive.to_string_lossy(),
+            &dest.to_string_lossy(),
+            ArchiveFormat::Auto,
+            16,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("max_unpacked_bytes"));
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn archive_symlinks_are_rejected() {
+        use zip::write::SimpleFileOptions;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("link.zip");
+        let dest = tmp.path().join("out");
+        let file = File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .add_symlink("link", "../outside", SimpleFileOptions::default())
+            .unwrap();
+        writer.finish().unwrap();
+
+        let err = apply_extract_archive(
+            &archive.to_string_lossy(),
+            &dest.to_string_lossy(),
+            ArchiveFormat::Auto,
+            1024,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("links and special files"));
+        assert!(!dest.exists());
+    }
+
+    fn test_tar_bytes() -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let payload = b"compressed";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "payload.txt", &payload[..])
+            .unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    #[test]
+    fn compressed_tar_formats_are_auto_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tar_bytes = test_tar_bytes();
+
+        let gzip_path = tmp.path().join("payload.tgz");
+        let mut gzip = flate2::write::GzEncoder::new(
+            File::create(&gzip_path).unwrap(),
+            flate2::Compression::default(),
+        );
+        gzip.write_all(&tar_bytes).unwrap();
+        gzip.finish().unwrap();
+
+        let bzip_path = tmp.path().join("payload.tar.bz2");
+        let mut bzip = bzip2::write::BzEncoder::new(
+            File::create(&bzip_path).unwrap(),
+            bzip2::Compression::default(),
+        );
+        bzip.write_all(&tar_bytes).unwrap();
+        bzip.finish().unwrap();
+
+        let xz_path = tmp.path().join("payload.txz");
+        let mut xz = xz2::write::XzEncoder::new(File::create(&xz_path).unwrap(), 6);
+        xz.write_all(&tar_bytes).unwrap();
+        xz.finish().unwrap();
+
+        for (index, archive) in [gzip_path, bzip_path, xz_path].iter().enumerate() {
+            let dest = tmp.path().join(format!("out-{index}"));
+            apply_extract_archive(
+                &archive.to_string_lossy(),
+                &dest.to_string_lossy(),
+                ArchiveFormat::Auto,
+                1024,
+            )
+            .unwrap();
+            assert_eq!(fs::read(dest.join("payload.txt")).unwrap(), b"compressed");
+        }
     }
 
     #[test]
@@ -1309,5 +3057,349 @@ mod tests {
         .unwrap();
         assert!(matches!(report.steps[0].status, StepStatus::Applied));
         assert!(matches!(report.outcomes[0], ActionOutcome::Applied { .. }));
+    }
+
+    #[test]
+    fn lightburn_activation_refuses_non_interactive_runs_before_launch() {
+        let launched = std::cell::Cell::new(false);
+        let err = apply_activate_license_with(
+            LicenseProvider::LightBurn,
+            LicenseMethod::VendorUi,
+            false,
+            |_| {
+                launched.set(true);
+                Ok(())
+            },
+            |_| Ok(true),
+        )
+        .unwrap_err();
+
+        assert!(!launched.get());
+        assert!(err.to_string().contains("interactive terminal"));
+    }
+
+    #[test]
+    fn lightburn_activation_launches_only_vendor_ui_and_uses_nonsecret_confirmation() {
+        let launched = std::cell::RefCell::new(Vec::new());
+        let prompts = std::cell::RefCell::new(Vec::new());
+        let summary = apply_activate_license_with(
+            LicenseProvider::LightBurn,
+            LicenseMethod::VendorUi,
+            true,
+            |provider| {
+                launched.borrow_mut().push(provider);
+                Ok(())
+            },
+            |prompt| {
+                prompts.borrow_mut().push(prompt.to_owned());
+                Ok(true)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(launched.into_inner(), vec![LicenseProvider::LightBurn]);
+        let app_path = license_application_path(LicenseProvider::LightBurn).unwrap();
+        assert_eq!(
+            app_path,
+            dirs::home_dir().unwrap().join("Applications/LightBurn.app")
+        );
+        let launch_arguments = license_launch_arguments(&app_path);
+        assert_eq!(launch_arguments[0], "-n");
+        assert_eq!(launch_arguments[1], app_path.as_os_str());
+        let prompts = prompts.into_inner();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("ACTIVATED"));
+        assert!(summary.contains("did not read or store"));
+    }
+
+    #[test]
+    fn lightburn_activation_requires_explicit_confirmation() {
+        let err = apply_activate_license_with(
+            LicenseProvider::LightBurn,
+            LicenseMethod::VendorUi,
+            true,
+            |_| Ok(()),
+            |_| Ok(false),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("expected ACTIVATED"));
+    }
+
+    #[test]
+    fn non_interactive_license_preflight_runs_before_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source.dmg");
+        let destination = tmp.path().join("downloaded.dmg");
+        fs::write(&source, b"not-reached").unwrap();
+        let task = Task {
+            id: "lightburn-preflight".into(),
+            name: "LightBurn preflight".into(),
+            description: String::new(),
+            platform: crate::rules::Platform::Any,
+            trust: TrustRequirement::BundledOnly,
+            steps: vec![
+                Step {
+                    id: "download".into(),
+                    name: String::new(),
+                    auth: AuthPolicy::None,
+                    check: None,
+                    dangerous: false,
+                    allow_elevation: ElevationPolicy::Forbidden,
+                    action: Action::DownloadFile {
+                        url: format!("file://{}", source.display()),
+                        dest: destination.to_string_lossy().into_owned(),
+                        checksum: Checksum {
+                            sha256: sha256_file(&source).unwrap(),
+                        },
+                    },
+                },
+                Step {
+                    id: "activate".into(),
+                    name: String::new(),
+                    auth: AuthPolicy::None,
+                    check: None,
+                    dangerous: false,
+                    allow_elevation: ElevationPolicy::Forbidden,
+                    action: Action::ActivateLicense(ActivateLicenseAction {
+                        provider: LicenseProvider::LightBurn,
+                        method: LicenseMethod::VendorUi,
+                    }),
+                },
+            ],
+        };
+
+        let err = run_task_with_interactivity(
+            &task,
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("interactive terminal"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn macos_version_comparison_handles_missing_components() {
+        assert!(version_at_least("26.6", "12.0").unwrap());
+        assert!(version_at_least("12", "12.0").unwrap());
+        assert!(version_at_least("12.0.1", "12").unwrap());
+        assert!(!version_at_least("11.7.10", "12.0").unwrap());
+    }
+
+    #[test]
+    fn app_identity_uses_test_requirement_with_signed_version() {
+        let identity = AppBundleIdentity {
+            bundle_identifier: "com.LightBurnSoftware.LightBurn".into(),
+            team_identifier: "UWZQ3LL82C".into(),
+            version: "2.1.03".into(),
+        };
+        let arguments = app_identity_verification_arguments(&identity);
+        let arguments = arguments
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+
+        assert!(arguments.iter().any(|arg| arg == "--test-requirement"));
+        assert!(!arguments.iter().any(|arg| arg == "--requirement"));
+        let requirement = arguments.last().unwrap();
+        assert!(requirement.contains("identifier \"com.LightBurnSoftware.LightBurn\""));
+        assert!(requirement.contains("subject.OU] = \"UWZQ3LL82C\""));
+        assert!(requirement.contains("CFBundleShortVersionString] = \"2.1.03\""));
+    }
+
+    #[test]
+    fn app_store_install_plan_is_typed_and_reports_prerequisites() {
+        let task = base_task(Step {
+            id: "install-xcode".into(),
+            name: String::new(),
+            auth: AuthPolicy::Sudo,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Allow,
+            action: Action::AppStoreInstall(AppStoreInstallAction {
+                app_id: 497_799_835,
+                operation: AppStoreOperation::Install,
+            }),
+        });
+
+        let report = run_task(
+            &task,
+            &RunOptions {
+                allow_elevation: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(report.plans[0]
+            .summary
+            .contains("mas install Mac App Store application 497799835"));
+        assert!(report.plans[0]
+            .prerequisites
+            .iter()
+            .any(|item| item.contains("Mac App Store")));
+        assert!(report.plans[0]
+            .prerequisites
+            .iter()
+            .any(|item| item.contains("operation: get")));
+    }
+
+    #[test]
+    fn mas_list_parser_and_command_arguments_use_exact_app_id() {
+        assert!(mas_list_contains_app(
+            "497799835 Xcode (26.4)\n",
+            497_799_835
+        ));
+        assert!(!mas_list_contains_app(
+            "497799835 Xcode (26.4)\n",
+            409_183_694
+        ));
+        assert_eq!(
+            app_store_command_arguments(497_799_835, AppStoreOperation::Get),
+            vec![OsString::from("get"), OsString::from("497799835")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_root_must_not_be_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real-applications");
+        let link = tmp.path().join("Applications");
+        fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let err = require_real_directory(&link).unwrap_err();
+        assert!(err.to_string().contains("not a symlink"));
+    }
+
+    #[test]
+    fn system_app_dmg_install_is_rejected() {
+        let task = base_task(Step {
+            id: "install".into(),
+            name: String::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            action: Action::InstallDmg {
+                dmg: "$HOME/Library/Caches/app.dmg".into(),
+                app_name: Some("Example.app".into()),
+                target: Some("/Applications".into()),
+                identity: None,
+            },
+        });
+
+        let err = run_task(&task, &RunOptions::default()).unwrap_err();
+        assert!(err.to_string().contains("restricted to $HOME/Applications"));
+    }
+
+    #[test]
+    fn user_app_dmg_install_plans_without_elevation() {
+        let task = base_task(Step {
+            id: "install".into(),
+            name: String::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            action: Action::InstallDmg {
+                dmg: "$HOME/Library/Caches/app.dmg".into(),
+                app_name: Some("Example.app".into()),
+                target: Some("$HOME/Applications".into()),
+                identity: None,
+            },
+        });
+
+        let report = run_task(&task, &RunOptions::default()).unwrap();
+        assert!(matches!(report.outcomes[0], ActionOutcome::Planned { .. }));
+        assert!(report.plans[0].summary.contains("$HOME/Applications"));
+        assert!(report.plans[0].prerequisites.is_empty());
+    }
+
+    fn github_release(
+        tag: &str,
+        prerelease: bool,
+        published_at: &str,
+        asset_name: &str,
+        digest: &str,
+    ) -> GithubRelease {
+        GithubRelease {
+            tag_name: tag.into(),
+            draft: false,
+            prerelease,
+            published_at: published_at.into(),
+            assets: vec![GithubAsset {
+                name: asset_name.into(),
+                browser_download_url: format!("{BAMBU_DOWNLOAD_PREFIX}{tag}/{asset_name}"),
+                digest: Some(format!("sha256:{digest}")),
+            }],
+        }
+    }
+
+    #[test]
+    fn bambu_release_resolver_selects_stable_or_beta_and_asset_version() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let stable = github_release(
+            "v02.07.01.62",
+            false,
+            "2026-06-16T00:00:00Z",
+            "Bambu_Studio_mac-v02.07.01.62-20260616.dmg",
+            digest,
+        );
+        let beta = github_release(
+            "v02.08.01.55",
+            true,
+            "2026-07-14T00:00:00Z",
+            "Bambu_Studio_mac-v02.08.01.55-20260714.dmg",
+            digest,
+        );
+        let releases = vec![stable, beta];
+
+        let resolved_stable = resolve_bambu_release(&releases, ReleaseChannel::Release).unwrap();
+        let resolved_beta = resolve_bambu_release(&releases, ReleaseChannel::Beta).unwrap();
+        assert_eq!(resolved_stable.version, "02.07.01.62");
+        assert_eq!(resolved_beta.version, "02.08.01.55");
+    }
+
+    #[test]
+    fn bambu_plan_honors_channel_override_without_network() {
+        let task = base_task(Step {
+            id: "bambu".into(),
+            name: String::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            action: Action::BambuStudioRelease(crate::automation::task::BambuStudioReleaseAction {
+                channel: ReleaseChannel::Release,
+            }),
+        });
+        let report = run_task(
+            &task,
+            &RunOptions {
+                release_channel: Some(ReleaseChannel::Beta),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(report.plans[0].summary.contains("latest Bambu Studio beta"));
+    }
+
+    #[test]
+    fn numeric_version_comparison_prevents_downgrades() {
+        assert_eq!(
+            compare_versions("02.08.01.55", "02.07.01.62").unwrap(),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("02.07.01.62", "2.7.1.62").unwrap(),
+            Ordering::Equal
+        );
     }
 }
