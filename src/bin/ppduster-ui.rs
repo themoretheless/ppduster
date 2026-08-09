@@ -790,6 +790,8 @@ impl ScenarioApp {
         let Some(parent) = self.block_picker_parent.clone() else {
             return;
         };
+        let picker_height = (ctx.content_rect().height() - 96.0).clamp(540.0, 760.0);
+        let list_height = picker_height - 118.0;
         let mut selected = None;
         let mut close = false;
         egui::Modal::new(Id::new("composer-block-picker"))
@@ -801,6 +803,7 @@ impl ScenarioApp {
             )
             .show(ctx, |ui| {
                 ui.set_width(560.0);
+                ui.set_min_height(picker_height);
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(
@@ -832,7 +835,7 @@ impl ScenarioApp {
                 let query = self.block_picker_search.trim().to_lowercase();
                 ScrollArea::vertical()
                     .id_salt("composer-block-picker-list")
-                    .max_height(430.0)
+                    .max_height(list_height)
                     .show(ui, |ui| {
                         for kind in ComposerBlockKind::ALL {
                             let context = composer_output_context(kind);
