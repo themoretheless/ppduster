@@ -231,6 +231,7 @@ fn run_task_with_interactivity(
     let mut steps = Vec::new();
     let mut errors = Vec::new();
     let mut auth_state = AuthState::default();
+    let mut loop_contexts: BTreeMap<String, (String, Vec<serde_json::Value>)> = BTreeMap::new();
     let mut halted = false;
 
     for step in &task.steps {
@@ -354,6 +355,222 @@ fn run_task_with_interactivity(
                         continue;
                     }
                 }
+            }
+        }
+        if opts.apply {
+            if let Action::ForEach {
+                source_step,
+                array_path,
+                item,
+            } = &step.action
+            {
+                let plan = plan_step(step, opts)?;
+                plans.push(plan.clone());
+                match resolve_for_each_items(source_step, array_path, &steps) {
+                    Ok(items) => {
+                        let count = items.len();
+                        loop_contexts.insert(step.id.clone(), (item.clone(), items));
+                        let summary = format!(
+                            "prepared {count} iteration(s) from {source_step}.{array_path} as {item}"
+                        );
+                        steps.push(StepReport {
+                            step_id: step.id.clone(),
+                            step_name: step_name(step),
+                            summary: summary.clone(),
+                            status: StepStatus::Applied,
+                            prerequisites: plan.prerequisites,
+                            logs: vec![StepLogEntry {
+                                step_id: step.id.clone(),
+                                message: summary.clone(),
+                            }],
+                            output: None,
+                        });
+                        outcomes.push(ActionOutcome::Applied { summary });
+                    }
+                    Err(error) => {
+                        let message = format!("step {} failed to prepare loop: {error:#}", step.id);
+                        steps.push(StepReport {
+                            step_id: step.id.clone(),
+                            step_name: step_name(step),
+                            summary: plan.summary,
+                            status: StepStatus::Failed,
+                            prerequisites: plan.prerequisites,
+                            logs: vec![StepLogEntry {
+                                step_id: step.id.clone(),
+                                message: format!("failed: {message}"),
+                            }],
+                            output: None,
+                        });
+                        errors.push(message);
+                        outcomes.push(ActionOutcome::Blocked);
+                        halted = true;
+                    }
+                }
+                continue;
+            }
+            if let Action::ForEachGitCloneIfMissing {
+                loop_step,
+                repo,
+                dest,
+                branch,
+            } = &step.action
+            {
+                let plan = plan_step(step, opts)?;
+                plans.push(plan.clone());
+                let Some((item_alias, items)) = loop_contexts.get(loop_step) else {
+                    let message = format!(
+                        "step {} cannot find executed for-each step {}",
+                        step.id, loop_step
+                    );
+                    steps.push(failed_step_report(step, &plan, &message));
+                    errors.push(message);
+                    outcomes.push(ActionOutcome::Blocked);
+                    halted = true;
+                    continue;
+                };
+                let mut logs = vec![StepLogEntry {
+                    step_id: step.id.clone(),
+                    message: format!("running {} iteration(s)", items.len()),
+                }];
+                let mut applied = 0usize;
+                let mut satisfied = 0usize;
+                let mut failure = None;
+                let mut iteration_steps = Vec::with_capacity(items.len());
+                for (index, value) in items.iter().enumerate() {
+                    let iteration = index + 1;
+                    let rendered = (|| -> Result<Step> {
+                        let repo = render_item_template(repo, item_alias, value)?;
+                        let dest = render_item_template(dest, item_alias, value)?;
+                        let branch = branch
+                            .as_deref()
+                            .map(|value_template| {
+                                render_optional_item_template(value_template, item_alias, value)
+                            })
+                            .transpose()?
+                            .flatten();
+                        Ok(Step {
+                            id: format!("{}[{iteration}]", step.id),
+                            name: format!("{} · {iteration}", step_name(step)),
+                            auth: step.auth,
+                            check: step.check.clone(),
+                            dangerous: step.dangerous,
+                            allow_elevation: step.allow_elevation,
+                            when: None,
+                            require: None,
+                            action: Action::GitCloneIfMissing { repo, dest, branch },
+                        })
+                    })();
+                    let iteration_step = match rendered {
+                        Ok(iteration_step) => iteration_step,
+                        Err(error) => {
+                            failure = Some(format!("iteration {iteration}: {error:#}"));
+                            break;
+                        }
+                    };
+                    if let Err(error) = iteration_step
+                        .validate()
+                        .map_err(AutomationError::Message)
+                        .and_then(|_| {
+                            enforce_step_policy(&iteration_step, opts, terminal_interactive)
+                                .map_err(|error| AutomationError::Message(error.to_string()))
+                        })
+                    {
+                        failure = Some(format!("iteration {iteration}: {error}"));
+                        break;
+                    }
+                    iteration_steps.push(iteration_step);
+                }
+                if failure.is_none() {
+                    for (index, iteration_step) in iteration_steps.iter().enumerate() {
+                        let iteration = index + 1;
+                        if step_requires_auth_prompt(iteration_step, &auth_state)? {
+                            if let Err(error) = ensure_auth(iteration_step, &mut auth_state) {
+                                failure = Some(format!("iteration {iteration}: {error}"));
+                                break;
+                            }
+                        }
+                        match is_satisfied(iteration_step, true)? {
+                            Some(reason) => {
+                                satisfied += 1;
+                                logs.push(StepLogEntry {
+                                    step_id: iteration_step.id.clone(),
+                                    message: reason,
+                                });
+                            }
+                            None => match apply_step(iteration_step, opts) {
+                                Ok(ApplyStepResult::Applied(summary))
+                                | Ok(ApplyStepResult::AppliedWithOutput { summary, .. }) => {
+                                    applied += 1;
+                                    logs.push(StepLogEntry {
+                                        step_id: iteration_step.id.clone(),
+                                        message: summary,
+                                    });
+                                }
+                                Ok(ApplyStepResult::AlreadySatisfied(summary)) => {
+                                    satisfied += 1;
+                                    logs.push(StepLogEntry {
+                                        step_id: iteration_step.id.clone(),
+                                        message: summary,
+                                    });
+                                }
+                                Ok(ApplyStepResult::Failed { error, .. }) => {
+                                    failure = Some(format!("iteration {iteration}: {error}"));
+                                    break;
+                                }
+                                Err(error) => {
+                                    failure = Some(format!("iteration {iteration}: {error:#}"));
+                                    break;
+                                }
+                            },
+                        }
+                    }
+                }
+                if let Some(message) = failure {
+                    logs.push(StepLogEntry {
+                        step_id: step.id.clone(),
+                        message: format!("failed: {message}"),
+                    });
+                    steps.push(StepReport {
+                        step_id: step.id.clone(),
+                        step_name: step_name(step),
+                        summary: plan.summary,
+                        status: StepStatus::Failed,
+                        prerequisites: plan.prerequisites,
+                        logs,
+                        output: None,
+                    });
+                    errors.push(format!("step {} {message}", step.id));
+                    outcomes.push(ActionOutcome::Blocked);
+                    halted = true;
+                } else {
+                    let summary = format!(
+                        "completed {} iteration(s): {applied} cloned, {satisfied} already present",
+                        items.len()
+                    );
+                    logs.push(StepLogEntry {
+                        step_id: step.id.clone(),
+                        message: summary.clone(),
+                    });
+                    steps.push(StepReport {
+                        step_id: step.id.clone(),
+                        step_name: step_name(step),
+                        summary: summary.clone(),
+                        status: if applied > 0 {
+                            StepStatus::Applied
+                        } else {
+                            StepStatus::Satisfied
+                        },
+                        prerequisites: plan.prerequisites,
+                        logs,
+                        output: None,
+                    });
+                    outcomes.push(if applied > 0 {
+                        ActionOutcome::Applied { summary }
+                    } else {
+                        ActionOutcome::AlreadySatisfied { reason: summary }
+                    });
+                }
+                continue;
             }
         }
         // Unconditional typed inspections are deliberately read-only, so they
@@ -660,6 +877,119 @@ fn enforce_step_policy(step: &Step, opts: &RunOptions, terminal_interactive: boo
         validate_existing_dmg_install(step)?;
     }
     Ok(())
+}
+
+fn failed_step_report(step: &Step, plan: &ActionPlan, message: &str) -> StepReport {
+    StepReport {
+        step_id: step.id.clone(),
+        step_name: step_name(step),
+        summary: plan.summary.clone(),
+        status: StepStatus::Failed,
+        prerequisites: plan.prerequisites.clone(),
+        logs: vec![StepLogEntry {
+            step_id: step.id.clone(),
+            message: format!("failed: {message}"),
+        }],
+        output: None,
+    }
+}
+
+fn resolve_for_each_items(
+    source_step: &str,
+    array_path: &str,
+    reports: &[StepReport],
+) -> Result<Vec<serde_json::Value>> {
+    let report = reports
+        .iter()
+        .find(|report| report.step_id == source_step)
+        .with_context(|| format!("source step {source_step} has not produced a report"))?;
+    let output = report
+        .output
+        .as_ref()
+        .with_context(|| format!("source step {source_step} has no output context"))?;
+    let serialized = serde_json::to_value(output).context("serialize source step output")?;
+    let mut current = serialized
+        .get("value")
+        .context("source step output has no value")?;
+    for segment in array_path.split('.').filter(|segment| !segment.is_empty()) {
+        current = current
+            .get(segment)
+            .with_context(|| format!("context path {array_path} is missing segment {segment}"))?;
+    }
+    current
+        .as_array()
+        .cloned()
+        .with_context(|| format!("context path {array_path} is not an array"))
+}
+
+fn item_value_at_path<'a>(
+    expression: &str,
+    item_alias: &str,
+    item: &'a serde_json::Value,
+) -> Result<&'a serde_json::Value> {
+    let mut segments = expression.split('.');
+    let alias = segments.next().unwrap_or_default();
+    if alias != item_alias {
+        bail!("template {expression} must start with loop item {item_alias}");
+    }
+    let mut current = item;
+    for segment in segments {
+        current = current
+            .get(segment)
+            .with_context(|| format!("template field {expression} does not exist"))?;
+    }
+    Ok(current)
+}
+
+fn scalar_template_value(value: &serde_json::Value, expression: &str) -> Result<String> {
+    match value {
+        serde_json::Value::String(value) => Ok(value.clone()),
+        serde_json::Value::Bool(value) => Ok(value.to_string()),
+        serde_json::Value::Number(value) => Ok(value.to_string()),
+        serde_json::Value::Null => bail!("template field {expression} is null"),
+        _ => bail!("template field {expression} is not a scalar value"),
+    }
+}
+
+fn render_optional_item_template(
+    template: &str,
+    item_alias: &str,
+    item: &serde_json::Value,
+) -> Result<Option<String>> {
+    let trimmed = template.trim();
+    if let Some(expression) = trimmed
+        .strip_prefix("{{")
+        .and_then(|value| value.strip_suffix("}}"))
+    {
+        let expression = expression.trim();
+        let value = item_value_at_path(expression, item_alias, item)?;
+        if value.is_null() {
+            return Ok(None);
+        }
+    }
+    render_item_template(template, item_alias, item).map(Some)
+}
+
+fn render_item_template(
+    template: &str,
+    item_alias: &str,
+    item: &serde_json::Value,
+) -> Result<String> {
+    let mut rendered = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        rendered.push_str(&rest[..start]);
+        let after_start = &rest[start + 2..];
+        let end = after_start
+            .find("}}")
+            .with_context(|| format!("unclosed template in {template}"))?;
+        let expression = after_start[..end].trim();
+        let value = item_value_at_path(expression, item_alias, item)?;
+        rendered.push_str(&scalar_template_value(value, expression)?);
+        rest = &after_start[end + 2..];
+    }
+    rendered.push_str(rest);
+    Ok(rendered)
 }
 
 fn validate_existing_dmg_install(step: &Step) -> Result<()> {
@@ -1001,6 +1331,25 @@ pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
         Action::GithubListRepositories => {
             "list repositories visible to the GitHub CLI account and return the account login plus typed GitHub repository metadata".into()
         }
+        Action::ForEach {
+            source_step,
+            array_path,
+            item,
+        } => format!(
+            "iterate over array {array_path} from step {source_step}, exposing each element as {item}"
+        ),
+        Action::ForEachGitCloneIfMissing {
+            loop_step,
+            repo,
+            dest,
+            branch,
+        } => format!(
+            "for every item from loop {loop_step}, clone {repo} to {dest} when absent{}",
+            branch
+                .as_deref()
+                .map(|branch| format!(" using branch {branch}"))
+                .unwrap_or_default()
+        ),
         Action::CreateDirectory(action) => format!(
             "create directory {} and missing parents; leave an existing real directory unchanged and never replace a file or symlink",
             action.path
@@ -1519,6 +1868,9 @@ fn prompt_once(message: &str) -> Result<()> {
 fn apply_step(step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
     match &step.action {
         Action::GithubListRepositories => apply_github_list_repositories(),
+        Action::ForEach { .. } | Action::ForEachGitCloneIfMissing { .. } => {
+            bail!("foreach actions must be executed by the scenario runner")
+        }
         Action::CreateDirectory(action) => apply_create_directory(&action.path),
         Action::InspectPath(action) => {
             let metadata = inspect_path(action)?;
@@ -7577,6 +7929,69 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
         assert_eq!(repository["default_branch"], "main");
         assert_eq!(repository["private"], true);
         assert_eq!(repository["archived"], false);
+    }
+
+    #[test]
+    fn foreach_resolves_repository_array_and_renders_clone_fields() {
+        let output = StepOutput::GithubRepositories(GithubRepositoriesOutput {
+            github: GithubContextOutput {
+                account: GithubAccountOutput {
+                    login: "octocat".into(),
+                },
+                repositories: vec![GithubRepositoryOutput {
+                    id: "R_123".into(),
+                    owner: "owner".into(),
+                    name: "repository".into(),
+                    full_name: "owner/repository".into(),
+                    https_url: "https://github.com/owner/repository".into(),
+                    ssh_url: "git@github.com:owner/repository.git".into(),
+                    default_branch: Some("main".into()),
+                    private: false,
+                    archived: false,
+                }],
+            },
+        });
+        let reports = vec![StepReport {
+            step_id: "repositories".into(),
+            step_name: "Repositories".into(),
+            summary: String::new(),
+            status: StepStatus::Applied,
+            prerequisites: Vec::new(),
+            logs: Vec::new(),
+            output: Some(output),
+        }];
+
+        let items =
+            resolve_for_each_items("repositories", "github.repositories", &reports).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            render_item_template("{{repository.https_url}}", "repository", &items[0]).unwrap(),
+            "https://github.com/owner/repository"
+        );
+        assert_eq!(
+            render_item_template(
+                "$HOME/Developer/{{repository.owner}}/{{repository.name}}",
+                "repository",
+                &items[0]
+            )
+            .unwrap(),
+            "$HOME/Developer/owner/repository"
+        );
+        assert_eq!(
+            render_optional_item_template("{{repository.default_branch}}", "repository", &items[0])
+                .unwrap(),
+            Some("main".into())
+        );
+    }
+
+    #[test]
+    fn foreach_optional_template_maps_null_to_none() {
+        let item = serde_json::json!({"default_branch": null});
+        assert_eq!(
+            render_optional_item_template("{{repository.default_branch}}", "repository", &item)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

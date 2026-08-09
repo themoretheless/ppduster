@@ -130,6 +130,7 @@ fn project_entry_mut<'a>(
 #[derive(Debug, Clone, Copy)]
 enum ComposerBlockKind {
     GithubListRepositories,
+    ForEach,
     GitInspect,
     GitCloneIfMissing,
     GitFetch,
@@ -143,8 +144,9 @@ enum ComposerBlockKind {
 }
 
 impl ComposerBlockKind {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::GithubListRepositories,
+        Self::ForEach,
         Self::GitInspect,
         Self::GitCloneIfMissing,
         Self::GitFetch,
@@ -160,6 +162,7 @@ impl ComposerBlockKind {
     fn title(self) -> &'static str {
         match self {
             Self::GithubListRepositories => "Получить репозитории аккаунта",
+            Self::ForEach => "Для каждого элемента",
             Self::GitInspect => "Проверить Git-репозиторий",
             Self::GitCloneIfMissing => "Клонировать, если отсутствует",
             Self::GitFetch => "Получить remote-ветку",
@@ -176,6 +179,7 @@ impl ComposerBlockKind {
     fn category(self) -> &'static str {
         match self {
             Self::GithubListRepositories => "GITHUB",
+            Self::ForEach => "ЛОГИКА",
             Self::GitInspect | Self::GitCloneIfMissing | Self::GitFetch | Self::GitFastForward => {
                 "GIT"
             }
@@ -416,7 +420,27 @@ impl ScenarioApp {
             }
             suffix += 1;
         };
-        task.steps.push(composer_step(kind, id.clone()));
+        let mut new_step = composer_step(kind, id.clone());
+        if matches!(kind, ComposerBlockKind::ForEach) {
+            if task.steps.iter().any(|step| step.id == parent) {
+                if let Action::ForEach { source_step, .. } = &mut new_step.action {
+                    *source_step = parent.clone();
+                }
+            }
+        } else if matches!(kind, ComposerBlockKind::GitCloneIfMissing)
+            && task
+                .steps
+                .iter()
+                .any(|step| step.id == parent && matches!(step.action, Action::ForEach { .. }))
+        {
+            new_step.action = Action::ForEachGitCloneIfMissing {
+                loop_step: parent.clone(),
+                repo: "{{repository.https_url}}".into(),
+                dest: "$HOME/Developer/{{repository.owner}}/{{repository.name}}".into(),
+                branch: Some("{{repository.default_branch}}".into()),
+            };
+        }
+        task.steps.push(new_step);
         let task_id = task.id.clone();
         self.selected_step = Some(task.steps.len() - 1);
         if let Some(project) = self.custom_project.as_mut() {
@@ -3188,6 +3212,7 @@ fn github_step_slug(repository: &GithubRepository) -> String {
 fn composer_block_id(kind: ComposerBlockKind) -> &'static str {
     match kind {
         ComposerBlockKind::GithubListRepositories => "list-github-repositories",
+        ComposerBlockKind::ForEach => "for-each",
         ComposerBlockKind::GitInspect => "inspect-repository",
         ComposerBlockKind::GitCloneIfMissing => "clone-repository",
         ComposerBlockKind::GitFetch => "fetch-repository",
@@ -3206,6 +3231,7 @@ fn composer_output_context(kind: ComposerBlockKind) -> &'static str {
         ComposerBlockKind::GithubListRepositories => {
             "github.account.login, github.repositories[]: { id, owner, name, full_name, https_url, ssh_url, default_branch, private, archived }"
         }
+        ComposerBlockKind::ForEach => "item (текущий элемент массива)",
         ComposerBlockKind::GitInspect => {
             "repository.exists, repository.path, repository.remote_url"
         }
@@ -3234,6 +3260,10 @@ fn composer_step_output_context(step: &Step) -> &'static str {
         Action::GithubListRepositories => {
             composer_output_context(ComposerBlockKind::GithubListRepositories)
         }
+        Action::ForEach { .. } => "repository (элемент массива github.repositories[])",
+        Action::ForEachGitCloneIfMissing { .. } => {
+            composer_output_context(ComposerBlockKind::GitCloneIfMissing)
+        }
         Action::GitInspect { .. } => composer_output_context(ComposerBlockKind::GitInspect),
         Action::GitCloneIfMissing { .. } => {
             composer_output_context(ComposerBlockKind::GitCloneIfMissing)
@@ -3255,6 +3285,11 @@ fn composer_step(kind: ComposerBlockKind, id: String) -> Step {
     let destination = "$HOME/Developer/owner/repository".to_owned();
     let action = match kind {
         ComposerBlockKind::GithubListRepositories => Action::GithubListRepositories,
+        ComposerBlockKind::ForEach => Action::ForEach {
+            source_step: "list-github-repositories-1".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+        },
         ComposerBlockKind::GitInspect => Action::GitInspect {
             repo: repository,
             dest: destination,
@@ -3478,6 +3513,38 @@ fn paint_composer_step_editor(ui: &mut egui::Ui, step: &mut Step, dark: bool) ->
                 .size(9.0)
                 .color(MUTED),
             );
+        }
+        Action::ForEach {
+            source_step,
+            array_path,
+            item,
+        } => {
+            changed |= composer_text_field(ui, "ID шага-источника", source_step);
+            changed |= composer_text_field(ui, "Путь к массиву", array_path);
+            changed |= composer_text_field(ui, "Имя элемента", item);
+            ui.label(
+                RichText::new(format!(
+                    "В дочернем блоке используйте {{{{{item}.field}}}} — например, {{{{{item}.https_url}}}}."
+                ))
+                .size(9.0)
+                .color(PURPLE),
+            );
+        }
+        Action::ForEachGitCloneIfMissing {
+            loop_step,
+            repo,
+            dest,
+            branch,
+        } => {
+            changed |= composer_text_field(ui, "ID блока For each", loop_step);
+            changed |= composer_text_field(ui, "Repository URL", repo);
+            changed |= composer_text_field(ui, "Локальная папка", dest);
+            changed |= composer_text_field(
+                ui,
+                "Ветка",
+                branch.get_or_insert_with(|| "{{repository.default_branch}}".into()),
+            );
+            changed |= composer_git_auth(ui, &mut step.auth);
         }
         Action::GitInspect { repo, dest } => {
             changed |= composer_text_field(ui, "Repository URL", repo);
@@ -3916,6 +3983,8 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, dark: bool) {
 fn action_color(action: &Action) -> Color32 {
     match action {
         Action::GithubListRepositories => PURPLE,
+        Action::ForEach { .. } => CYAN,
+        Action::ForEachGitCloneIfMissing { .. } => PURPLE,
         Action::CreateDirectory(_) | Action::InspectPath(_) | Action::WriteFile(_) => CYAN,
         Action::CopyPath(_)
         | Action::DownloadFile { .. }
@@ -3940,6 +4009,8 @@ fn action_color(action: &Action) -> Color32 {
 fn action_icon(action: &Action) -> &'static str {
     match action {
         Action::GithubListRepositories => "GH",
+        Action::ForEach { .. } => "∀",
+        Action::ForEachGitCloneIfMissing { .. } => "⌘",
         Action::CreateDirectory(_) => "+DIR",
         Action::InspectPath(_) => "INFO",
         Action::CopyPath(_) => "COPY",
@@ -3970,6 +4041,8 @@ fn action_icon(action: &Action) -> &'static str {
 fn action_eyebrow(action: &Action) -> &'static str {
     match action {
         Action::GithubListRepositories => "Репозитории GitHub",
+        Action::ForEach { .. } => "Цикл",
+        Action::ForEachGitCloneIfMissing { .. } => "Клонирование в цикле",
         Action::CreateDirectory(_) => "Папка",
         Action::InspectPath(_) => "Метаданные",
         Action::CopyPath(_) => "Копирование",
@@ -4058,6 +4131,7 @@ fn task_has_unready_git_credentials(task: &Task) -> bool {
                 Action::GitClone { repo, .. }
                     | Action::GitInspect { repo, .. }
                     | Action::GitCloneIfMissing { repo, .. }
+                    | Action::ForEachGitCloneIfMissing { repo, .. }
                     | Action::GitFetch { repo, .. }
                     | Action::GitFastForward { repo, .. }
                     if !git_clone_auth_ready(repo)
@@ -4072,6 +4146,8 @@ fn action_supports_gui_run(action: &Action) -> bool {
         | Action::RunScript { .. }
         | Action::ConfigurePackageRegistryFiles { .. } => false,
         Action::GithubListRepositories
+        | Action::ForEach { .. }
+        | Action::ForEachGitCloneIfMissing { .. }
         | Action::CreateDirectory(_)
         | Action::InspectPath(_)
         | Action::CopyPath(_)
