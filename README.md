@@ -53,10 +53,11 @@ of arbitrarily nested groups, and every group can contain scenarios or more grou
 After a project YAML is opened, the left navigator is populated directly from its
 `project.entries`; nested `group` entries appear as an expandable tree.
 Selecting a scenario opens only its blocks on the canvas; selecting a group changes the
-insertion location without replacing the current canvas. Add atomic Git, filesystem,
-and Homebrew blocks from the palette and edit their typed parameters on the right. Every
-scenario canvas starts with a permanent Start block. Its plus button, and the plus button
-on every following block, opens a searchable block picker that displays the planned typed
+insertion location without replacing the current canvas. The left sidebar contains only
+the project tree; atomic Git, filesystem, and Homebrew blocks are added from the searchable
+picker opened by a plus button on the canvas and edited on the right. Every scenario canvas
+starts with a permanent Start block. Its plus button, and the plus button on every following
+block, opens a block picker that displays the planned typed
 output contract for downstream graph bindings. The current executable form remains an
 ordered task while graph execution is developed. The constructor saves the whole project
 as portable YAML. Loading a legacy standalone task

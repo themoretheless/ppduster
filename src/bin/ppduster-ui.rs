@@ -221,7 +221,6 @@ struct ScenarioApp {
     load_error: Option<String>,
     selected_task: usize,
     selected_step: Option<usize>,
-    search: String,
     channel: ReleaseChannel,
     allow_shell: bool,
     allow_elevation: bool,
@@ -262,7 +261,6 @@ impl ScenarioApp {
             load_error,
             selected_task,
             selected_step: Some(0),
-            search: String::new(),
             channel: ReleaseChannel::Release,
             allow_shell: false,
             allow_elevation: false,
@@ -346,7 +344,6 @@ impl ScenarioApp {
         self.selected_step = None;
         self.github_picker.open = false;
         self.github_picker.selected_ids.clear();
-        self.search.clear();
         self.invalidate_plan();
     }
 
@@ -1296,67 +1293,6 @@ impl ScenarioApp {
                     self.invalidate_plan();
                 }
             }
-        }
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
-        section_label(ui, "АТОМАРНЫЕ БЛОКИ");
-        ui.add(
-            egui::TextEdit::singleline(&mut self.search)
-                .hint_text("Поиск блока…")
-                .desired_width(f32::INFINITY),
-        );
-        ui.add_space(8.0);
-        ui.separator();
-
-        let query = self.search.trim().to_lowercase();
-        let mut add = None;
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let mut previous_category = "";
-                for kind in ComposerBlockKind::ALL {
-                    if !query.is_empty()
-                        && !kind.title().to_lowercase().contains(&query)
-                        && !kind.category().to_lowercase().contains(&query)
-                    {
-                        continue;
-                    }
-                    if kind.category() != previous_category {
-                        ui.add_space(10.0);
-                        section_label(ui, kind.category());
-                        previous_category = kind.category();
-                    }
-                    let response = Frame::new()
-                        .fill(panel(self.dark))
-                        .stroke(Stroke::new(1.0, line(self.dark)))
-                        .corner_radius(9)
-                        .inner_margin(Margin::same(9))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(
-                                RichText::new(kind.title())
-                                    .strong()
-                                    .size(10.0)
-                                    .color(text(self.dark)),
-                            );
-                            ui.label(
-                                RichText::new(format!("＋ {}", composer_block_id(kind)))
-                                    .monospace()
-                                    .size(8.0)
-                                    .color(PURPLE),
-                            );
-                        })
-                        .response
-                        .interact(Sense::click());
-                    if response.clicked() {
-                        add = Some(kind);
-                    }
-                    ui.add_space(6.0);
-                }
-            });
-        if let Some(kind) = add {
-            self.add_composer_block(kind);
         }
     }
 
