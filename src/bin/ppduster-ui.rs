@@ -222,6 +222,12 @@ fn main() -> eframe::Result {
         .with_title("ppduster · Scenario Flow")
         .with_inner_size([1440.0, 900.0])
         .with_min_inner_size([980.0, 680.0]);
+    #[cfg(target_os = "macos")]
+    let viewport = viewport
+        .with_fullsize_content_view(true)
+        .with_title_shown(false)
+        .with_titlebar_shown(false)
+        .with_titlebar_buttons_shown(true);
     eframe::run_native(
         "ppduster · Scenario Flow",
         eframe::NativeOptions {
@@ -1187,15 +1193,37 @@ fn first_scenario_path(entries: &[ProjectEntry], prefix: &mut Vec<usize>) -> Opt
 
 impl ScenarioApp {
     fn top_bar(&mut self, root: &mut egui::Ui) {
+        #[cfg(target_os = "macos")]
+        let horizontal_margin = Margin {
+            left: 84,
+            right: 16,
+            top: 10,
+            bottom: 10,
+        };
+        #[cfg(not(target_os = "macos"))]
+        let horizontal_margin = Margin::symmetric(16, 10);
+
         egui::Panel::top("topbar")
             .exact_size(68.0)
             .frame(
                 Frame::new()
                     .fill(surface(self.dark))
                     .stroke(Stroke::new(1.0, line(self.dark)))
-                    .inner_margin(Margin::symmetric(16, 10)),
+                    .inner_margin(horizontal_margin),
             )
             .show(root, |ui| {
+                #[cfg(target_os = "macos")]
+                {
+                    let drag = ui.interact(
+                        ui.max_rect(),
+                        ui.id().with("native-titlebar-drag"),
+                        Sense::drag(),
+                    );
+                    if drag.drag_started() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                }
+
                 ui.horizontal(|ui| {
                     Frame::new()
                         .fill(if self.dark { Color32::WHITE } else { INK })
