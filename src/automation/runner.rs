@@ -83,6 +83,10 @@ pub enum ActionOutcome {
 #[derive(Debug, Clone, Serialize)]
 pub struct RunReport {
     pub task_id: String,
+    pub task_name: String,
+    pub task_description: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scenarios: Vec<String>,
     pub plans: Vec<ActionPlan>,
     pub outcomes: Vec<ActionOutcome>,
     pub steps: Vec<StepReport>,
@@ -106,6 +110,15 @@ fn run_task_with_interactivity(
     terminal_interactive: bool,
 ) -> Result<RunReport> {
     task.validate().map_err(AutomationError::Message)?;
+    if task.steps.is_empty() {
+        if task.is_template() {
+            bail!(
+                "task template {} must be resolved through TaskPack before execution",
+                task.id
+            );
+        }
+        bail!("task {} has no executable steps", task.id);
+    }
     if opts.release_channel.is_some()
         && !task
             .steps
@@ -150,7 +163,7 @@ fn run_task_with_interactivity(
             steps.push(StepReport {
                 step_id: step.id.clone(),
                 step_name: step_name(step),
-                summary: plan_summary(step, opts)?,
+                summary: describe_step(step, opts)?,
                 status: StepStatus::Satisfied,
                 prerequisites: prerequisites_for_step(step),
                 logs: vec![StepLogEntry {
@@ -251,6 +264,9 @@ fn run_task_with_interactivity(
 
     Ok(RunReport {
         task_id: task.id.clone(),
+        task_name: task.name.clone(),
+        task_description: task.description.clone(),
+        scenarios: task.included_scenarios().to_vec(),
         plans,
         outcomes,
         steps,
@@ -368,7 +384,7 @@ fn parent_or_self(path: &Path) -> &Path {
 
 fn plan_step(step: &Step, opts: &RunOptions) -> Result<ActionPlan> {
     let prerequisites = prerequisites_for_step(step);
-    let summary = plan_summary(step, opts)?;
+    let summary = describe_step(step, opts)?;
     Ok(ActionPlan {
         step_id: step.id.clone(),
         step_name: step_name(step),
@@ -377,7 +393,11 @@ fn plan_step(step: &Step, opts: &RunOptions) -> Result<ActionPlan> {
     })
 }
 
-fn plan_summary(step: &Step, opts: &RunOptions) -> Result<String> {
+/// Return a detailed, side-effect-free explanation of what one step will do.
+///
+/// This is shared by plans, reports, and the scenario inspector so the user
+/// sees the same technical description before and during execution.
+pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
     Ok(match &step.action {
         Action::GitClone { repo, dest, branch } => format!(
             "git clone {} {}{} with hooks disabled and no submodules",
@@ -2429,9 +2449,11 @@ mod tests {
         Task {
             id: "setup-dev".into(),
             name: "Setup dev".into(),
-            description: String::new(),
+            description: "Set up the development environment.".into(),
             platform: crate::rules::Platform::Any,
             trust: TrustRequirement::BundledOnly,
+            scenarios: vec![],
+            resolved_scenarios: vec![],
             steps: vec![step],
         }
     }
@@ -2842,9 +2864,11 @@ mod tests {
         let task = Task {
             id: "setup-dev".into(),
             name: "Setup dev".into(),
-            description: String::new(),
+            description: "Set up the development environment.".into(),
             platform: crate::rules::Platform::Any,
             trust: TrustRequirement::BundledOnly,
+            scenarios: vec![],
+            resolved_scenarios: vec![],
             steps: vec![
                 Step {
                     id: "clone".into(),
@@ -2946,9 +2970,11 @@ mod tests {
         let task = Task {
             id: "setup-dev".into(),
             name: "Setup dev".into(),
-            description: String::new(),
+            description: "Set up the development environment.".into(),
             platform: crate::rules::Platform::Any,
             trust: TrustRequirement::BundledOnly,
+            scenarios: vec![],
+            resolved_scenarios: vec![],
             steps: vec![
                 Step {
                     id: "fail".into(),
@@ -3135,9 +3161,11 @@ mod tests {
         let task = Task {
             id: "lightburn-preflight".into(),
             name: "LightBurn preflight".into(),
-            description: String::new(),
+            description: "Verify the non-interactive license preflight.".into(),
             platform: crate::rules::Platform::Any,
             trust: TrustRequirement::BundledOnly,
+            scenarios: vec![],
+            resolved_scenarios: vec![],
             steps: vec![
                 Step {
                     id: "download".into(),

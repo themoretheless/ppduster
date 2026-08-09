@@ -140,9 +140,42 @@ ppduster setup run bambu-studio-install --channel beta --yes
 ppduster setup run app-store-bootstrap
 ppduster setup run app-store-bootstrap --yes
 
+# A reusable template composed from six existing scenarios
+ppduster setup show macos-developer-workstation
+ppduster setup run macos-developer-workstation --allow-shell
+
 # External task packs are blocked unless explicitly trusted
 ppduster --trust-external-packs setup run dev-brew-bootstrap --tasks-dir /path/to/tasks
 ```
+
+Every scenario must explain its outcome in `description`. YAML block scalars are
+recommended for a useful overview of changes, prerequisites, permissions, and what
+the scenario intentionally leaves alone. The UI and `setup run` combine that overview
+with a generated, action-by-action explanation of what will happen.
+
+A reusable template groups existing scenarios without copying their steps:
+
+```yaml
+task:
+  id: macos-developer-workstation
+  name: macOS developer workstation
+  description: |
+    Prepare a development workstation in a deliberate, reviewable order.
+    Child checks and safety gates remain active, and dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-top-01-brew-bootstrap
+    - macos-top-02-dotfiles
+    - macos-top-05-toolchains
+```
+
+Templates may include other templates. References are expanded in the listed order
+before execution so all shell, elevation, authentication, and destination policies are
+checked before the first change. Loading fails early on missing references, cycles,
+duplicate children, platform mismatches, excessive expansion, or a reference from a
+more-trusted pack to a less-trusted pack. A definition contains either `steps` or
+`scenarios`, never both.
 
 Current safety posture:
 

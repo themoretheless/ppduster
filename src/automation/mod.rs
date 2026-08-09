@@ -6,8 +6,8 @@ pub mod task;
 
 pub use loader::{PackTrust, TaskPack, TaskSource};
 pub use runner::{
-    run_task, ActionOutcome, ActionPlan, AutomationError, RunOptions, RunReport, StepLogEntry,
-    StepReport, StepStatus,
+    describe_step, run_task, ActionOutcome, ActionPlan, AutomationError, RunOptions, RunReport,
+    StepLogEntry, StepReport, StepStatus,
 };
 pub use task::{
     Action, ActivateLicenseAction, AppBundleIdentity, AppStoreInstallAction, AppStoreOperation,

@@ -339,7 +339,17 @@ fn run() -> Result<()> {
             SetupCmd::List => {
                 let tasks = load_tasks(&[], cli.trust_external_packs)?;
                 for task in &tasks.tasks {
-                    println!("{}\t{}", task.id, task.name);
+                    let kind = if task.is_template() {
+                        "template"
+                    } else {
+                        "scenario"
+                    };
+                    let description = task
+                        .description
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    println!("{}\t{}\t{}\t{}", task.id, kind, task.name, description);
                 }
                 Ok(())
             }
@@ -360,11 +370,9 @@ fn run() -> Result<()> {
                 tasks_dir,
             } => {
                 let tasks = load_tasks(&tasks_dir, cli.trust_external_packs)?;
-                let task = tasks
-                    .get(&id)
-                    .ok_or_else(|| anyhow::anyhow!("unknown task id {}", id))?;
+                let task = tasks.resolve(&id)?;
                 let report = run_task(
-                    task,
+                    &task,
                     &RunOptions {
                         apply: yes,
                         allow_shell,

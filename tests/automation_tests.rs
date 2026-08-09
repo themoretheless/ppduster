@@ -13,6 +13,613 @@ fn bin() -> PathBuf {
         .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/ppduster"))
 }
 
+fn write_task(dir: &Path, file: &str, yaml: &str) {
+    fs::write(dir.join(file), yaml).unwrap();
+}
+
+fn load_bundled_tasks(dir: &Path) -> TaskPack {
+    TaskPack::load_many(
+        &[TaskSource {
+            path: dir.to_path_buf(),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap()
+}
+
+#[test]
+fn task_description_supports_multiline_yaml_and_round_trip() {
+    let yaml = r#"
+task:
+  id: documented-task
+  name: Documented task
+  description: |
+    Checks the current workstation state before changing anything.
+    Installs the selected tool only when the check reports it missing.
+    Dry-run remains the default and no elevation is requested.
+  platform: any
+  steps:
+    - id: inspect
+      name: Inspect the workstation
+      type: run-command
+      program: /usr/bin/true
+"#;
+
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    task.validate().unwrap();
+    assert!(task.description.contains('\n'));
+    assert!(task.description.contains("before changing anything"));
+    assert!(task.description.contains("no elevation is requested"));
+
+    let rendered = serde_yaml::to_string(&task).unwrap();
+    let reparsed = serde_yaml::from_str::<ppduster::automation::Task>(&rendered).unwrap();
+    assert_eq!(reparsed.description, task.description);
+}
+
+#[test]
+fn programmatic_task_pack_constructor_preserves_source_provenance() {
+    let task = serde_yaml::from_str::<TaskFile>(
+        r#"
+task:
+  id: programmatic-task
+  name: Programmatic task
+  description: Verifies the supported in-memory task-pack constructor.
+  platform: any
+  steps:
+    - id: inspect
+      type: run-command
+      program: /usr/bin/true
+"#,
+    )
+    .unwrap()
+    .task;
+    let source = TaskSource {
+        path: PathBuf::from("programmatic-task.yaml"),
+        trust: PackTrust::Bundled,
+    };
+
+    let pack = TaskPack::from_tasks(vec![task], vec![source], false).unwrap();
+    assert_eq!(pack.resolve("programmatic-task").unwrap().steps.len(), 1);
+
+    let error = TaskPack::from_tasks(
+        Vec::new(),
+        vec![TaskSource {
+            path: PathBuf::from("extra-source.yaml"),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("count mismatch"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn task_validation_rejects_blank_description() {
+    let yaml = r#"
+task:
+  id: undocumented-task
+  name: Undocumented task
+  description: "   "
+  platform: any
+  steps:
+    - id: inspect
+      type: run-command
+      program: /usr/bin/true
+"#;
+
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    let error = task.validate().unwrap_err();
+    assert!(error.contains("description"), "unexpected error: {error}");
+}
+
+#[test]
+fn task_validation_requires_steps_or_scenarios_but_not_both() {
+    let both = r#"
+task:
+  id: ambiguous-task
+  name: Ambiguous task
+  description: A task body cannot mix direct steps and child scenarios.
+  platform: any
+  scenarios: [child]
+  steps:
+    - id: inspect
+      type: run-command
+      program: /usr/bin/true
+"#;
+    let neither = r#"
+task:
+  id: empty-task
+  name: Empty task
+  description: A task body must contain something to execute.
+  platform: any
+"#;
+
+    assert!(serde_yaml::from_str::<TaskFile>(both)
+        .unwrap()
+        .task
+        .validate()
+        .is_err());
+    assert!(serde_yaml::from_str::<TaskFile>(neither)
+        .unwrap()
+        .task
+        .validate()
+        .is_err());
+}
+
+#[test]
+fn task_pack_resolves_child_scenarios_in_declared_order() {
+    let dir = tempfile::tempdir().unwrap();
+    write_task(
+        dir.path(),
+        "alpha.yaml",
+        r#"
+task:
+  id: alpha
+  name: Alpha
+  description: Performs the first part of the composed scenario.
+  platform: any
+  steps:
+    - id: prepare
+      name: Prepare alpha
+      type: run-command
+      program: /usr/bin/true
+"#,
+    );
+    write_task(
+        dir.path(),
+        "beta.yaml",
+        r#"
+task:
+  id: beta
+  name: Beta
+  description: Performs the second part of the composed scenario.
+  platform: any
+  steps:
+    - id: finish
+      name: Finish beta
+      type: run-command
+      program: /usr/bin/true
+"#,
+    );
+    write_task(
+        dir.path(),
+        "template.yaml",
+        r#"
+task:
+  id: simple-template
+  name: Simple template
+  description: Runs alpha first and beta second as one scenario.
+  platform: any
+  scenarios:
+    - alpha
+    - beta
+"#,
+    );
+
+    let pack = load_bundled_tasks(dir.path());
+    let resolved = pack.resolve("simple-template").unwrap();
+    assert!(resolved.scenarios.is_empty());
+    assert_eq!(resolved.included_scenarios(), ["alpha", "beta"]);
+    resolved.validate().unwrap();
+    let rendered = serde_yaml::to_string(&resolved).unwrap();
+    serde_yaml::from_str::<ppduster::automation::Task>(&rendered)
+        .unwrap()
+        .validate()
+        .unwrap();
+    let step_ids = resolved
+        .steps
+        .iter()
+        .map(|step| step.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(step_ids, ["alpha/prepare", "beta/finish"]);
+}
+
+#[test]
+fn task_pack_resolves_nested_scenarios_in_declared_order() {
+    let dir = tempfile::tempdir().unwrap();
+    for (file, id, step_id, step_name) in [
+        ("first.yaml", "first", "one", "First step"),
+        ("second.yaml", "second", "two", "Second step"),
+        ("third.yaml", "third", "three", "Third step"),
+    ] {
+        write_task(
+            dir.path(),
+            file,
+            &format!(
+                r#"
+task:
+  id: {id}
+  name: {step_name} scenario
+  description: Provides {step_name} for the nested template test.
+  platform: any
+  steps:
+    - id: {step_id}
+      name: {step_name}
+      type: run-command
+      program: /usr/bin/true
+"#
+            ),
+        );
+    }
+    write_task(
+        dir.path(),
+        "inner.yaml",
+        r#"
+task:
+  id: inner
+  name: Inner template
+  description: Groups the first and second child scenarios.
+  platform: any
+  scenarios: [first, second]
+"#,
+    );
+    write_task(
+        dir.path(),
+        "outer.yaml",
+        r#"
+task:
+  id: outer
+  name: Outer template
+  description: Runs the inner template before the final child scenario.
+  platform: any
+  scenarios: [inner, third]
+"#,
+    );
+
+    let pack = load_bundled_tasks(dir.path());
+    let resolved = pack.resolve("outer").unwrap();
+    let step_names = resolved
+        .steps
+        .iter()
+        .map(|step| step.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(step_names, ["First step", "Second step", "Third step"]);
+}
+
+#[test]
+fn task_pack_load_rejects_unknown_child_scenario() {
+    let dir = tempfile::tempdir().unwrap();
+    write_task(
+        dir.path(),
+        "broken.yaml",
+        r#"
+task:
+  id: broken-template
+  name: Broken template
+  description: References a scenario that is not present in the task pack.
+  platform: any
+  scenarios: [missing-child]
+"#,
+    );
+
+    let error = TaskPack::load_many(
+        &[TaskSource {
+            path: dir.path().to_path_buf(),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap_err();
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("broken-template"),
+        "unexpected error: {error}"
+    );
+    assert!(error.contains("missing-child"), "unexpected error: {error}");
+}
+
+#[test]
+fn task_pack_load_rejects_scenario_cycles() {
+    let dir = tempfile::tempdir().unwrap();
+    write_task(
+        dir.path(),
+        "alpha.yaml",
+        r#"
+task:
+  id: cycle-alpha
+  name: Cycle alpha
+  description: References the beta half of an invalid cycle.
+  platform: any
+  scenarios: [cycle-beta]
+"#,
+    );
+    write_task(
+        dir.path(),
+        "beta.yaml",
+        r#"
+task:
+  id: cycle-beta
+  name: Cycle beta
+  description: References the alpha half of an invalid cycle.
+  platform: any
+  scenarios: [cycle-alpha]
+"#,
+    );
+
+    let error = TaskPack::load_many(
+        &[TaskSource {
+            path: dir.path().to_path_buf(),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap_err();
+    let error = format!("{error:#}");
+    assert!(error.contains("cycle-alpha"), "unexpected error: {error}");
+    assert!(error.contains("cycle-beta"), "unexpected error: {error}");
+}
+
+#[test]
+fn task_pack_load_rejects_duplicate_child_scenarios() {
+    let dir = tempfile::tempdir().unwrap();
+    write_task(
+        dir.path(),
+        "child.yaml",
+        r#"
+task:
+  id: repeated-child
+  name: Repeated child
+  description: A valid child that must not be included twice by one template.
+  platform: any
+  steps:
+    - id: inspect
+      type: run-command
+      program: /usr/bin/true
+"#,
+    );
+    write_task(
+        dir.path(),
+        "template.yaml",
+        r#"
+task:
+  id: duplicate-template
+  name: Duplicate template
+  description: Incorrectly includes the same child scenario twice.
+  platform: any
+  scenarios:
+    - repeated-child
+    - repeated-child
+"#,
+    );
+
+    let error = TaskPack::load_many(
+        &[TaskSource {
+            path: dir.path().to_path_buf(),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap_err();
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("duplicate-template"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.contains("repeated-child"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn task_pack_rejects_a_scenario_repeated_through_diamond_composition() {
+    let dir = tempfile::tempdir().unwrap();
+    write_task(
+        dir.path(),
+        "shared.yaml",
+        r#"
+task:
+  id: shared
+  name: Shared scenario
+  description: Performs one side effect that must not be expanded twice.
+  platform: any
+  steps:
+    - id: apply
+      type: run-command
+      program: /usr/bin/true
+"#,
+    );
+    for branch in ["alpha", "beta"] {
+        write_task(
+            dir.path(),
+            &format!("{branch}.yaml"),
+            &format!(
+                r#"
+task:
+  id: {branch}
+  name: {branch} branch
+  description: Includes the shared scenario through the {branch} branch.
+  platform: any
+  scenarios: [shared]
+"#
+            ),
+        );
+    }
+    write_task(
+        dir.path(),
+        "root.yaml",
+        r#"
+task:
+  id: diamond-root
+  name: Diamond root
+  description: Incorrectly reaches one shared scenario through two branches.
+  platform: any
+  scenarios: [alpha, beta]
+"#,
+    );
+
+    let error = TaskPack::load_many(
+        &[TaskSource {
+            path: dir.path().to_path_buf(),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap_err();
+    let error = format!("{error:#}");
+    assert!(error.contains("diamond-root"), "unexpected error: {error}");
+    assert!(error.contains("shared"), "unexpected error: {error}");
+    assert!(
+        error.contains("more than once"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn trusted_template_cannot_include_a_less_trusted_scenario() {
+    let bundled = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    write_task(
+        bundled.path(),
+        "template.yaml",
+        r#"
+task:
+  id: bundled-template
+  name: Bundled template
+  description: Must not silently inherit executable content from an external pack.
+  platform: any
+  trust: bundled-only
+  scenarios: [external-child]
+"#,
+    );
+    write_task(
+        external.path(),
+        "child.yaml",
+        r#"
+task:
+  id: external-child
+  name: External child
+  description: Represents explicitly trusted but lower-provenance executable content.
+  platform: any
+  trust: external-allowed
+  steps:
+    - id: apply
+      type: run-command
+      program: /usr/bin/true
+"#,
+    );
+
+    let error = TaskPack::load_many(
+        &[
+            TaskSource {
+                path: bundled.path().to_path_buf(),
+                trust: PackTrust::Bundled,
+            },
+            TaskSource {
+                path: external.path().to_path_buf(),
+                trust: PackTrust::External,
+            },
+        ],
+        true,
+    )
+    .unwrap_err();
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("bundled-template"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.contains("external-child"),
+        "unexpected error: {error}"
+    );
+    assert!(error.contains("less-trusted"), "unexpected error: {error}");
+}
+
+#[test]
+fn resolved_scenarios_namespace_step_ids_and_preserve_permission_gates() {
+    let dir = tempfile::tempdir().unwrap();
+    write_task(
+        dir.path(),
+        "plain.yaml",
+        r#"
+task:
+  id: plain
+  name: Plain child
+  description: Provides an unprivileged step with a colliding local ID.
+  platform: any
+  steps:
+    - id: inspect
+      name: Inspect without elevation
+      type: run-command
+      program: /usr/bin/true
+"#,
+    );
+    write_task(
+        dir.path(),
+        "privileged.yaml",
+        r#"
+task:
+  id: privileged
+  name: Privileged child
+  description: Provides an elevated step with the same local ID.
+  platform: any
+  steps:
+    - id: inspect
+      name: Inspect with elevation
+      auth: sudo
+      allow_elevation: allow
+      type: run-command
+      program: /usr/bin/true
+"#,
+    );
+    write_task(
+        dir.path(),
+        "template.yaml",
+        r#"
+task:
+  id: permission-template
+  name: Permission template
+  description: Combines unprivileged and privileged checks without losing policy metadata.
+  platform: any
+  scenarios: [plain, privileged]
+"#,
+    );
+
+    let pack = load_bundled_tasks(dir.path());
+    let resolved = pack.resolve("permission-template").unwrap();
+    let step_ids = resolved
+        .steps
+        .iter()
+        .map(|step| step.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(step_ids, ["plain/inspect", "privileged/inspect"]);
+
+    let error = run_task(&resolved, &RunOptions::default())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("privileged/inspect"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.contains("--allow-elevation"),
+        "unexpected error: {error}"
+    );
+
+    let report = run_task(
+        &resolved,
+        &RunOptions {
+            allow_elevation: true,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(report.task_name, "Permission template");
+    assert!(report.task_description.contains("policy metadata"));
+    assert_eq!(report.scenarios, ["plain", "privileged"]);
+    let planned_ids = report
+        .plans
+        .iter()
+        .map(|plan| plan.step_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(planned_ids, ["plain/inspect", "privileged/inspect"]);
+}
+
 #[test]
 fn loads_bundled_task_pack() {
     let dir = tempfile::tempdir().unwrap();
@@ -22,6 +629,7 @@ fn loads_bundled_task_pack() {
 task:
   id: setup-dev
   name: Setup dev
+  description: Loads one bundled setup task from a task pack directory.
   platform: any
   trust: bundled-only
   steps:
@@ -128,6 +736,10 @@ fn bundled_dev_setup_includes_macos_top_fifty_tasks() {
         pack.get("app-store-bootstrap").is_some(),
         "expected bundled task pack to include the App Store bootstrap scenario"
     );
+    assert!(
+        pack.get("macos-developer-workstation").is_some(),
+        "expected bundled task pack to include the developer workstation template"
+    );
 }
 
 #[test]
@@ -160,6 +772,7 @@ fn extract_archive_action_supports_explicit_format_and_safe_default_limit() {
 task:
   id: unpack-demo
   name: Unpack demo
+  description: Extracts an archive with an explicit safe format and default size limit.
   steps:
     - id: unpack
       type: extract-archive
@@ -185,6 +798,7 @@ fn app_store_install_action_is_typed_and_requires_elevation() {
 task:
   id: app-store-demo
   name: App Store demo
+  description: Installs an application through the typed Mac App Store action.
   platform: macos
   steps:
     - id: install
@@ -211,6 +825,7 @@ fn app_store_install_rejects_missing_elevation_declaration() {
 task:
   id: unsafe-app-store
   name: Unsafe App Store task
+  description: Demonstrates that typed App Store steps require explicit elevation.
   platform: macos
   steps:
     - id: install
@@ -268,6 +883,7 @@ fn activate_license_rejects_embedded_secret_fields() {
 task:
   id: unsafe-license
   name: Unsafe license
+  description: Demonstrates that license secrets are forbidden in scenario files.
   platform: macos
   steps:
     - id: activate
@@ -291,6 +907,7 @@ fn task_pack_rejects_license_key_fields_at_any_yaml_level() {
 task:
   id: unsafe-license
   name: Unsafe license
+  description: Demonstrates nested secret-field rejection during task-pack loading.
   platform: any
   steps:
     - id: activate
@@ -325,6 +942,7 @@ fn setup_cli_returns_failure_when_an_applied_step_fails() {
 task:
   id: failing-setup
   name: Failing setup
+  description: Runs a command that intentionally fails to test the CLI exit status.
   platform: any
   trust: external-allowed
   steps:
@@ -362,6 +980,7 @@ fn setup_cli_plans_typed_app_store_install() {
 task:
   id: app-store-cli-demo
   name: App Store CLI demo
+  description: Plans a typed Mac App Store installation through the setup CLI.
   platform: macos
   trust: external-allowed
   steps:
@@ -1013,6 +1632,7 @@ fn external_pack_requires_flag() {
 task:
   id: ext
   name: External
+  description: Downloads an external archive only after explicit pack trust is granted.
   platform: any
   trust: external-allowed
   steps:
@@ -1046,6 +1666,7 @@ fn shell_task_requires_flag_to_run() {
 task:
   id: shell-demo
   name: Shell demo
+  description: Exercises the explicit shell permission gate for dangerous commands.
   platform: any
   trust: bundled-only
   steps:
@@ -1103,6 +1724,7 @@ fn task_pack_parses_auth_prerequisites() {
 task:
   id: auth-demo
   name: Auth demo
+  description: Preserves Git credential and sudo prerequisites in the generated plan.
   platform: any
   trust: bundled-only
   steps:
