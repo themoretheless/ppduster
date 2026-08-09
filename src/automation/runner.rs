@@ -1,3 +1,4 @@
+use crate::automation::package_registry;
 use crate::automation::task::{Action, AuthPolicy, ElevationPolicy, ShellMode, Step, Task};
 use crate::rules::expand_path_template;
 use crate::safety::{is_safe_rule_root, stays_under_root};
@@ -91,6 +92,7 @@ struct AuthState {
 }
 
 pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
+    task.validate().map_err(AutomationError::Message)?;
     let mut plans = Vec::new();
     let mut outcomes = Vec::new();
     let mut steps = Vec::new();
@@ -305,6 +307,11 @@ fn plan_summary(step: &Step) -> Result<String> {
                 ""
             }
         ),
+        Action::ConfigurePackageRegistryFiles {
+            secrets,
+            npm,
+            nuget,
+        } => package_registry::plan_summary(secrets, npm, nuget)?,
         Action::DownloadFile { url, dest, .. } => {
             format!("download {} to {} with sha256 verification", url, dest)
         }
@@ -437,6 +444,11 @@ fn apply_step(step: &Step) -> Result<String> {
             env,
             shell,
         } => apply_run_command(program, args, cwd.as_deref(), env, *shell),
+        Action::ConfigurePackageRegistryFiles {
+            secrets,
+            npm,
+            nuget,
+        } => package_registry::apply(secrets, npm, nuget),
         Action::DownloadFile {
             url,
             dest,
@@ -789,6 +801,19 @@ impl ExitStatusExt for ExitStatus {
 }
 
 fn is_satisfied(step: &Step, run_command_checks: bool) -> Result<Option<String>> {
+    if run_command_checks {
+        if let Action::ConfigurePackageRegistryFiles {
+            secrets,
+            npm,
+            nuget,
+        } = &step.action
+        {
+            if let Some(reason) = package_registry::is_satisfied(secrets, npm, nuget)? {
+                return Ok(Some(reason));
+            }
+        }
+    }
+
     let Some(check) = &step.check else {
         return Ok(None);
     };
@@ -1220,6 +1245,40 @@ mod tests {
         assert_eq!(report.steps.len(), 2);
         assert!(matches!(report.steps[0].status, StepStatus::Failed));
         assert!(matches!(report.steps[1].status, StepStatus::Skipped));
+    }
+
+    #[test]
+    fn run_task_rejects_invalid_programmatic_package_registry_action() {
+        let task = base_task(Step {
+            id: "package-config".into(),
+            name: String::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            action: Action::ConfigurePackageRegistryFiles {
+                secrets: crate::automation::task::EncryptedSecretsSpec {
+                    profile: "github-packages".into(),
+                    username_env: "GITHUB_PACKAGES_USER".into(),
+                    token_env: "GITHUB_PACKAGES_TOKEN".into(),
+                },
+                npm: crate::automation::task::NpmRegistryFileSpec {
+                    scope: "@dodopizza".into(),
+                    registry: "http://npm.pkg.github.com/".into(),
+                },
+                nuget: crate::automation::task::NugetRegistryFileSpec {
+                    public_source_name: "nuget.org".into(),
+                    public_source: "https://api.nuget.org/v3/index.json".into(),
+                    source_name: "github".into(),
+                    source: "https://nuget.pkg.github.com/dodopizza/index.json".into(),
+                    package_patterns: vec!["Dodo.*".into()],
+                },
+            },
+        });
+
+        let err = run_task(&task, &RunOptions::default()).unwrap_err();
+
+        assert!(err.to_string().contains("npm.registry to be an HTTPS URL"));
     }
 
     #[test]

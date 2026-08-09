@@ -1,0 +1,24 @@
+task:
+  id: dev-dodopizza-package-registries
+  name: DodoPizza npm and NuGet registries
+  description: Create project-level .npmrc and NuGet.Config files with credential references for the separate password-encrypted DodoPizza GitHub Packages vault, without replacing existing configuration; requires the private feeds to contain every mapped package.
+  platform: any
+  trust: bundled-only
+  steps:
+    - id: configure-package-registry-files
+      name: Configure npm and NuGet files
+      type: configure-package-registry-files
+      secrets:
+        profile: dodopizza-github-packages
+        username_env: GITHUB_PACKAGES_USER
+        token_env: GITHUB_PACKAGES_TOKEN
+      npm:
+        scope: "@dodopizza"
+        registry: https://npm.pkg.github.com/
+      nuget:
+        public_source_name: nuget.org
+        public_source: https://api.nuget.org/v3/index.json
+        source_name: github
+        source: https://nuget.pkg.github.com/dodopizza/index.json
+        package_patterns:
+          - Dodo.*
