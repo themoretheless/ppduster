@@ -7,7 +7,9 @@ use ppduster::automation::{
     describe_step, run_task, Action, AuthPolicy, ReleaseChannel, RunOptions, RunReport,
     ScriptInterpreter, Step, StepStatus, Task, TaskPack, TaskSource,
 };
-use ppduster::github::{list_accessible_repositories, GithubRepository};
+use ppduster::github::{
+    list_accessible_repositories, open_github_login_terminal, GithubRepository,
+};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -43,6 +45,7 @@ struct GithubPickerState {
     loaded_once: bool,
     loading: bool,
     error: Option<String>,
+    login_started: bool,
     receiver: Option<Receiver<Result<Vec<GithubRepository>, String>>>,
 }
 
@@ -57,6 +60,7 @@ impl Default for GithubPickerState {
             loaded_once: false,
             loading: false,
             error: None,
+            login_started: false,
             receiver: None,
         }
     }
@@ -1248,6 +1252,7 @@ impl ScenarioApp {
             .count();
         let mut configuration_changed = false;
         let mut request_refresh = false;
+        let mut request_login = false;
         let mut close = false;
 
         egui::Modal::new(Id::new("github-repository-picker"))
@@ -1343,9 +1348,30 @@ impl ScenarioApp {
                 if let Some(error) = &self.github_picker.error {
                     ui.add_space(10.0);
                     error_box(ui, error, self.dark);
-                    if ui.button("Скопировать команду входа").clicked() {
-                        ui.ctx().copy_text("gh auth login --hostname github.com".into());
-                    }
+                }
+
+                if self.github_picker.repositories.is_empty() {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                !self.github_picker.loading,
+                                egui::Button::new("Войти через GitHub…"),
+                            )
+                            .clicked()
+                        {
+                            request_login = true;
+                        }
+                        if self.github_picker.login_started {
+                            ui.label(
+                                RichText::new(
+                                    "Завершите вход в Terminal, затем нажмите «Обновить».",
+                                )
+                                .size(9.0)
+                                .color(PURPLE),
+                            );
+                        }
+                    });
                 }
 
                 ui.add_space(10.0);
@@ -1524,6 +1550,18 @@ impl ScenarioApp {
 
         if request_refresh {
             self.start_github_repository_load(ctx);
+        }
+        if request_login {
+            match open_github_login_terminal() {
+                Ok(()) => {
+                    self.github_picker.login_started = true;
+                    self.github_picker.error = None;
+                }
+                Err(error) => {
+                    self.github_picker.login_started = false;
+                    self.github_picker.error = Some(format!("{error:#}"));
+                }
+            }
         }
         if configuration_changed {
             self.selected_step = Some(0);

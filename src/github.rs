@@ -1,4 +1,5 @@
-//! Read-only discovery of repositories available to the authenticated GitHub user.
+//! Discovery of repositories available to the authenticated GitHub user and an
+//! explicit, user-initiated GitHub CLI login handoff for the desktop UI.
 //!
 //! Authentication is delegated entirely to GitHub CLI. This module never reads,
 //! accepts, or persists a GitHub token.
@@ -99,6 +100,52 @@ pub fn list_accessible_repositories() -> Result<Vec<GithubRepository>> {
             GH_DISPLAY_ERROR_LIMIT,
         ))
     })
+}
+
+/// Open an interactive `gh auth login` in macOS Terminal.
+///
+/// The desktop application does not read credentials or capture the login
+/// process. Terminal owns the interactive session and GitHub CLI stores its
+/// credentials in its normal credential store. The caller must only invoke
+/// this after an explicit user action.
+pub fn open_github_login_terminal() -> Result<()> {
+    let gh = discover_gh().ok_or_else(|| {
+        anyhow::anyhow!(
+            "GitHub CLI (`gh`) was not found in PATH, /opt/homebrew/bin, or /usr/local/bin. Install it before signing in."
+        )
+    })?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("/usr/bin/osascript")
+            .args([
+                "-e",
+                "on run argv",
+                "-e",
+                "tell application \"Terminal\"",
+                "-e",
+                "activate",
+                "-e",
+                "do script (quoted form of (item 1 of argv)) & \" auth login --hostname github.com --git-protocol https --web\"",
+                "-e",
+                "end tell",
+                "-e",
+                "end run",
+                "--",
+            ])
+            .arg(&gh)
+            .status()
+            .context("open GitHub CLI login in Terminal")?;
+        if !status.success() {
+            bail!("Terminal could not start GitHub CLI login (status {status})");
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    bail!(
+        "interactive GitHub login from the desktop UI is currently supported only on macOS; run `gh auth login --hostname github.com --git-protocol https --web` in a terminal"
+    )
 }
 
 fn list_accessible_repositories_inner() -> Result<Vec<GithubRepository>> {
