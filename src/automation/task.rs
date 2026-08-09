@@ -500,6 +500,18 @@ fn default_script_success_exit_codes() -> Vec<u32> {
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Action {
     GithubListRepositories,
+    ForEach {
+        source_step: String,
+        array_path: String,
+        item: String,
+    },
+    ForEachGitCloneIfMissing {
+        loop_step: String,
+        repo: String,
+        dest: String,
+        #[serde(default)]
+        branch: Option<String>,
+    },
     CreateDirectory(CreateDirectoryAction),
     InspectPath(InspectPathAction),
     CopyPath(CopyPathAction),
@@ -668,6 +680,7 @@ impl Task {
 
     fn validate_steps(&self) -> Result<(), String> {
         let mut step_ids = std::collections::BTreeSet::<&str>::new();
+        let mut foreach_ids = std::collections::BTreeSet::<&str>::new();
         let mut script_exit_codes = std::collections::BTreeMap::<&str, &[u32]>::new();
         for step in &self.steps {
             step.validate()?;
@@ -704,6 +717,26 @@ impl Task {
                     }
                     Ok(())
                 })?;
+            }
+            match &step.action {
+                Action::ForEach { source_step, .. } => {
+                    if !step_ids.contains(source_step.as_str()) {
+                        return Err(format!(
+                            "step {} for-each must reference an earlier source step, got {}",
+                            step.id, source_step
+                        ));
+                    }
+                    foreach_ids.insert(step.id.as_str());
+                }
+                Action::ForEachGitCloneIfMissing { loop_step, .. }
+                    if !foreach_ids.contains(loop_step.as_str()) =>
+                {
+                    return Err(format!(
+                        "step {} foreach clone must reference an earlier for-each step, got {}",
+                        step.id, loop_step
+                    ));
+                }
+                _ => {}
             }
             step_ids.insert(step.id.as_str());
             if let Action::RunScript {
@@ -757,6 +790,43 @@ impl Step {
                 {
                     return Err(format!(
                         "step {} github-list-repositories must be read-only and must not request authentication or elevation",
+                        self.id
+                    ));
+                }
+            }
+            Action::ForEach {
+                source_step,
+                array_path,
+                item,
+            } => {
+                if source_step.trim().is_empty()
+                    || array_path.trim().is_empty()
+                    || item.trim().is_empty()
+                {
+                    return Err(format!(
+                        "step {} for-each requires source_step, array_path, and item",
+                        self.id
+                    ));
+                }
+                if source_step == &self.id {
+                    return Err(format!("step {} for-each cannot reference itself", self.id));
+                }
+            }
+            Action::ForEachGitCloneIfMissing {
+                loop_step,
+                repo,
+                dest,
+                ..
+            } => {
+                if loop_step.trim().is_empty() || repo.trim().is_empty() || dest.trim().is_empty() {
+                    return Err(format!(
+                        "step {} foreach clone requires loop_step, repo, and dest",
+                        self.id
+                    ));
+                }
+                if loop_step == &self.id {
+                    return Err(format!(
+                        "step {} foreach clone cannot reference itself",
                         self.id
                     ));
                 }
@@ -1435,5 +1505,71 @@ mod tests {
             let err = step.validate().unwrap_err();
             assert!(err.contains("[a-z0-9][a-z0-9._-]{0,63}"));
         }
+    }
+
+    #[test]
+    fn foreach_actions_validate_order_and_round_trip() {
+        let task = Task {
+            id: "clone-account-repositories".into(),
+            name: "Clone repositories".into(),
+            description: "Clone every repository returned by GitHub.".into(),
+            platform: crate::rules::Platform::Macos,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            steps: vec![
+                Step {
+                    id: "repositories".into(),
+                    name: String::new(),
+                    auth: AuthPolicy::None,
+                    check: None,
+                    dangerous: false,
+                    allow_elevation: ElevationPolicy::Forbidden,
+                    when: None,
+                    require: None,
+                    action: Action::GithubListRepositories,
+                },
+                Step {
+                    id: "repositories-loop".into(),
+                    name: String::new(),
+                    auth: AuthPolicy::None,
+                    check: None,
+                    dangerous: false,
+                    allow_elevation: ElevationPolicy::Forbidden,
+                    when: None,
+                    require: None,
+                    action: Action::ForEach {
+                        source_step: "repositories".into(),
+                        array_path: "github.repositories".into(),
+                        item: "repository".into(),
+                    },
+                },
+                Step {
+                    id: "clone".into(),
+                    name: String::new(),
+                    auth: AuthPolicy::None,
+                    check: None,
+                    dangerous: false,
+                    allow_elevation: ElevationPolicy::Forbidden,
+                    when: None,
+                    require: None,
+                    action: Action::ForEachGitCloneIfMissing {
+                        loop_step: "repositories-loop".into(),
+                        repo: "{{repository.https_url}}".into(),
+                        dest: "$HOME/Developer/{{repository.owner}}/{{repository.name}}".into(),
+                        branch: Some("{{repository.default_branch}}".into()),
+                    },
+                },
+            ],
+        };
+
+        task.validate().unwrap();
+        let yaml = serde_yaml::to_string(&task).unwrap();
+        assert!(yaml.contains("type: for-each"));
+        assert!(yaml.contains("type: for-each-git-clone-if-missing"));
+        serde_yaml::from_str::<Task>(&yaml)
+            .unwrap()
+            .validate()
+            .unwrap();
     }
 }
