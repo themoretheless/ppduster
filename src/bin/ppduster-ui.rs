@@ -1,3 +1,4 @@
+use anyhow::Context;
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Layout, Margin, Pos2, Rect,
     RichText, ScrollArea, Sense, Stroke, StrokeKind, Vec2,
@@ -5,11 +6,12 @@ use eframe::egui::{
 use ppduster::automation::PackTrust;
 use ppduster::automation::{
     describe_step, run_task, Action, AuthPolicy, ReleaseChannel, RunOptions, RunReport,
-    ScriptInterpreter, Step, StepStatus, Task, TaskPack, TaskSource,
+    ScriptInterpreter, Step, StepStatus, Task, TaskFile, TaskPack, TaskSource, TrustRequirement,
 };
 use ppduster::github::{list_accessible_repositories, login_via_web, GithubRepository};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
@@ -98,6 +100,8 @@ struct ScenarioApp {
     running: bool,
     run_receiver: Option<Receiver<Result<RunReport, String>>>,
     github_picker: GithubPickerState,
+    imported_task_files: Vec<PathBuf>,
+    file_message: Option<(bool, String)>,
 }
 
 impl ScenarioApp {
@@ -132,6 +136,8 @@ impl ScenarioApp {
             running: false,
             run_receiver: None,
             github_picker: GithubPickerState::default(),
+            imported_task_files: Vec::new(),
+            file_message: None,
         }
     }
 
@@ -381,6 +387,76 @@ impl ScenarioApp {
         command.push_str(" --yes");
         Some(command)
     }
+
+    fn save_selected_scenario(&mut self) {
+        let Some(mut task) = self.selected_task().cloned() else {
+            return;
+        };
+        // A file chosen by the user is external on its next load, even if its
+        // source scenario was bundled with the application.
+        task.trust = TrustRequirement::ExternalAllowed;
+        let suggested_name = format!("{}.yaml", task.id);
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Сценарий YAML", &["yaml", "yml"])
+            .set_file_name(&suggested_name)
+            .save_file()
+        else {
+            return;
+        };
+        let result = serde_yaml::to_string(&TaskFile { task })
+            .map_err(anyhow::Error::from)
+            .and_then(|yaml| {
+                fs::write(&path, yaml)
+                    .map_err(anyhow::Error::from)
+                    .with_context(|| format!("не удалось сохранить {}", path.display()))
+            });
+        self.file_message = Some(match result {
+            Ok(()) => (false, format!("Сценарий сохранён: {}", path.display())),
+            Err(error) => (true, format!("{error:#}")),
+        });
+    }
+
+    fn load_scenario_file(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Сценарий YAML", &["yaml", "yml"])
+            .pick_file()
+        else {
+            return;
+        };
+        let task_id = fs::read_to_string(&path)
+            .with_context(|| format!("не удалось прочитать {}", path.display()))
+            .and_then(|yaml| {
+                serde_yaml::from_str::<TaskFile>(&yaml)
+                    .map(|file| file.task.id)
+                    .with_context(|| format!("не удалось разобрать {}", path.display()))
+            });
+        let task_id = match task_id {
+            Ok(task_id) => task_id,
+            Err(error) => {
+                self.file_message = Some((true, format!("{error:#}")));
+                return;
+            }
+        };
+        let mut imported = self.imported_task_files.clone();
+        imported.retain(|existing| existing != &path);
+        imported.push(path.clone());
+        match load_tasks_with_files(&imported) {
+            Ok(pack) => {
+                let Some(selected_task) = pack.tasks.iter().position(|task| task.id == task_id)
+                else {
+                    self.file_message =
+                        Some((true, "Сценарий не предназначен для этой платформы".into()));
+                    return;
+                };
+                self.task_pack = Some(pack);
+                self.imported_task_files = imported;
+                self.select_task(selected_task);
+                self.load_error = None;
+                self.file_message = Some((false, format!("Сценарий загружен: {}", path.display())));
+            }
+            Err(error) => self.file_message = Some((true, format!("{error:#}"))),
+        }
+    }
 }
 
 impl eframe::App for ScenarioApp {
@@ -503,6 +579,31 @@ impl ScenarioApp {
                         .size(22.0)
                         .color(text(self.dark)),
                 );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!self.running, egui::Button::new("Загрузить…"))
+                        .clicked()
+                    {
+                        self.load_scenario_file();
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.running && self.selected_task().is_some(),
+                            egui::Button::new("Сохранить…"),
+                        )
+                        .clicked()
+                    {
+                        self.save_selected_scenario();
+                    }
+                });
+                if let Some((is_error, message)) = &self.file_message {
+                    ui.label(RichText::new(message).size(8.0).color(if *is_error {
+                        ORANGE
+                    } else {
+                        CYAN
+                    }));
+                }
                 ui.add_space(10.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.search)
@@ -2475,6 +2576,10 @@ fn error_box(ui: &mut egui::Ui, error: &str, dark: bool) {
 }
 
 fn load_tasks() -> anyhow::Result<TaskPack> {
+    load_tasks_with_files(&[])
+}
+
+fn load_tasks_with_files(imported_files: &[PathBuf]) -> anyhow::Result<TaskPack> {
     let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tasks")];
     if let Ok(executable) = std::env::current_exe() {
         if let Some(parent) = executable.parent() {
@@ -2495,7 +2600,11 @@ fn load_tasks() -> anyhow::Result<TaskPack> {
             });
         }
     }
-    TaskPack::load_many(&sources, false)
+    sources.extend(imported_files.iter().cloned().map(|path| TaskSource {
+        path,
+        trust: PackTrust::External,
+    }));
+    TaskPack::load_many_with_overrides(&sources, true)
 }
 
 fn configure_style(ctx: &egui::Context, dark: bool) {

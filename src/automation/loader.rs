@@ -31,28 +31,47 @@ pub struct TaskPack {
 
 impl TaskPack {
     pub fn load_many(sources: &[TaskSource], allow_external: bool) -> Result<Self> {
+        Self::load_sources(sources, allow_external, false)
+    }
+
+    /// Load task sources in order, allowing a later source to replace a task
+    /// with the same id. This is intended for an explicitly selected user file
+    /// layered over the bundled library; the normal pack loader remains strict.
+    pub fn load_many_with_overrides(sources: &[TaskSource], allow_external: bool) -> Result<Self> {
+        Self::load_sources(sources, allow_external, true)
+    }
+
+    fn load_sources(
+        sources: &[TaskSource],
+        allow_external: bool,
+        allow_overrides: bool,
+    ) -> Result<Self> {
         let mut tasks = Vec::new();
         let mut seen = BTreeSet::new();
         let mut loaded = Vec::new();
         let mut origins = BTreeMap::new();
         let mut unavailable = Vec::new();
         for source in sources {
-            if !source.path.is_dir() {
+            let mut files: Vec<PathBuf> = if source.path.is_file() {
+                vec![source.path.clone()]
+            } else if source.path.is_dir() {
+                fs::read_dir(&source.path)
+                    .with_context(|| format!("read tasks dir {}", source.path.display()))?
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| is_yaml_file(p))
+                    .collect()
+            } else {
                 continue;
-            }
-            let mut files: Vec<PathBuf> = fs::read_dir(&source.path)
-                .with_context(|| format!("read tasks dir {}", source.path.display()))?
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.extension()
-                        .and_then(|x| x.to_str())
-                        .map(|x| x == "yaml" || x == "yml")
-                        .unwrap_or(false)
-                })
-                .collect();
+            };
             files.sort();
             for file in files {
+                if !is_yaml_file(&file) {
+                    bail!(
+                        "task file {} must use a .yaml or .yml extension",
+                        file.display()
+                    );
+                }
                 let text = fs::read_to_string(&file)
                     .with_context(|| format!("read task file {}", file.display()))?;
                 reject_license_key_fields(&text, &file)?;
@@ -69,7 +88,15 @@ impl TaskPack {
                     continue;
                 }
                 if !seen.insert(parsed.task.id.clone()) {
-                    anyhow::bail!("duplicate task id {} in {}", parsed.task.id, file.display());
+                    if !allow_overrides {
+                        anyhow::bail!("duplicate task id {} in {}", parsed.task.id, file.display());
+                    }
+                    let index = tasks
+                        .iter()
+                        .position(|task: &Task| task.id == parsed.task.id)
+                        .expect("seen task id must have a corresponding task");
+                    tasks.remove(index);
+                    loaded.remove(index);
                 }
                 origins.insert(parsed.task.id.clone(), source.trust);
                 tasks.push(parsed.task);
@@ -270,6 +297,12 @@ impl TaskPack {
         cache.insert(index, resolved.clone());
         Ok(resolved)
     }
+}
+
+fn is_yaml_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension == "yaml" || extension == "yml")
 }
 
 fn trust_rank(trust: PackTrust) -> u8 {

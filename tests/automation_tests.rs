@@ -32,6 +32,67 @@ fn load_bundled_tasks(dir: &Path) -> TaskPack {
 }
 
 #[test]
+fn explicit_task_file_can_override_a_bundled_scenario() {
+    let bundled = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    write_task(
+        bundled.path(),
+        "scenario.yaml",
+        r#"
+task:
+  id: portable-scenario
+  name: Bundled name
+  description: Bundled scenario used as the base layer.
+  platform: any
+  steps:
+    - id: inspect
+      name: Inspect
+      type: inspect-path
+      path: /tmp
+"#,
+    );
+    let external_file = external.path().join("scenario.yaml");
+    fs::write(
+        &external_file,
+        r#"
+task:
+  id: portable-scenario
+  name: Loaded from file
+  description: Explicitly selected portable scenario.
+  platform: any
+  trust: external-allowed
+  steps:
+    - id: inspect
+      name: Inspect
+      type: inspect-path
+      path: /tmp
+"#,
+    )
+    .unwrap();
+
+    let pack = TaskPack::load_many_with_overrides(
+        &[
+            TaskSource {
+                path: bundled.path().to_path_buf(),
+                trust: PackTrust::Bundled,
+            },
+            TaskSource {
+                path: external_file,
+                trust: PackTrust::External,
+            },
+        ],
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(
+        pack.get("portable-scenario").unwrap().name,
+        "Loaded from file"
+    );
+    assert_eq!(pack.resolve("portable-scenario").unwrap().steps.len(), 1);
+}
+
+#[test]
 fn task_description_supports_multiline_yaml_and_round_trip() {
     let yaml = r#"
 task:
