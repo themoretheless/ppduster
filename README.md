@@ -309,14 +309,19 @@ failed and skips later steps. Omit `expect` to observe a missing path successful
 does not add a newline; YAML's `|-` block style is useful when the final newline must
 be omitted. The default `on_conflict: fail` leaves a different existing file untouched,
 while an identical file is already satisfied. `on_conflict: replace` atomically
-replaces only a regular file. There is deliberately no append mode because appending
-cannot provide strict idempotency. Task YAML is plaintext, not a secret store: never
-embed passwords or tokens in `content`; use the dedicated secrets workflow instead.
+replaces only a regular file. Its parent directory must already exist, so directory
+creation remains an explicit scenario step. There is deliberately no append mode
+because appending cannot provide strict idempotency. Task YAML is plaintext, not a
+secret store: never embed passwords or tokens in `content`; use the dedicated secrets
+workflow instead.
 
 `copy-path` accepts `src` and the exact `dest`. It copies a regular file or directory
 without following symlinks. A source tree containing a symlink is rejected, an
 identical destination is already satisfied, and any different existing destination is
-left untouched with an error. `copy-path` has no overwrite or conflict-policy field.
+left untouched with an error. The destination parent must already exist (use an
+explicit `create-directory` step); directory copies are bounded to 100,000 entries,
+10 GiB of logical file bytes, and 128 levels. `copy-path` has no overwrite or
+conflict-policy field.
 `remove-path` moves its declared path to the system Trash or Recycle Bin and never
 falls back to permanent deletion. A missing path is already satisfied; moving a final
 symlink moves the link itself rather than its target.

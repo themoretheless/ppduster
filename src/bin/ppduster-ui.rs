@@ -2362,9 +2362,9 @@ fn step_title(step: &Step) -> String {
 }
 
 fn task_supports_gui_run(task: &Task) -> bool {
-    task.steps.iter().all(|step| {
-        matches!(step.auth, AuthPolicy::None) && action_supports_gui_run(&step.action)
-    })
+    task.steps
+        .iter()
+        .all(|step| matches!(step.auth, AuthPolicy::None) && action_supports_gui_run(&step.action))
 }
 
 fn git_clone_auth_ready(repo: &str) -> bool {
@@ -2407,9 +2407,11 @@ fn github_selection_auth_ready(picker: &GithubPickerState) -> bool {
     if matches!(picker.protocol, GithubCloneProtocol::Ssh) {
         return git_clone_auth_ready("git@github.com:owner/repository.git");
     }
-    if picker.repositories.iter().any(|repository| {
-        repository.is_private && picker.selected_ids.contains(&repository.id)
-    }) {
+    if picker
+        .repositories
+        .iter()
+        .any(|repository| repository.is_private && picker.selected_ids.contains(&repository.id))
+    {
         return git_clone_auth_ready("https://github.com/owner/repository.git");
     }
     true
