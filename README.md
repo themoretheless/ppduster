@@ -48,7 +48,10 @@ Run from the repo root so `./rules` is found, or pass `--rules-dir /path/to/rule
 canvas. It presents every setup scenario as a connected route of typed steps, with a
 searchable scenario library, step inspector, release-channel controls, permission
 switches, dry-run planning, and explicit confirmation before supported scenarios are
-applied.
+applied. The library can also save the selected scenario as a portable YAML file and
+load `.yaml`/`.yml` scenarios selected in the native file dialog. A loaded file is
+validated as an external task pack and may replace a bundled scenario with the same id
+for the current application session.
 
 For a scenario that resolves to exactly one standalone `git-clone` step, the inspector
 can load repositories visible to the current GitHub CLI account and select one or many
