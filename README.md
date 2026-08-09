@@ -42,6 +42,29 @@ cargo build --release
 
 Run from the repo root so `./rules` is found, or pass `--rules-dir /path/to/rules`.
 
+## Scenario Flow UI
+
+`ppduster-ui` is a native `egui` application inspired by Peregon's visual pipeline
+canvas. It presents every setup scenario as a connected route of typed steps, with a
+searchable scenario library, step inspector, release-channel controls, permission
+switches, dry-run planning, and explicit confirmation before supported scenarios are
+applied.
+
+```bash
+cargo run --bin ppduster-ui
+```
+
+Create a native macOS application bundle:
+
+```bash
+./scripts/build-macos-app.sh
+open target/macos/ppduster.app
+```
+
+Scenarios that need a terminal prompt, App Store authentication, or vendor license UI
+remain terminal-only. The desktop app produces the exact CLI command for them instead
+of attempting to capture credentials.
+
 ## Usage
 
 ```bash

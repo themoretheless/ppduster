@@ -1,5 +1,6 @@
 [package]
 name = "ppduster"
+default-run = "ppduster"
 version = "0.1.0"
 edition = "2021"
 description = "Safe, rule-driven system junk cleaner (logs, caches, temp, leftovers)"
@@ -31,6 +32,7 @@ tar = { version = "0.4.46", default-features = false }
 flate2 = "1.1.9"
 bzip2 = "0.6.1"
 xz2 = "0.1.7"
+eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 
 [dev-dependencies]
 tempfile = "3"
