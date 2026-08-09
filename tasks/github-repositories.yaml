@@ -1,0 +1,15 @@
+task:
+  id: github-repositories
+  name: GitHub repositories
+  description: >-
+    Sign in with GitHub CLI when needed, choose one or more public repositories
+    in the desktop UI, and clone or safely synchronize their main branches.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: clone-repository
+      name: Clone or update GitHub repository
+      type: git-clone
+      repo: https://github.com/example/example.git
+      dest: $HOME/Developer/example/example
+      branch: main
