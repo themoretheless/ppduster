@@ -113,6 +113,19 @@ ppduster setup show macos-top-01-brew-bootstrap
 ppduster setup run macos-top-03-system-defaults --allow-shell
 ppduster setup run macos-top-08-security-baseline --allow-elevation
 
+# In a repository that contains package.json and a .NET solution/project:
+# create project-level npm and NuGet registry files for DodoPizza packages
+cd /path/to/mixed-node-dotnet-repository
+ppduster setup run dev-dodopizza-package-registries
+ppduster setup run dev-dodopizza-package-registries --yes
+
+# create a separate password-encrypted credential vault (hidden prompts)
+ppduster setup secrets init dev-dodopizza-package-registries
+
+# decrypt only in memory and expose credentials to the guarded child environment
+ppduster setup secrets exec dev-dodopizza-package-registries npm -- ci
+ppduster setup secrets exec dev-dodopizza-package-registries dotnet -- restore
+
 # LightBurn 2.1.03: inspect the plan, then download/install/confirm activation
 ppduster setup run lightburn-install-activate
 ppduster setup run lightburn-install-activate --yes
@@ -140,6 +153,66 @@ Current safety posture:
 - elevated steps require `--allow-elevation`
 - external task packs require `--trust-external-packs`
 - download steps require `checksum.sha256`
+
+The `dev-dodopizza-package-registries` task creates `.npmrc` and `NuGet.Config`
+in the current project root. Those files never contain credential values: they contain
+only `${GITHUB_PACKAGES_TOKEN}`, `%GITHUB_PACKAGES_USER%`, and
+`%GITHUB_PACKAGES_TOKEN%` references.
+
+`setup secrets init` stores the real GitHub username and token in a separate binary
+[age](https://age-encryption.org/) passphrase-encrypted vault. The default file is
+outside the repository under the user config directory at
+`ppduster/secrets/v1/dodopizza-github-packages-<workspace-id>.age` (`~/Library/Application Support`
+on macOS and `$XDG_CONFIG_HOME`/`~/.config` on Linux). Windows config-file generation
+still works, but vault init/exec currently fail closed until owner-only ACL creation and
+validation are implemented.
+Interactive password and token prompts disable terminal echo; the optional stdin modes
+require redirected input. Secret values are never accepted as command-line arguments or
+task-YAML values. New Unix directories/files use `0700`/`0600`; ciphertext is staged and
+installed without overwriting an existing vault. A custom `--file` path is allowed
+only outside the current Git repository and its existing parent must already be
+owner-only. Losing the vault password is unrecoverable.
+The encrypted payload is bound to the canonical repository path, so a different
+checkout cannot reuse it merely by copying the generated config files.
+An interrupted Unix no-clobber install can leave a second owner-only encrypted staging
+hardlink; the target remains unlockable, and no plaintext staging file is ever created.
+
+`setup secrets exec` accepts only the exact commands `npm ci`, `npm install`, or
+`dotnet restore` (no additional package-manager arguments), launches
+the selected executable directly without a shell, and injects credentials into that
+child process only. It isolates inherited npm user/global configs and pins dotnet to the
+generated `NuGet.Config`; arguments that override registries or credential configs are
+rejected. npm lifecycle scripts are forcibly disabled while the token is present. Exact
+username/token occurrences in child output are redacted, and unlock
+failures use one generic error in stderr and the audit log. Use a short-lived GitHub
+token with the minimum `read:packages` permission. Encryption protects the secrets at
+rest; the selected child environment and its descendants, a debugger running as the same
+user, or malicious project tooling can still access or encode the values. The npm/dotnet
+executable resolved from the caller's `PATH` is also trusted, so run the wrapper only in
+a trusted checkout and shell environment.
+
+The task preserves the inherited default npm registry, routes `@dodopizza/*` npm
+packages to GitHub Packages, keeps other NuGet packages on nuget.org, and maps
+`Dodo.*` NuGet package IDs to GitHub Packages using Package Source Mapping.
+Applying must run from the Git repository root and requires both `package.json`
+and a .NET solution or project in that directory. Existing, different config files
+and symlink targets are conflicts; ppduster will not merge or overwrite them.
+Matching files are left byte-for-byte unchanged on repeated runs (LF and CRLF
+checkouts are treated as equivalent) and are safe to commit because they contain
+no credential values. If an interruption happens after the first file is created,
+ppduster leaves that exact file in place; the next run creates only the missing
+file instead of deleting a pathname that another process may have replaced. A
+hard crash can also leave a random `.ppduster.*.tmp` hardlink containing only
+placeholders; exact targets remain recoverable, while any differing hardlinked
+target is rejected.
+
+The bundled mappings are exclusive: use this task only after confirming that the
+GitHub feeds contain every `@dodopizza/*` and `Dodo.*` package required by the
+project, including packages also published publicly. If the private IDs use a
+narrower namespace, change the task to that confirmed scope/prefix first. NuGet
+Package Source Mapping requires NuGet 6.0+ or .NET SDK 6.0.100+ in every restore
+environment; [older clients ignore the mapping](https://learn.microsoft.com/en-us/nuget/consume-packages/package-source-mapping#package-source-mapping-rules).
+
 - `extract-archive` supports `zip`, `tar`, `tar.gz`/`tgz`, `tar.bz2`, and `tar.xz`; it rejects links, special files, traversal, duplicate output files, oversized output, and existing destinations before atomically publishing the extracted directory
 - DMG installation verifies the image, mounts it read-only, validates the app signature and Gatekeeper assessment, stages the bundle in `~/Applications`, and refuses elevation or overwriting an existing app
 - typed `app-store-install` steps use a numeric App Store ID through a standard Homebrew `mas` installation; they require explicit elevation permission and an App Store account that owns the app
@@ -261,6 +334,7 @@ Path templates: `$HOME`, `~`, `$TMPDIR`, `$XDG_CACHE_HOME`, `$XDG_DATA_HOME`, `%
 ```
 src/           Rust library + CLI
 rules/         YAML rule packs (macos, linux, windows, dev, apps)
+tasks/         Typed setup automation tasks
 tests/         Integration tests
 research/      Research notes from multi-agent analysis (when present)
 ```

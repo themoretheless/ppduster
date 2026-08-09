@@ -869,6 +869,7 @@ fn action_color(action: &Action) -> Color32 {
         Action::RunCommand { .. } => Color32::from_rgb(139, 95, 191),
         Action::BambuStudioRelease(_) => ORANGE,
         Action::ActivateLicense(_) => Color32::from_rgb(183, 90, 115),
+        Action::ConfigurePackageRegistryFiles { .. } => CYAN,
     }
 }
 
@@ -884,6 +885,7 @@ fn action_icon(action: &Action) -> &'static str {
         Action::AppStoreInstall(_) => "A",
         Action::BambuStudioRelease(_) => "3D",
         Action::ActivateLicense(_) => "KEY",
+        Action::ConfigurePackageRegistryFiles { .. } => "REG",
     }
 }
 
@@ -898,6 +900,7 @@ fn action_eyebrow(action: &Action) -> &'static str {
         Action::MacosRequirements { .. } => "Проверка",
         Action::BambuStudioRelease(_) => "Релиз",
         Action::ActivateLicense(_) => "Активация",
+        Action::ConfigurePackageRegistryFiles { .. } => "Реестр пакетов",
     }
 }
 
@@ -914,7 +917,9 @@ fn task_supports_gui_run(task: &Task) -> bool {
         matches!(step.auth, ppduster::automation::AuthPolicy::None)
             && !matches!(
                 step.action,
-                Action::ActivateLicense(_) | Action::AppStoreInstall(_)
+                Action::ActivateLicense(_)
+                    | Action::AppStoreInstall(_)
+                    | Action::ConfigurePackageRegistryFiles { .. }
             )
     })
 }
@@ -1071,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn gui_execution_excludes_vendor_ui_flows() {
+    fn gui_execution_excludes_flows_that_need_external_context() {
         let pack = load_tasks().unwrap();
         assert!(task_supports_gui_run(
             pack.get("bambu-studio-install").unwrap()
@@ -1081,6 +1086,9 @@ mod tests {
         ));
         assert!(task_supports_gui_run(
             pack.get("app-store-bootstrap").unwrap()
+        ));
+        assert!(!task_supports_gui_run(
+            pack.get("dev-dodopizza-package-registries").unwrap()
         ));
     }
 }

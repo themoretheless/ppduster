@@ -1,4 +1,6 @@
 pub mod loader;
+mod package_registry;
+pub mod package_secrets;
 pub mod runner;
 pub mod task;
 
@@ -10,6 +12,6 @@ pub use runner::{
 pub use task::{
     Action, ActivateLicenseAction, AppBundleIdentity, AppStoreInstallAction, AppStoreOperation,
     ArchiveFormat, AuthPolicy, BambuStudioReleaseAction, Check, Checksum, ElevationPolicy,
-    LicenseMethod, LicenseProvider, ReleaseChannel, ShellMode, Step, Task, TaskFile,
-    TrustRequirement,
+    EncryptedSecretsSpec, LicenseMethod, LicenseProvider, NpmRegistryFileSpec,
+    NugetRegistryFileSpec, ReleaseChannel, ShellMode, Step, Task, TaskFile, TrustRequirement,
 };
