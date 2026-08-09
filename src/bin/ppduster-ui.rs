@@ -253,7 +253,8 @@ impl ScenarioApp {
             .and_then(|pack| {
                 pack.tasks
                     .iter()
-                    .position(|task| task.id == "bambu-studio-install")
+                    .position(|task| task.id == "macos-developer-workstation")
+                    .or_else(|| pack.tasks.iter().position(Task::is_template))
             })
             .unwrap_or(0);
         Self {
@@ -646,21 +647,6 @@ impl ScenarioApp {
         }
     }
 
-    fn select_task(&mut self, index: usize) {
-        if self.running {
-            return;
-        }
-        self.selected_task = index;
-        self.custom_project = None;
-        self.selected_project_scenario = None;
-        self.selected_project_group.clear();
-        self.selected_step = Some(0);
-        self.github_picker.open = false;
-        self.github_picker.selected_ids.clear();
-        self.github_picker.search.clear();
-        self.invalidate_plan();
-    }
-
     fn command_for_selected(&self) -> Option<String> {
         if self.custom_project.is_some() || !self.github_picker.selected_ids.is_empty() {
             return None;
@@ -910,12 +896,6 @@ impl eframe::App for ScenarioApp {
     }
 }
 
-#[derive(Debug)]
-enum ProjectTreeAction {
-    SelectGroup(Vec<usize>),
-    SelectScenario(Vec<usize>),
-}
-
 fn project_group_entries_mut<'a>(
     project: &'a mut ScenarioProject,
     path: &[usize],
@@ -929,60 +909,97 @@ fn project_group_entries_mut<'a>(
     }
 }
 
-fn paint_project_tree(
-    ui: &mut egui::Ui,
-    entries: &[ProjectEntry],
-    prefix: &mut Vec<usize>,
-    selected_scenario: Option<&[usize]>,
-    selected_group: &[usize],
-    dark: bool,
-    action: &mut Option<ProjectTreeAction>,
-) {
-    for (index, entry) in entries.iter().enumerate() {
-        prefix.push(index);
-        match entry {
-            ProjectEntry::Group { name, entries, .. } => {
-                let selected = prefix.as_slice() == selected_group;
-                let response = egui::CollapsingHeader::new(
-                    RichText::new(format!("{} {name}", if selected { "▣" } else { "▾" }))
-                        .strong()
-                        .size(9.0)
-                        .color(if selected { PURPLE } else { text(dark) }),
-                )
-                .id_salt(("project-group", prefix.clone()))
-                .default_open(true)
-                .show(ui, |ui| {
-                    paint_project_tree(
-                        ui,
-                        entries,
-                        prefix,
-                        selected_scenario,
-                        selected_group,
-                        dark,
-                        action,
-                    );
-                });
-                if response.header_response.clicked() {
-                    *action = Some(ProjectTreeAction::SelectGroup(prefix.clone()));
-                }
-            }
-            ProjectEntry::Scenario { task } => {
-                let selected = selected_scenario.is_some_and(|path| path == prefix.as_slice());
-                if ui
-                    .selectable_label(
-                        selected,
-                        RichText::new(format!("◇ {}", task.name))
-                            .size(9.0)
-                            .color(if selected { PURPLE } else { text(dark) }),
-                    )
-                    .clicked()
-                {
-                    *action = Some(ProjectTreeAction::SelectScenario(prefix.clone()));
-                }
-            }
-        }
-        prefix.pop();
+fn project_group_entries<'a>(
+    project: &'a ScenarioProject,
+    path: &[usize],
+) -> Option<&'a [ProjectEntry]> {
+    if path.is_empty() {
+        return Some(&project.entries);
     }
+    match project_entry(&project.entries, path)? {
+        ProjectEntry::Group { entries, .. } => Some(entries),
+        ProjectEntry::Scenario { .. } => None,
+    }
+}
+
+fn project_group_column_paths(
+    project: &ScenarioProject,
+    selected_group: &[usize],
+) -> Vec<Vec<usize>> {
+    let mut columns = vec![Vec::new()];
+    let mut path = Vec::new();
+    for index in selected_group {
+        path.push(*index);
+        let Some(entries) = project_group_entries(project, &path) else {
+            break;
+        };
+        if entries
+            .iter()
+            .any(|entry| matches!(entry, ProjectEntry::Group { .. }))
+        {
+            columns.push(path.clone());
+        }
+    }
+    columns
+}
+
+fn paint_project_group_columns(
+    ui: &mut egui::Ui,
+    project: &ScenarioProject,
+    selected_group: &[usize],
+    action: &mut Option<Vec<usize>>,
+) {
+    let columns = project_group_column_paths(project, selected_group);
+    ScrollArea::horizontal()
+        .id_salt("project-group-columns")
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                for (column_index, parent_path) in columns.iter().enumerate() {
+                    if column_index > 0 {
+                        ui.separator();
+                    }
+                    ui.vertical(|ui| {
+                        ui.set_width(164.0);
+                        let title = if parent_path.is_empty() {
+                            "Верхний уровень"
+                        } else {
+                            match project_entry(&project.entries, parent_path) {
+                                Some(ProjectEntry::Group { name, .. }) => name,
+                                _ => "Группы",
+                            }
+                        };
+                        ui.label(RichText::new(title).strong().size(9.0).color(MUTED));
+                        ui.add_space(4.0);
+                        let Some(entries) = project_group_entries(project, parent_path) else {
+                            return;
+                        };
+                        for (index, entry) in entries.iter().enumerate() {
+                            let ProjectEntry::Group { name, entries, .. } = entry else {
+                                continue;
+                            };
+                            let mut path = parent_path.clone();
+                            path.push(index);
+                            let selected = path == selected_group;
+                            let has_subgroups = entries
+                                .iter()
+                                .any(|entry| matches!(entry, ProjectEntry::Group { .. }));
+                            let label = if has_subgroups {
+                                format!("{name}  ›")
+                            } else {
+                                name.clone()
+                            };
+                            if ui
+                                .add_sized([164.0, 28.0], egui::Button::selectable(selected, label))
+                                .clicked()
+                            {
+                                *action = Some(path);
+                            }
+                        }
+                    });
+                }
+            });
+        });
 }
 
 fn validate_project(project: &ScenarioProject) -> Result<(), String> {
@@ -1159,8 +1176,17 @@ impl ScenarioApp {
     }
 
     fn left_library(&mut self, root: &mut egui::Ui) {
+        let panel_width = self
+            .custom_project
+            .as_ref()
+            .map(|project| {
+                let columns =
+                    project_group_column_paths(project, &self.selected_project_group).len();
+                (columns as f32 * 180.0 + 28.0).clamp(270.0, 568.0)
+            })
+            .unwrap_or(270.0);
         egui::Panel::left("library")
-            .exact_size(270.0)
+            .exact_size(panel_width)
             .resizable(false)
             .frame(
                 Frame::new()
@@ -1176,16 +1202,19 @@ impl ScenarioApp {
                     return;
                 }
                 ui.label(
-                    RichText::new("Сценарии")
+                    RichText::new("Группы")
                         .strong()
                         .size(22.0)
                         .color(text(self.dark)),
                 );
+                if let Some(task) = self.selected_task().filter(|task| task.is_template()) {
+                    ui.label(RichText::new(&task.name).size(9.0).color(MUTED));
+                }
                 ui.add_space(8.0);
                 if ui
                     .add_enabled(
                         !self.running,
-                        egui::Button::new("＋ Новый сценарий")
+                        egui::Button::new("＋ Новая группа")
                             .min_size(Vec2::new(ui.available_width(), 34.0)),
                     )
                     .clicked()
@@ -1221,7 +1250,7 @@ impl ScenarioApp {
                 ui.add_space(10.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.search)
-                        .hint_text("Поиск сценария…")
+                        .hint_text("Поиск группы…")
                         .desired_width(f32::INFINITY),
                 );
                 ui.add_space(10.0);
@@ -1231,23 +1260,29 @@ impl ScenarioApp {
                 let visible = self
                     .task_pack
                     .as_ref()
-                    .map(|pack| {
-                        pack.tasks
+                    .and_then(|pack| pack.tasks.get(self.selected_task).map(|task| (pack, task)))
+                    .map(|(pack, task)| {
+                        let group_ids = if task.is_template() {
+                            task.scenarios.clone()
+                        } else {
+                            vec![task.id.clone()]
+                        };
+                        group_ids
                             .iter()
                             .enumerate()
-                            .filter(|(_, task)| task_matches_query(task, &query))
-                            .map(|(index, task)| {
-                                (
-                                    index,
-                                    task.name.clone(),
-                                    task.id.clone(),
-                                    pack.resolve(&task.id)
-                                        .map(|resolved| resolved.steps.len())
-                                        .unwrap_or(task.steps.len()),
-                                    task.platform.as_str().to_string(),
-                                    task.is_template(),
-                                    task.scenarios.len(),
-                                )
+                            .filter_map(|(index, id)| {
+                                let group = pack.get(id)?;
+                                task_matches_query(group, &query).then(|| {
+                                    (
+                                        index,
+                                        group.name.clone(),
+                                        group.id.clone(),
+                                        pack.resolve(&group.id)
+                                            .map(|resolved| resolved.steps.len())
+                                            .unwrap_or(group.steps.len()),
+                                        group.platform.as_str().to_string(),
+                                    )
+                                })
                             })
                             .collect::<Vec<_>>()
                     })
@@ -1257,10 +1292,8 @@ impl ScenarioApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.add_space(8.0);
-                        for (index, name, id, step_count, platform, is_template, scenario_count) in
-                            visible
-                        {
-                            let selected = index == self.selected_task;
+                        for (index, name, id, step_count, platform) in visible {
+                            let selected = self.selected_step == Some(index);
                             let response = Frame::new()
                                 .fill(if selected {
                                     translucent(PURPLE, if self.dark { 42 } else { 18 })
@@ -1313,28 +1346,17 @@ impl ScenarioApp {
                                                 .size(8.0)
                                                 .color(CYAN),
                                         );
-                                        if is_template {
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "ШАБЛОН · {scenario_count} групп"
-                                                ))
-                                                .strong()
+                                        ui.label(
+                                            RichText::new(format!("{step_count} шагов"))
                                                 .size(8.0)
-                                                .color(PURPLE),
-                                            );
-                                        } else {
-                                            ui.label(
-                                                RichText::new(format!("{step_count} шагов"))
-                                                    .size(8.0)
-                                                    .color(MUTED),
-                                            );
-                                        }
+                                                .color(MUTED),
+                                        );
                                     });
                                 })
                                 .response
                                 .interact(Sense::click());
                             if response.clicked() {
-                                self.select_task(index);
+                                self.selected_step = Some(index);
                             }
                             ui.add_space(7.0);
                         }
@@ -1402,27 +1424,19 @@ impl ScenarioApp {
             }
         });
         ui.add_space(4.0);
-        let entries = self
-            .custom_project
-            .as_ref()
-            .map(|project| project.entries.clone())
-            .unwrap_or_default();
+        let project = self.custom_project.clone().expect("project checked above");
         let mut tree_action = None;
-        paint_project_tree(
-            ui,
-            &entries,
-            &mut Vec::new(),
-            self.selected_project_scenario.as_deref(),
-            &self.selected_project_group,
-            self.dark,
-            &mut tree_action,
-        );
-        if let Some(action) = tree_action {
-            match action {
-                ProjectTreeAction::SelectGroup(path) => self.selected_project_group = path,
-                ProjectTreeAction::SelectScenario(path) => {
-                    self.selected_project_group = path[..path.len().saturating_sub(1)].to_vec();
-                    self.selected_project_scenario = Some(path);
+        paint_project_group_columns(ui, &project, &self.selected_project_group, &mut tree_action);
+        if let Some(path) = tree_action {
+            self.selected_project_group = path.clone();
+            let selected_is_inside = self
+                .selected_project_scenario
+                .as_ref()
+                .is_some_and(|selected| selected.starts_with(&path));
+            if !selected_is_inside {
+                if let Some(entries) = project_group_entries(&project, &path) {
+                    let mut prefix = path;
+                    self.selected_project_scenario = first_scenario_path(entries, &mut prefix);
                     self.selected_step = Some(0);
                     self.invalidate_plan();
                 }
@@ -4284,6 +4298,14 @@ mod tests {
 
         assert_eq!(path, vec![0, 0, 0]);
         assert_eq!(reparsed.scenario(&path).unwrap().id, "nested-scenario");
+        assert_eq!(
+            project_group_column_paths(&reparsed, &[0]),
+            vec![Vec::<usize>::new(), vec![0]]
+        );
+        assert_eq!(
+            project_group_column_paths(&reparsed, &[0, 0]),
+            vec![Vec::<usize>::new(), vec![0]]
+        );
     }
 
     #[test]

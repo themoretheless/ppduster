@@ -46,9 +46,9 @@ Run from the repo root so `./rules` is found, or pass `--rules-dir /path/to/rule
 
 `ppduster-ui` is a native `egui` application inspired by Peregon's visual pipeline
 canvas. It presents every setup scenario as a connected route of typed steps, with a
-searchable scenario library, step inspector, release-channel controls, permission
+searchable group list, step inspector, release-channel controls, permission
 switches, dry-run planning, and explicit confirmation before supported scenarios are
-applied. **New scenario** opens a visual project constructor. A project file owns a tree
+applied. **New group** opens a visual project constructor. A project file owns a tree
 of arbitrarily nested groups, and every group can contain scenarios or more groups.
 Selecting a scenario opens only its blocks on the canvas; selecting a group changes the
 insertion location without replacing the current canvas. Add atomic Git, filesystem,
