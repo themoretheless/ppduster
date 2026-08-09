@@ -201,6 +201,14 @@ struct GithubPickerState {
     error: Option<String>,
     receiver: Option<Receiver<Result<Vec<GithubRepository>, String>>>,
     auth_receiver: Option<Receiver<Result<(), String>>>,
+    authorization_intent: GithubAuthorizationIntent,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum GithubAuthorizationIntent {
+    #[default]
+    RepositoryPicker,
+    RetryScenario,
 }
 
 impl Default for GithubPickerState {
@@ -217,6 +225,7 @@ impl Default for GithubPickerState {
             error: None,
             receiver: None,
             auth_receiver: None,
+            authorization_intent: GithubAuthorizationIntent::RepositoryPicker,
         }
     }
 }
@@ -692,7 +701,11 @@ impl ScenarioApp {
         }
     }
 
-    fn start_github_authorization(&mut self, ctx: &egui::Context) {
+    fn start_github_authorization(
+        &mut self,
+        ctx: &egui::Context,
+        intent: GithubAuthorizationIntent,
+    ) {
         if self.github_picker.authorizing || self.github_picker.loading {
             return;
         }
@@ -705,6 +718,7 @@ impl ScenarioApp {
         });
         self.github_picker.auth_receiver = Some(receiver);
         self.github_picker.authorizing = true;
+        self.github_picker.authorization_intent = intent;
         self.github_picker.error = None;
     }
 
@@ -714,9 +728,15 @@ impl ScenarioApp {
         };
         match receiver.try_recv() {
             Ok(Ok(())) => {
+                let intent = self.github_picker.authorization_intent;
                 self.github_picker.authorizing = false;
                 self.github_picker.auth_receiver = None;
-                self.start_github_repository_load(ctx);
+                match intent {
+                    GithubAuthorizationIntent::RepositoryPicker => {
+                        self.start_github_repository_load(ctx);
+                    }
+                    GithubAuthorizationIntent::RetryScenario => self.start_run(ctx),
+                }
             }
             Ok(Err(error)) => {
                 self.github_picker.error = Some(error);
@@ -2158,20 +2178,56 @@ impl ScenarioApp {
         {
             self.confirm_run = true;
         }
+        let mut request_github_authorization = false;
         if let Some(error) = &self.plan_error {
             ui.add_space(8.0);
             error_box(ui, error, self.dark);
         } else if let Some(report) = &self.report {
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(if self.report_applied {
-                    format!("Выполнено шагов: {}", report.steps.len())
-                } else {
-                    format!("План готов: {} шагов", report.steps.len())
-                })
-                .size(9.0)
-                .color(CYAN),
+            paint_composer_run_report(
+                ui,
+                report,
+                self.selected_step,
+                self.report_applied,
+                self.dark,
             );
+            if github_report_needs_authorization(report) {
+                ui.add_space(8.0);
+                if ui
+                    .add_enabled(
+                        !self.github_picker.authorizing && !self.running,
+                        egui::Button::new("Войти через GitHub и повторить")
+                            .min_size(Vec2::new(ui.available_width(), 32.0)),
+                    )
+                    .clicked()
+                {
+                    request_github_authorization = true;
+                }
+                if self.github_picker.authorizing
+                    && matches!(
+                        self.github_picker.authorization_intent,
+                        GithubAuthorizationIntent::RetryScenario
+                    )
+                {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new("Ожидаю подтверждения входа в браузере…")
+                                .size(8.0)
+                                .color(MUTED),
+                        );
+                    });
+                } else if matches!(
+                    self.github_picker.authorization_intent,
+                    GithubAuthorizationIntent::RetryScenario
+                ) {
+                    if let Some(error) = &self.github_picker.error {
+                        error_box(ui, error, self.dark);
+                    }
+                }
+            }
+        }
+        if request_github_authorization {
+            self.start_github_authorization(ui.ctx(), GithubAuthorizationIntent::RetryScenario);
         }
     }
 
@@ -2828,7 +2884,7 @@ impl ScenarioApp {
             self.start_github_repository_load(ctx);
         }
         if request_authorization {
-            self.start_github_authorization(ctx);
+            self.start_github_authorization(ctx, GithubAuthorizationIntent::RepositoryPicker);
         }
         if configuration_changed {
             self.selected_step = Some(0);
@@ -4052,6 +4108,119 @@ fn section_label(ui: &mut egui::Ui, label: &str) {
     ui.add_space(5.0);
 }
 
+fn paint_composer_run_report(
+    ui: &mut egui::Ui,
+    report: &RunReport,
+    selected_step: Option<usize>,
+    applied: bool,
+    dark: bool,
+) {
+    ui.add_space(10.0);
+    let failed = !report.errors.is_empty();
+    ui.label(
+        RichText::new(if applied {
+            if failed {
+                format!(
+                    "Выполнение завершилось с ошибкой · шагов: {}",
+                    report.steps.len()
+                )
+            } else {
+                format!("Выполнено шагов: {}", report.steps.len())
+            }
+        } else if failed {
+            format!("План содержит ошибок: {}", report.errors.len())
+        } else {
+            format!("План готов: {} шагов", report.steps.len())
+        })
+        .strong()
+        .size(9.0)
+        .color(if failed { ORANGE } else { CYAN }),
+    );
+
+    if failed {
+        ui.add_space(8.0);
+        section_label(ui, "ОШИБКИ ВЫПОЛНЕНИЯ");
+        for error in &report.errors {
+            error_box(ui, error, dark);
+            ui.add_space(6.0);
+        }
+    }
+
+    let Some(step) = selected_step.and_then(|index| report.steps.get(index)) else {
+        return;
+    };
+    ui.add_space(8.0);
+    section_label(ui, "РЕЗУЛЬТАТ ВЫБРАННОГО БЛОКА");
+    ui.add(
+        egui::Label::new(RichText::new(&step.summary).size(9.0).color(
+            if matches!(&step.status, StepStatus::Failed) {
+                ORANGE
+            } else {
+                text(dark)
+            },
+        ))
+        .wrap(),
+    );
+
+    if !step.logs.is_empty() {
+        egui::CollapsingHeader::new(format!("Логи блока · {}", step.logs.len()))
+            .default_open(matches!(&step.status, StepStatus::Failed))
+            .show(ui, |ui| {
+                for log in &step.logs {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&log.message)
+                                .monospace()
+                                .size(8.0)
+                                .color(MUTED),
+                        )
+                        .wrap(),
+                    );
+                }
+            });
+    }
+
+    if let Some(output) = &step.output {
+        let json = serde_json::to_string_pretty(output)
+            .unwrap_or_else(|error| format!("Не удалось вывести контекст: {error}"));
+        egui::CollapsingHeader::new("Выходной контекст JSON")
+            .default_open(false)
+            .show(ui, |ui| {
+                ScrollArea::vertical()
+                    .id_salt(("composer-step-output", &step.step_id))
+                    .max_height(240.0)
+                    .show(ui, |ui| {
+                        Frame::new()
+                            .fill(code_surface(dark))
+                            .corner_radius(8)
+                            .inner_margin(Margin::same(8))
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(json).monospace().size(8.0).color(text(dark)),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                    });
+            });
+    }
+}
+
+fn github_report_needs_authorization(report: &RunReport) -> bool {
+    github_errors_need_authorization(&report.errors)
+}
+
+fn github_errors_need_authorization(errors: &[String]) -> bool {
+    errors.iter().any(|error| {
+        let error = error.to_ascii_lowercase();
+        error.contains("github cli")
+            && (error.contains("not authenticated")
+                || error.contains("is not logged")
+                || error.contains("gh auth login"))
+    })
+}
+
 fn error_box(ui: &mut egui::Ui, error: &str, dark: bool) {
     let red = Color32::from_rgb(194, 64, 64);
     Frame::new()
@@ -4596,6 +4765,16 @@ project:
             round_trip.task.steps[0].action,
             Action::GithubListRepositories
         ));
+    }
+
+    #[test]
+    fn github_authentication_failure_offers_recovery_but_rate_limit_does_not() {
+        assert!(github_errors_need_authorization(&[String::from(
+            "GitHub repository discovery failed: GitHub CLI is not authenticated for github.com; run gh auth login"
+        )]));
+        assert!(!github_errors_need_authorization(&[String::from(
+            "GitHub API rate limit was exceeded"
+        )]));
     }
 
     fn standalone_github_picker_task(pack: &TaskPack) -> Task {
