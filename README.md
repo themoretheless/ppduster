@@ -50,20 +50,21 @@ searchable scenario library, step inspector, release-channel controls, permissio
 switches, dry-run planning, and explicit confirmation before supported scenarios are
 applied.
 
-For a scenario with a `git-clone` step, the inspector can load every repository visible
-to the current GitHub CLI account and select one or many of them. The selection replaces
-the first resolved git step with one ordinary clone-or-update step per repository,
-synchronizes `main`, and checks out under `<destination root>/<owner>/<repository>`, so
-plans and reports stay separate. Repositories without `main`, archived repositories, and
-empty repositories cannot be selected. The HTTPS/SSH choice is used for a new clone;
-an existing checkout keeps and fetches its verified `origin`.
+For a scenario that resolves to exactly one standalone `git-clone` step, the inspector
+can load repositories visible to the current GitHub CLI account and select one or many
+public repositories. The selection replaces that standalone step with one ordinary
+HTTPS clone-or-update step per repository, synchronizes `main`, and checks out under
+`<destination root>/<owner>/<repository>`, so plans and reports stay separate. A task
+with downstream steps is deliberately ineligible: replacing its clone could otherwise
+silently disconnect those steps from their original checkout. Private, archived,
+empty, and no-`main` repositories cannot be selected; SSH is not offered in the GUI.
 
-The picker never reads or stores a GitHub token: install `gh` and run
-`gh auth login --hostname github.com` before loading the list. Private HTTPS clones also
-need `gh auth setup-git --hostname github.com`; SSH clones need a configured GitHub key
-and SSH agent. The desktop app blocks Apply until the corresponding noninteractive
-credential helper or SSH-agent/known-host setup is present; an invalid credential is
-then reported by the ordinary per-repository git step.
+ppduster does not request or store a GitHub token. Install `gh` and run
+`gh auth login --hostname github.com` before loading the list. GitHub CLI can still use
+its own authenticated session or inherit supported authentication environment variables
+from the ppduster process. The picker resolves `gh` only from absolute executable paths,
+runs it noninteractively with bounded output and a timeout, and redacts diagnostics before
+showing them in the UI.
 
 ```bash
 cargo run --bin ppduster-ui
@@ -111,46 +112,49 @@ ppduster clean -c temp --yes --permanent   # asks you to type DELETE
 
 ## Mac App Store CLI
 
-`ppduster app-store` provides its own `mas`-style catalog, inventory, install,
-and update commands. It does not require Homebrew or the external `mas` binary,
-and it can run outside the repository without loading cleanup rules.
+[`ppstore`](packages/ppstore/README.md) is the standalone `mas`-style package for
+catalog search, installed-app inventory, installation, and updates. Install it
+separately; Homebrew and the external `mas` binary are not required:
+
+```bash
+cargo install --locked --path packages/ppstore
+```
 
 ```bash
 # Catalog and local inventory (read-only)
-ppduster app-store search Xcode --country US --limit 10
-ppduster app-store list
-ppduster app-store outdated
-ppduster app-store doctor
+ppstore search Xcode --country US --limit 10
+ppstore list
+ppstore outdated
+ppstore doctor
 
 # Installation/update is planned by default
-ppduster app-store install 497799835
-ppduster app-store upgrade
+ppstore install 497799835
+ppstore upgrade
 
 # Explicitly enqueue with Apple's App Store services
-ppduster app-store install 497799835 --yes
-ppduster app-store install 640199958 --get --yes
-ppduster app-store upgrade --yes
+ppstore install 497799835 --yes
+ppstore install 640199958 --get --yes
+ppstore upgrade --yes
 
 # Machine-readable output is available for every report
-ppduster -o json app-store list
+ppstore -o json list
 ```
 
-The storefront defaults to the Mac's Apple locale and can be overridden with
-`--country` or `PPDUSTER_APP_STORE_COUNTRY`. Installed apps are identified by a
-non-empty App Store receipt and their bundle metadata; `outdated` compares those
-versions with Apple's catalog and reports incompatible or unmatched apps separately.
-Because Apple's catalog can lag behind App Store delivery, these are update candidates,
-not a transactional guarantee of the release the signed-in account will receive.
+`ppduster app-store` remains a compatibility proxy with the same subcommands, but it
+executes the separately installed `ppstore` binary directly, without a shell. The
+typed `app-store-install` automation action uses the versioned JSON protocol exposed
+by `ppstore 0.1.x`. An explicit `PPDUSTER_PPSTORE_PATH` must be an absolute path to a
+trusted executable; an invalid override is a hard error instead of falling back to a
+different program. The legacy `PPDUSTER_APP_STORE_COUNTRY` override is forwarded by
+the proxy and automation adapter; direct `ppstore` use supports `PPSTORE_COUNTRY`.
 
-Native install/update is macOS-only and uses isolated, runtime-checked private Apple
-frameworks because Apple does not publish a CLI installation API. This backend may
-need maintenance after macOS updates. The Mac App Store must already be signed in;
-ppduster never reads Apple Account credentials. `--get` is restricted to catalogued
-free apps, while paid apps must first be purchased in Apple's UI. Applying always
-requires `--yes`; omit it for a side-effect-free plan. By default ppduster waits for
-the receipt/version, while `--no-wait` returns after the bounded submission check. A
-`pending` result is deliberately not treated as a safe retry signal: rescan `list` and
-`outdated` first, because Apple's background service may still finish the request.
+The storefront otherwise defaults to the Mac's Apple locale. Installed apps are
+identified by a non-empty App Store receipt and bundle metadata. Native installation
+is macOS-only and remains isolated inside `ppstore`, which runtime-checks private Apple
+frameworks because Apple does not publish a CLI installation API. The Mac App Store
+must already be signed in; neither program reads Apple Account credentials. Applying
+always requires `--yes`. A `pending` result is not a safe retry signal: rescan first,
+because Apple's background service may still complete the request.
 
 ## Setup automation
 
@@ -195,7 +199,7 @@ ppduster setup run bambu-studio-install --channel release --yes
 ppduster setup run bambu-studio-install --channel beta
 ppduster setup run bambu-studio-install --channel beta --yes
 
-# Check native App Store prerequisites used by app-store-install actions
+# Check the macOS baseline used with the separately installed ppstore client
 ppduster setup run app-store-bootstrap
 ppduster setup run app-store-bootstrap --yes
 
@@ -557,8 +561,10 @@ child process only. It isolates inherited npm user/global configs and pins dotne
 generated `NuGet.Config`; arguments that override registries or credential configs are
 rejected. npm lifecycle scripts are forcibly disabled while the token is present. Exact
 username/token occurrences in child output are redacted, and unlock
-failures use one generic error in stderr and the audit log. Use a short-lived GitHub
-token with the minimum `read:packages` permission. Encryption protects the secrets at
+failures use one generic error in stderr and the audit log. For local authentication,
+use a short-lived GitHub [personal access token (classic)](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-nuget-registry#authenticating-with-a-personal-access-token)
+with only the `read:packages` permission; GitHub Packages does not accept fine-grained
+personal access tokens for this flow. Encryption protects the secrets at
 rest; the selected child environment and its descendants, a debugger running as the same
 user, or malicious project tooling can still access or encode the values. The npm/dotnet
 executable resolved from the caller's `PATH` is also trusted, so run the wrapper only in
@@ -588,7 +594,7 @@ environment; [older clients ignore the mapping](https://learn.microsoft.com/en-u
 
 - `extract-archive` supports `zip`, `tar`, `tar.gz`/`tgz`, `tar.bz2`, and `tar.xz`; it rejects links, special files, traversal, duplicate output files, oversized output, and existing destinations before atomically publishing the extracted directory
 - DMG installation verifies the image, mounts it read-only, validates the app signature and Gatekeeper assessment, stages the bundle in `~/Applications`, and refuses elevation or overwriting an existing app
-- typed `app-store-install` steps use a numeric App Store ID through ppduster's native, runtime-checked backend; they must not request sudo/elevation and require an App Store account that owns the app
+- typed `app-store-install` steps pass a numeric App Store ID to the separately installed, runtime-checked `ppstore 0.1.x` client through a versioned JSON protocol; they never use a shell, must not request sudo/elevation, and require an App Store account that owns the app
 - the sealed `activate-license` action accepts only a provider and method, and task loading rejects `license_key` / `license-key` fields at any nesting level; enter the key directly in the vendor UI
 
 An App Store installation step looks like this:

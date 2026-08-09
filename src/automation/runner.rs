@@ -4,9 +4,9 @@ use crate::automation::task::{
     InspectPathAction, LicenseMethod, LicenseProvider, PathExpectation, PathKind, ReleaseChannel,
     ScriptInterpreter, ShellMode, Step, StepCondition, Task, WriteConflictPolicy,
 };
+use crate::ppstore::{self, InstallOutcome};
 use crate::rules::expand_path_template;
 use crate::safety::{is_safe_rule_root, stays_under_root};
-use crate::{app_store, app_store_installer};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,6 @@ use std::io::IsTerminal;
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::time::Duration;
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -1089,7 +1088,7 @@ pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
             }
         ),
         Action::AppStoreInstall(action) => format!(
-            "queue a native App Store {} download for application {} through Apple's system services",
+            "delegate an App Store {} request for application {} to standalone ppstore 0.1.x",
             app_store_operation_name(action.operation),
             action.app_id
         ),
@@ -1129,6 +1128,10 @@ fn prerequisites_for_step(step: &Step) -> Vec<String> {
         );
     }
     if let Action::AppStoreInstall(action) = &step.action {
+        prerequisites.push(
+            "install a trusted ppstore 0.1.x executable separately; optionally select it with the absolute PPDUSTER_PPSTORE_PATH override"
+                .into(),
+        );
         prerequisites.push(
             "sign in to the Mac App Store with the Apple Account that owns the application; authentication stays in Apple's UI"
                 .into(),
@@ -1483,9 +1486,7 @@ fn apply_step(step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
             require_rosetta_on_apple_silicon,
         } => apply_macos_requirements(minimum_version, *require_rosetta_on_apple_silicon)
             .map(ApplyStepResult::Applied),
-        Action::AppStoreInstall(action) => {
-            apply_app_store_install(action.app_id, action.operation).map(ApplyStepResult::Applied)
-        }
+        Action::AppStoreInstall(action) => apply_app_store_install(action.app_id, action.operation),
         Action::BambuStudioRelease(action) => {
             apply_bambu_studio_release(opts.release_channel.unwrap_or(action.channel))
                 .map(ApplyStepResult::Applied)
@@ -4170,86 +4171,42 @@ fn app_store_operation_name(operation: AppStoreOperation) -> &'static str {
     }
 }
 
-fn native_app_store_operation(operation: AppStoreOperation) -> app_store_installer::StoreOperation {
-    match operation {
-        AppStoreOperation::Install => app_store_installer::StoreOperation::Install,
-        AppStoreOperation::Get => app_store_installer::StoreOperation::Get,
+fn app_store_country_override() -> Result<Option<String>> {
+    let country = match std::env::var("PPDUSTER_APP_STORE_COUNTRY") {
+        Ok(country) if country.trim().is_empty() => return Ok(None),
+        Ok(country) => country,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("PPDUSTER_APP_STORE_COUNTRY contains non-Unicode data")
+        }
+    };
+    let country = country.trim();
+    if country.len() != 2 || !country.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        bail!("PPDUSTER_APP_STORE_COUNTRY must be a two-letter country code");
     }
+    Ok(Some(country.to_ascii_uppercase()))
 }
 
-fn app_store_country() -> String {
-    std::env::var("PPDUSTER_APP_STORE_COUNTRY").unwrap_or_else(|_| "US".into())
-}
-
-fn app_store_identity_matches(
-    installed_adam_id: Option<u64>,
-    installed_bundle_id: &str,
-    target_adam_id: u64,
-    target_bundle_id: &str,
-) -> bool {
-    installed_adam_id == Some(target_adam_id)
-        || (!installed_bundle_id.is_empty()
-            && !target_bundle_id.is_empty()
-            && installed_bundle_id == target_bundle_id)
-}
-
-fn app_store_app_is_installed(app_id: u64) -> Result<bool> {
-    let installed = app_store::scan_installed(&[])
-        .with_context(|| format!("scan installed Mac App Store applications for {app_id}"))?;
-    let catalog = app_store::lookup_by_adam_id(app_id, &app_store_country())
-        .with_context(|| format!("look up Mac App Store application {app_id}"))?;
-
-    Ok(installed.apps.iter().any(|local| {
-        catalog.apps.iter().any(|available| {
-            available.adam_id == app_id
-                && app_store_identity_matches(
-                    local.adam_id,
-                    &local.bundle_id,
-                    app_id,
-                    &available.bundle_id,
-                )
-        }) || local.adam_id == Some(app_id)
-    }))
-}
-
-fn apply_app_store_install(app_id: u64, operation: AppStoreOperation) -> Result<String> {
+fn apply_app_store_install(app_id: u64, operation: AppStoreOperation) -> Result<ApplyStepResult> {
     if !cfg!(target_os = "macos") {
         bail!("app-store-install is only supported on macOS");
     }
-    if app_store_app_is_installed(app_id)? {
-        return Ok(format!(
-            "Mac App Store application {} is already installed",
-            app_id
-        ));
-    }
-    const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-    let queued = app_store_installer::queue(
+    let country = app_store_country_override()?;
+    let outcome = ppstore::install(
         app_id,
-        native_app_store_operation(operation),
-        INITIAL_REQUEST_TIMEOUT,
+        matches!(operation, AppStoreOperation::Get),
+        country.as_deref(),
     )
     .with_context(|| {
         format!(
-            "queue native App Store {} download for application {}",
+            "run ppstore {} for App Store application {}",
             app_store_operation_name(operation),
             app_id
         )
     })?;
-    match &queued.status {
-        app_store_installer::QueueStatus::Queued => Ok(format!(
-            "native App Store download queued for application {} ({} download{})",
-            app_id,
-            queued.downloads_queued,
-            if queued.downloads_queued == 1 {
-                ""
-            } else {
-                "s"
-            }
-        )),
-        app_store_installer::QueueStatus::Pending { detail } => Ok(format!(
-            "native App Store request for application {} is pending; do not retry before rescanning: {}",
-            app_id, detail
-        )),
+    match outcome {
+        InstallOutcome::Applied(summary) => Ok(ApplyStepResult::Applied(summary)),
+        InstallOutcome::AlreadySatisfied(summary) => Ok(ApplyStepResult::AlreadySatisfied(summary)),
     }
 }
 
@@ -4875,14 +4832,6 @@ fn is_satisfied(step: &Step, run_command_checks: bool) -> Result<Option<String>>
         {
             if let Some(reason) = package_registry::is_satisfied(secrets, npm, nuget)? {
                 return Ok(Some(reason));
-            }
-        }
-        if let Action::AppStoreInstall(action) = &step.action {
-            if app_store_app_is_installed(action.app_id)? {
-                return Ok(Some(format!(
-                    "Mac App Store application {} is already installed",
-                    action.app_id
-                )));
             }
         }
         if let Action::InstallDmg {
@@ -7005,7 +6954,11 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
 
         assert!(report.plans[0]
             .summary
-            .contains("native App Store install download for application 497799835"));
+            .contains("App Store install request for application 497799835"));
+        assert!(report.plans[0]
+            .prerequisites
+            .iter()
+            .any(|item| item.contains("ppstore 0.1.x")));
         assert!(report.plans[0]
             .prerequisites
             .iter()
@@ -7014,36 +6967,6 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
             .prerequisites
             .iter()
             .any(|item| item.contains("operation: get")));
-    }
-
-    #[test]
-    fn app_store_identity_matching_and_native_operations_are_exact() {
-        assert!(app_store_identity_matches(
-            Some(497_799_835),
-            "com.apple.dt.Xcode",
-            497_799_835,
-            "com.example.unrelated",
-        ));
-        assert!(app_store_identity_matches(
-            None,
-            "com.apple.dt.Xcode",
-            497_799_835,
-            "com.apple.dt.Xcode",
-        ));
-        assert!(!app_store_identity_matches(
-            Some(409_183_694),
-            "com.example.unrelated",
-            497_799_835,
-            "com.apple.dt.Xcode",
-        ));
-        assert_eq!(
-            native_app_store_operation(AppStoreOperation::Install),
-            app_store_installer::StoreOperation::Install
-        );
-        assert_eq!(
-            native_app_store_operation(AppStoreOperation::Get),
-            app_store_installer::StoreOperation::Get
-        );
     }
 
     #[cfg(unix)]

@@ -26,7 +26,7 @@ const CURL_RESPONSE_LIMIT: &str = "16777216";
 /// An application returned by Apple's public Search or Lookup API.
 ///
 /// The aliases let this type deserialize the API's camelCase response while
-/// keeping ppduster's serialized reports in snake_case.
+/// keeping ppstore's serialized reports in snake_case.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CatalogApp {
     #[serde(alias = "trackId")]

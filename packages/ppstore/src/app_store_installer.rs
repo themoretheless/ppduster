@@ -120,7 +120,7 @@ mod platform {
     use super::*;
     use block2::RcBlock;
     use objc2::rc::autoreleasepool;
-    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
     use objc2::{msg_send, sel};
     use objc2_foundation::{NSDate, NSError, NSRunLoop, NSString};
     use std::ffi::CStr;
@@ -200,11 +200,16 @@ mod platform {
                 );
             }
         }
+        if let Some(class) = AnyClass::get(c"NSArray") {
+            if class.instance_method(sel!(count)).is_none() {
+                missing.push("-[NSArray count]".into());
+            }
+        }
         if missing.is_empty() {
             InstallerBackendStatus {
                 available: true,
                 backend: "commerce-kit",
-                detail: "native App Store download services are available".into(),
+                detail: "required native App Store request interfaces are available; callback response selectors are validated before use".into(),
             }
         } else {
             InstallerBackendStatus {
@@ -276,20 +281,8 @@ mod platform {
                         let result = {
                             if let Some(error) = error.as_ref() {
                                 Err(error.localizedDescription().to_string())
-                            } else if response.is_null() {
-                                Err("App Store returned no download response".into())
                             } else {
-                                let downloads: *mut AnyObject = msg_send![response, downloads];
-                                if downloads.is_null() {
-                                    Err("App Store returned no downloads".into())
-                                } else {
-                                    let count: usize = msg_send![downloads, count];
-                                    if count == 0 {
-                                        Err("App Store did not enqueue a download".into())
-                                    } else {
-                                        Ok(count)
-                                    }
-                                }
+                                checked_response_download_count(response)
                             }
                         };
                         let _ = sender.try_send(result);
@@ -348,13 +341,54 @@ mod platform {
         })
     }
 
+    pub(super) fn checked_response_download_count(
+        response: *mut AnyObject,
+    ) -> Result<usize, String> {
+        let Some(response) = (unsafe { response.as_ref() }) else {
+            return Err("App Store returned no download response".into());
+        };
+        if !responds_to_selector(response, sel!(downloads)) {
+            return Err(
+                "App Store response is missing the required -[response downloads] selector".into(),
+            );
+        }
+
+        let downloads: *mut AnyObject = unsafe { msg_send![response, downloads] };
+        checked_download_collection_count(downloads)
+    }
+
+    pub(super) fn checked_download_collection_count(
+        downloads: *mut AnyObject,
+    ) -> Result<usize, String> {
+        let Some(downloads) = (unsafe { downloads.as_ref() }) else {
+            return Err("App Store returned no downloads".into());
+        };
+        if !responds_to_selector(downloads, sel!(count)) {
+            return Err(
+                "App Store downloads object is missing the required -[downloads count] selector"
+                    .into(),
+            );
+        }
+
+        let count: usize = unsafe { msg_send![downloads, count] };
+        if count == 0 {
+            Err("App Store did not enqueue a download".into())
+        } else {
+            Ok(count)
+        }
+    }
+
+    fn responds_to_selector(object: &AnyObject, selector: Sel) -> bool {
+        unsafe { msg_send![object, respondsToSelector: selector] }
+    }
+
     fn load_frameworks() -> Result<(), String> {
         FRAMEWORK_LOAD
             .get_or_init(|| {
                 for path in FRAMEWORKS {
                     // Keep each system framework loaded for the lifetime of
                     // the process. This avoids a hard load command in every
-                    // ppduster binary and lets unrelated commands keep working
+                    // ppstore binary and lets unrelated commands keep working
                     // when Apple removes or renames a private framework.
                     let handle =
                         unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
@@ -426,5 +460,28 @@ mod tests {
     fn backend_probe_is_read_only_and_does_not_panic() {
         let status = backend_status();
         assert_eq!(status.backend, "commerce-kit");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn callback_response_selectors_fail_closed() {
+        use objc2::rc::autoreleasepool;
+        use objc2::runtime::AnyObject;
+        use objc2_foundation::NSString;
+
+        autoreleasepool(|_| {
+            let incompatible = NSString::from_str("not a CommerceKit response");
+            let incompatible = (&*incompatible as *const NSString)
+                .cast::<AnyObject>()
+                .cast_mut();
+
+            let response_error =
+                platform::checked_response_download_count(incompatible).unwrap_err();
+            assert!(response_error.contains("downloads] selector"));
+
+            let collection_error =
+                platform::checked_download_collection_count(incompatible).unwrap_err();
+            assert!(collection_error.contains("count] selector"));
+        });
     }
 }

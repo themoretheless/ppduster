@@ -3110,7 +3110,6 @@ version = "0.1.0"
 dependencies = [
  "age",
  "anyhow",
- "block2 0.6.2",
  "bytesize",
  "bzip2",
  "chrono",
@@ -3122,8 +3121,6 @@ dependencies = [
  "globset",
  "hex",
  "libc",
- "objc2 0.6.4",
- "objc2-foundation 0.3.2",
  "regex",
  "rpassword",
  "same-file",

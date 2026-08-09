@@ -1,12 +1,12 @@
 task:
   id: macos-top-26-app-store
   name: macOS App Store baseline
-  description: Verify the macOS baseline used by native App Store automation and safely inspect Spotlight metadata for installed App Store applications without installing third-party tooling.
+  description: Verify the macOS baseline used by the separately installed ppstore client and safely inspect Spotlight metadata for installed App Store applications. This task does not install ppstore or other third-party tooling.
   platform: macos
   trust: bundled-only
   steps:
     - id: verify-app-store-requirements
-      name: Verify native App Store macOS requirements
+      name: Verify ppstore macOS requirements
       type: macos-requirements
       minimum_version: "14.0"
     - id: inspect-app-store-metadata

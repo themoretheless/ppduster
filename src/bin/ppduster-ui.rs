@@ -8,6 +8,7 @@ use ppduster::automation::{
     ScriptInterpreter, Step, StepStatus, Task, TaskPack, TaskSource,
 };
 use ppduster::github::{list_accessible_repositories, GithubRepository};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -33,17 +34,10 @@ struct ScenarioGroup {
     step_summaries: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GithubCloneProtocol {
-    Https,
-    Ssh,
-}
-
 struct GithubPickerState {
     open: bool,
     search: String,
     destination_root: String,
-    protocol: GithubCloneProtocol,
     repositories: Vec<GithubRepository>,
     selected_ids: BTreeSet<String>,
     loaded_once: bool,
@@ -58,7 +52,6 @@ impl Default for GithubPickerState {
             open: false,
             search: String::new(),
             destination_root: default_github_destination_root(),
-            protocol: GithubCloneProtocol::Https,
             repositories: Vec::new(),
             selected_ids: BTreeSet::new(),
             loaded_once: false,
@@ -156,7 +149,6 @@ impl ScenarioApp {
             &self.github_picker.repositories,
             &self.github_picker.selected_ids,
             &self.github_picker.destination_root,
-            self.github_picker.protocol,
         )
     }
 
@@ -612,12 +604,7 @@ impl ScenarioApp {
                     .task_pack
                     .as_ref()
                     .and_then(|pack| pack.resolve(&task.id).ok())
-                    .is_some_and(|resolved| {
-                        resolved
-                            .steps
-                            .iter()
-                            .any(|step| matches!(step.action, Action::GitClone { .. }))
-                    });
+                    .is_some_and(|resolved| github_picker_source_step(&resolved).is_some());
                 let resolved = self.resolved_selected_task();
                 let resolved_task = resolved.as_ref().ok().cloned();
                 let resolution_error = resolved.err().map(|error| format!("{error:#}"));
@@ -723,7 +710,7 @@ impl ScenarioApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(
-                                    "Можно заменить первый git-шаг одним или несколькими репозиториями из вашего GitHub.",
+                                    "Можно заменить одношаговый git-сценарий одним или несколькими публичными HTTPS-репозиториями из вашего GitHub.",
                                 )
                                 .size(9.0)
                                 .color(MUTED),
@@ -1259,24 +1246,6 @@ impl ScenarioApp {
                     .any(|repository| &repository.id == *id)
             })
             .count();
-        let source_requires_git_auth = self
-            .task_pack
-            .as_ref()
-            .and_then(|pack| {
-                self.selected_task()
-                    .and_then(|task| pack.resolve(&task.id).ok())
-            })
-            .and_then(|task| {
-                task.steps
-                    .into_iter()
-                    .find(|step| matches!(step.action, Action::GitClone { .. }))
-            })
-            .is_some_and(|step| matches!(step.auth, AuthPolicy::GitCredential));
-        let selection_requires_git_auth = source_requires_git_auth
-            || matches!(self.github_picker.protocol, GithubCloneProtocol::Ssh)
-            || self.github_picker.repositories.iter().any(|repository| {
-                repository.is_private && self.github_picker.selected_ids.contains(&repository.id)
-            });
         let mut configuration_changed = false;
         let mut request_refresh = false;
         let mut close = false;
@@ -1300,7 +1269,7 @@ impl ScenarioApp {
                         );
                         ui.label(
                             RichText::new(
-                                "Список загружается через вашу существующую сессию GitHub CLI; токен не попадает в ppduster.",
+                                "ppduster не запрашивает и не сохраняет токен; GitHub CLI может получить авторизацию из своей сессии или унаследованных переменных окружения.",
                             )
                             .size(9.0)
                             .color(MUTED),
@@ -1355,64 +1324,21 @@ impl ScenarioApp {
                                 .desired_width(300.0),
                             );
                             configuration_changed |= root_response.changed();
-                            let before = self.github_picker.protocol;
-                            ui.selectable_value(
-                                &mut self.github_picker.protocol,
-                                GithubCloneProtocol::Https,
-                                "HTTPS",
+                            ui.label(
+                                RichText::new("PUBLIC HTTPS ONLY")
+                                    .strong()
+                                    .size(8.0)
+                                    .color(PURPLE),
                             );
-                            ui.selectable_value(
-                                &mut self.github_picker.protocol,
-                                GithubCloneProtocol::Ssh,
-                                "SSH",
-                            );
-                            configuration_changed |= before != self.github_picker.protocol;
                         });
                         ui.label(
                             RichText::new(
-                                "Путь: <корень>/<owner>/<repository>; синхронизируется main. Протокол применяется при новом clone; существующий origin сохраняется.",
+                                "Путь: <корень>/<owner>/<repository>; синхронизируется main. Private и SSH отключены, чтобы фоновый git не запрашивал credentials.",
                             )
                             .size(8.0)
                             .color(MUTED),
                         );
                     });
-
-                if selection_requires_git_auth {
-                    ui.add_space(8.0);
-                    Frame::new()
-                        .fill(translucent(ORANGE, if self.dark { 34 } else { 15 }))
-                        .stroke(Stroke::new(1.0, translucent(ORANGE, 90)))
-                        .corner_radius(9)
-                        .inner_margin(Margin::same(9))
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(if matches!(
-                                    self.github_picker.protocol,
-                                    GithubCloneProtocol::Ssh
-                                ) {
-                                    "Для SSH нужен настроенный GitHub-ключ и доступный SSH agent. Загрузка списка через gh этого не проверяет."
-                                } else {
-                                    "Для private HTTPS обычный git должен использовать GitHub CLI как credential helper."
-                                })
-                                .size(9.0)
-                                .color(ORANGE),
-                            );
-                            let (label, command) = if matches!(
-                                self.github_picker.protocol,
-                                GithubCloneProtocol::Ssh
-                            ) {
-                                ("Скопировать проверку SSH", "ssh -T git@github.com")
-                            } else {
-                                (
-                                    "Скопировать настройку Git",
-                                    "gh auth setup-git --hostname github.com",
-                                )
-                            };
-                            if ui.button(label).clicked() {
-                                ui.ctx().copy_text(command.into());
-                            }
-                        });
-                }
 
                 if let Some(error) = &self.github_picker.error {
                     ui.add_space(10.0);
@@ -1470,6 +1396,7 @@ impl ScenarioApp {
                                     self.github_picker.selected_ids.contains(&repository.id);
                                 let selectable = selected
                                     || (!repository.is_archived
+                                        && !repository.is_private
                                         && repository.main_branch.is_some()
                                         && self.github_picker.selected_ids.len()
                                             < MAX_SELECTED_GITHUB_REPOSITORIES);
@@ -1678,7 +1605,6 @@ fn materialize_github_repositories(
     repositories: &[GithubRepository],
     selected_ids: &BTreeSet<String>,
     destination_root: &str,
-    protocol: GithubCloneProtocol,
 ) -> anyhow::Result<Task> {
     if selected_ids.is_empty() {
         return Ok(task);
@@ -1701,17 +1627,12 @@ fn materialize_github_repositories(
         anyhow::bail!("корневая папка GitHub не должна содержать '..'");
     }
 
-    let source_index = task
-        .steps
-        .iter()
-        .position(|step| matches!(step.action, Action::GitClone { .. }))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "сценарий {} не содержит git-шаг, который можно настроить",
-                task.id
-            )
-        })?;
-    let source_step = task.steps[source_index].clone();
+    let source_step = github_picker_source_step(&task).cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "сценарий {} должен состоять ровно из одного git-clone шага для безопасной настройки через GitHub picker",
+            task.id
+        )
+    })?;
     let mut selected = Vec::with_capacity(selected_ids.len());
     for id in selected_ids {
         let repository = repositories
@@ -1726,6 +1647,12 @@ fn materialize_github_repositories(
         if repository.is_archived {
             anyhow::bail!(
                 "архивный GitHub-репозиторий {} нельзя добавить в сценарий",
+                repository.name_with_owner
+            );
+        }
+        if repository.is_private {
+            anyhow::bail!(
+                "private GitHub-репозиторий {} нельзя запускать из GUI; picker поддерживает только публичный HTTPS",
                 repository.name_with_owner
             );
         }
@@ -1754,18 +1681,14 @@ fn materialize_github_repositories(
         }
 
         let mut step = source_step.clone();
-        step.id = format!(
-            "{}/{}",
-            source_step.id,
-            github_step_slug(&repository.name_with_owner)
-        );
+        step.id = format!("{}/{}", source_step.id, github_step_slug(repository));
         step.name = format!("Clone or update {}", repository.name_with_owner);
         step.check = None;
-        // The desktop picker performs its own noninteractive credential gate.
-        // Avoid the runner's terminal prompt in the background UI worker.
+        // The picker only materializes public github.com HTTPS URLs. No
+        // credential prompt is needed in the background UI worker.
         step.auth = AuthPolicy::None;
         step.action = Action::GitClone {
-            repo: github_clone_url(repository, protocol),
+            repo: github_clone_url(repository),
             dest: PathBuf::from(destination_root)
                 .join(&repository.owner)
                 .join(&repository.name)
@@ -1776,10 +1699,16 @@ fn materialize_github_repositories(
         generated_steps.push(step);
     }
 
-    task.steps
-        .splice(source_index..=source_index, generated_steps);
+    task.steps.splice(.., generated_steps);
     task.validate().map_err(anyhow::Error::msg)?;
     Ok(task)
+}
+
+fn github_picker_source_step(task: &Task) -> Option<&Step> {
+    match task.steps.as_slice() {
+        [step] if matches!(step.action, Action::GitClone { .. }) => Some(step),
+        _ => None,
+    }
 }
 
 fn validate_github_repository_identity(repository: &GithubRepository) -> anyhow::Result<()> {
@@ -1809,18 +1738,12 @@ fn is_safe_github_component(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
 }
 
-fn github_clone_url(repository: &GithubRepository, protocol: GithubCloneProtocol) -> String {
-    match protocol {
-        GithubCloneProtocol::Https => {
-            format!("https://github.com/{}.git", repository.name_with_owner)
-        }
-        GithubCloneProtocol::Ssh => {
-            format!("git@github.com:{}.git", repository.name_with_owner)
-        }
-    }
+fn github_clone_url(repository: &GithubRepository) -> String {
+    format!("https://github.com/{}.git", repository.name_with_owner)
 }
 
-fn github_step_slug(name_with_owner: &str) -> String {
+fn github_step_slug(repository: &GithubRepository) -> String {
+    let name_with_owner = &repository.name_with_owner;
     let mut slug = String::with_capacity(name_with_owner.len());
     let mut previous_dash = false;
     for character in name_with_owner.chars() {
@@ -1832,7 +1755,8 @@ fn github_step_slug(name_with_owner: &str) -> String {
             previous_dash = true;
         }
     }
-    slug.trim_matches('-').to_owned()
+    let digest = Sha256::digest(format!("{}\0{}", repository.id, repository.name_with_owner));
+    format!("{}-{}", slug.trim_matches('-'), hex::encode(&digest[..16]))
 }
 
 fn task_matches_query(task: &Task, normalized_query: &str) -> bool {
@@ -2401,20 +2325,10 @@ fn git_clone_auth_ready(repo: &str) -> bool {
 }
 
 fn github_selection_auth_ready(picker: &GithubPickerState) -> bool {
-    if picker.selected_ids.is_empty() {
-        return true;
-    }
-    if matches!(picker.protocol, GithubCloneProtocol::Ssh) {
-        return git_clone_auth_ready("git@github.com:owner/repository.git");
-    }
-    if picker
+    !picker
         .repositories
         .iter()
         .any(|repository| repository.is_private && picker.selected_ids.contains(&repository.id))
-    {
-        return git_clone_auth_ready("https://github.com/owner/repository.git");
-    }
-    true
 }
 
 fn task_has_unready_git_credentials(task: &Task) -> bool {
@@ -2664,49 +2578,42 @@ mod tests {
     #[test]
     fn github_selection_expands_to_one_typed_git_step_per_repository() {
         let pack = load_tasks().unwrap();
-        let task = pack.resolve("dev-brew-bootstrap").unwrap();
+        let task = standalone_github_picker_task(&pack);
         let repositories = vec![
             github_repository("R2", "zeta/api", "trunk"),
             github_repository("R1", "acme/api", "main"),
         ];
         let selected_ids = BTreeSet::from(["R2".to_owned(), "R1".to_owned()]);
 
-        let configured = materialize_github_repositories(
-            task,
-            &repositories,
-            &selected_ids,
-            "/tmp/workspaces",
-            GithubCloneProtocol::Ssh,
-        )
-        .unwrap();
+        let configured =
+            materialize_github_repositories(task, &repositories, &selected_ids, "/tmp/workspaces")
+                .unwrap();
 
-        assert_eq!(configured.steps.len(), 3);
-        assert_eq!(configured.steps[0].id, "clone-repo/acme-api");
-        assert_eq!(configured.steps[1].id, "clone-repo/zeta-api");
-        assert!(configured.steps[..2]
+        assert_eq!(configured.steps.len(), 2);
+        assert!(configured.steps[0].id.starts_with("clone-repo/acme-api-"));
+        assert!(configured.steps[1].id.starts_with("clone-repo/zeta-api-"));
+        assert_ne!(configured.steps[0].id, configured.steps[1].id);
+        assert!(configured
+            .steps
             .iter()
             .all(|step| matches!(step.auth, AuthPolicy::None)));
         assert!(matches!(
             &configured.steps[0].action,
             Action::GitClone { repo, dest, branch }
-                if repo == "git@github.com:acme/api.git"
+                if repo == "https://github.com/acme/api.git"
                     && dest == "/tmp/workspaces/acme/api"
                     && branch.as_deref() == Some("main")
         ));
         assert!(matches!(
             &configured.steps[1].action,
             Action::GitClone { repo, dest, branch }
-                if repo == "git@github.com:zeta/api.git"
+                if repo == "https://github.com/zeta/api.git"
                     && dest == "/tmp/workspaces/zeta/api"
                     && branch.as_deref() == Some("main")
         ));
-        assert!(matches!(
-            configured.steps[2].action,
-            Action::BrewInstall { .. }
-        ));
 
         let report = run_task(&configured, &RunOptions::default()).unwrap();
-        assert_eq!(report.steps.len(), 3);
+        assert_eq!(report.steps.len(), 2);
         assert!(report.steps[0].summary.contains("acme/api"));
         assert!(report.steps[1].summary.contains("zeta/api"));
     }
@@ -2714,7 +2621,7 @@ mod tests {
     #[test]
     fn github_selection_rejects_missing_branch_and_path_traversal() {
         let pack = load_tasks().unwrap();
-        let task = pack.resolve("dev-brew-bootstrap").unwrap();
+        let task = standalone_github_picker_task(&pack);
         let mut missing_branch = github_repository("R1", "acme/empty", "main");
         missing_branch.main_branch = None;
         let selected_ids = BTreeSet::from(["R1".to_owned()]);
@@ -2723,76 +2630,66 @@ mod tests {
             &[missing_branch],
             &selected_ids,
             "/tmp/workspaces",
-            GithubCloneProtocol::Https,
         )
         .unwrap_err()
         .to_string();
         assert!(error.contains("ветки main"));
 
         let traversal = github_repository("R1", "../escape", "main");
-        let error = materialize_github_repositories(
-            task,
-            &[traversal],
-            &selected_ids,
-            "/tmp/workspaces",
-            GithubCloneProtocol::Https,
-        )
-        .unwrap_err()
-        .to_string();
+        let error =
+            materialize_github_repositories(task, &[traversal], &selected_ids, "/tmp/workspaces")
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("недопустимое имя"));
     }
 
     #[test]
-    fn github_selection_can_configure_the_first_git_step_in_a_template() {
+    fn github_selection_rejects_private_repositories_and_downstream_steps() {
         let pack = load_tasks().unwrap();
-        let task = pack.resolve("macos-developer-workstation").unwrap();
-        let original_steps = task.steps.len();
-        let repositories = [
-            github_repository("R1", "acme/workstation", "trunk"),
-            github_repository("R2", "zeta/workstation", "main"),
-        ];
-        let selected_ids = BTreeSet::from(["R1".to_owned(), "R2".to_owned()]);
-
-        let configured = materialize_github_repositories(
-            task,
-            &repositories,
+        let selected_ids = BTreeSet::from(["R1".to_owned()]);
+        let mut private = github_repository("R1", "acme/private", "main");
+        private.is_private = true;
+        let error = materialize_github_repositories(
+            standalone_github_picker_task(&pack),
+            &[private],
             &selected_ids,
             "/tmp/workspaces",
-            GithubCloneProtocol::Https,
         )
-        .unwrap();
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("private"));
+        assert!(error.contains("публичный HTTPS"));
 
-        assert_eq!(configured.steps.len(), original_steps + 1);
-        let selected_step = configured
-            .steps
-            .iter()
-            .find(|step| step.id.contains("acme-workstation"))
-            .unwrap();
-        assert!(matches!(
-            &selected_step.action,
-            Action::GitClone { branch, .. } if branch.as_deref() == Some("main")
-        ));
+        let task_with_downstream_step = pack.resolve("dev-brew-bootstrap").unwrap();
+        assert!(github_picker_source_step(&task_with_downstream_step).is_none());
+        let public = github_repository("R1", "acme/public", "main");
+        let error = materialize_github_repositories(
+            task_with_downstream_step,
+            &[public],
+            &selected_ids,
+            "/tmp/workspaces",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("ровно из одного git-clone шага"));
+    }
 
-        let template = pack.get("macos-developer-workstation").unwrap();
-        let groups =
-            scenario_groups(&pack, template, &RunOptions::default(), Some(&configured)).unwrap();
-        assert_eq!(
-            groups.iter().map(|group| group.step_count).sum::<usize>(),
-            configured.steps.len()
-        );
-        let configured_group = groups
-            .iter()
-            .find(|group| {
-                group
-                    .step_summaries
-                    .iter()
-                    .any(|summary| summary.contains("acme/workstation"))
-            })
-            .unwrap();
-        assert!(configured_group
-            .step_summaries
-            .iter()
-            .any(|summary| summary.contains("zeta/workstation")));
+    #[test]
+    fn github_generated_step_ids_are_stable_and_resist_slug_collisions() {
+        let dotted = github_repository("R_dotted", "acme/foo.bar", "main");
+        let dashed = github_repository("R_dashed", "acme/foo-bar", "main");
+
+        let dotted_id = github_step_slug(&dotted);
+        assert_eq!(dotted_id, github_step_slug(&dotted));
+        assert!(dotted_id.starts_with("acme-foo-bar-"));
+        assert!(github_step_slug(&dashed).starts_with("acme-foo-bar-"));
+        assert_ne!(dotted_id, github_step_slug(&dashed));
+    }
+
+    fn standalone_github_picker_task(pack: &TaskPack) -> Task {
+        let mut task = pack.resolve("dev-brew-bootstrap").unwrap();
+        task.steps.truncate(1);
+        task
     }
 
     fn github_repository(
