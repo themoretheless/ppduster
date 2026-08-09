@@ -1,0 +1,630 @@
+pack: apps-streaming
+rules:
+
+  - id: stream-camtasia-caches
+    name: Camtasia caches and HTTPStorages
+    description: TechSmith Camtasia regenerable caches. Not .tscproj projects or shared media libraries.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.techsmith.camtasia2024
+      - $HOME/Library/Caches/com.techsmith.camtasia2025
+      - $HOME/Library/Caches/com.techsmith.camtasia2026
+      - $HOME/Library/Caches/com.plausiblelabs.crashreporter.data/com.techsmith.camtasia2024
+      - $HOME/Library/Caches/com.plausiblelabs.crashreporter.data/com.techsmith.camtasia2025
+      - $HOME/Library/Caches/com.plausiblelabs.crashreporter.data/com.techsmith.camtasia2026
+      - $HOME/Library/HTTPStorages/com.techsmith.camtasia2024
+      - $HOME/Library/HTTPStorages/com.techsmith.camtasia2025
+      - $HOME/Library/HTTPStorages/com.techsmith.camtasia2026
+      - $HOME/Library/Application Support/TechSmith/Camtasia 2024/Cache
+      - $HOME/Library/Application Support/TechSmith/Camtasia 2025/Cache
+      - $HOME/Library/Application Support/TechSmith/Camtasia 2026/Cache
+      - $HOME/Library/Logs/TechSmith/Camtasia
+      - $HOME/Library/Logs/Camtasia
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-camtasia-projects-report
+    name: Camtasia projects and shared media (report-only)
+    description: Camtasia project/media trees including /Users/Shared/TechSmith. Report only.
+    category: media-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - /Users/Shared/TechSmith/Camtasia
+      - $HOME/Library/Application Support/TechSmith/Camtasia 2024/Media
+      - $HOME/Library/Application Support/TechSmith/Camtasia 2025/Media
+      - $HOME/Library/Application Support/TechSmith/Camtasia 2026/Media
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-capcut-caches
+    name: CapCut caches and container caches
+    description: CapCut (com.lemon.lvoverseas) caches. Official clear path; drafts/projects not targeted here.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Caches/com.lemon.lvoverseas
+      - $HOME/Library/Containers/com.lemon.lvoverseas/Data/Library/Caches
+      - $HOME/Library/Containers/com.lemon.lvoverseas/Data/Library/Logs
+      - $HOME/Library/Logs/CapCut
+      - $HOME/Library/Logs/com.lemon.lvoverseas
+    delete_mode: contents
+    max_depth: 8
+
+  - id: stream-capcut-drafts-report
+    name: CapCut drafts and group container media (report-only)
+    description: CapCut drafts/projects in group container or Movies. Report only.
+    category: media-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Group Containers/22MMUN2RN5.lv
+      - $HOME/Library/Containers/com.lemon.lvoverseas/Data/Documents
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-cleanshot-residual
+    name: CleanShot X residual Sentry and support caches
+    description: "CleanShot residual beyond base: Sentry crash caches and broader Application Support cache trees. Not screenshot save folder."
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/SentryCrash/CleanShot X
+      - $HOME/Library/Application Support/CleanShot/Cache
+      - $HOME/Library/Application Support/CleanShot X/Cache
+      - $HOME/Library/Logs/CleanShot X
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-continuity-camera
+    name: Continuity Camera residual caches
+    description: Continuity Camera onboarding/container and related AV/video conference residual caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.ContinuityCaptureOnboardingUI/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.ContinuityCaptureOnboardingUI/Data/tmp
+      - $HOME/Library/Caches/com.apple.ContinuityCapture
+      - $HOME/Library/Logs/ContinuityCapture
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-davinci-residual-extra
+    name: DaVinci Resolve residual container caches/logs
+    description: "Extra residual beyond batch 04: Resolve Lite sandbox caches/logs and generic Blackmagic logs."
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.blackmagic-design.DaVinciResolveLite/Data/Library/Caches
+      - $HOME/Library/Containers/com.blackmagic-design.DaVinciResolveLite/Data/Library/Logs
+      - $HOME/Library/Logs/Blackmagic Design
+      - $HOME/Library/Logs/DaVinciResolve
+      - $HOME/Library/Logs/DaVinci Resolve
+      - $HOME/Library/Application Support/Blackmagic Design/DaVinci Resolve/CrashReports
+      - $HOME/Library/HTTPStorages/com.blackmagic-design.DaVinciResolve
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-descript-electron-caches
+    name: Descript Electron caches and logs
+    description: Descript beachcube Electron Cache/Code Cache/GPUCache/logs and ShipIt caches. Not project media.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Descript/Cache
+      - $HOME/Library/Application Support/Descript/Code Cache
+      - $HOME/Library/Application Support/Descript/GPUCache
+      - $HOME/Library/Application Support/Descript/logs
+      - $HOME/Library/Application Support/Descript/Crashpad
+      - $HOME/Library/Application Support/Descript/Service Worker
+      - $HOME/Library/Application Support/Descript/blob_storage
+      - $HOME/Library/Caches/com.descript.beachcube
+      - $HOME/Library/Caches/com.descript.beachcube.ShipIt
+      - $HOME/Library/Caches/com.descript.Descript-Installer
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-descript-media-report
+    name: Descript project media (report-only)
+    description: Descript project/media storage can be large. Report only; never default wipe.
+    category: media-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Descript/Media
+      - $HOME/Library/Application Support/Descript/Projects
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-ecamm-live-logs-caches
+    name: Ecamm Live logs and caches
+    description: Ecamm Live app logs, HTTP storage, WebKit, and regenerable caches. Not local recording media.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/EcammLive
+      - $HOME/Library/Logs/Ecamm Live
+      - $HOME/Library/Caches/com.ecamm.EcammLive
+      - $HOME/Library/HTTPStorages/com.ecamm.EcammLive
+      - $HOME/Library/WebKit/com.ecamm.EcammLive
+      - $HOME/Library/Application Support/com.ecamm.EcammLive/Cache
+      - $HOME/Library/Application Support/com.ecamm.EcammLive/Logs
+      - $HOME/Library/Application Support/EcammLive/Logs
+      - $HOME/Library/Application Support/EcammLive/Cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-elgato-camera-hub-logs
+    name: Elgato Camera Hub logs and caches
+    description: Camera Hub (Facecam/Prompter) logs and regenerable caches.
+    category: app-logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/CameraHub
+      - $HOME/Library/Logs/ElgatoCameraHub
+      - $HOME/Library/Caches/com.elgato.CameraHub
+      - $HOME/Library/Application Support/com.elgato.CameraHub/logs
+      - $HOME/Library/Application Support/com.elgato.CameraHub/Cache
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-elgato-control-center-logs
+    name: Elgato Control Center logs (streaming lights)
+    description: Control Center logs for Key Light etc. Can grow large; regenerable.
+    category: app-logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/ElgatoControlCenter
+      - $HOME/Library/Logs/ControlCenter
+      - $HOME/Library/Logs/com.elgato.ControlCenter
+      - $HOME/Library/Caches/com.elgato.ControlCenter
+      - $HOME/Library/Application Support/com.elgato.ControlCenter/logs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-elgato-streamdeck-caches-logs
+    name: Elgato Stream Deck caches and logs
+    description: Stream Deck app caches and SDK/plugin logs. Not Plugins, ProfilesV2, or Backup.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.elgato.StreamDeck
+      - $HOME/Library/Caches/com.plausiblelabs.crashreporter.data/com.elgato.StreamDeck
+      - $HOME/Library/Logs/ElgatoStreamDeck
+      - $HOME/Library/Logs/StreamDeck
+      - $HOME/Library/Application Support/com.elgato.StreamDeck/logs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-elgato-wavelink-logs-caches
+    name: Elgato Wave Link logs and caches
+    description: Wave Link audio mixer logs and regenerable caches. Not device/mix preferences wipe.
+    category: app-logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/ElgatoWaveLink
+      - $HOME/Library/Logs/WaveLink
+      - $HOME/Library/Caches/com.elgato.WaveLink
+      - $HOME/Library/Application Support/com.elgato.WaveLink/logs
+      - $HOME/Library/Application Support/elgato/Wave Link
+      - $HOME/Library/Containers/com.elgato.WaveLink/Data/Library/Caches
+      - $HOME/Library/Containers/com.elgato.WaveLink/Data/Library/Logs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-facetime-caches
+    name: FaceTime caches (not call history DB)
+    description: "FaceTime container and related video conference caches. Never delete FaceTime.sqlite*."
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.FaceTime/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.FaceTime/Data/tmp
+      - $HOME/Library/Caches/com.apple.FaceTime
+      - $HOME/Library/Containers/com.apple.AVConference.Diagnostic/Data/Library/Caches
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-gifox-caches
+    name: Gifox GIF recorder caches
+    description: Gifox 2 caches and support cache folders. Not exported GIFs in user folders.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.gifox.gifox2
+      - $HOME/Library/Application Support/Gifox 2/Cache
+      - $HOME/Library/Application Support/Gifox 2/Logs
+      - $HOME/Library/Logs/Gifox
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-kap-caches
+    name: Kap screen recorder caches
+    description: Kap Electron caches (com.wulkano.kap) and Application Support cache trees.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Caches/com.wulkano.kap
+      - $HOME/Library/Caches/com.wulkano.kap.ShipIt
+      - $HOME/Library/Application Support/Kap/Cache
+      - $HOME/Library/Application Support/Kap/Code Cache
+      - $HOME/Library/Application Support/Kap/GPUCache
+      - $HOME/Library/Application Support/Kap/logs
+      - $HOME/Library/Logs/Kap
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-licecap-support
+    name: LICEcap application support residual
+    description: LICEcap small Application Support residual. Exports live in user-chosen paths.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/LICEcap
+      - $HOME/Library/Caches/com.cockos.LICEcap
+      - $HOME/Library/Logs/LICEcap
+    delete_mode: contents
+    max_depth: 4
+
+  - id: stream-loom-recordings-report
+    name: Loom local recordings (report-only)
+    description: Possible local Loom recording/export staging. Report only.
+    category: media-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Loom/Videos
+      - $HOME/Library/Application Support/Loom/Recordings
+    delete_mode: contents
+    max_depth: 4
+
+  - id: stream-loom-residual-caches
+    name: Loom residual Electron caches and logs
+    description: Loom desktop Chromium caches/logs residual. Not user video library or exports.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Loom/Cache
+      - $HOME/Library/Application Support/Loom/Code Cache
+      - $HOME/Library/Application Support/Loom/GPUCache
+      - $HOME/Library/Application Support/Loom/Service Worker
+      - $HOME/Library/Application Support/Loom/blob_storage
+      - $HOME/Library/Application Support/Loom/logs
+      - $HOME/Library/Application Support/Loom/Crashpad
+      - $HOME/Library/Application Support/Loom/DawnGraphiteCache
+      - $HOME/Library/Application Support/Loom/DawnWebGPUCache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-mmhmm-caches
+    name: mmhmm desktop caches and support caches
+    description: mmhmm hybrid desktop caches. Virtual presentation residual; app discontinued in Homebrew.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/app.mmhmm.hybrid
+      - $HOME/Library/Caches/mmhmm
+      - $HOME/Library/Application Support/mmhmm/Cache
+      - $HOME/Library/Application Support/mmhmm/logs
+      - $HOME/Library/Logs/mmhmm
+      - $HOME/Library/Logs/app.mmhmm.hybrid
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-obs-browser-caches
+    name: OBS browser source Chromium caches
+    description: obs-browser CEF Cache/Code Cache/GPUCache under plugin_config. Safe; rebuilds for browser sources.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/obs-studio/plugin_config/obs-browser/Cache
+      - $HOME/Library/Application Support/obs-studio/plugin_config/obs-browser/Code Cache
+      - $HOME/Library/Application Support/obs-studio/plugin_config/obs-browser/GPUCache
+      - $HOME/Library/Application Support/obs-studio/plugin_config/obs-browser/DawnCache
+      - $HOME/Library/Application Support/obs-studio/plugin_config/obs-browser/Service Worker
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-obs-logs-crashes
+    name: OBS Studio logs and crash dumps
+    description: OBS session logs, crash dumps, and profiler data under Application Support. Regenerable; not scenes or profiles.
+    category: app-logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/obs-studio/logs
+      - $HOME/Library/Application Support/obs-studio/crashes
+      - $HOME/Library/Application Support/obs-studio/profiler_data
+      - $HOME/Library/Logs/obs-studio
+    delete_mode: contents
+    max_depth: 4
+
+  - id: stream-obs-shader-http-caches
+    name: OBS shader and HTTPStorages caches
+    description: OBS shader-cache and HTTP storage caches. Regenerable; first launch may recompile shaders.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/obs-studio/shader-cache
+      - $HOME/Library/Caches/com.obsproject.obs-studio
+      - $HOME/Library/HTTPStorages/com.obsproject.obs-studio
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-photobooth-caches
+    name: Photo Booth caches (not photo library)
+    description: Photo Booth container caches only. Pictures/Photo Booth Library is report_only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.PhotoBooth/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.PhotoBooth/Data/tmp
+      - $HOME/Library/Caches/com.apple.PhotoBooth
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-quicktime-residual
+    name: QuickTime Player residual caches
+    description: QuickTime Player X residual caches beyond base office-electron batch. Not Movies library.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.QuickTimePlayerX/Data/tmp
+      - $HOME/Library/Logs/QuickTime
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-riverside-caches
+    name: Riverside desktop caches and logs
+    description: Riverside Studio/desktop app caches and logs. Local high-quality recording media is report_only separately.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Riverside/Cache
+      - $HOME/Library/Application Support/Riverside/Code Cache
+      - $HOME/Library/Application Support/Riverside/GPUCache
+      - $HOME/Library/Application Support/Riverside/logs
+      - $HOME/Library/Application Support/riverside/Cache
+      - $HOME/Library/Caches/com.riverside.fm
+      - $HOME/Library/Caches/com.riverside.studio
+      - $HOME/Library/Caches/com.riverside.desktop
+      - $HOME/Library/Logs/Riverside
+      - $HOME/Library/Logs/Riverside Studio
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-riverside-media-report
+    name: Riverside local media (report-only)
+    description: Local recording/export staging for Riverside. Never auto-delete.
+    category: media-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Riverside/Recordings
+      - $HOME/Library/Application Support/Riverside/Media
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-screenflow-caches
+    name: ScreenFlow versioned caches
+    description: "Telestream ScreenFlow Caches folders (versioned net.telestream.screenflow*). Safe regenerable."
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/net.telestream.screenflow9
+      - $HOME/Library/Caches/net.telestream.screenflow10
+      - $HOME/Library/Caches/net.telestream.ScreenFlow9
+      - $HOME/Library/Caches/net.telestream.ScreenFlow10
+      - $HOME/Library/Caches/net.telestream.screenflowhelper
+      - $HOME/Library/Logs/ScreenFlow
+      - $HOME/Library/Logs/net.telestream.screenflow9
+      - $HOME/Library/Logs/net.telestream.screenflow10
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-screenflow-media-report
+    name: ScreenFlow Global Library and media (report-only)
+    description: ScreenFlow Global Library duplicates media into Application Support. User project media; report only.
+    category: media-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/ScreenFlow/Global Library
+      - $HOME/Library/Application Support/ScreenFlow/Media
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-snagit-caches-temp
+    name: Snagit caches and temporary recordings
+    description: Snagit app caches and versioned Temporary recording folders. Not Snagit Library captures.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 3
+    paths:
+      - $HOME/Library/Caches/com.TechSmith.Snagit2024
+      - $HOME/Library/Caches/com.TechSmith.Snagit2025
+      - $HOME/Library/Caches/com.TechSmith.Snagit2026
+      - $HOME/Library/HTTPStorages/com.TechSmith.Snagit2024
+      - $HOME/Library/HTTPStorages/com.TechSmith.Snagit2025
+      - $HOME/Library/HTTPStorages/com.TechSmith.Snagit2026
+      - $HOME/Library/Group Containers/7TQL462TU8.com.techsmith.snagit/Snagit 2024/Temporary
+      - $HOME/Library/Group Containers/7TQL462TU8.com.techsmith.snagit/Snagit 2025/Temporary
+      - $HOME/Library/Group Containers/7TQL462TU8.com.techsmith.snagit/Snagit 2026/Temporary
+      - $HOME/Library/Logs/TechSmith/Snagit
+      - $HOME/Library/Logs/Snagit
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-snagit-library-report
+    name: Snagit Library and autosaved captures (report-only)
+    description: User capture library and Autosaved Captures. Never auto-delete.
+    category: media-library
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Snagit
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-streamlabs-browser-source-cache
+    name: Streamlabs obs-browser plugin cache
+    description: Browser source cache under slobs-client plugin_config; high CPU fix often clears this.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/slobs-client/plugin_config/obs-browser
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-streamlabs-electron-caches
+    name: Streamlabs Desktop Chromium caches
+    description: slobs-client Electron Cache/Code Cache/GPUCache/Dawn/Service Worker/blob. Not scene collections.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/slobs-client/Cache
+      - $HOME/Library/Application Support/slobs-client/Code Cache
+      - $HOME/Library/Application Support/slobs-client/GPUCache
+      - $HOME/Library/Application Support/slobs-client/DawnGraphiteCache
+      - $HOME/Library/Application Support/slobs-client/DawnWebGPUCache
+      - $HOME/Library/Application Support/slobs-client/Service Worker
+      - $HOME/Library/Application Support/slobs-client/blob_storage
+      - $HOME/Library/Application Support/slobs-client/Shared Dictionary
+      - $HOME/Library/Caches/com.streamlabs.slobs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: stream-streamlabs-logs-crashpad
+    name: Streamlabs Desktop logs and Crashpad
+    description: Streamlabs app logs and Crashpad reports under slobs-client.
+    category: app-logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/slobs-client/logs
+      - $HOME/Library/Application Support/slobs-client/Crashpad
+      - $HOME/Library/Logs/Streamlabs Desktop
+      - $HOME/Library/Logs/Streamlabs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: stream-twitch-studio-residual
+    name: Twitch Studio residual caches and logs
+    description: Discontinued Twitch Studio leftovers (Mac support ended 2024). Caches/logs only if present.
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Twitch Studio
+      - $HOME/Library/Application Support/TwitchStudio
+      - $HOME/Library/Caches/com.twitch.TwitchStudio
+      - $HOME/Library/Caches/com.twitch.studio
+      - $HOME/Library/Logs/Twitch Studio
+      - $HOME/Library/Logs/TwitchStudio
+    delete_mode: contents
+    max_depth: 5

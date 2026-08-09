@@ -1,0 +1,988 @@
+{
+  "batch": "27-backup-sync",
+  "platform_focus": "macos",
+  "description": "Backup and sync client CACHES and LOGS only under $HOME (plus a few user-visible system log roots when apps install there). Never delete backup destinations, cloned volumes, Time Machine destinations, SafetyNet archives, synced user trees, or CloudStorage content. Time Machine local snapshots and full backup-plan metadata are report-only. Prefer contents-only deletes, age gates, and native cleaners (restic cache --cleanup, Arq Clear Cache, kopia cache clear) when available.",
+  "scope": "Caches/logs for Arq, Carbon Copy Cloner, SuperDuper, Backblaze, CrashPlan, Time Machine (report-only), Resilio Sync, Syncthing, Nextcloud, ownCloud, Seafile, Transmit, Cyberduck, FileZilla, Panic Nova residual, ForkLift, Path Finder, Mountain Duck, ExpanDrive, rclone, restic, borg, kopia, duplicacy. Never backup destinations.",
+  "path_count": 184,
+  "safety": {
+    "backup_destinations": "never-touch (report-only if surfaced)",
+    "time_machine_local_snapshots": "report-only (tmutil only)",
+    "synced_user_folders": "never-touch",
+    "cloudstorage_file_provider": "never-touch",
+    "credentials_keys": "never-touch (excluded)"
+  },
+  "rules": [
+    {
+      "id": "backup-arq-cache",
+      "name": "Arq backup metadata cache",
+      "description": "Arq local object/metadata cache (Cache.noindex). Regenerable from storage; next backup rebuilds slowly.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Arq/Cache.noindex",
+        "$HOME/Library/Application Support/ArqAgent/cache.noindex",
+        "/Library/Application Support/ArqAgent/cache.noindex",
+        "$HOME/Library/Caches/com.haystacksoftware.Arq",
+        "$HOME/Library/Caches/com.haystacksoftware.ArqAgent"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "native_hints": [
+        "Arq menu: Clear Cache for the backup plan"
+      ],
+      "notes": "Prefer in-app Clear Cache. Never touch backup destinations or storage credentials under Application Support/Arq plan configs."
+    },
+    {
+      "id": "backup-arq-logs",
+      "name": "Arq agent and app logs",
+      "description": "ArqAgent and Arq UI log directories only.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Logs/Arq",
+        "$HOME/Library/Logs/ArqAgent",
+        "/Library/Logs/ArqAgent",
+        "$HOME/Library/Logs/com.haystacksoftware.Arq",
+        "$HOME/Library/Logs/com.haystacksoftware.ArqAgent"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "report_only": false,
+      "notes": "Logs only. Leave Application Support plan databases alone."
+    },
+    {
+      "id": "backup-ccc-logs-cache",
+      "name": "Carbon Copy Cloner logs and caches",
+      "description": "CCC task logs and app caches. Not clone destinations or _CCC SafetyNet folders.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Logs/ccc.log",
+        "$HOME/Library/Logs/com.bombich.ccc",
+        "$HOME/Library/Logs/com.bombich.ccc.useragent",
+        "/Library/Logs/CCC.log",
+        "/Library/Logs/com.bombich.ccc",
+        "$HOME/Library/Caches/com.bombich.ccc",
+        "$HOME/Library/Caches/com.bombich.ccc.useragent",
+        "$HOME/Library/Caches/com.bombich.ccc.helper"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Never delete volumes under /Volumes used as CCC destinations, _CCC SafetyNet, or _CCC Archives."
+    },
+    {
+      "id": "backup-ccc-task-history-logs",
+      "name": "Carbon Copy Cloner Application Support logs",
+      "description": "User-scoped CCC Application Support log/task history text only via globs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/Library/Application Support/com.bombich.ccc",
+        "$HOME/Library/Application Support/CCC"
+      ],
+      "include_globs": [
+        "**/Logs/**",
+        "**/*.log",
+        "**/*log*"
+      ],
+      "exclude_globs": [
+        "**/Scripts/**",
+        "**/Tasks/**",
+        "**/*.plist"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "report_only": false,
+      "notes": "Globs limit to logs. Do not wipe task definitions or scripts."
+    },
+    {
+      "id": "backup-superduper-logs",
+      "name": "SuperDuper! copy logs",
+      "description": "Scheduled Copies and Saved Settings log trees under SuperDuper Application Support.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/Library/Application Support/SuperDuper!",
+        "$HOME/Library/Logs/SuperDuper!",
+        "$HOME/Library/Logs/com.blacey.SuperDuper"
+      ],
+      "include_globs": [
+        "**/Logs/**",
+        "**/*.sdlog",
+        "**/*.log"
+      ],
+      "exclude_globs": [
+        "**/*.sdsp",
+        "**/Copy Scripts/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 10,
+      "report_only": false,
+      "notes": "Logs only inside SuperDuper settings trees. Never destinations or Smart Update scripts."
+    },
+    {
+      "id": "backup-backblaze-logs",
+      "name": "Backblaze client logs",
+      "description": "Backblaze bzlogs (known multi-GB growth). Safe to clear log files; not backup queues of user data.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "/Library/Backblaze.bzpkg/bzdata/bzlogs",
+        "$HOME/Library/Logs/Backblaze",
+        "$HOME/Library/Logs/com.backblaze",
+        "$HOME/Library/Logs/com.backblaze.BackblazeDownloader"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Delete log file contents only, not enclosing bzpkg structure. Never touch bzdata backup state outside bzlogs without report-only."
+    },
+    {
+      "id": "backup-backblaze-cache",
+      "name": "Backblaze client cache",
+      "description": "Backblaze transient cache folders under bzdata/cache-style trees and user Caches.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "paths": [
+        "/Library/Backblaze.bzpkg/bzdata/bzcache",
+        "/Library/Backblaze.bzpkg/bzdata/cache",
+        "$HOME/Library/Caches/com.backblaze.BackblazeDownloader",
+        "$HOME/Library/Caches/com.backblaze.B2Downloader",
+        "$HOME/Library/Caches/Backblaze"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Do not delete bzfilelists/bzdata backup inventory outside cache. Not a substitute for uninstall."
+    },
+    {
+      "id": "backup-crashplan-logs",
+      "name": "CrashPlan app logs",
+      "description": "CrashPlan UI and service logs (version-dependent locations).",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Logs/CrashPlan",
+        "$HOME/Library/Application Support/CrashPlan/log",
+        "/Library/Logs/CrashPlan",
+        "/Library/Application Support/CrashPlan/log"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Logs only. Leave conf and identity under CrashPlan Application Support."
+    },
+    {
+      "id": "backup-crashplan-cache",
+      "name": "CrashPlan transient cache",
+      "description": "CrashPlan regenerable cache directories (version-dependent).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/CrashPlan",
+        "$HOME/Library/Application Support/CrashPlan/cache",
+        "/Library/Caches/CrashPlan",
+        "/Library/Application Support/CrashPlan/cache"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Close CrashPlan first. Never cloud archives or destination stores."
+    },
+    {
+      "id": "backup-timemachine-local-snapshots-report",
+      "name": "Time Machine local APFS snapshots (report-only)",
+      "description": "Local Time Machine snapshots reclaim only via tmutil; not a $HOME path wipe.",
+      "category": "system-data",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 0,
+      "report_only": true,
+      "native_hints": [
+        "tmutil listlocalsnapshots /",
+        "tmutil listlocalsnapshotdates",
+        "sudo tmutil thinlocalsnapshots / 10000000000 1"
+      ],
+      "notes": "Report-only. Never rm .localsnapshots or delete Time Machine backup volumes under /Volumes."
+    },
+    {
+      "id": "backup-timemachine-destination-report",
+      "name": "Time Machine destination and MobileBackups (report-only)",
+      "description": "Legacy MobileBackups and TM-related local hold areas; inventory only.",
+      "category": "system-data",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/MobileSync/Backup",
+        "/Volumes/MobileBackups",
+        "/.MobileBackups"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "report_only": true,
+      "notes": "iOS device backups and TM local hold areas: size report only. User deletes via Finder Manage Backups or Storage settings."
+    },
+    {
+      "id": "backup-resilio-logs",
+      "name": "Resilio Sync logs",
+      "description": "Resilio Sync debug/sync log files inside Application Support storage folder.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Application Support/Resilio Sync",
+        "$HOME/Library/Application Support/BitTorrent Sync",
+        "$HOME/Library/Logs/Resilio Sync",
+        "$HOME/Library/Logs/com.resilio.Sync"
+      ],
+      "include_globs": [
+        "**/sync.log*",
+        "**/*.log",
+        "**/*.log.*.zip",
+        "**/Logs/**"
+      ],
+      "exclude_globs": [
+        "**/sync.dat",
+        "**/settings.dat",
+        "**/*.db",
+        "**/storage/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Logs only. Never wipe Resilio storage DBs or user-synced share folders."
+    },
+    {
+      "id": "backup-resilio-cache",
+      "name": "Resilio Sync caches",
+      "description": "Resilio Sync Library Caches bundle identifiers.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/com.resilio.Sync",
+        "$HOME/Library/Caches/Resilio Sync",
+        "$HOME/Library/Caches/com.getsync.desktop"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "App caches only, not .sync folders inside user shares."
+    },
+    {
+      "id": "backup-syncthing-logs",
+      "name": "Syncthing logs",
+      "description": "Syncthing macOS app and daemon log files.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Application Support/Syncthing",
+        "$HOME/Library/Logs/Syncthing",
+        "$HOME/Library/Logs/syncthing.log",
+        "$HOME/.local/state/syncthing",
+        "$HOME/.config/syncthing"
+      ],
+      "include_globs": [
+        "**/syncthing.log*",
+        "**/audit-*.log",
+        "**/*.log"
+      ],
+      "exclude_globs": [
+        "**/config.xml",
+        "**/cert.pem",
+        "**/key.pem",
+        "**/https-*.pem",
+        "**/index-v*.db*",
+        "**/csrftokens.txt"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Logs only. Never config, certs, or index DB; never user synced folder content."
+    },
+    {
+      "id": "backup-syncthing-cache",
+      "name": "Syncthing caches",
+      "description": "Syncthing Library Caches and temporary index helper caches.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/syncthing",
+        "$HOME/Library/Caches/com.github.syncthing.syncthing",
+        "$HOME/Library/Caches/com.github.srad.syncthing"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Does not include Application Support index databases."
+    },
+    {
+      "id": "backup-nextcloud-cache-logs",
+      "name": "Nextcloud desktop client cache and logs",
+      "description": "Nextcloud client Caches and Logs; not synced folders or File Provider content.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/Nextcloud",
+        "$HOME/Library/Caches/com.nextcloud.desktopclient",
+        "$HOME/Library/Logs/Nextcloud",
+        "$HOME/Library/Logs/com.nextcloud.desktopclient",
+        "$HOME/Library/Application Support/Nextcloud/logs",
+        "$HOME/Library/Application Support/Nextcloud/cache"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Never CloudStorage/Nextcloud-* or user Nextcloud sync roots."
+    },
+    {
+      "id": "backup-owncloud-cache-logs",
+      "name": "ownCloud desktop client cache and logs",
+      "description": "ownCloud client caches/logs (fork of Nextcloud lineage paths).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/ownCloud",
+        "$HOME/Library/Caches/com.owncloud.desktopclient",
+        "$HOME/Library/Logs/ownCloud",
+        "$HOME/Library/Logs/com.owncloud.desktopclient",
+        "$HOME/Library/Application Support/ownCloud/logs",
+        "$HOME/Library/Application Support/ownCloud/cache"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Never user ownCloud sync folders or CloudStorage providers."
+    },
+    {
+      "id": "backup-seafile-cache-logs",
+      "name": "Seafile / SeaDrive client cache and logs",
+      "description": "Seafile and SeaDrive logs and client caches; not full seafile-data library stores as default wipe.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/Seafile",
+        "$HOME/Library/Caches/com.seafile.SeafileClient",
+        "$HOME/Library/Caches/com.seafile.seadrive",
+        "$HOME/Library/Logs/Seafile",
+        "$HOME/Library/Logs/SeaDrive",
+        "$HOME/Library/Logs/com.seafile.SeafileClient",
+        "$HOME/Library/Application Support/Seafile/logs",
+        "$HOME/Library/Application Support/SeaDrive/logs"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "~/.seafile-data holds DBs/block cache; treated separately as medium/report."
+    },
+    {
+      "id": "backup-seafile-data-cache-report",
+      "name": "Seafile-data block/index cache (medium)",
+      "description": "Seafile client seafile-data internal block cache and logs; rebuild cost can be high.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/.seafile-data",
+        "$HOME/Seafile/.seafile-data"
+      ],
+      "include_globs": [
+        "**/cache/**",
+        "**/tmpfiles/**",
+        "**/logs/**",
+        "**/*.log"
+      ],
+      "exclude_globs": [
+        "**/accounts.db",
+        "**/repo.db",
+        "**/ccnet/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "report_only": false,
+      "notes": "Globs only. Never wipe account DBs or synced library content under ~/Seafile."
+    },
+    {
+      "id": "backup-transmit-cache",
+      "name": "Panic Transmit transfer cache",
+      "description": "Transmit download/edit temp and Caches (often multi-GB).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/Transmit",
+        "$HOME/Library/Caches/com.panic.Transmit",
+        "$HOME/Library/Caches/com.panic.transmit.mas",
+        "$HOME/Library/Application Support/Transmit/Cache",
+        "$HOME/Library/Application Support/Transmit/Caches"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Quit Transmit first. Leaves Favorites/Keys; only caches."
+    },
+    {
+      "id": "backup-transmit-logs",
+      "name": "Panic Transmit logs",
+      "description": "Transmit log directories.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Logs/Transmit",
+        "$HOME/Library/Logs/com.panic.Transmit"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "report_only": false,
+      "notes": "Logs only."
+    },
+    {
+      "id": "backup-cyberduck-cache",
+      "name": "Cyberduck cache",
+      "description": "Cyberduck transfer and browser caches under Application Support and Caches.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/Cyberduck",
+        "$HOME/Library/Caches/ch.sudo.cyberduck",
+        "$HOME/Library/Group Containers/G69SCX94XU.duck/Library/Application Support/Cyberduck/Cache",
+        "$HOME/Library/Application Support/Cyberduck/Cache",
+        "$HOME/Library/Application Support/Cyberduck/Caches"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Bookmarks and credentials live outside Cache folders; leave them."
+    },
+    {
+      "id": "backup-cyberduck-logs",
+      "name": "Cyberduck logs",
+      "description": "Cyberduck log directories.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Logs/Cyberduck",
+        "$HOME/Library/Logs/ch.sudo.cyberduck",
+        "$HOME/Library/Group Containers/G69SCX94XU.duck/Library/Logs"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Logs only."
+    },
+    {
+      "id": "backup-filezilla-cache-logs",
+      "name": "FileZilla cache and logs",
+      "description": "FileZilla / FileZilla Pro caches, temp, and logs. Not site manager credentials file wipe.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/org.filezilla-project.filezilla",
+        "$HOME/Library/Caches/org.filezilla-project.filezilla.pro",
+        "$HOME/Library/Caches/FileZilla",
+        "$HOME/.config/filezilla/Cache",
+        "$HOME/.filezilla/Cache",
+        "$HOME/Library/Application Support/FileZilla/Cache",
+        "$HOME/Library/Logs/FileZilla",
+        "$HOME/Library/Logs/org.filezilla-project.filezilla",
+        "$HOME/Library/Containers/org.filezilla-project.filezilla.pro/Data/Library/Caches",
+        "$HOME/Library/Containers/org.filezilla-project.filezilla.pro/Data/Library/Logs"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Do not delete sitemanager.xml or queue.xml credential stores."
+    },
+    {
+      "id": "backup-nova-residual-cache",
+      "name": "Panic Nova residual caches",
+      "description": "Nova editor residual caches and logs (transfer/preview leftovers often paired with Transmit installs).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/com.panic.Nova",
+        "$HOME/Library/Caches/com.panic.nova.mas",
+        "$HOME/Library/Caches/Nova",
+        "$HOME/Library/Logs/com.panic.Nova",
+        "$HOME/Library/Logs/Nova",
+        "$HOME/Library/Application Support/Nova/Cache",
+        "$HOME/Library/Application Support/Nova/Caches",
+        "$HOME/Library/Application Support/Nova/Logs"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Caches/logs only. Leave Extensions, Themes, project support data."
+    },
+    {
+      "id": "backup-forklift-cache-logs",
+      "name": "ForkLift caches and logs",
+      "description": "BinaryNights ForkLift file manager remote transfer caches and logs.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/com.binarynights.ForkLift",
+        "$HOME/Library/Caches/com.binarynights.ForkLift-3",
+        "$HOME/Library/Caches/com.binarynights.ForkLiftHelper",
+        "$HOME/Library/Caches/com.binarynights.ForkLift2",
+        "$HOME/Library/Logs/ForkLift",
+        "$HOME/Library/Logs/com.binarynights.ForkLift",
+        "$HOME/Library/Application Support/ForkLift/Cache",
+        "$HOME/Library/Application Support/ForkLift/Caches",
+        "$HOME/Library/Application Support/ForkLift/Logs"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Leave Favorites and connection configs under Application Support outside Cache/Logs."
+    },
+    {
+      "id": "backup-pathfinder-cache-logs",
+      "name": "Path Finder caches and logs",
+      "description": "Cocoatech Path Finder caches and logs.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/com.cocoatech.PathFinder",
+        "$HOME/Library/Caches/com.cocoatech.PathFinder.PathFinderSync",
+        "$HOME/Library/Caches/Path Finder",
+        "$HOME/Library/Logs/Path Finder",
+        "$HOME/Library/Logs/com.cocoatech.PathFinder",
+        "$HOME/Library/Application Support/Path Finder/Cache",
+        "$HOME/Library/Application Support/Path Finder/Caches"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "App caches only."
+    },
+    {
+      "id": "backup-mountainduck-cache",
+      "name": "Mountain Duck offline/buffer cache",
+      "description": "Mountain Duck Cache under duck Group Container; can be hundreds of GB with buffering.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Group Containers/G69SCX94XU.duck/Library/Application Support/duck/Cache",
+        "$HOME/Library/Group Containers/G69SCX94XU.duck/Library/Caches",
+        "$HOME/Library/Caches/io.mountainduck",
+        "$HOME/Library/Caches/ch.sudo.mountainduck",
+        "$HOME/Library/Application Support/Mountain Duck/Cache"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "report_only": false,
+      "notes": "Quit Mountain Duck first. Offline pinned files redownload. Integrated mode may also use CloudStorage (never-touch)."
+    },
+    {
+      "id": "backup-mountainduck-logs",
+      "name": "Mountain Duck logs",
+      "description": "Mountain Duck log trees.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Logs/Mountain Duck",
+        "$HOME/Library/Logs/io.mountainduck",
+        "$HOME/Library/Group Containers/G69SCX94XU.duck/Library/Logs",
+        "$HOME/Library/Application Support/Mountain Duck/Logs"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Logs only."
+    },
+    {
+      "id": "backup-expandrive-cache-logs",
+      "name": "ExpanDrive cache and logs",
+      "description": "ExpanDrive mount caches and client logs. Not CloudStorage provider trees.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.expandrive.ExpanDrive3",
+        "$HOME/Library/Caches/com.expandrive.ExpanDrive",
+        "$HOME/Library/Caches/ExpanDrive",
+        "$HOME/Library/Application Support/ExpanDrive/cache",
+        "$HOME/Library/Application Support/ExpanDrive/Cache",
+        "$HOME/Library/Application Support/ExpanDrive/Caches",
+        "$HOME/Library/Logs/ExpanDrive",
+        "$HOME/Library/Logs/com.expandrive.ExpanDrive",
+        "$HOME/Library/Application Support/ExpanDrive/logs",
+        "$HOME/Library/Application Support/ExpanDrive/Logs"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Never wipe $HOME/Library/CloudStorage mounts. Close ExpanDrive before clearing cache."
+    },
+    {
+      "id": "backup-rclone-cache",
+      "name": "rclone VFS and backend cache",
+      "description": "rclone default cache-dir (macOS Library/Caches/rclone and ~/.cache/rclone).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 3,
+      "paths": [
+        "$HOME/Library/Caches/rclone",
+        "$HOME/.cache/rclone",
+        "$HOME/Library/Caches/rclone/vfs",
+        "$HOME/Library/Caches/rclone/vfsMeta",
+        "$HOME/.cache/rclone/vfs",
+        "$HOME/.cache/rclone/cache-backend"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "report_only": false,
+      "notes": "Unmount rclone mounts first. Does not delete remotes or rclone.conf. Custom --cache-dir not covered."
+    },
+    {
+      "id": "backup-rclone-logs",
+      "name": "rclone log leftovers under common paths",
+      "description": "Common rclone log drop locations when users redirect --log-file under Library/Logs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Logs/rclone",
+        "$HOME/Library/Logs/rclone.log"
+      ],
+      "include_globs": [
+        "**/*.log",
+        "**/*rclone*"
+      ],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "report_only": false,
+      "notes": "Only if user stores logs here; not config."
+    },
+    {
+      "id": "backup-restic-cache",
+      "name": "restic repository cache",
+      "description": "restic local pack/index cache (macOS ~/Library/Caches/restic).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/restic",
+        "$HOME/.cache/restic"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "report_only": false,
+      "native_hints": [
+        "restic cache --cleanup"
+      ],
+      "notes": "Prefer restic cache --cleanup. Rebuilds on next backup/restore. Never delete restic repositories."
+    },
+    {
+      "id": "backup-borg-cache",
+      "name": "borg backup cache",
+      "description": "borg local chunk cache under ~/.cache/borg (and Library mirror if present).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.cache/borg",
+        "$HOME/Library/Caches/borg"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Cache rebuild can be slow. Never delete borg repositories or ~/.config/borg security dir keys."
+    },
+    {
+      "id": "backup-vorta-logs-cache",
+      "name": "Vorta (borg GUI) logs and caches",
+      "description": "Vorta macOS app logs/caches wrapping borg.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/borg.vorta",
+        "$HOME/Library/Caches/com.borgbase.client.macos",
+        "$HOME/Library/Logs/Vorta",
+        "$HOME/Library/Logs/borg.vorta",
+        "$HOME/Library/Application Support/Vorta/logs",
+        "$HOME/Library/Application Support/Vorta/Logs"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Leave Vorta profile DB; logs/caches only. Repos stay report-only."
+    },
+    {
+      "id": "backup-kopia-cache",
+      "name": "Kopia content cache",
+      "description": "Kopia default cache under ~/Library/Caches/kopia/{repo-id}.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/kopia",
+        "$HOME/.cache/kopia"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "native_hints": [
+        "kopia cache clear"
+      ],
+      "notes": "Prefer kopia cache clear. Never wipe repositories or kopia.config credentials."
+    },
+    {
+      "id": "backup-kopia-logs",
+      "name": "Kopia UI and CLI logs",
+      "description": "Kopia logs under Library/Logs and Application Support.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Logs/kopia",
+        "$HOME/Library/Logs/kopia-ui",
+        "$HOME/Library/Application Support/kopia/logs",
+        "$HOME/Library/Application Support/kopia-ui/logs"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Logs only."
+    },
+    {
+      "id": "backup-duplicacy-cache-logs",
+      "name": "Duplicacy cache and logs",
+      "description": "Duplicacy Web and CLI cache/log locations (home and Library variants).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.duplicacy-web/cache",
+        "$HOME/.duplicacy-web/logs",
+        "$HOME/.duplicacy_web/cache",
+        "$HOME/.duplicacy_web/logs",
+        "$HOME/Library/Caches/Duplicacy",
+        "$HOME/Library/Caches/duplicacy",
+        "$HOME/Library/Logs/Duplicacy",
+        "$HOME/Library/Logs/duplicacy",
+        "$HOME/Library/Application Support/Duplicacy/cache",
+        "$HOME/Library/Application Support/Duplicacy/logs"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Never delete storage backends or per-repo .duplicacy config. Repo-local .duplicacy/cache is project-scoped; use care."
+    },
+    {
+      "id": "backup-duplicacy-repo-cache-report",
+      "name": "Duplicacy per-repository cache (report-only)",
+      "description": "Common per-repo .duplicacy/cache under home projects; inventory only to avoid wiping active jobs.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/.duplicacy/cache"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "report_only": true,
+      "notes": "Report size. Active repositories may place cache under each repo root (.duplicacy/cache) which is not bulk-scanned here."
+    },
+    {
+      "id": "backup-destinations-never-report",
+      "name": "Backup destinations and SafetyNet (report-only guard)",
+      "description": "Explicit report-only markers so scanners never treat common destination patterns as cleanable junk.",
+      "category": "system-data",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "/Volumes"
+      ],
+      "include_globs": [
+        "**/_CCC SafetyNet/**",
+        "**/_CCC Archives/**",
+        "**/Backups.backupdb/**",
+        "**/.SparseBundle/**",
+        "**/*.sparsebundle/**",
+        "**/*.backupbundle/**"
+      ],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "report_only": true,
+      "notes": "Hard policy: never delete backup destinations, CCC SafetyNet, or Time Machine backupdb trees. Size reporting only if scanned."
+    }
+  ]
+}

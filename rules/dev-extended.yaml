@@ -1,0 +1,1453 @@
+pack: dev-extended
+rules:
+
+  - id: dev-android-avd-report
+    name: Android AVDs (report-only)
+    description: User AVD definitions and data; never auto-delete.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.android/avd
+    delete_mode: path
+    max_depth: 3
+
+  - id: dev-android-emulator-cache
+    name: Android emulator intermediate cache
+    description: Emulator skins/snapshots temp under SDK (not AVD data).
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Android/sdk/emulator/qemu_pipe
+      - $HOME/.android/cache/ddms
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-android-ndk-report
+    name: Android NDK (report-only)
+    description: Installed NDK trees; large and versioned, report only.
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Android/sdk/ndk
+      - $HOME/Library/Android/sdk/ndk-bundle
+    delete_mode: path
+    max_depth: 3
+
+  - id: dev-android-sdk-caches
+    name: Android SDK download and build caches
+    description: Android SDK intermediate download and build-cache folders (not platforms).
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Android/sdk/.downloadIntermediates
+      - $HOME/Library/Android/sdk/caches
+      - $HOME/Library/Android/sdk/build-cache
+      - $HOME/Library/Android/sdk/.temp
+      - $HOME/.android/cache
+      - $HOME/.android/build-cache
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-android-studio-logs
+    name: Android Studio logs
+    description: Android Studio logs under Library/Logs.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Google/AndroidStudio
+      - $HOME/Library/Logs/AndroidStudio
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-android-system-images-report
+    name: Android emulator system images (report-only)
+    description: AVD system images under SDK; report size only.
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Android/sdk/system-images
+    delete_mode: path
+    max_depth: 4
+
+  - id: dev-asdf-downloads
+    name: asdf downloads and tmp
+    description: asdf plugin download staging (not installed tool versions).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.asdf/downloads
+      - $HOME/.asdf/tmp
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-asdf-installs-report
+    name: asdf installed toolchains (report-only)
+    description: asdf installs tree; report size only.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.asdf/installs
+    delete_mode: path
+    max_depth: 3
+
+  - id: dev-bazel-cache
+    name: Bazel disk cache
+    description: Bazel output and disk caches under home.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.cache/bazel
+      - $HOME/Library/Caches/bazel
+      - $HOME/.bazel
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-bazelisk-cache
+    name: Bazelisk download cache
+    description: Bazelisk downloaded Bazel binaries.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Caches/bazelisk
+      - $HOME/.cache/bazelisk
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-buck-cache
+    name: Buck/Buck2 cache
+    description: Buck build caches and daemon state.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.cache/buck
+      - $HOME/.buckd
+      - $HOME/Library/Caches/Buck
+      - $HOME/.buck2
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-bun-install-cache
+    name: Bun install cache
+    description: Bun global package install cache (bun install --cache).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.bun/install/cache
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-bun-library-cache
+    name: Bun Library Caches
+    description: Optional Bun cache under macOS Library/Caches.
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/Bun
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-cargo-git-checkouts
+    name: Cargo git checkouts
+    description: Working trees of git dependencies (git/db already covered).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.cargo/git/checkouts
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-cargo-registry-src
+    name: Cargo registry unpacked sources
+    description: Unpacked crate sources under registry/src (registry/cache already covered).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.cargo/registry/src
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-cargo-vet-cache
+    name: cargo-vet cache
+    description: cargo-vet audit cache under Library/Caches.
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/cargo-vet
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-carthage-cache
+    name: Carthage cache
+    description: CarthageKit build and checkout caches.
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/org.carthage.CarthageKit
+      - $HOME/Library/Caches/carthage
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-ccache
+    name: ccache compiler cache
+    description: ccache object cache (default macOS Library or ~/.ccache).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.ccache
+      - $HOME/Library/Caches/ccache
+      - $HOME/.cache/ccache
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-clangd-cache
+    name: clangd index cache
+    description: clangd language server index caches.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/clangd
+      - $HOME/Library/Caches/clangd
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-cloud-cli-caches
+    name: AWS and gcloud CLI caches
+    description: Cloud CLI HTTP/token-adjacent caches (not credentials files).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.aws/cli/cache
+      - $HOME/.cache/gcloud
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-cocoapods-cache-ext
+    name: CocoaPods cache
+    description: CocoaPods downloaded podspecs and sources (pod cache clean).
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/CocoaPods
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-cocoapods-pre-downloads
+    name: CocoaPods CDN pre-downloads
+    description: Alternate CocoaPods CDN cache path used by some versions.
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/CocoaPods/Pods
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-cocoapods-repos-report
+    name: CocoaPods Specs repos (report-only)
+    description: CocoaPods Specs git checkouts under ~/.cocoapods; report only.
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.cocoapods/repos
+    delete_mode: path
+    max_depth: 3
+
+  - id: dev-colima-caches
+    name: Colima caches
+    description: Colima host-side caches (not VM disk images).
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/colima
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-colima-lima-store-report
+    name: Colima/Lima instance store (report-only)
+    description: Colima _lima/_store and default instance disks; report only.
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.colima/_lima
+      - $HOME/.colima/_store
+      - $HOME/.colima/default
+    delete_mode: path
+    max_depth: 3
+
+  - id: dev-composer-cache
+    name: Composer (PHP) cache
+    description: PHP Composer package caches.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/composer
+      - $HOME/.composer/cache
+      - $HOME/.cache/composer
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-conda-envs-report
+    name: Conda environments (report-only)
+    description: Conda envs directories; report only, never auto-delete environments.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.conda/envs
+      - $HOME/miniconda3/envs
+      - $HOME/anaconda3/envs
+      - $HOME/miniforge3/envs
+      - $HOME/mambaforge/envs
+    delete_mode: path
+    max_depth: 2
+
+  - id: dev-conda-pkgs-cache
+    name: Conda package download cache
+    description: Conda pkgs tarball cache (not envs). Forces re-download of packages.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.conda/pkgs
+      - $HOME/Library/Caches/conda
+      - $HOME/.cache/conda
+      - $HOME/miniconda3/pkgs
+      - $HOME/anaconda3/pkgs
+      - $HOME/miniforge3/pkgs
+      - $HOME/mambaforge/pkgs
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-cursor-caches
+    name: Cursor IDE caches
+    description: Cursor Cache, CachedData, extension VSIX, Code/GPU caches.
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Cursor/Cache
+      - $HOME/Library/Application Support/Cursor/CachedData
+      - $HOME/Library/Application Support/Cursor/CachedExtensionVSIXs
+      - $HOME/Library/Application Support/Cursor/Code Cache
+      - $HOME/Library/Application Support/Cursor/GPUCache
+      - $HOME/Library/Application Support/Cursor/logs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-deno-cache-ext
+    name: Deno module cache
+    description: Deno remote module and npm-compat caches.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/deno
+      - $HOME/Library/Caches/deno
+      - $HOME/.deno/gen
+      - $HOME/.deno/remote
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-docker-buildx-report
+    name: Docker buildx cache (report-only)
+    description: Docker buildx local state under ~/.docker/buildx; report only (prefer docker buildx prune).
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.docker/buildx
+      - $HOME/Library/Caches/com.docker.docker
+    delete_mode: path
+    max_depth: 4
+
+  - id: dev-dotnet-sdk-report
+    name: dotnet user SDK install (report-only)
+    description: User-level .NET SDK/runtime install under ~/.dotnet; report only.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.dotnet
+    exclude_globs:
+      - "**/DataProtection-Keys/**"
+    delete_mode: path
+    max_depth: 3
+
+  - id: dev-dotnet-template-and-tool-cache
+    name: dotnet template engine cache
+    description: dotnet new template engine cache (not full SDK).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.templateengine
+      - $HOME/Library/Caches/dotnet
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-electron-caches
+    name: Electron and electron-builder caches
+    description: Downloaded Electron binaries and electron-builder artifacts.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/electron
+      - $HOME/.cache/electron
+      - $HOME/Library/Caches/electron-builder
+      - $HOME/.cache/electron-builder
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-esbuild-cache
+    name: esbuild cache
+    description: esbuild binary and transform caches under XDG cache.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/esbuild
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-flutter-engine-caches
+    name: Flutter engine and tool caches
+    description: Flutter engine artifacts and dart analysis server caches.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/flutter_engine
+      - $HOME/Library/Caches/Dart
+      - $HOME/.dartServer
+      - $HOME/.flutter
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-flutter-pub-cache
+    name: Dart/Flutter pub cache
+    description: pub.dev package system cache (~/.pub-cache).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.pub-cache
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-fnm-cache
+    name: fnm Node version storage
+    description: "fnm version downloads (medium: removes Node installs)."
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.local/share/fnm
+      - $HOME/.fnm
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-fvm-versions-report
+    name: FVM Flutter SDKs (report-only)
+    description: Flutter Version Management installed SDKs; report only.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/fvm/versions
+      - $HOME/.fvm
+    delete_mode: path
+    max_depth: 3
+
+  - id: dev-gem-home-cache
+    name: User GEM_HOME cache
+    description: Per-user gem installation cache directory when GEM_HOME is default.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.gem/ruby
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-go-sumdb-and-mod-full
+    name: Go sumdb and full module tree
+    description: Go checksum DB cache and full pkg/mod tree beyond partial mod/cache rule.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/go/pkg/sumdb
+      - $HOME/go/pkg/mod
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-gradle-build-scans
+    name: Gradle build-scan cache
+    description: Gradle Enterprise/build-scan local cache if present.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.gradle/build-scan-data
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-gradle-daemon-wrapper
+    name: Gradle daemon, wrapper, native
+    description: Gradle daemon logs, wrapper distributions, and native helpers (caches root already covered).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.gradle/daemon
+      - $HOME/.gradle/wrapper/dists
+      - $HOME/.gradle/native
+      - $HOME/.gradle/kotlin-profile
+      - $HOME/.gradle/.tmp
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-helm-cache-ext
+    name: Helm chart cache
+    description: Helm repository and chart caches.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/helm
+      - $HOME/.cache/helm
+      - $HOME/.local/share/helm
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-homebrew-cask-cache-extra
+    name: Homebrew Cask downloads subcache
+    description: Nested Cask download cache under Homebrew (top-level Homebrew cache may already be covered).
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/Homebrew/downloads
+      - $HOME/Library/Caches/Homebrew/Cask
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-ivy-sbt-coursier
+    name: Ivy, sbt, Coursier caches
+    description: Scala/JVM dependency caches for Ivy, sbt, and Coursier.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.ivy2/cache
+      - $HOME/.sbt
+      - $HOME/Library/Caches/Coursier
+      - $HOME/.cache/coursier
+      - $HOME/Library/Caches/sbt
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-java-heap-dumps-home
+    name: Java heap dumps in home
+    description: JVM .hprof dumps left in $HOME (regenerable crash artifacts).
+    category: leftovers
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME
+    include_globs:
+      - "*.hprof"
+    delete_mode: contents
+    max_depth: 1
+
+  - id: dev-jetbrains-logs
+    name: JetBrains application logs
+    description: JetBrains IDE logs under Library/Logs (IDE caches already covered).
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/JetBrains
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-kind-state
+    name: kind cluster state
+    description: kind local cluster metadata under ~/.kind.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.kind
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-kotlin-compiler-cache
+    name: Kotlin compiler daemon cache
+    description: Kotlin daemon and compiler caches under ~/.kotlin.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.kotlin
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-kubectl-cache
+    name: kubectl discovery and http cache
+    description: kubectl client-side discovery and HTTP caches.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/.kube/cache
+      - $HOME/.cache/kubectl
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-lima-cache
+    name: Lima cache and instances report
+    description: Standalone Lima cache plus report-only instances root.
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.lima
+      - $HOME/Library/Caches/lima
+    delete_mode: path
+    max_depth: 3
+
+  - id: dev-mamba-pkgs-cache
+    name: Mamba package cache
+    description: Standalone mamba pkgs cache when separate from conda root.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.mamba/pkgs
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-maven-local-repo
+    name: Maven local repository
+    description: Maven ~/.m2/repository dependency cache.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.m2/repository
+      - $HOME/.m2/wrapper
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-minikube-cache
+    name: minikube cache
+    description: minikube image and ISO cache (machines remain report-only).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.minikube/cache
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-minikube-machines-report
+    name: minikube machines (report-only)
+    description: minikube VM disks; report only.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.minikube/machines
+    delete_mode: path
+    max_depth: 3
+
+  - id: dev-mise-cache
+    name: mise (rtx) cache
+    description: mise version-manager cache and downloads.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/mise
+      - $HOME/Library/Caches/mise
+      - $HOME/.local/share/mise/downloads
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-nextjs-global-cache
+    name: Next.js global cache dirs
+    description: Next.js caches under XDG/Library cache roots only (not project .next).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/next-swc
+      - $HOME/.cache/next
+      - $HOME/Library/Caches/next-swc
+      - $HOME/Library/Caches/next
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-node-gyp-cache
+    name: node-gyp cache
+    description: Compiled native addon headers/objects for node-gyp.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.node-gyp
+      - $HOME/Library/Caches/node-gyp
+      - $HOME/.cache/node-gyp
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-npm-global-cache-alt
+    name: Alternate npm cache path
+    description: npm cache when configured under ~/.npm-cache-user (DevCacheCleaner path).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.npm-cache-user/_cacache
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-npm-npx-prebuilds
+    name: npm npx and prebuilds
+    description: npm npx package cache and node-gyp prebuilds (not _cacache).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.npm/_npx
+      - $HOME/.npm/_prebuilds
+      - $HOME/.npm/_logs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-nuget-packages
+    name: NuGet global packages
+    description: NuGet global packages folder (dotnet restore re-downloads).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.nuget/packages
+      - $HOME/.local/share/NuGet/http-cache
+      - $HOME/.local/share/NuGet/plugin-cache
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-nvm-cache
+    name: nvm cache
+    description: nvm downloaded Node tarballs under .nvm/.cache.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.nvm/.cache
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-nvm-versions-report
+    name: nvm Node versions (report-only)
+    description: Installed Node versions managed by nvm; report only.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.nvm/versions
+    delete_mode: path
+    max_depth: 3
+
+  - id: dev-nx-cache-ext
+    name: Nx computation cache
+    description: Nx global computation cache (not project node_modules).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.nx/cache
+      - $HOME/.cache/nx
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-orbstack-report
+    name: OrbStack data (report-only)
+    description: OrbStack VMs and Linux distros; report only.
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.orbstack
+      - $HOME/Library/Application Support/OrbStack
+    delete_mode: path
+    max_depth: 3
+
+  - id: dev-pipenv-cache
+    name: Pipenv cache
+    description: Pipenv HTTP and wheel caches.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/pipenv
+      - $HOME/.cache/pipenv
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-playwright-puppeteer-cypress
+    name: Browser test runner browser downloads
+    description: Playwright, Puppeteer, and Cypress browser binary caches.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Caches/ms-playwright
+      - $HOME/.cache/ms-playwright
+      - $HOME/Library/Caches/org.webkit.Playwright
+      - $HOME/.cache/puppeteer
+      - $HOME/Library/Caches/Cypress
+      - $HOME/Library/Caches/com.electron.playwright
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-pnpm-metadata-caches
+    name: pnpm metadata and tools caches
+    description: pnpm side caches outside the shared store (store stays report-only elsewhere).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.pnpm-store
+      - $HOME/Library/Caches/pnpm
+      - $HOME/.cache/pnpm
+      - $HOME/.local/share/pnpm/.tools
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-podman-machine-report
+    name: Podman machine state (report-only)
+    description: Podman machine and storage under home; report only.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.local/share/containers
+      - $HOME/.config/containers/storage
+      - $HOME/.podman
+    delete_mode: path
+    max_depth: 3
+
+  - id: dev-poetry-cache-ext
+    name: Poetry cache
+    description: Poetry virtualenv and package caches.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/pypoetry
+      - $HOME/.cache/pypoetry
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-prebuild-install-cache
+    name: prebuild-install cache
+    description: Node native module prebuild-install cache.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.cache/prebuild-install
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-prisma-engines-cache
+    name: Prisma engines cache
+    description: Prisma query engine binaries cache.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.cache/prisma
+      - $HOME/Library/Caches/prisma
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-pulumi-plugins
+    name: Pulumi plugins
+    description: Pulumi downloaded provider plugins.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.pulumi/plugins
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-pyenv-cache
+    name: pyenv download cache
+    description: pyenv source/binary download cache (not installed versions).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.pyenv/cache
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-python-tool-caches
+    name: Python tool caches (ruff, mypy, pre-commit, huggingface)
+    description: Common regenerable Python tooling caches under ~/.cache.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/ruff
+      - $HOME/.cache/mypy
+      - $HOME/.cache/pre-commit
+      - $HOME/Library/Caches/pre-commit
+      - $HOME/.cache/huggingface
+      - $HOME/.cache/torch
+      - $HOME/Library/Caches/com.apple.python
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-rbenv-rvm-caches
+    name: rbenv and RVM download caches
+    description: Ruby version manager download archives and logs (not installed rubies as default).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.rbenv/cache
+      - $HOME/.rvm/archives
+      - $HOME/.rvm/log
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-rubygems-bundler-cache
+    name: RubyGems and Bundler caches
+    description: gem install and bundler package caches.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/RubyGems
+      - $HOME/.gem/cache
+      - $HOME/.bundle/cache
+      - $HOME/Library/Caches/Bundler
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-rustup-downloads
+    name: rustup downloads and tmp
+    description: rustup staging downloads and tmp (not installed toolchains).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/.rustup/downloads
+      - $HOME/.rustup/tmp
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-rustup-toolchains-report
+    name: rustup toolchains (report-only)
+    description: Installed Rust toolchains; report size only, do not auto-delete.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.rustup/toolchains
+    delete_mode: path
+    max_depth: 2
+
+  - id: dev-sccache
+    name: sccache compiler cache
+    description: Shared compilation cache for Rust/C++ via sccache.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/sccache
+      - $HOME/Library/Caches/sccache
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-sdkman-archives
+    name: SDKMAN archives and tmp
+    description: SDKMAN downloaded archives and temporary files.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.sdkman/archives
+      - $HOME/.sdkman/tmp
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-sdkman-candidates-report
+    name: SDKMAN candidates (report-only)
+    description: Installed JDKs and candidates; report only.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.sdkman/candidates
+    delete_mode: path
+    max_depth: 3
+
+  - id: dev-spm-cloned-sources
+    name: SwiftPM cloned source packages
+    description: SwiftPM SourcePackages-style global clones when present under cache.
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/org.swift.swiftpm/repositories
+      - $HOME/Library/Caches/org.swift.swiftpm/manifests
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-swiftpm-cache
+    name: Swift Package Manager cache
+    description: SwiftPM global package cache (repositories and manifests).
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/org.swift.swiftpm
+      - $HOME/.swiftpm/cache
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-terraform-plugin-cache-ext
+    name: Terraform plugin cache
+    description: TF_PLUGIN_CACHE_DIR style caches and provider plugins.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.terraform.d/plugin-cache
+      - $HOME/.terraform.d/providers
+      - $HOME/Library/Caches/terraform
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-testcontainers-cache
+    name: Testcontainers Ryuk/cache leftovers
+    description: Testcontainers properties-adjacent cache dirs when present under home cache.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.testcontainers
+      - $HOME/.cache/testcontainers
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-turbo-cache-ext
+    name: Turborepo remote/local cache
+    description: Turbo/Turborepo daemon and task caches outside project dirs.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.turbo
+      - $HOME/.cache/turbo
+      - $HOME/Library/Caches/turbo
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-typescript-cache
+    name: TypeScript incremental caches
+    description: Global tsc/tsbuildinfo style caches when stored under known cache roots.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/typescript
+      - $HOME/.cache/typescript
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-unity-hub-cache
+    name: Unity Hub cache
+    description: Unity Hub download and ShipIt caches.
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/com.unity3d.unityhub
+      - $HOME/Library/Caches/com.unity3d.unityhub.ShipIt
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-uv-cache
+    name: uv package cache
+    description: Astral uv wheel/sdist caches (regenerable).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/uv
+      - $HOME/.cache/uv
+      - $HOME/.local/share/uv/cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: dev-virtualenv-cache
+    name: virtualenv seed cache
+    description: virtualenv app-data seed wheels cache.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.local/share/virtualenv
+      - $HOME/Library/Application Support/virtualenv
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-vite-webpack-global-caches
+    name: Vite and webpack global caches
+    description: Global vite/webpack caches only under known cache directories (not project .vite).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/vite
+      - $HOME/Library/Caches/vite
+      - $HOME/.cache/webpack
+      - $HOME/Library/Caches/webpack
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-volta-cache
+    name: Volta cache and tmp
+    description: Volta Node/tool download cache.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.volta/cache
+      - $HOME/.volta/tmp
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-vscode-caches
+    name: VS Code caches and CachedData
+    description: VS Code Cache, CachedData, GPU/Code Cache, extension VSIX cache.
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Code/Cache
+      - $HOME/Library/Application Support/Code/CachedData
+      - $HOME/Library/Application Support/Code/CachedExtensions
+      - $HOME/Library/Application Support/Code/CachedExtensionVSIXs
+      - $HOME/Library/Application Support/Code/Code Cache
+      - $HOME/Library/Application Support/Code/GPUCache
+      - $HOME/Library/Caches/com.microsoft.VSCode
+      - $HOME/Library/Caches/com.microsoft.VSCode.ShipIt
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-vscode-insiders-caches
+    name: VS Code Insiders caches
+    description: VS Code Insiders Cache and CachedData trees.
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Code - Insiders/Cache
+      - $HOME/Library/Application Support/Code - Insiders/CachedData
+      - $HOME/Library/Application Support/Code - Insiders/CachedExtensionVSIXs
+      - $HOME/Library/Application Support/Code - Insiders/Code Cache
+      - $HOME/Library/Application Support/Code - Insiders/GPUCache
+      - $HOME/Library/Caches/com.microsoft.VSCodeInsiders
+      - $HOME/Library/Caches/com.microsoft.VSCodeInsiders.ShipIt
+    delete_mode: contents
+    max_depth: 5
+
+  - id: dev-xcode-misc-caches
+    name: Xcode products, docs, and IDE caches
+    description: Extra Xcode regenerable trees not covered by DerivedData/DeviceSupport/Archives/CoreSimulator rules.
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Developer/Xcode/Products
+      - $HOME/Library/Developer/Xcode/DocumentationCache
+      - $HOME/Library/Developer/Xcode/iOS Device Logs
+      - $HOME/Library/Caches/com.apple.dt.Xcode
+      - $HOME/Library/Caches/com.apple.dt.xcodebuild
+      - $HOME/Library/Caches/com.apple.dt.Xcode.sourcecontrol.Git
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-yarn-berry-cache
+    name: Yarn Berry (Yarn 2+) cache
+    description: Yarn PnP/berry global cache under ~/.yarn.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.yarn/berry/cache
+      - $HOME/.yarn/cache
+    delete_mode: contents
+    max_depth: 4
+
+  - id: dev-zed-caches
+    name: Zed editor caches
+    description: Zed application and Library caches.
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/Zed
+      - $HOME/Library/Application Support/Zed/cache
+    delete_mode: contents
+    max_depth: 5

@@ -1,0 +1,756 @@
+pack: dev-mobile
+rules:
+
+  - id: mobile-android-avd-snapshots
+    name: mobile-android-avd-snapshots
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.android/avd
+    include_globs:
+      - "**/*.avd/snapshots/**"
+      - "**/*.avd/*.qcow2"
+      - "**/*.avd/cache.img"
+      - "**/*.avd/cache.img.qcow2"
+      - "**/*.avd/tmpdir/**"
+      - "**/*.avd/*.log"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-android-avd-tree-report
+    name: mobile-android-avd-tree-report
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.android/avd
+    delete_mode: path
+    max_depth: 6
+
+  - id: mobile-android-dot-android-caches
+    name: mobile-android-dot-android-caches
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.android/cache
+      - $HOME/.android/build-cache
+      - $HOME/.android/metrics
+      - $HOME/.android/studio
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-android-sdk-system-images-report
+    name: mobile-android-sdk-system-images-report
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Android/sdk/system-images
+      - $HOME/Library/Android/sdk/ndk
+      - $HOME/Library/Android/sdk/ndk-bundle
+      - $HOME/Library/Android/sdk/build-tools
+      - $HOME/Library/Android/sdk/platforms
+      - $HOME/Android/Sdk/system-images
+      - $HOME/Android/Sdk/ndk
+      - $HOME/Android/Sdk/build-tools
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-android-sdk-temps
+    name: mobile-android-sdk-temps
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Android/sdk/.temp
+      - $HOME/Library/Android/sdk/.downloadIntermediates
+      - $HOME/Library/Android/sdk/temp
+      - $HOME/Library/Android/sdk/emulator/qemu
+      - $HOME/Android/Sdk/.temp
+      - $HOME/Android/Sdk/.downloadIntermediates
+      - $ANDROID_HOME/.temp
+      - $ANDROID_SDK_ROOT/.temp
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-android-studio-caches
+    name: mobile-android-studio-caches
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - "$HOME/Library/Caches/Google/AndroidStudio*"
+      - "$HOME/Library/Caches/AndroidStudio*"
+      - "$HOME/Library/Logs/Google/AndroidStudio*"
+      - "$HOME/Library/Logs/AndroidStudio*"
+      - "$HOME/Library/Application Support/Google/AndroidStudio*/caches"
+      - "$HOME/Library/Application Support/Google/AndroidStudio*/system"
+      - "$HOME/Library/Application Support/Google/AndroidStudio*/localHistory"
+      - "$HOME/Library/Application Support/AndroidStudio*/caches"
+      - "$HOME/Library/Application Support/AndroidStudio*/system"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-appium
+    name: mobile-appium
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.appium
+      - $HOME/.appium/node_modules
+      - $HOME/Library/Caches/appium
+      - $HOME/.cache/appium
+      - $HOME/Library/Logs/Appium
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-apple-configurator
+    name: mobile-apple-configurator
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Caches/com.apple.configurator.ui
+      - $HOME/Library/Caches/com.apple.configurator.xpc.DeviceService
+      - $HOME/Library/Logs/Apple Configurator
+      - $HOME/Library/Group Containers/K36BKF7T3D.group.com.apple.configurator
+      - $HOME/Library/Application Support/com.apple.configurator
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-buck-bazel-mobile
+    name: mobile-buck-bazel-mobile
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.buckd
+      - $HOME/.buck
+      - $HOME/Library/Caches/Buck
+      - $HOME/.cache/bazel
+      - $HOME/Library/Caches/Bazel
+      - $HOME/.bazel-cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-carthage-cache
+    name: mobile-carthage-cache
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Caches/org.carthage.CarthageKit
+      - $HOME/Library/Caches/carthage
+      - $HOME/Library/Caches/Carthage
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-cocoapods-cache
+    name: mobile-cocoapods-cache
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/CocoaPods
+      - $HOME/Library/Caches/org.cocoapods.CocoaPods
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-cocoapods-repos-report
+    name: mobile-cocoapods-repos-report
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 60
+    paths:
+      - $HOME/.cocoapods/repos
+      - $HOME/.cocoapods/repos/trunk
+      - $HOME/.cocoapods/repos/cocoapods
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-coresimulator-devices-report
+    name: mobile-coresimulator-devices-report
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Developer/CoreSimulator/Devices
+      - $HOME/Library/Developer/CoreSimulator/Temp
+      - $HOME/Library/Developer/XCTestDevices
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-detox
+    name: mobile-detox
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/Detox
+      - $HOME/Library/Detox
+      - $HOME/.detox-artifacts
+      - $TMPDIR/detox
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-documentation-cache
+    name: mobile-documentation-cache
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Developer/Shared/Documentation
+      - $HOME/Library/Developer/Xcode/DocumentationIndex
+      - $HOME/Library/Developer/Xcode/DocumentationCache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-dsyms-archives-report
+    name: mobile-dsyms-archives-report
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 90
+    paths:
+      - $HOME/Library/Caches/com.apple.dt.Xcode/Downloads
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-dvt-downloads-runtimes
+    name: mobile-dvt-downloads-runtimes
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Developer/DVTDownloads
+      - $HOME/Library/Developer/CoreSimulator/Images
+      - $HOME/Library/Developer/CoreSimulator/Cryptex
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-eas-cli
+    name: mobile-eas-cli
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.eas
+      - $HOME/.eas-cli
+      - $HOME/Library/Caches/eas-cli
+      - $HOME/Library/Caches/eas-cli-nodejs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-expo-caches
+    name: mobile-expo-caches
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.expo
+      - $HOME/.expo/cache
+      - $HOME/.expo/ios-simulator-app-cache
+      - $HOME/.expo/android-apk-cache
+      - $HOME/.expo/native-modules-cache
+      - $HOME/.expo/versions-cache
+      - $HOME/.expo/template-cache
+      - $HOME/Library/Caches/Expo
+      - $HOME/Library/Caches/com.expo.exporter
+      - $HOME/Library/Caches/com.exponent.Exponent
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-fastlane
+    name: mobile-fastlane
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/fastlane
+      - $HOME/Library/Logs/fastlane
+      - $HOME/.fastlane/spaceship
+      - $HOME/.fastlane
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-flipper-reactotron
+    name: mobile-flipper-reactotron
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Application Support/Flipper
+      - $HOME/Library/Caches/Flipper
+      - $HOME/Library/Caches/facebook-flipper
+      - $HOME/Library/Application Support/Reactotron
+      - $HOME/Library/Caches/Reactotron
+      - $HOME/Library/Logs/Flipper
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-flutter-pub-dart
+    name: mobile-flutter-pub-dart
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.pub-cache
+      - $HOME/.pub-cache/hosted
+      - $HOME/.pub-cache/git
+      - $HOME/.pub-cache/hosted-hashes
+      - $HOME/.dart-tool
+      - $HOME/.dartServer
+      - $HOME/.dart-cli-completion
+      - $HOME/Library/Caches/flutter_engine
+      - $HOME/Library/Caches/Dart
+      - $HOME/.config/flutter/tool_state
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-flutter-sdk-cache-report
+    name: mobile-flutter-sdk-cache-report
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/flutter/bin/cache
+      - $HOME/development/flutter/bin/cache
+      - $HOME/fvm/versions
+      - $HOME/fvm/cache
+      - $HOME/.fvm
+      - $HOME/Library/Application Support/fvm
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-gradle-android
+    name: mobile-gradle-android
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.gradle/daemon
+      - $HOME/.gradle/native
+      - $HOME/.gradle/.tmp
+      - $HOME/.gradle/wrapper/dists
+      - $HOME/.gradle/kotlin-profile
+      - $HOME/.gradle/notifications
+      - $HOME/.gradle/workers
+      - $HOME/.gradle/jdks
+      - $HOME/.gradle/android
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-instruments-traces
+    name: mobile-instruments-traces
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Developer/Xcode/Instruments
+      - $HOME/Library/Application Support/Instruments
+      - $HOME/Library/Caches/com.apple.dt.Instruments
+      - $HOME/Library/Logs/Instruments
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-intellij-android-caches
+    name: mobile-intellij-android-caches
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - "$HOME/Library/Caches/JetBrains/IntelliJIdea*"
+      - "$HOME/Library/Caches/JetBrains/IdeaIC*"
+      - "$HOME/Library/Logs/JetBrains/IntelliJIdea*"
+      - "$HOME/Library/Logs/JetBrains/IdeaIC*"
+      - "$HOME/Library/Caches/JetBrains/AndroidStudio*"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-ios-deploy-libimobiledevice
+    name: mobile-ios-deploy-libimobiledevice
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Logs/ios-deploy
+      - $HOME/.config/libimobiledevice
+      - $HOME/Library/Caches/libimobiledevice
+      - $HOME/Library/Logs/libimobiledevice
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-kotlin-native-kmp
+    name: mobile-kotlin-native-kmp
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.konan
+      - $HOME/.konan/dependencies
+      - $HOME/.konan/cache
+      - "$HOME/.konan/kotlin-native-prebuilt-*"
+      - $HOME/Library/Caches/Kotlin
+      - $HOME/Library/Application Support/kotlin
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-lockdown-pairing-report
+    name: mobile-lockdown-pairing-report
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - /var/db/lockdown
+      - /var/db/lockdown-development
+    delete_mode: path
+    max_depth: 6
+
+  - id: mobile-maestro
+    name: mobile-maestro
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.maestro
+      - $HOME/.maestro/tests
+      - "$HOME/.maestro/tests/**"
+      - $HOME/Library/Caches/maestro
+      - $HOME/Library/Caches/Maestro
+      - $HOME/.cache/maestro
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-maui-xamarin
+    name: mobile-maui-xamarin
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Caches/Xamarin
+      - $HOME/Library/Caches/XamarinBuildDownloadCache
+      - "$HOME/Library/Caches/com.xamarin.*"
+      - $HOME/Library/Caches/com.microsoft.visual-studio
+      - $HOME/Library/Developer/Xamarin
+      - $HOME/.local/share/Xamarin
+      - "$HOME/.nuget/packages/microsoft.maui.*"
+      - "$HOME/.nuget/packages/xamarin.*"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-metro-rn-temp-caches
+    name: mobile-metro-rn-temp-caches
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 3
+    paths:
+      - $HOME/Library/Caches/com.facebook.react.packager
+      - $HOME/Library/Caches/metro-cache
+      - $HOME/.metro
+      - $HOME/.rncache
+    include_globs:
+      - "metro-cache/**"
+      - "metro-*/**"
+      - "haste-map-*/**"
+      - "react-native-packager-cache-*/**"
+      - "react-*/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-provisioning-profiles-report
+    name: mobile-provisioning-profiles-report
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 90
+    paths:
+      - $HOME/Library/MobileDevice/Provisioning Profiles
+      - $HOME/Library/Developer/Xcode/UserData/Provisioning Profiles
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-react-native-firebase-caches
+    name: mobile-react-native-firebase-caches
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Caches/Firebase
+      - $HOME/Library/Caches/com.google.firebase
+      - $HOME/Library/Caches/Google/Firebase
+      - $HOME/Library/Caches/cn.jiguang
+      - $HOME/Library/Caches/io.sentry
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-ruby-gems-cocoapods-side
+    name: mobile-ruby-gems-cocoapods-side
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.gem/ruby
+      - $HOME/Library/Caches/RubyGems
+      - $HOME/.bundle/cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-scrcpy
+    name: mobile-scrcpy
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/scrcpy
+      - $HOME/.config/scrcpy
+      - $HOME/.cache/scrcpy
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-simulator-screenshots-media
+    name: mobile-simulator-screenshots-media
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Developer/CoreSimulator/Devices
+      - $HOME/Library/Logs/CoreSimulator
+    include_globs:
+      - "**/data/Media/**"
+      - "**/data/Library/Caches/**"
+      - "**/data/tmp/**"
+      - "**/*.log"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-spm-repositories-cache
+    name: mobile-spm-repositories-cache
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Caches/org.swift.swiftpm
+      - $HOME/Library/Caches/org.swift.swiftpm/repositories
+      - $HOME/Library/Caches/org.swift.swiftpm/artifacts
+      - $HOME/Library/Caches/org.swift.swiftpm/manifests
+      - $HOME/Library/Caches/swiftpm
+      - $HOME/Library/org.swift.swiftpm
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-testflight-transporter
+    name: mobile-testflight-transporter
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Caches/com.apple.TransporterApp
+      - $HOME/Library/Caches/com.apple.amp.itmstransporter
+      - $HOME/Library/Application Support/Transporter
+      - $HOME/Library/Caches/com.apple.AMPLibraryAgent
+      - $HOME/Library/Logs/Transporter
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-watchman-flow
+    name: mobile-watchman-flow
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/.watchman
+      - "$TMPDIR/watchman-*"
+      - $HOME/Library/Caches/com.github.facebook.watchman
+      - $HOME/.flow-typed
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-watchos-tvos-visionos-device-support
+    name: mobile-watchos-tvos-visionos-device-support
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Developer/Xcode/watchOS DeviceSupport
+      - $HOME/Library/Developer/Xcode/tvOS DeviceSupport
+      - $HOME/Library/Developer/Xcode/visionOS DeviceSupport
+      - $HOME/Library/Developer/Xcode/macOS DeviceSupport
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-xcode-app-caches
+    name: mobile-xcode-app-caches
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.apple.dt.Xcode
+      - $HOME/Library/Caches/com.apple.dt.xcodebuild
+      - $HOME/Library/Caches/com.apple.dt.Instruments
+      - $HOME/Library/Caches/com.apple.dt.IDECacheDeleteAppExtension
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-xcode-device-logs
+    name: mobile-xcode-device-logs
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Developer/Xcode/iOS Device Logs
+      - $HOME/Library/Developer/Xcode/watchOS Device Logs
+      - $HOME/Library/Developer/Xcode/tvOS Device Logs
+      - $HOME/Library/Developer/Xcode/visionOS Device Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-xcode-gpu-metal
+    name: mobile-xcode-gpu-metal
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Developer/Xcode/GPUToolsAgent.caches
+      - $HOME/Library/Caches/com.apple.gpu
+      - $HOME/Library/Developer/Xcode/UserData/IB Support/Simulator Devices
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-xcode-module-symbol-caches
+    name: mobile-xcode-module-symbol-caches
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Developer/Xcode/DerivedData/ModuleCache.noindex
+      - $HOME/Library/Developer/Xcode/DerivedData/SymbolCache.noindex
+      - $HOME/Library/Developer/Xcode/DerivedData/SDKStatCaches.noindex
+      - $HOME/Library/Developer/Xcode/DerivedData/CompilationCache.noindex
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-xcode-products
+    name: mobile-xcode-products
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Developer/Xcode/Products
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mobile-xcode-userdata-ib-previews
+    name: mobile-xcode-userdata-ib-previews
+    category: dev
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Developer/Xcode/UserData/IB Support
+      - $HOME/Library/Developer/Xcode/UserData/Previews
+      - $HOME/Library/Developer/Xcode/UserData/IDEEditorInteractivityHistory
+      - $HOME/Library/Developer/Xcode/UserData/XcodeCloud
+    delete_mode: contents
+    max_depth: 6

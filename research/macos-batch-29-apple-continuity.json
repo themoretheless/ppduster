@@ -1,0 +1,616 @@
+{
+  "batch": "29-apple-continuity",
+  "platform": "macos",
+  "title": "Apple Continuity and cross-device system user caches residual",
+  "scope": "Apple Continuity and related system USER caches under $HOME only, not already primary targets in macos-apple-extended: Handoff/useractivityd, Universal Clipboard (shared-pasteboard), AirPlay receiver residual, Sidecar/Screen Continuity, Continuity Camera residual, Continuity Markup, Apple Watch AutoUnlock residual, iCloud Photos agent caches (not library), iCloud Drive bird/CloudDocs residual report-only carefully, CloudKit residual user agent leaves, Push/UserNotifications residual, APSD/AOSPush residual, CallHistory residual careful medium/report-only, FaceTime residual, Messages regenerable cache leaves report-only (Messages is never-touch for chat.db/Attachments), Siri suggestions residual, Proactive residual, DuetExpertCenter residual streams/metrics, KnowledgeC report-only, Biome residual (databases/streams/sync beyond tmp/compute), IntelligencePlatform residual Artifacts. Prefer medium/report-only for privacy-adjacent stores.",
+  "safety_notes": [
+    "NEVER touch Keychains, Mail full data, Messages chat.db or Attachments content, Photos Library.photoslibrary, Mobile Documents, CloudStorage, File Provider Storage under iCloud Drive groups, Documents/Desktop/Downloads.",
+    "Messages is never-touch for conversation data. Only explicit regenerable cache leaves (Caches, StickerCache, CollaborationNoticeCache, NickNameCache) and only as report-only unless product policy later promotes carefully.",
+    "CallHistoryDB/CallHistoryTransactions hold call history: report-only. callservicesd group Library/Caches only is medium residual.",
+    "FaceTime Application Support FaceTime.sqlite* is call-related DB: never wipe. Only container/group Caches/tmp residual.",
+    "Universal Clipboard shared-pasteboard can hold large staged paste payloads (known multi-GB bloat). Cleaning drops pending cross-device paste; medium risk, default off.",
+    "Sharing/AutoUnlock holds Watch unlock pairing material (ltk, pairing-records): report-only only. Do not auto-delete pairing files.",
+    "bird Caches under ~/Library/Caches is already in apple-extended; this batch adds group-container and CloudKit bird residual carefully. Never wipe iCloud Drive file content or Mobile Documents.",
+    "CloudKit under ~/Library/Caches/CloudKit: narrow residual agent leaves only; never bulk-wipe all CloudKit as default. Safari CloudKit leaves belong to browser packs.",
+    "Biome: tmp and compute already cleanable in apple-extended. databases/streams/sync/sets are personalization residual: report-only.",
+    "IntelligencePlatform and KnowledgeC are privacy-adjacent ML stores: report-only.",
+    "IdentityServices crypto DBs and StatusKit full trees are sensitive; not bulk targets here (partially covered elsewhere).",
+    "path_count counts distinct path templates across rules (including report-only)."
+  ],
+  "risk_policy": {
+    "universal_clipboard_shared_pasteboard": "medium (default_enabled false)",
+    "handoff_useractivityd_caches": "medium",
+    "sidecar_screen_continuity_caches": "medium",
+    "airplay_receiver_container_caches": "low to medium",
+    "continuity_camera_markup_caches": "low",
+    "watch_autounlock_pairing": "report-only (never auto-delete pairing)",
+    "icloud_photos_agent_caches_not_library": "medium",
+    "bird_clouddocs_group_residual": "report-only or medium careful",
+    "cloudkit_agent_residual": "report-only preferred / medium careful",
+    "push_usernotifications_residual": "low to medium",
+    "callhistory_db": "report-only",
+    "callservicesd_caches": "medium",
+    "facetime_caches_not_sqlite": "low to medium",
+    "messages_regenerable_caches": "report-only (Messages never-touch for content)",
+    "siri_suggestions_proactive_duet_residual": "medium / report-only privacy-adjacent",
+    "knowledgec_biome_streams_intelligenceplatform": "report-only"
+  },
+  "overlap_exclusions": [
+    "macos-apple-extended: Biome/tmp, Biome/compute; bird/iCloud agent Caches; DuetExpertCenter + duetexpertd + proactive.eventtracker; IntelligencePlatform/Suggestions/PersonalizationPortrait report-only; Sharing/StatusKit/FrontBoard; Siri assistantd/parsecd/sirittsd; group.com.apple.siri.sirisuggestions and siri.userfeedbacklearning as group-container-apple-caches; VideoConference cache; com.apple.internal.ck",
+    "macos-batch-01: same apple-system primary set",
+    "macos-batch-04 creative: Photos/cloudphotod app caches primary",
+    "macos-batch-10: CallHistoryDB report-only, Knowledge/DifferentialPrivacy/Duet medium, Biome report-only inventory",
+    "macos-batch-26: FaceTime container caches + Continuity Camera onboarding caches primary (this batch adds group residual and extras)",
+    "macos-batch-07: $TMPDIR AirDrop/continuity globs only"
+  ],
+  "sources": [
+    "Live host: group.com.apple.coreservices.useractivityd/shared-pasteboard (~203MB archives/items verified)",
+    "Live host: Sharing/AutoUnlock pairing-records.plist and ltk.plist present (report-only)",
+    "Live host: group.com.apple.ScreenContinuityServices, Containers/com.apple.ScreenContinuity, AirPlayUIAgent, ContinuityCaptureOnboardingUI",
+    "Live host: Group Containers group.com.apple.sharingd, rapportd, replicatord, UserNotifications, FaceTime, telephonyutilities.callservicesd, bird, CloudDocs, iCloudDrive, photolibraryd.private, moments, siri.sirisuggestions, siri.remembers, siri.userfeedbacklearning",
+    "Live host: Application Support CallHistoryDB, CallHistoryTransactions, FaceTime sqlite, Knowledge/knowledgeC.db",
+    "Live host: Library/Messages/{Caches,StickerCache,CollaborationNoticeCache,NickNameCache,Attachments,chat.db}",
+    "Live host: Library/Biome/{tmp,compute,databases,streams,sync,sets}; IntelligencePlatform Artifacts + graph dbs",
+    "Live host: Caches/CloudKit agents bird, cloudphotod, facetimemessagestored, imagent, callhistory.sync-helper, knowledge-agent, biomesyncd, suggestd",
+    "Live host: HTTPStorages/com.apple.AOSPushRelay; Metadata/CoreSpotlight/PasteboardHistory",
+    "Community: shared-pasteboard archives multi-GB bloat (useractivityd Universal Clipboard / Handoff paste staging)",
+    "Apple Continuity umbrella: Handoff, Universal Clipboard, Sidecar, Continuity Camera, AirPlay, Watch unlock, SMS relay",
+    "Not in macos-apple-extended primary paths: shared-pasteboard, ScreenContinuity*, useractivityd group leaves, Markup Continuity residual, Messages regenerable cache leaves, KnowledgeC path specificity, Biome databases/streams residual"
+  ],
+  "path_count": 134,
+  "rules": [
+    {
+      "id": "cont-universal-clipboard-pasteboard",
+      "name": "Universal Clipboard shared-pasteboard staging",
+      "description": "Handoff/Universal Clipboard staged pasteboard archives and items under useractivityd group. Known large reclaim surface.",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 1,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Group Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard",
+        "$HOME/Library/Group Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard/archives",
+        "$HOME/Library/Group Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard/items"
+      ],
+      "notes": "Verified on host (~200MB+ typical; can reach multi-GB). Deleting drops pending cross-device paste payloads only; not user documents. Close apps mid-paste first. Prefer aged contents."
+    },
+    {
+      "id": "cont-handoff-useractivityd-caches",
+      "name": "Handoff useractivityd group caches",
+      "description": "Regenerable Caches/Application Support under useractivityd group (Handoff activity metadata), not the shared-pasteboard tree.",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Group Containers/group.com.apple.coreservices.useractivityd/Library/Caches",
+        "$HOME/Library/Group Containers/group.com.apple.coreservices.useractivityd/Library/Application Support",
+        "$HOME/Library/Containers/com.apple.AirDrop-Handoff-Settings.extension/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.AirDrop-Handoff-Settings.extension/Data/tmp",
+        "$HOME/Library/Containers/com.apple.settings-intents.AirDropHandoffIntents/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.settings-intents.AirDropHandoffIntents/Data/tmp"
+      ],
+      "exclude_globs": [
+        "**/shared-pasteboard/**"
+      ],
+      "notes": "Handoff activity UI caches rebuild. Do not use this rule for shared-pasteboard (dedicated rule)."
+    },
+    {
+      "id": "cont-pasteboard-spotlight-history",
+      "name": "CoreSpotlight PasteboardHistory residual",
+      "description": "Spotlight PasteboardHistory metadata residual related to clipboard indexing.",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Metadata/CoreSpotlight/PasteboardHistory"
+      ],
+      "notes": "Clipboard-related Spotlight residual. Not full CoreSpotlight wipe (that is separate medium category in apple-extended)."
+    },
+    {
+      "id": "cont-airplay-receiver-residual",
+      "name": "AirPlay receiver UI and diagnostic residual",
+      "description": "AirPlayUIAgent and AirPlay diagnostic extension container Caches/tmp only.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Containers/com.apple.AirPlayUIAgent/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.AirPlayUIAgent/Data/tmp",
+        "$HOME/Library/Containers/com.apple.DiagnosticExtensions.AirPlay/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.DiagnosticExtensions.AirPlay/Data/tmp",
+        "$HOME/Library/Caches/com.apple.AirPlayUIAgent",
+        "$HOME/Library/Caches/com.apple.AirPlayXPCHelper"
+      ],
+      "notes": "Receiver UI caches only. Does not change AirPlay settings plists. System AirPlay helpers outside $HOME are out of scope."
+    },
+    {
+      "id": "cont-sidecar-screen-continuity",
+      "name": "Sidecar and Screen Continuity caches",
+      "description": "Screen Continuity / Sidecar / iPhone Mirroring related container and group caches.",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Containers/com.apple.ScreenContinuity/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.ScreenContinuity/Data/tmp",
+        "$HOME/Library/Group Containers/group.com.apple.ScreenContinuityServices/Library/Caches",
+        "$HOME/Library/Group Containers/group.com.apple.ScreenContinuityServices/Library/Application Support",
+        "$HOME/Library/Group Containers/group.com.apple.replicatord/Library/Caches",
+        "$HOME/Library/Group Containers/group.com.apple.replicatord/Library/Application Support",
+        "$HOME/Library/Caches/com.apple.ScreenContinuity",
+        "$HOME/Library/Caches/com.apple.sidecar"
+      ],
+      "notes": "May briefly disrupt active Sidecar/iPhone Mirroring session. Regenerable display/session caches; not user documents."
+    },
+    {
+      "id": "cont-continuity-camera-residual",
+      "name": "Continuity Camera residual extras",
+      "description": "Continuity Camera residual beyond streaming batch primary: onboarding container already listed in batch 26; adds CMIO-related user cache leaves if present.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Containers/com.apple.ContinuityCaptureOnboardingUI/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.ContinuityCaptureOnboardingUI/Data/tmp",
+        "$HOME/Library/Caches/com.apple.ContinuityCapture",
+        "$HOME/Library/Caches/com.apple.cmio.ContinuityCaptureAgent",
+        "$HOME/Library/Logs/ContinuityCapture"
+      ],
+      "notes": "Overlap with batch-26 stream-continuity-camera intentional residual depth. Never system CoreMediaIO plugins."
+    },
+    {
+      "id": "cont-continuity-markup",
+      "name": "Continuity Markup residual caches",
+      "description": "MarkupUI Continuity Markup / markup photo extension regenerable caches and tmp.",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Containers/com.apple.MarkupUI.Markup/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.MarkupUI.Markup/Data/tmp",
+        "$HOME/Library/Containers/com.apple.MarkupUI.MarkupPhotoExtension/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.MarkupUI.MarkupPhotoExtension/Data/tmp",
+        "$HOME/Library/Caches/com.apple.MarkupUI.Markup"
+      ],
+      "notes": "Continuity Markup UI caches. Does not delete marked-up documents."
+    },
+    {
+      "id": "cont-watch-autounlock-report",
+      "name": "Apple Watch AutoUnlock residual (report-only)",
+      "description": "Sharing/AutoUnlock holds Watch unlock pairing material. Report size only; never auto-delete pairing records.",
+      "category": "report-only",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Sharing/AutoUnlock",
+        "$HOME/Library/Sharing/AutoUnlock/pairing-records.plist",
+        "$HOME/Library/Sharing/AutoUnlock/ltk.plist"
+      ],
+      "notes": "Host verified pairing-records.plist and ltk.plist. Deleting breaks Watch unlock until re-pair. apple-extended may list Sharing broadly; this rule documents AutoUnlock as never auto-clean pairing."
+    },
+    {
+      "id": "cont-sharingd-rapport-residual",
+      "name": "sharingd and rapportd Continuity residual caches",
+      "description": "Nearby Continuity transport residual under sharingd and rapportd group Library/Caches only.",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Group Containers/group.com.apple.sharingd/Library/Caches",
+        "$HOME/Library/Group Containers/group.com.apple.rapportd/Library/Caches",
+        "$HOME/Library/Group Containers/group.com.apple.rapportd/Library/Application Support",
+        "$HOME/Library/Caches/com.apple.sharingd",
+        "$HOME/Library/Caches/com.apple.rapportd"
+      ],
+      "exclude_globs": [
+        "**/AirDropIDMSDB/**",
+        "**/RPIdentitySyncCache.plist"
+      ],
+      "notes": "Avoid AirDrop IDMS DB and rapport identity plist as wipe targets. ~/Library/Sharing bulk remains separate careful surface."
+    },
+    {
+      "id": "cont-icloud-photos-agent-residual",
+      "name": "iCloud Photos agent caches (not library)",
+      "description": "photolibraryd, mstreamd, moments, CloudPhotosConfiguration agent caches only. Never Photos Library.photoslibrary or File Provider Storage originals.",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Containers/com.apple.photolibraryd/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.mediastream.mstreamd/Data/Library/HTTPStorages",
+        "$HOME/Library/Containers/com.apple.mediastream.mstreamd/Data/Library/MediaStream",
+        "$HOME/Library/Containers/com.apple.CloudPhotosConfiguration/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.CloudPhotosConfiguration/Data/tmp",
+        "$HOME/Library/Group Containers/group.com.apple.photolibraryd.private/Library/Caches",
+        "$HOME/Library/Group Containers/group.com.apple.moments/Library/Caches",
+        "$HOME/Library/Group Containers/group.com.apple.moments/tmp",
+        "$HOME/Library/Caches/CloudKit/com.apple.cloudphotod"
+      ],
+      "exclude_globs": [
+        "**/*.photoslibrary/**",
+        "**/File Provider Storage/**",
+        "**/moments.sqlite*",
+        "**/Photos.sqlite*"
+      ],
+      "notes": "Batch-04 covers com.apple.Photos and cloudphotod top-level Caches; this adds agent/container residual. Never library originals."
+    },
+    {
+      "id": "cont-bird-clouddocs-residual-report",
+      "name": "iCloud Drive bird/CloudDocs residual (report-only careful)",
+      "description": "bird/CloudDocs/iCloudDrive group Library/Caches and CloudDocs Application Support telemetry residual. Report-only; never File Provider Storage or Mobile Documents.",
+      "category": "report-only",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Group Containers/com.apple.bird/Library/Caches",
+        "$HOME/Library/Group Containers/group.com.apple.CloudDocs/Library/Caches",
+        "$HOME/Library/Group Containers/group.com.apple.iCloudDrive/Library/Caches",
+        "$HOME/Library/Application Support/CloudDocs/session",
+        "$HOME/Library/Application Support/CloudDocs/device-tracking",
+        "$HOME/Library/Containers/com.apple.CloudDocs.iCloudDriveFileProvider/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.CloudDocsDaemon.StorageManagement/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.iCloudDriveCore.diagnostic/Data/Library/Caches",
+        "$HOME/Library/Caches/CloudKit/com.apple.bird"
+      ],
+      "notes": "Primary ~/Library/Caches/com.apple.bird already in apple-extended as cleanable. Group containers and CloudDocs session/telemetry are careful report-only here. Never Mobile Documents or File Provider Storage."
+    },
+    {
+      "id": "cont-cloudkit-residual-user-report",
+      "name": "CloudKit residual user agent leaves (report-only)",
+      "description": "Selected CloudKit agent cache leaves for Continuity/iMessage/FaceTime/knowledge residual. Report sizes; do not bulk-wipe entire CloudKit root.",
+      "category": "report-only",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/CloudKit/com.apple.facetimemessagestored",
+        "$HOME/Library/Caches/CloudKit/com.apple.imagent",
+        "$HOME/Library/Caches/CloudKit/com.apple.knowledge-agent",
+        "$HOME/Library/Caches/CloudKit/com.apple.biomesyncd",
+        "$HOME/Library/Caches/CloudKit/com.apple.suggestd",
+        "$HOME/Library/Caches/CloudKit/com.apple.callhistory.sync-helper",
+        "$HOME/Library/Caches/CloudKit/com.apple.identityservicesd",
+        "$HOME/Library/Caches/CloudKit/com.apple.siriknowledged",
+        "$HOME/Library/Caches/CloudKit/CloudKitMetadata",
+        "$HOME/Library/Caches/CloudKit/cloudd_db"
+      ],
+      "notes": "Privacy and sync residual. Prefer report and Storage recommendations over bulk delete. Safari CloudKit leaves stay in browser packs."
+    },
+    {
+      "id": "cont-push-usernotifications-residual",
+      "name": "Push and UserNotifications residual caches",
+      "description": "UserNotifications group caches, Notification Center UI residual, AOSPushRelay HTTPStorages.",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Group Containers/group.com.apple.UserNotifications/Library/Caches",
+        "$HOME/Library/Containers/com.apple.notificationcenterui/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.notificationcenterui/Data/tmp",
+        "$HOME/Library/HTTPStorages/com.apple.AOSPushRelay",
+        "$HOME/Library/Caches/com.apple.UserNotifications",
+        "$HOME/Library/Caches/com.apple.apsd"
+      ],
+      "exclude_globs": [
+        "**/*.binarycookies"
+      ],
+      "notes": "APS/push daemon state is largely system-scoped; user leaves are residual. May clear notification presentation caches; not credentials."
+    },
+    {
+      "id": "cont-callhistory-db-report",
+      "name": "CallHistory DB residual (report-only careful)",
+      "description": "Call history store and transactions. Privacy-sensitive; report-only. Also lists CloudKit callhistory sync residual.",
+      "category": "report-only",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "$HOME/Library/Application Support/CallHistoryDB",
+        "$HOME/Library/Application Support/CallHistoryTransactions",
+        "$HOME/Library/Caches/CloudKit/com.apple.callhistory.sync-helper"
+      ],
+      "notes": "Overlap with batch-10 report rule intentional Continuity-domain documentation. Never auto-delete call history."
+    },
+    {
+      "id": "cont-callservicesd-caches",
+      "name": "callservicesd residual caches (medium careful)",
+      "description": "telephonyutilities callservicesd and callintelligenced regenerable caches only, not CallHistoryDB.",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Group Containers/group.com.apple.telephonyutilities.callservicesd/Library/Caches",
+        "$HOME/Library/Application Support/com.apple.callintelligenced",
+        "$HOME/Library/Caches/com.apple.callservicesd",
+        "$HOME/Library/Containers/com.apple.calls.PhoneAppIntentsExtension/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.calls.PhoneAppIntentsExtension/Data/tmp"
+      ],
+      "notes": "Does not delete CallHistory.storedata. May reset short-lived call UI state."
+    },
+    {
+      "id": "cont-facetime-residual",
+      "name": "FaceTime residual caches (not sqlite history)",
+      "description": "FaceTime group/container residual beyond streaming batch: group Caches, notification extension, facetimemessagestored CloudKit leave (cleanable container tmp only).",
+      "category": "app-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Group Containers/group.com.apple.FaceTime/Library/Caches",
+        "$HOME/Library/Containers/com.apple.FaceTime/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.FaceTime/Data/tmp",
+        "$HOME/Library/Containers/com.apple.FaceTime.FaceTimeNotificationExtension/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.FaceTime.FaceTimeNotificationExtension/Data/tmp",
+        "$HOME/Library/Containers/com.apple.FaceTime.RemotePeoplePicker/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.FaceTime.RemotePeoplePicker/Data/tmp",
+        "$HOME/Library/Caches/com.apple.FaceTime",
+        "$HOME/Library/Caches/com.apple.facetimemessagestored"
+      ],
+      "exclude_globs": [
+        "**/*.sqlite*",
+        "**/FaceTime.sqlite*"
+      ],
+      "notes": "Never Application Support/FaceTime/*.sqlite*. VideoConference covered in apple-extended/batch-26."
+    },
+    {
+      "id": "cont-messages-regenerable-cache-report",
+      "name": "Messages regenerable caches (report-only)",
+      "description": "Explicit regenerable Messages cache leaves only. Messages content (chat.db, Attachments) is never-touch.",
+      "category": "report-only",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Messages/Caches",
+        "$HOME/Library/Messages/StickerCache",
+        "$HOME/Library/Messages/CollaborationNoticeCache",
+        "$HOME/Library/Messages/NickNameCache",
+        "$HOME/Library/Group Containers/com.apple.messages/Library/Caches",
+        "$HOME/Library/Containers/com.apple.MobileSMS/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.MobileSMS/Data/tmp"
+      ],
+      "exclude_globs": [
+        "**/chat.db*",
+        "**/Attachments/**",
+        "**/Drafts/**"
+      ],
+      "notes": "NEVER chat.db or Attachments. Report sizes of regenerable caches only; product may later promote StickerCache/Caches with extreme care and default off."
+    },
+    {
+      "id": "cont-siri-suggestions-residual",
+      "name": "Siri suggestions residual caches",
+      "description": "Siri suggestions group Library/Caches residual and related suggestion container leaves. Full Suggestions tree remains report-only in apple-extended.",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Group Containers/group.com.apple.siri.sirisuggestions/Library/Caches",
+        "$HOME/Library/Group Containers/group.com.apple.siri.userfeedbacklearning/Library/Caches",
+        "$HOME/Library/Group Containers/group.com.apple.siri.userfeedbacklearning/Segment",
+        "$HOME/Library/Containers/com.apple.siri.SiriSuggestionsLightHousePlugin/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.siri.SiriSuggestionsLightHousePlugin/Data/tmp",
+        "$HOME/Library/Caches/com.apple.siri.suggestions",
+        "$HOME/Library/Caches/com.apple.suggestd"
+      ],
+      "notes": "Suggestions quality resets until relearn. Do not wipe full ~/Library/Suggestions SQLite stores via this rule (report-only elsewhere)."
+    },
+    {
+      "id": "cont-siri-remembers-inference-report",
+      "name": "Siri Remembers and inference residual (report-only)",
+      "description": "Privacy-adjacent Siri Remembers and inference stores. Report-only.",
+      "category": "report-only",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Group Containers/group.com.apple.siri.remembers",
+        "$HOME/Library/Group Containers/group.com.apple.siri.inference",
+        "$HOME/Library/Application Support/com.apple.siri.inference",
+        "$HOME/Library/Application Support/com.apple.appleintelligencereporting.processing"
+      ],
+      "notes": "Contains personal inference DBs. Not auto-clean targets."
+    },
+    {
+      "id": "cont-proactive-duet-residual",
+      "name": "Proactive and Duet residual streams/metrics",
+      "description": "DuetExpertCenter residual subtrees (streams, metrics, feedback, caches) and proactive reporting residual. Parent DuetExpertCenter already cleanable in apple-extended; this documents residual depth and medium privacy stance.",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/DuetExpertCenter/streams",
+        "$HOME/Library/DuetExpertCenter/metrics",
+        "$HOME/Library/DuetExpertCenter/feedback",
+        "$HOME/Library/DuetExpertCenter/caches",
+        "$HOME/Library/Containers/com.apple.proactive.AppleIntelligenceReportingSELFIngestor/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.proactive.AppleIntelligenceReportingSELFIngestor/Data/tmp",
+        "$HOME/Library/Containers/com.apple.DEC.AppPredictionInternal.DiagnosticExtension/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.DEC.AppPredictionInternal.DiagnosticExtension/Data/tmp"
+      ],
+      "notes": "Resets app prediction / notification suggestion learning. Prefer default off. Full DuetExpertCenter root remains in apple-extended."
+    },
+    {
+      "id": "cont-knowledgec-report",
+      "name": "KnowledgeC store (report-only)",
+      "description": "CoreDuet knowledgeC.db under Application Support/Knowledge. Privacy-sensitive activity knowledge graph.",
+      "category": "report-only",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "$HOME/Library/Application Support/Knowledge",
+        "$HOME/Library/Application Support/Knowledge/knowledgeC.db",
+        "$HOME/Library/Application Support/Knowledge/knowledgeC.db-shm",
+        "$HOME/Library/Application Support/Knowledge/knowledgeC.db-wal"
+      ],
+      "notes": "Host verified knowledgeC.db. Deleting resets device activity knowledge used by suggestions; report-only preferred over batch-10 medium clean for Continuity safety posture."
+    },
+    {
+      "id": "cont-biome-residual-report",
+      "name": "Biome residual databases/streams/sync (report-only)",
+      "description": "Biome personalization residual beyond tmp/compute already cleanable in apple-extended.",
+      "category": "report-only",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Biome/databases",
+        "$HOME/Library/Biome/streams",
+        "$HOME/Library/Biome/sync",
+        "$HOME/Library/Biome/sets",
+        "$HOME/Library/Containers/com.apple.lighthouse.BiomeSELFIngestor/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.lighthouse.BiomeSELFIngestor/Data/tmp"
+      ],
+      "notes": "tmp and compute remain the only default-safe Biome leaves (apple-extended). streams/databases/sync hold personalization; report only."
+    },
+    {
+      "id": "cont-intelligenceplatform-residual-report",
+      "name": "IntelligencePlatform residual Artifacts (report-only)",
+      "description": "IntelligencePlatform Artifacts and on-device knowledge residual. Full tree is report-only in apple-extended; documents residual Artifacts explicitly for Continuity/AI overlap.",
+      "category": "report-only",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/IntelligencePlatform/Artifacts",
+        "$HOME/Library/Containers/com.apple.intelligenceplatform.IntelligencePlatform.DiagnosticExtension/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.intelligenceplatform.IntelligencePlatform.DiagnosticExtension/Data/tmp",
+        "$HOME/Library/Containers/com.apple.intelligenceflow.IntelligenceFlowRuntime.IntelligenceFlowDiagnostics/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.intelligenceflow.IntelligenceFlowRuntime.IntelligenceFlowDiagnostics/Data/tmp"
+      ],
+      "notes": "Do not auto-delete graph.db / globalKnowledge.db roots. Report sizes for System Data investigations."
+    },
+    {
+      "id": "cont-tmpdir-clipboard-handoff",
+      "name": "TMPDIR Continuity clipboard and Handoff temps",
+      "description": "User temp Continuity/Handoff/clipboard staging under $TMPDIR only (never whole /private/var/folders).",
+      "category": "temp",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 1,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$TMPDIR"
+      ],
+      "include_globs": [
+        "**/com.apple.continuity/**",
+        "**/com.apple.useractivityd/**",
+        "**/UASharedPasteboard*/**",
+        "**/com.apple.sharingd/**",
+        "**/com.apple.ScreenContinuity*/**",
+        "**/com.apple.AirPlay*/**",
+        "**/com.apple.sidecar*/**"
+      ],
+      "notes": "Complements batch-07 AirDrop/continuity tmp rule with Continuity-specific globs. Never delete entire TMPDIR root node."
+    }
+  ]
+}

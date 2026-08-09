@@ -1,0 +1,504 @@
+pack: apps-asia
+rules:
+
+  - id: asia-aliyun-adrive-electron
+    name: Alibaba aDrive Electron caches
+    description: 阿里云盘 aDrive (com.alicloud.smartdrive) Electron cache leaves under Application Support/aDrive.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/aDrive/Cache
+      - $HOME/Library/Application Support/aDrive/Code Cache
+      - $HOME/Library/Application Support/aDrive/GPUCache
+      - $HOME/Library/Application Support/aDrive/DawnGraphiteCache
+      - $HOME/Library/Application Support/aDrive/DawnWebGPUCache
+      - $HOME/Library/Application Support/aDrive/Service Worker
+      - $HOME/Library/Application Support/aDrive/blob_storage
+      - $HOME/Library/Application Support/aDrive/Crashpad
+      - $HOME/Library/Application Support/aDrive/logs
+      - $HOME/Library/Caches/com.alicloud.smartdrive
+      - $HOME/Library/Caches/aDrive
+      - $HOME/Library/Logs/aDrive
+      - $HOME/Library/Logs/com.alicloud.smartdrive
+    exclude_globs:
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Cookies/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: asia-baidu-input-cache
+    name: Baidu input method caches
+    description: 百度输入法 user Library caches and support temps. Not /Library/Input Methods/BaiduIM.app bundle.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.baidu.inputmethod
+      - $HOME/Library/Caches/com.baidu.inputmethod.main
+      - $HOME/Library/Caches/com.baidu.inputmethod.helper
+      - $HOME/Library/Caches/BaiduIM
+      - $HOME/Library/Application Support/Baidu/Input Method/Cache
+      - $HOME/Library/Application Support/BaiduIM/Cache
+      - $HOME/Library/Logs/BaiduIM
+      - $HOME/Library/Logs/com.baidu.inputmethod
+    delete_mode: contents
+    max_depth: 5
+
+  - id: asia-baidu-netdisk-cache
+    name: Baidu Netdisk caches and Electron leaves
+    description: 百度网盘 (com.baidu.BaiduNetdisk-mac) Library/Caches, crashreporter, and Application Support Electron cache leaves.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.baidu.BaiduNetdisk-mac
+      - $HOME/Library/Caches/com.plausiblelabs.crashreporter.data/com.baidu.BaiduNetdisk-mac
+      - $HOME/Library/Application Support/baidunetdisk/Cache
+      - $HOME/Library/Application Support/baidunetdisk/Code Cache
+      - $HOME/Library/Application Support/baidunetdisk/GPUCache
+      - $HOME/Library/Application Support/baidunetdisk/DawnGraphiteCache
+      - $HOME/Library/Application Support/baidunetdisk/DawnWebGPUCache
+      - $HOME/Library/Application Support/baidunetdisk/Service Worker
+      - $HOME/Library/Application Support/baidunetdisk/blob_storage
+      - $HOME/Library/Application Support/baidunetdisk/logs
+      - $HOME/Library/Application Support/baidunetdisk/Crashpad
+      - $HOME/Library/Application Support/com.baidu.BaiduNetdisk-mac/Cache
+      - $HOME/Library/Application Support/com.baidu.BaiduNetdisk-mac/Code Cache
+      - $HOME/Library/Application Support/com.baidu.BaiduNetdisk-mac/GPUCache
+      - $HOME/Library/Logs/BaiduNetdisk
+      - $HOME/Library/Logs/baidunetdisk
+    exclude_globs:
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Cookies/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: asia-dingtalk-caches-webkit
+    name: DingTalk caches, WebKit, and Application Support temps
+    description: 钉钉 (com.alibaba.DingTalkMac) Library/Caches, installer caches, WebKit, and regenerable logs under DingTalkMac support.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.alibaba.DingTalkMac
+      - $HOME/Library/Caches/com.alibaba.DingTalkInstaller
+      - $HOME/Library/Caches/DingTalk
+      - $HOME/Library/WebKit/com.alibaba.DingTalkMac
+      - $HOME/Library/Application Support/DingTalkMac/Cache
+      - $HOME/Library/Application Support/DingTalkMac/Code Cache
+      - $HOME/Library/Application Support/DingTalkMac/GPUCache
+      - $HOME/Library/Application Support/DingTalkMac/logs
+      - $HOME/Library/Application Support/DingTalkMac/Logs
+      - $HOME/Library/Logs/DingTalk
+      - $HOME/Library/Logs/DingTalkMac
+    exclude_globs:
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Cookies/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: asia-feishu-lark-electron-cache
+    name: Feishu and Lark Electron Chromium caches
+    description: ByteDance Feishu (CN) and Lark Suite (intl) Electron caches under Application Support name variants plus com.electron.lark Library/Caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Caches/com.electron.lark
+      - $HOME/Library/Caches/com.electron.lark.helper
+      - $HOME/Library/Caches/com.bytedance.lark.helper
+      - $HOME/Library/Application Support/LarkShell/Cache
+      - $HOME/Library/Application Support/LarkShell/Code Cache
+      - $HOME/Library/Application Support/LarkShell/GPUCache
+      - $HOME/Library/Application Support/LarkShell/DawnGraphiteCache
+      - $HOME/Library/Application Support/LarkShell/DawnWebGPUCache
+      - $HOME/Library/Application Support/LarkShell/Service Worker
+      - $HOME/Library/Application Support/LarkShell/blob_storage
+      - $HOME/Library/Application Support/LarkShell/Crashpad
+      - $HOME/Library/Application Support/LarkShell/logs
+      - $HOME/Library/Application Support/Lark/Cache
+      - $HOME/Library/Application Support/Lark/Code Cache
+      - $HOME/Library/Application Support/Lark/GPUCache
+      - $HOME/Library/Application Support/Lark/logs
+      - $HOME/Library/Application Support/LarkInternational/Cache
+      - $HOME/Library/Application Support/LarkInternational/Code Cache
+      - $HOME/Library/Application Support/LarkInternational/GPUCache
+      - $HOME/Library/Application Support/LarkInternational/logs
+      - $HOME/Library/Application Support/Feishu/Cache
+      - $HOME/Library/Application Support/Feishu/Code Cache
+      - $HOME/Library/Application Support/Feishu/GPUCache
+      - $HOME/Library/Application Support/Feishu/logs
+      - $HOME/Library/Logs/Lark
+      - $HOME/Library/Logs/Feishu
+      - $HOME/Library/Logs/LarkShell
+    exclude_globs:
+      - "**/sdk_storage/**"
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+      - "**/Cookies/**"
+      - "**/Preferences"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: asia-huawei-hisuite-cache
+    name: Huawei HiSuite Mac caches and logs
+    description: HiSuite phone manager caches/logs residuals. Not HiSuite phone backup archives.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.huawei.hisuite
+      - $HOME/Library/Caches/com.huawei.HiSuite
+      - $HOME/Library/Caches/HiSuite
+      - $HOME/Library/Application Support/HiSuite/Cache
+      - $HOME/Library/Application Support/HiSuite/log
+      - $HOME/Library/Application Support/HiSuite/logs
+      - $HOME/Library/Application Support/Huawei/HiSuite/Cache
+      - $HOME/Library/Application Support/Huawei/HiSuite/log
+      - $HOME/Library/Logs/HiSuite
+      - $HOME/Library/Logs/com.huawei.hisuite
+    exclude_globs:
+      - "**/backup/**"
+      - "**/Backup/**"
+      - "**/*.backup*"
+      - "**/bak/**"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: asia-iflytek-input-cache
+    name: iFlytek input method caches
+    description: 讯飞输入法 macOS user caches and logs. Not Input Methods app bundle under /Library.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.iflytek.inputmethod
+      - $HOME/Library/Caches/com.iflytek.inputmethod.mac
+      - $HOME/Library/Caches/com.iflytek.iflyime
+      - $HOME/Library/Caches/iFlyIME
+      - $HOME/Library/Application Support/iFlyIME/Cache
+      - $HOME/Library/Application Support/com.iflytek.inputmethod/Cache
+      - $HOME/Library/Logs/iFlyIME
+      - $HOME/Library/Logs/com.iflytek.inputmethod
+    delete_mode: contents
+    max_depth: 5
+
+  - id: asia-kakaotalk-cache
+    name: KakaoTalk Mac container caches
+    description: KakaoTalk (com.kakao.KakaoTalkMac) sandbox Library/Caches. Not full container Application Support chat stores.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.kakao.KakaoTalkMac
+      - $HOME/Library/Containers/com.kakao.KakaoTalkMac/Data/Library/Caches
+      - $HOME/Library/Containers/com.kakao.KakaoTalkMac/Data/Library/Logs
+      - $HOME/Library/Logs/KakaoTalk
+      - $HOME/Library/Logs/com.kakao.KakaoTalkMac
+    delete_mode: contents
+    max_depth: 6
+
+  - id: asia-line-mac-cache
+    name: LINE Mac nested container caches
+    description: LINE (jp.naver.line.mac) nested Cache trees and Library/Caches. Not Sticker packs as required offline assets if user prefers keep (sticker re-download is safe).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/jp.naver.line.mac
+      - $HOME/Library/Containers/jp.naver.line.mac/Data/Library/Caches
+      - $HOME/Library/Containers/jp.naver.line.mac/Data/Library/Containers/jp.naver.line/Data/Cache
+      - $HOME/Library/Containers/jp.naver.line.mac/Data/Library/Logs
+      - $HOME/Library/Group Containers/group.com.linecorp.line.mac/Library/Caches
+      - $HOME/Library/Logs/LINE
+      - $HOME/Library/Logs/jp.naver.line.mac
+    delete_mode: contents
+    max_depth: 8
+
+  - id: asia-naver-whale-browser-cache
+    name: Naver Whale browser caches
+    description: Whale Chromium caches under Library/Caches and Application Support user data Cache leaves. Not Cookies/Login Data/History.
+    category: browser-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.naver.Whale
+      - $HOME/Library/Caches/Whale
+      - $HOME/Library/Application Support/Naver/Whale/Default/Cache
+      - $HOME/Library/Application Support/Naver/Whale/Default/Code Cache
+      - $HOME/Library/Application Support/Naver/Whale/Default/GPUCache
+      - $HOME/Library/Application Support/Naver/Whale/Default/Service Worker
+      - $HOME/Library/Application Support/Naver/Whale/ShaderCache
+      - $HOME/Library/Application Support/Naver/Whale/GrShaderCache
+      - $HOME/Library/Application Support/Naver/Whale/GraphiteDawnCache
+      - $HOME/Library/Application Support/Whale/Default/Cache
+      - $HOME/Library/Application Support/Whale/Default/Code Cache
+      - $HOME/Library/Application Support/Whale/Default/GPUCache
+      - $HOME/Library/Application Support/Whale/ShaderCache
+    include_globs:
+      - "**/Cache/**"
+      - "**/Code Cache/**"
+      - "**/GPUCache/**"
+      - "**/ShaderCache/**"
+      - "**/GrShaderCache/**"
+      - "**/GraphiteDawnCache/**"
+      - "**/Service Worker/CacheStorage/**"
+    exclude_globs:
+      - "**/Cookies*"
+      - "**/Login Data*"
+      - "**/History*"
+      - "**/Web Data*"
+      - "**/Bookmarks*"
+      - "**/Preferences"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: asia-netease-music-cache
+    name: NetEase Cloud Music caches and WebKit
+    description: 网易云音乐 (com.netease.163music) caches, WebKit, and container caches. Not user-downloaded music libraries.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.netease.163music
+      - $HOME/Library/Application Support/com.netease.163music/Cache
+      - $HOME/Library/Application Support/com.netease.163music/Code Cache
+      - $HOME/Library/Application Support/com.netease.163music/GPUCache
+      - $HOME/Library/Application Support/com.netease.163music/logs
+      - $HOME/Library/Containers/com.netease.163music/Data/Library/Caches
+      - $HOME/Library/WebKit/com.netease.163music
+      - $HOME/Library/Logs/NeteaseMusic
+      - $HOME/Library/Logs/com.netease.163music
+    delete_mode: contents
+    max_depth: 6
+
+  - id: asia-qq-caches-webkit
+    name: QQ Mac caches and WebKit process data
+    description: QQNT (com.tencent.qq) Library/Caches, container Caches, and WebKit site data cache. Not chat databases in Group Containers.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.tencent.qq
+      - $HOME/Library/Containers/com.tencent.qq/Data/Library/Caches
+      - $HOME/Library/Containers/com.tencent.qq/Data/Library/Logs
+      - $HOME/Library/Containers/com.tencent.qq.share/Data/Library/Caches
+      - $HOME/Library/WebKit/com.tencent.qq
+      - $HOME/Library/Logs/QQ
+      - $HOME/Library/Logs/com.tencent.qq
+    delete_mode: contents
+    max_depth: 6
+
+  - id: asia-samsung-smart-switch-cache
+    name: Samsung Smart Switch Mac caches (DeX note)
+    description: Smart Switch for Mac caches/logs. Samsung DeX has no first-party macOS residual app tree.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.samsung.SmartSwitch
+      - $HOME/Library/Caches/com.samsung.smartswitch
+      - $HOME/Library/Caches/SmartSwitch
+      - $HOME/Library/Application Support/Smart Switch/Cache
+      - $HOME/Library/Application Support/Samsung/Smart Switch/Cache
+      - $HOME/Library/Application Support/SmartSwitch/Cache
+      - $HOME/Library/Logs/SmartSwitch
+      - $HOME/Library/Logs/Smart Switch
+    delete_mode: contents
+    max_depth: 5
+
+  - id: asia-sogou-input-cache
+    name: Sogou input method caches
+    description: 搜狗输入法 user caches and regenerable Application Support cache panels. Not /Library/Input Methods/SogouInput.app.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.sogou.inputmethod.sogou
+      - $HOME/Library/Caches/com.sogou.SGAssistPanel
+      - $HOME/Library/Caches/com.sogou.SogouPreference
+      - $HOME/Library/Caches/SogouServices
+      - $HOME/Library/Application Support/Sogou/EmojiPanel
+      - $HOME/.sogouinput
+    delete_mode: contents
+    max_depth: 5
+
+  - id: asia-tencent-lemon-cache
+    name: Tencent Lemon cleaner self-caches and logs
+    description: Tencent Lemon (Asia-market cleaner) own caches and log files, not third-party wipe lists.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.tencent.Lemon
+      - $HOME/Library/Caches/com.tencent.LemonMonitor
+      - $HOME/Library/Logs/LemonMonitor.log
+      - $HOME/Library/Logs/Tencent Lemon.log
+    delete_mode: contents
+    max_depth: 4
+
+  - id: asia-tencent-meeting-cache
+    name: Tencent Meeting caches, containers, WebKit
+    description: 腾讯会议 (com.tencent.meeting) Library/Caches, container Caches/Logs, WebKit. Not meeting recordings in user Documents/Movies.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.tencent.meeting
+      - $HOME/Library/Caches/com.tencent.meeting.helper
+      - $HOME/Library/Containers/com.tencent.meeting/Data/Library/Caches
+      - $HOME/Library/Containers/com.tencent.meeting/Data/Library/Logs
+      - $HOME/Library/Containers/com.tencent.wemeet.FileDelta/Data/Library/Caches
+      - $HOME/Library/Group Containers/FN2V63AD2J.com.tencent.meeting/Library/Caches
+      - $HOME/Library/Group Containers/FN2V63AD2J.com.tencent.meeting/Library/Logs
+      - $HOME/Library/WebKit/com.tencent.meeting
+      - $HOME/Library/Logs/TencentMeeting
+      - $HOME/Library/Logs/com.tencent.meeting
+    exclude_globs:
+      - "**/*Recording*"
+      - "**/recording*"
+      - "**/Recordings/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: asia-wechat-caches
+    name: WeChat Mac container and Library caches
+    description: WeChat (com.tencent.xinWeChat) sandboxed Caches and top-level Library/Caches only. Not Application Support message/Backup trees.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.tencent.xinWeChat
+      - $HOME/Library/Containers/com.tencent.xinWeChat/Data/Library/Caches
+      - $HOME/Library/Containers/com.tencent.xinWeChat/Data/Library/Caches/com.tencent.xinWeChat
+      - $HOME/Library/Containers/com.tencent.xinWeChat.MiniProgram/Data/Library/Caches
+      - $HOME/Library/Containers/com.tencent.xinWeChat.WeChatMacShare/Data/Library/Caches
+      - $HOME/Library/Logs/com.tencent.xinWeChat
+      - $HOME/Library/Containers/com.tencent.xinWeChat/Data/Library/Logs
+    exclude_globs:
+      - "**/Message/**"
+      - "**/Backup/**"
+      - "**/Account/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: asia-wecom-caches
+    name: WeCom / WeChat Work container caches
+    description: 企业微信 (com.tencent.WeWorkMac) sandbox Library/Caches and related helper containers. Not full IPC/account stores.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.tencent.WeWorkMac
+      - $HOME/Library/Containers/com.tencent.WeWorkMac/Data/Library/Caches
+      - $HOME/Library/Containers/com.tencent.WeWorkMac/Data/Library/Logs
+      - $HOME/Library/Containers/88L2Q4487U.com.tencent.WeWorkMac/Data/Library/Caches
+      - $HOME/Library/Containers/88L2Q4487U.com.tencent.WeWorkMac.IPCHelper/Data/Library/Caches
+      - $HOME/Library/Logs/WeWork
+      - $HOME/Library/Logs/企业微信
+    delete_mode: contents
+    max_depth: 6
+
+  - id: asia-wps-office-cache
+    name: WPS Office CN and global container caches
+    description: Kingsoft WPS (com.kingsoft.wpsoffice.mac / .global) sandbox Caches and Logs. Not user documents under container Documents.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.kingsoft.wpsoffice.mac/Data/Library/Caches
+      - $HOME/Library/Containers/com.kingsoft.wpsoffice.mac/Data/Library/Logs
+      - $HOME/Library/Containers/com.kingsoft.wpsoffice.mac.global/Data/Library/Caches
+      - $HOME/Library/Containers/com.kingsoft.wpsoffice.mac.global/Data/Library/Logs
+      - $HOME/Library/Containers/com.kingsoft.wpsoffice.mac.FinderSync/Data/Library/Caches
+      - $HOME/Library/Caches/com.kingsoft.wpsoffice.mac
+      - $HOME/Library/Caches/com.kingsoft.wpsoffice.mac.global
+      - $HOME/Library/Application Support/Kingsoft/WPS Office/Cache
+      - $HOME/Library/Application Support/Kingsoft/office6/officecloud/cache
+      - $HOME/Library/Application Support/Kingsoft/office6/log
+      - $HOME/Library/Logs/WPS Office
+      - $HOME/Library/Logs/Kingsoft
+    exclude_globs:
+      - "**/Documents/**"
+      - "**/*.doc"
+      - "**/*.docx"
+      - "**/*.xls"
+      - "**/*.xlsx"
+      - "**/*.ppt"
+      - "**/*.pptx"
+      - "**/*.pdf"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: asia-youdao-dict-note-cache
+    name: NetEase Youdao Dictionary and Youdao Note caches
+    description: 有道词典 and 有道云笔记 caches, WebKit, Electron leaves for note client. Not notebook content stores as whole wipe.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.youdao.YoudaoDict
+      - $HOME/Library/Application Support/com.youdao.YoudaoDict/Cache
+      - $HOME/Library/Application Support/com.youdao.YoudaoDict/Code Cache
+      - $HOME/Library/Application Support/com.youdao.YoudaoDict/GPUCache
+      - $HOME/Library/WebKit/com.youdao.YoudaoDict
+      - $HOME/Library/Containers/com.youdao.YoudaoDict/Data/Library/Caches
+      - $HOME/Library/Containers/com.youdao.note.YoudaoNoteMac/Data/Library/Caches
+      - $HOME/Library/Containers/com.youdao.note.YoudaoNoteMac/Data/Library/Logs
+      - $HOME/Library/Application Support/有道云笔记/Cache
+      - $HOME/Library/Application Support/有道云笔记/Code Cache
+      - $HOME/Library/Application Support/有道云笔记/GPUCache
+      - $HOME/Library/Application Support/YoudaoNote/Cache
+      - $HOME/Library/Application Support/YoudaoNote/Code Cache
+      - $HOME/Library/Application Support/YoudaoNote/GPUCache
+      - $HOME/Library/Logs/YoudaoDict
+      - $HOME/Library/Logs/YoudaoNote
+    exclude_globs:
+      - "**/Local Storage/**"
+      - "**/IndexedDB/**"
+    delete_mode: contents
+    max_depth: 6

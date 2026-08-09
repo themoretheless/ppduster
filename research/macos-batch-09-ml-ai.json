@@ -1,0 +1,934 @@
+{
+  "batch": "09-ml-ai",
+  "platform": "macos",
+  "description": "macOS regenerable ML/AI/data-science caches, model stores, package manager package caches, experiment logs, and language data caches under $HOME. Models and installed toolchains are medium or report-only; disposable download/build caches are low or medium. Prefer contents-only deletes, age gates, and native cleaners (hf cache prune, conda clean, uv cache clean, poetry cache clear) when available.",
+  "path_count": 239,
+  "risk_policy": {
+    "models_weights": "medium or report-only (large re-downloads; may be intentionally kept offline)",
+    "package_download_caches": "low or medium",
+    "installed_tool_versions_venvs": "report-only",
+    "experiment_run_logs": "medium (user may want history; not pure cache)",
+    "jupyter_checkpoints": "medium, careful (may hold unsaved notebook work)",
+    "credentials_tokens": "never-touch (excluded from this batch)"
+  },
+  "rules": [
+    {
+      "id": "ml-huggingface-hub",
+      "name": "Hugging Face Hub model/dataset snapshots",
+      "category": "ml-models",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "paths": [
+        "$HOME/.cache/huggingface/hub",
+        "$XDG_CACHE_HOME/huggingface/hub"
+      ],
+      "notes": "Default HF hub cache (~/.cache/huggingface/hub). Large model blobs/snapshots; regenerable via re-download. Prefer hf cache prune/rm. HF_HOME / HF_HUB_CACHE override. Do not delete tokens under ~/.cache/huggingface/token or ~/.huggingface/token."
+    },
+    {
+      "id": "ml-huggingface-datasets",
+      "name": "Hugging Face datasets cache",
+      "category": "ml-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/huggingface/datasets",
+        "$XDG_CACHE_HOME/huggingface/datasets"
+      ],
+      "notes": "Processed datasets cache (HF_DATASETS_CACHE). Re-download/reprocess on next load."
+    },
+    {
+      "id": "ml-huggingface-transformers-legacy",
+      "name": "Transformers legacy cache",
+      "category": "ml-models",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/huggingface/transformers",
+        "$XDG_CACHE_HOME/huggingface/transformers",
+        "$HOME/.cache/torch/transformers"
+      ],
+      "notes": "Legacy TRANSFORMERS_CACHE layout; modern stack uses hub/. Safe regenerable weights/tokenizers."
+    },
+    {
+      "id": "ml-huggingface-modules-xet-assets",
+      "name": "Hugging Face modules, xet, and assets caches",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.cache/huggingface/modules",
+        "$HOME/.cache/huggingface/xet",
+        "$HOME/.cache/huggingface/assets",
+        "$HOME/.cache/huggingface/evaluate",
+        "$HOME/.cache/huggingface/metrics",
+        "$XDG_CACHE_HOME/huggingface/modules",
+        "$XDG_CACHE_HOME/huggingface/xet"
+      ],
+      "notes": "Secondary HF caches: dynamic modules, xet chunk/shard cache, library assets, evaluate/metrics. Safer than hub models; still regenerable."
+    },
+    {
+      "id": "ml-torch-hub",
+      "name": "PyTorch hub and checkpoints",
+      "category": "ml-models",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/torch/hub",
+        "$HOME/.cache/torch/hub/checkpoints",
+        "$HOME/.cache/torch/checkpoints",
+        "$XDG_CACHE_HOME/torch/hub",
+        "$HOME/.torch/models"
+      ],
+      "notes": "Torch Hub default $TORCH_HOME/hub or ~/.cache/torch/hub. Includes torchvision model weights under hub/checkpoints. Large but regenerable."
+    },
+    {
+      "id": "ml-torch-extensions-inductor",
+      "name": "PyTorch extensions and inductor/compile caches",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.cache/torch_extensions",
+        "$HOME/.cache/torch/kernels",
+        "$HOME/.cache/torch/inductor",
+        "$XDG_CACHE_HOME/torch_extensions"
+      ],
+      "notes": "Compiled C++/CUDA/MPS extensions and torch.compile/inductor artifacts. Rebuild on next use."
+    },
+    {
+      "id": "ml-triton-cache",
+      "name": "Triton compiler cache",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.triton",
+        "$HOME/.cache/triton",
+        "$XDG_CACHE_HOME/triton"
+      ],
+      "notes": "Triton autotune/compile cache used by some torch stacks."
+    },
+    {
+      "id": "ml-tensorflow-datasets",
+      "name": "TensorFlow Datasets download cache",
+      "category": "ml-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/tensorflow_datasets",
+        "$HOME/.cache/tensorflow_datasets",
+        "$XDG_CACHE_HOME/tensorflow_datasets"
+      ],
+      "notes": "TFDS_DATA_DIR default often ~/tensorflow_datasets. Downloaded/extracted datasets; regenerable."
+    },
+    {
+      "id": "ml-keras-cache",
+      "name": "Keras datasets and models cache",
+      "category": "ml-models",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.keras/datasets",
+        "$HOME/.keras/models",
+        "$HOME/.keras"
+      ],
+      "notes": "Keras get_file datasets and pretrained models under ~/.keras. Models re-download; keep if offline work expected."
+    },
+    {
+      "id": "ml-tfhub-cache",
+      "name": "TensorFlow Hub module cache",
+      "category": "ml-models",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/tfhub_modules",
+        "$XDG_CACHE_HOME/tfhub_modules",
+        "$TMPDIR/tfhub_modules"
+      ],
+      "notes": "TFHUB_CACHE_DIR; default often tempfile/tfhub_modules. Regenerable Hub modules."
+    },
+    {
+      "id": "ml-mlx-cache",
+      "name": "Apple MLX local caches",
+      "category": "ml-models",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/mlx",
+        "$XDG_CACHE_HOME/mlx",
+        "$HOME/Library/Caches/mlx"
+      ],
+      "notes": "MLX/mlx-lm primarily reuse Hugging Face hub; extra local MLX caches if present. Large weights should be treated like HF hub (medium)."
+    },
+    {
+      "id": "ml-ollama-models-report",
+      "name": "Ollama pulled models (report-only)",
+      "category": "ml-models",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "paths": [
+        "$HOME/.ollama/models",
+        "$HOME/.ollama"
+      ],
+      "notes": "macOS stores models under ~/.ollama/models (blobs+manifests). Very large; user-managed. Report size only; reclaim via ollama rm. Do not bulk-delete config without user intent."
+    },
+    {
+      "id": "ml-ollama-logs-cache",
+      "name": "Ollama logs and app cache",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.ollama/logs",
+        "$HOME/Library/Caches/ollama",
+        "$HOME/Library/Caches/com.electron.ollama"
+      ],
+      "notes": "Logs and Electron/app caches only; not model weights."
+    },
+    {
+      "id": "ml-lmstudio-models-report",
+      "name": "LM Studio models (report-only)",
+      "category": "ml-models",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "paths": [
+        "$HOME/.lmstudio/models",
+        "$HOME/Library/Application Support/LM Studio/models",
+        "$HOME/.cache/lm-studio/models"
+      ],
+      "notes": "Default models dir ~/.lmstudio/models (publisher/model/*.gguf). Report-only; large GGUF/MLX downloads."
+    },
+    {
+      "id": "ml-lmstudio-cache",
+      "name": "LM Studio caches and working data",
+      "category": "ml-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.lmstudio/.internal",
+        "$HOME/Library/Caches/LM Studio",
+        "$HOME/Library/Application Support/LM Studio/gpu-config",
+        "$HOME/Library/Logs/LM Studio"
+      ],
+      "notes": "App caches/logs; exclude chat history/settings under Application Support root unless age-gated and opt-in."
+    },
+    {
+      "id": "ml-gpt4all-models-report",
+      "name": "GPT4All models (report-only)",
+      "category": "ml-models",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "paths": [
+        "$HOME/Library/Application Support/nomic.ai/GPT4All"
+      ],
+      "notes": "macOS models dir per GPT4All docs. Report-only large model files."
+    },
+    {
+      "id": "ml-llama-cpp-cache",
+      "name": "llama.cpp / ggml related caches",
+      "category": "ml-models",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/llama.cpp",
+        "$HOME/.cache/llamacpp",
+        "$HOME/.cache/ggml",
+        "$HOME/.cache/gguf",
+        "$XDG_CACHE_HOME/llama.cpp"
+      ],
+      "notes": "Common user/cache locations for llama.cpp tooling; models are often user-specified paths (no single standard). Medium risk for weight-sized files."
+    },
+    {
+      "id": "ml-whisper-cache",
+      "name": "OpenAI Whisper model cache",
+      "category": "ml-models",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/whisper",
+        "$XDG_CACHE_HOME/whisper",
+        "$HOME/.cache/whisperx",
+        "$HOME/.cache/faster-whisper"
+      ],
+      "notes": "openai-whisper download_root default ~/.cache/whisper. faster-whisper often uses HF hub; dedicated caches if present."
+    },
+    {
+      "id": "ml-sentence-transformers",
+      "name": "Sentence-Transformers cache",
+      "category": "ml-models",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/sentence-transformers",
+        "$HOME/.cache/torch/sentence_transformers",
+        "$XDG_CACHE_HOME/sentence-transformers"
+      ],
+      "notes": "Embedding model cache; often also under HF hub. Regenerable."
+    },
+    {
+      "id": "ml-diffusers-cache",
+      "name": "Diffusers / diffusion model cache extras",
+      "category": "ml-models",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/huggingface/diffusers",
+        "$HOME/.cache/diffusers",
+        "$XDG_CACHE_HOME/diffusers"
+      ],
+      "notes": "Diffusers primarily use HF hub; extra diffusers caches if present. Large."
+    },
+    {
+      "id": "ml-jupyter-checkpoints-careful",
+      "name": "Jupyter notebook checkpoints (careful)",
+      "category": "ml-dev",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/.ipynb_checkpoints"
+      ],
+      "include_globs": [
+        "**/.ipynb_checkpoints/**"
+      ],
+      "notes": "CAREFUL: .ipynb_checkpoints can hold only-unsaved recovery copies. Never default-enable full-home walk; prefer known project roots or aged checkpoints only. This rule lists home-level checkpoint dir if used; project trees need bounded scan."
+    },
+    {
+      "id": "ml-jupyter-runtime-cache",
+      "name": "Jupyter runtime and kernel caches",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Jupyter/runtime",
+        "$HOME/Library/Jupyter/kernels",
+        "$HOME/.jupyter/runtime",
+        "$HOME/Library/Caches/Jupyter"
+      ],
+      "notes": "Runtime connection files and disposable kernel metadata. Do not wipe custom nbextensions configs wholesale without care (~/.jupyter)."
+    },
+    {
+      "id": "ml-ipython-cache",
+      "name": "IPython logs, pid, and cache dirs",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.ipython/profile_default/log",
+        "$HOME/.ipython/profile_default/pid",
+        "$HOME/.ipython/profile_default/db",
+        "$HOME/.ipython/profile_default/security"
+      ],
+      "notes": "Disposable profile subdirs. History (history.sqlite) is user data; keep out of default low-risk clean or gate separately."
+    },
+    {
+      "id": "ml-matplotlib-cache",
+      "name": "Matplotlib font and cache",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.matplotlib",
+        "$HOME/.cache/matplotlib",
+        "$HOME/Library/Caches/matplotlib",
+        "$XDG_CACHE_HOME/matplotlib"
+      ],
+      "notes": "Font list and image caches; fully regenerable."
+    },
+    {
+      "id": "ml-seaborn-plotly-cache",
+      "name": "Seaborn and Plotly caches",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.cache/seaborn",
+        "$HOME/Library/Caches/seaborn",
+        "$HOME/.plotly",
+        "$HOME/Library/Caches/plotly",
+        "$HOME/.cache/plotly",
+        "$XDG_CACHE_HOME/seaborn",
+        "$XDG_CACHE_HOME/plotly"
+      ],
+      "notes": "Plot libraries cache fonts/datasets/temp. Seaborn often uses matplotlib; plotly may use ~/.plotly."
+    },
+    {
+      "id": "ml-r-package-cache",
+      "name": "R package and renv caches",
+      "category": "package-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/Library/Caches/org.R-project.R",
+        "$HOME/Library/Caches/R",
+        "$HOME/Library/Caches/renv",
+        "$HOME/.local/share/renv",
+        "$HOME/Library/Application Support/renv",
+        "$HOME/.cache/R",
+        "$XDG_CACHE_HOME/R"
+      ],
+      "notes": "R binary/package caches and renv global cache. Installed user libraries (~/Library/R, R_LIBS_USER) are not pure cache; prefer report or medium only for caches."
+    },
+    {
+      "id": "ml-julia-depot-report",
+      "name": "Julia depot packages and artifacts (report/medium)",
+      "category": "package-cache",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "paths": [
+        "$HOME/.julia/packages",
+        "$HOME/.julia/artifacts",
+        "$HOME/.julia/compiled",
+        "$HOME/.julia/registries",
+        "$HOME/.julia/conda",
+        "$HOME/.julia/scratchspaces",
+        "$HOME/.julia/logs",
+        "$HOME/.julia"
+      ],
+      "notes": "JULIA_DEPOT_PATH default ~/.julia. packages/artifacts/compiled are large; reinstall via Pkg. Report-only by default; compiled/logs could be medium if split later."
+    },
+    {
+      "id": "ml-conda-pkgs",
+      "name": "Conda package download cache (pkgs)",
+      "category": "package-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/miniconda3/pkgs",
+        "$HOME/anaconda3/pkgs",
+        "$HOME/miniforge3/pkgs",
+        "$HOME/mambaforge/pkgs",
+        "$HOME/micromamba/pkgs",
+        "$HOME/.conda/pkgs",
+        "$HOME/Library/Caches/conda"
+      ],
+      "notes": "tarballs/extracted pkgs only. Prefer conda clean -a / mamba clean. Do not delete envs/ directories (not listed). Paths vary by installer location."
+    },
+    {
+      "id": "ml-mamba-micromamba-cache",
+      "name": "Mamba / micromamba caches",
+      "category": "package-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.mamba/pkgs",
+        "$HOME/Library/Caches/mamba",
+        "$HOME/.cache/mamba",
+        "$HOME/.local/share/mamba/pkgs",
+        "$XDG_CACHE_HOME/mamba"
+      ],
+      "notes": "Standalone mamba/micromamba package caches when not sharing conda root pkgs."
+    },
+    {
+      "id": "ml-pixi-rattler-cache",
+      "name": "Pixi / rattler package cache",
+      "category": "package-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/rattler",
+        "$HOME/Library/Caches/pixi",
+        "$HOME/.cache/rattler",
+        "$HOME/.cache/pixi",
+        "$XDG_CACHE_HOME/rattler",
+        "$XDG_CACHE_HOME/pixi"
+      ],
+      "notes": "prefix.dev pixi uses rattler cache (macOS often Library/Caches/rattler). Regenerable downloads."
+    },
+    {
+      "id": "ml-uv-cache",
+      "name": "uv package cache",
+      "category": "package-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.cache/uv",
+        "$HOME/Library/Caches/uv",
+        "$XDG_CACHE_HOME/uv"
+      ],
+      "notes": "Astral uv wheel/source cache. Prefer uv cache clean. Safe regenerable."
+    },
+    {
+      "id": "ml-uv-python-tools-report",
+      "name": "uv managed Python and tools (report-only)",
+      "category": "package-cache",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "paths": [
+        "$HOME/.local/share/uv/python",
+        "$HOME/.local/share/uv/tools",
+        "$XDG_DATA_HOME/uv/python",
+        "$XDG_DATA_HOME/uv/tools"
+      ],
+      "notes": "Installed interpreters/tools (uv python dir / tool dir), not disposable cache. Report-only."
+    },
+    {
+      "id": "ml-poetry-cache",
+      "name": "Poetry download cache",
+      "category": "package-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/pypoetry",
+        "$HOME/.cache/pypoetry",
+        "$XDG_CACHE_HOME/pypoetry"
+      ],
+      "notes": "poetry cache clear --all. Wheel/artifact cache only."
+    },
+    {
+      "id": "ml-poetry-virtualenvs-report",
+      "name": "Poetry virtualenvs (report-only)",
+      "category": "package-cache",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "paths": [
+        "$HOME/Library/Application Support/pypoetry/virtualenvs",
+        "$HOME/.local/share/virtualenvs",
+        "$XDG_DATA_HOME/virtualenvs"
+      ],
+      "notes": "Project virtualenvs; deleting breaks envs until poetry install. Report-only."
+    },
+    {
+      "id": "ml-pyenv-versions-report",
+      "name": "pyenv installed versions (report-only)",
+      "category": "package-cache",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "paths": [
+        "$HOME/.pyenv/versions"
+      ],
+      "notes": "Installed CPython builds. Report-only; use pyenv uninstall."
+    },
+    {
+      "id": "ml-pyenv-cache",
+      "name": "pyenv build/download cache",
+      "category": "package-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.pyenv/cache",
+        "$HOME/.pyenv/sources"
+      ],
+      "notes": "Source tarballs/build cache for pyenv install; not installed versions."
+    },
+    {
+      "id": "ml-pip-wheel-cache",
+      "name": "pip wheel/HTTP cache",
+      "category": "package-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.cache/pip",
+        "$HOME/Library/Caches/pip",
+        "$XDG_CACHE_HOME/pip"
+      ],
+      "notes": "pip cache purge. Wheels/HTTP only; not virtualenvs."
+    },
+    {
+      "id": "ml-scikit-learn-data",
+      "name": "scikit-learn data and joblib cache",
+      "category": "ml-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/scikit_learn_data",
+        "$HOME/.cache/scikit-learn",
+        "$HOME/Library/Caches/scikit-learn",
+        "$HOME/.cache/joblib",
+        "$XDG_CACHE_HOME/scikit-learn",
+        "$XDG_CACHE_HOME/joblib"
+      ],
+      "notes": "fetch_* datasets under ~/scikit_learn_data; joblib memory caches. Regenerable."
+    },
+    {
+      "id": "ml-wandb-cache",
+      "name": "Weights & Biases cache",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.cache/wandb",
+        "$HOME/Library/Caches/wandb",
+        "$XDG_CACHE_HOME/wandb"
+      ],
+      "notes": "WANDB_CACHE_DIR default ~/.cache/wandb (artifacts cache). Prefer wandb artifact cache cleanup."
+    },
+    {
+      "id": "ml-wandb-runs-medium",
+      "name": "Weights & Biases local run logs",
+      "category": "ml-logs",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/wandb",
+        "$HOME/.wandb"
+      ],
+      "notes": "Offline/local run directories (often also ./wandb in projects). Medium: may hold experiment history user wants."
+    },
+    {
+      "id": "ml-mlflow-logs",
+      "name": "MLflow local tracking store",
+      "category": "ml-logs",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/mlruns",
+        "$HOME/.mlflow",
+        "$HOME/mlartifacts"
+      ],
+      "notes": "Default file store ./mlruns often under cwd; home-level mlruns/.mlflow if used. Medium experiment data."
+    },
+    {
+      "id": "ml-tensorboard-logs",
+      "name": "TensorBoard logs and info",
+      "category": "ml-logs",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.tensorboard",
+        "$TMPDIR/.tensorboard-info",
+        "$HOME/tensorboard_logs",
+        "$HOME/runs"
+      ],
+      "notes": "Event logs and .tensorboard-info; project runs/ also common. Medium: training curves may matter."
+    },
+    {
+      "id": "ml-dvc-cache-report",
+      "name": "DVC cache (report-only)",
+      "category": "ml-cache",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "paths": [
+        "$HOME/.dvc/cache",
+        "$HOME/Library/Caches/dvc",
+        "$XDG_CACHE_HOME/dvc"
+      ],
+      "notes": "DVC content-addressed cache can be large and shared across projects. Report-only; use dvc gc. Project .dvc/cache not home-walked here."
+    },
+    {
+      "id": "ml-comet-neptune",
+      "name": "Comet and Neptune local caches",
+      "category": "ml-logs",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cometml",
+        "$HOME/.comet-ml",
+        "$HOME/.cache/comet",
+        "$HOME/.neptune",
+        "$HOME/.cache/neptune",
+        "$HOME/Library/Caches/comet",
+        "$HOME/Library/Caches/neptune"
+      ],
+      "notes": "Experiment tracking offline caches/config. Avoid wiping API keys/config blindly; prefer cache subdirs when known."
+    },
+    {
+      "id": "ml-lightning-logs",
+      "name": "PyTorch Lightning logs and cache",
+      "category": "ml-logs",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/lightning_logs",
+        "$HOME/.cache/lightning",
+        "$HOME/.lightning",
+        "$XDG_CACHE_HOME/lightning"
+      ],
+      "notes": "Default lightning_logs often under cwd; home-level if configured. Checkpoints may live here: medium."
+    },
+    {
+      "id": "ml-ray-cache",
+      "name": "Ray session and results",
+      "category": "ml-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$TMPDIR/ray",
+        "$HOME/ray_results",
+        "$HOME/.cache/ray",
+        "$HOME/Library/Caches/ray",
+        "/tmp/ray"
+      ],
+      "notes": "Ray temp sessions under /tmp/ray or $TMPDIR/ray; tune results in ~/ray_results. Safe after jobs finish; age-gate."
+    },
+    {
+      "id": "ml-dask-cache",
+      "name": "Dask configuration spill and cache",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.dask",
+        "$HOME/.cache/dask",
+        "$XDG_CACHE_HOME/dask",
+        "$TMPDIR/dask-worker-space"
+      ],
+      "notes": "Dask worker spill dirs and local caches. Config in ~/.dask may include dask.yaml; prefer cache/spill paths for delete."
+    },
+    {
+      "id": "ml-spark-local",
+      "name": "Spark local warehouse and Ivy cache",
+      "category": "ml-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/spark-warehouse",
+        "$HOME/.ivy2/cache",
+        "$HOME/.ivy2/jars",
+        "$HOME/.spark",
+        "$TMPDIR/spark-*"
+      ],
+      "notes": "Local metastore warehouse and Ivy dependency caches for Spark. Regenerable jars; warehouse may hold tables: medium."
+    },
+    {
+      "id": "ml-duckdb-polars-temp",
+      "name": "DuckDB and Polars temp/cache",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.duckdb",
+        "$HOME/.cache/duckdb",
+        "$HOME/.cache/polars",
+        "$HOME/Library/Caches/polars",
+        "$XDG_CACHE_HOME/duckdb",
+        "$XDG_CACHE_HOME/polars",
+        "$TMPDIR/duckdb_temp",
+        "$TMPDIR/polars_*"
+      ],
+      "notes": "Engine temps and small caches. Do not delete user .duckdb database files that are primary data stores if co-located; prefer temp/cache paths."
+    },
+    {
+      "id": "ml-parquet-arrow-temp",
+      "name": "Parquet/Arrow temp and cache",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 3,
+      "paths": [
+        "$HOME/.cache/parquet",
+        "$HOME/.cache/pyarrow",
+        "$HOME/.cache/arrow",
+        "$XDG_CACHE_HOME/pyarrow",
+        "$TMPDIR/parquet_*",
+        "$TMPDIR/pyarrow_*"
+      ],
+      "notes": "Transient parquet/arrow spill files under cache/temp."
+    },
+    {
+      "id": "ml-nltk-gensim-spacy",
+      "name": "NLTK, Gensim, spaCy data caches",
+      "category": "ml-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/nltk_data",
+        "$HOME/.nltk_data",
+        "$HOME/gensim-data",
+        "$HOME/.gensim-data",
+        "$HOME/.cache/spacy",
+        "$HOME/Library/Caches/spacy"
+      ],
+      "notes": "Downloaded corpora/models. spaCy models also via pip; these are data dirs."
+    },
+    {
+      "id": "ml-fastai-cache",
+      "name": "fastai data and model cache",
+      "category": "ml-models",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.fastai",
+        "$HOME/.cache/fastai",
+        "$HOME/Library/Caches/fastai"
+      ],
+      "notes": "fastai data/archive/model dirs under ~/.fastai."
+    },
+    {
+      "id": "ml-clip-openclip",
+      "name": "CLIP / OpenCLIP caches",
+      "category": "ml-models",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/clip",
+        "$HOME/.cache/open_clip",
+        "$XDG_CACHE_HOME/clip",
+        "$XDG_CACHE_HOME/open_clip"
+      ],
+      "notes": "CLIP weight caches outside or alongside HF hub."
+    },
+    {
+      "id": "ml-kaggle-cache",
+      "name": "Kaggle API datasets cache",
+      "category": "ml-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/kaggle",
+        "$HOME/Library/Caches/kaggle",
+        "$XDG_CACHE_HOME/kaggle"
+      ],
+      "notes": "Downloaded competition/dataset files. Do NOT touch ~/.kaggle/kaggle.json credentials."
+    },
+    {
+      "id": "ml-numba-cache",
+      "name": "Numba compiled function cache",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.numba_cache",
+        "$HOME/.cache/numba",
+        "$XDG_CACHE_HOME/numba"
+      ],
+      "notes": "NUMBA_CACHE_DIR compiled bytecode; regenerable."
+    },
+    {
+      "id": "ml-chroma-vector-cache",
+      "name": "ChromaDB and local vector store caches",
+      "category": "ml-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/chroma",
+        "$HOME/.chroma",
+        "$HOME/Library/Caches/chroma",
+        "$XDG_CACHE_HOME/chroma"
+      ],
+      "notes": "Local vector DB files may be project data; treat as medium, not default low."
+    },
+    {
+      "id": "ml-langchain-llama-index",
+      "name": "LangChain / LlamaIndex caches",
+      "category": "ml-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/langchain",
+        "$HOME/.cache/llama_index",
+        "$HOME/.llamaindex",
+        "$XDG_CACHE_HOME/langchain",
+        "$XDG_CACHE_HOME/llama_index"
+      ],
+      "notes": "LLM framework embedding/index caches; may embed project knowledge: medium."
+    },
+    {
+      "id": "ml-vllm-cache",
+      "name": "vLLM cache",
+      "category": "ml-cache",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.cache/vllm",
+        "$XDG_CACHE_HOME/vllm"
+      ],
+      "notes": "vLLM compilation/model-related cache if present on macOS/remote mounts."
+    },
+    {
+      "id": "ml-jan-anythingllm-report",
+      "name": "Jan / AnythingLLM local data (report-only)",
+      "category": "ml-models",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "paths": [
+        "$HOME/jan/models",
+        "$HOME/Library/Application Support/Jan",
+        "$HOME/Library/Application Support/anythingllm-desktop",
+        "$HOME/Library/Application Support/Open WebUI"
+      ],
+      "notes": "Desktop local-LLM apps store models and chat DBs. Report-only."
+    },
+    {
+      "id": "ml-detectron-fairseq-paddle",
+      "name": "Detectron2, Fairseq, Paddle caches",
+      "category": "ml-models",
+      "risk": "medium",
+      "default_enabled": false,
+      "paths": [
+        "$HOME/.torch/iopath_cache",
+        "$HOME/.cache/detectron2",
+        "$HOME/.cache/fairseq",
+        "$HOME/.paddleocr",
+        "$HOME/.paddlenlp",
+        "$HOME/.cache/paddle"
+      ],
+      "notes": "Vision/NLP framework weight and iopath caches."
+    },
+    {
+      "id": "ml-apple-python-cache",
+      "name": "Apple/system Python framework caches (user)",
+      "category": "ml-cache",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/com.apple.python"
+      ],
+      "notes": "User-level Apple python cache under Library/Caches. pip covered by ml-pip-wheel-cache."
+    }
+  ],
+  "excluded_never_touch": [
+    "$HOME/.kaggle/kaggle.json",
+    "$HOME/.huggingface/token",
+    "$HOME/.cache/huggingface/token",
+    "$HOME/.netrc",
+    "$HOME/.config/gcloud",
+    "$HOME/.aws/credentials",
+    "project .venv / venv directories",
+    "conda envs directories (miniconda3/envs, etc.)",
+    "Docker VM disks",
+    "iCloud/Documents primary datasets"
+  ],
+  "native_cleaner_hints": [
+    "hf cache ls / hf cache prune / hf cache rm",
+    "conda clean -a ; mamba clean -a",
+    "uv cache clean ; uv cache prune",
+    "poetry cache clear --all pypi",
+    "pip cache purge",
+    "ollama rm <model> ; ollama list",
+    "julia -e 'using Pkg; Pkg.gc()'",
+    "dvc gc",
+    "wandb artifact cache cleanup"
+  ],
+  "sources": [
+    "Hugging Face hub cache docs (~/.cache/huggingface/hub, datasets, xet)",
+    "PyTorch hub docs (~/.cache/torch/hub)",
+    "Ollama macOS docs (~/.ollama)",
+    "LM Studio docs (~/.lmstudio/models)",
+    "GPT4All FAQ (Library/Application Support/nomic.ai/GPT4All)",
+    "uv storage docs (~/.cache/uv)",
+    "pixi/rattler cache (Library/Caches/rattler)",
+    "openai-whisper default ~/.cache/whisper",
+    "W&B WANDB_CACHE_DIR ~/.cache/wandb"
+  ]
+}

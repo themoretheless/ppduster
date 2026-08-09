@@ -1,0 +1,508 @@
+{
+  "batch": "38-homebrew-deep",
+  "platform": "macos",
+  "platform_focus": "macos",
+  "description": "Homebrew deep residual caches beyond top-level $HOME/Library/Caches/Homebrew and $HOME/Library/Logs/Homebrew already shipped: HOMEBREW_CACHE variants (Linux/XDG), nested downloads/Cask/api/bootsnap/build tool caches, bottle temp cellar, portable-ruby download and vendor leftovers, linuxbrew home tree, brew bundle dump artifacts (report-only), formula JSON/API caches, tap git leftovers (report-only), logs deeper structure, Cellar/opt/Caskroom inventory (report-only never wipe), mas/App Store CLI-related caches, and cask zap residual pattern notes. Prefer brew cleanup / brew cleanup -s / brew autoremove for prefix maintenance.",
+  "path_count": 86,
+  "risk_policy": {
+    "nested_download_api_build_caches": "low; contents-only + min_age; regenerable via brew fetch/update",
+    "temp_cellar_locks_incomplete": "low or medium; aged only; skip in-progress locks",
+    "portable_ruby_vendor_installed": "report-only or medium (old versions only; brew cleanup manages)",
+    "cellar_opt_caskroom_prefix": "report-only; never bulk-wipe installed kegs",
+    "taps_git_and_bundle_dumps": "report-only (user/state inventory)",
+    "cask_zap_user_data": "report-only; use brew uninstall --cask --zap per token; do not bulk-delete Application Support"
+  },
+  "notes": "Top-level macos-homebrew-cache and macos-homebrew-logs already cover default macOS cache/log roots. This batch adds nested subcaches, alternate HOMEBREW_CACHE locations, prefix var/tmp, and adjacent tools (mas App Store caches). /usr/local Intel prefix is runtime never-touch under /usr; list /opt/homebrew (Apple Silicon default) for prefix paths. Prefer native: brew cleanup, brew cleanup -s, brew autoremove, brew untap, brew uninstall --cask --zap TOKEN.",
+  "rules": [
+    {
+      "id": "hb-deep-cache-variants",
+      "name": "Homebrew HOMEBREW_CACHE alternate roots",
+      "description": "Non-default or Linux-style Homebrew download cache roots when HOMEBREW_CACHE or XDG layout is used.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/.cache/Homebrew",
+        "$XDG_CACHE_HOME/Homebrew"
+      ],
+      "native_hints": [
+        "brew --cache",
+        "brew cleanup -s"
+      ],
+      "notes": "Default macOS is $HOME/Library/Caches/Homebrew (already covered). Linux default is $XDG_CACHE_HOME/Homebrew or ~/.cache/Homebrew. HOMEBREW_CACHE env overrides brew --cache; expand is not automatic so alternate concrete roots are listed."
+    },
+    {
+      "id": "hb-deep-downloads-cask",
+      "name": "Homebrew downloads and Cask subcache",
+      "description": "Nested bottle/source downloads and Cask artifact cache under Homebrew cache (symlinks at cache root point into downloads/).",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/Library/Caches/Homebrew/downloads",
+        "$HOME/Library/Caches/Homebrew/Cask",
+        "$HOME/.cache/Homebrew/downloads",
+        "$HOME/.cache/Homebrew/Cask",
+        "$XDG_CACHE_HOME/Homebrew/downloads",
+        "$XDG_CACHE_HOME/Homebrew/Cask"
+      ],
+      "native_hints": [
+        "brew cleanup -s",
+        "brew cleanup --prune=all"
+      ],
+      "notes": "Largest reclaim under brew --cache. Incomplete *.incomplete files are partial downloads. Prefer brew cleanup before blind wipe."
+    },
+    {
+      "id": "hb-deep-api-json-cache",
+      "name": "Homebrew formula/cask API JSON cache",
+      "description": "Cached formula.jws.json, cask.jws.json, names/aliases lists, and internal packages envelopes used by API mode.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 3,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/Homebrew/api",
+        "$HOME/Library/Caches/Homebrew/api/internal",
+        "$HOME/.cache/Homebrew/api",
+        "$HOME/.cache/Homebrew/api/internal",
+        "$XDG_CACHE_HOME/Homebrew/api",
+        "$XDG_CACHE_HOME/Homebrew/api/internal"
+      ],
+      "native_hints": [
+        "brew update",
+        "brew cleanup -s"
+      ],
+      "notes": "HOMEBREW_CACHE_API. Regenerated on brew update. Safe wipe; next brew command refetches. Internal packages.*.jws.json can be large."
+    },
+    {
+      "id": "hb-deep-api-source-cache",
+      "name": "Homebrew API source formula cache",
+      "description": "api-source tree caching formula.rb and patches fetched via the formulae API.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/Homebrew/api-source",
+        "$HOME/.cache/Homebrew/api-source",
+        "$XDG_CACHE_HOME/Homebrew/api-source"
+      ],
+      "notes": "HOMEBREW_CACHE_API_SOURCE. brew cleanup prunes empty dirs and aged files. Not installed Cellar content."
+    },
+    {
+      "id": "hb-deep-bootsnap",
+      "name": "Homebrew Bootsnap Ruby compile cache",
+      "description": "Bootsnap cache for Homebrew Ruby when HOMEBREW_BOOTSNAP is enabled.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 3,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/Homebrew/bootsnap",
+        "$HOME/.cache/Homebrew/bootsnap",
+        "$XDG_CACHE_HOME/Homebrew/bootsnap"
+      ],
+      "native_hints": [
+        "brew cleanup"
+      ],
+      "notes": "Regenerates quickly; brew cleanup already removes non-current bootsnap keys. Harmless reclaim."
+    },
+    {
+      "id": "hb-deep-formula-nested-build-caches",
+      "name": "Homebrew nested formula build tool caches",
+      "description": "Per-build caches Homebrew places under HOMEBREW_CACHE for formula builds (cargo, go, java, npm, pip, glide, gclient).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/Homebrew/cargo_cache",
+        "$HOME/Library/Caches/Homebrew/go_cache",
+        "$HOME/Library/Caches/Homebrew/go_mod_cache",
+        "$HOME/Library/Caches/Homebrew/java_cache",
+        "$HOME/Library/Caches/Homebrew/npm_cache",
+        "$HOME/Library/Caches/Homebrew/pip_cache",
+        "$HOME/Library/Caches/Homebrew/glide_home",
+        "$HOME/Library/Caches/Homebrew/gclient_cache",
+        "$HOME/.cache/Homebrew/cargo_cache",
+        "$HOME/.cache/Homebrew/go_cache",
+        "$HOME/.cache/Homebrew/go_mod_cache",
+        "$HOME/.cache/Homebrew/java_cache",
+        "$HOME/.cache/Homebrew/npm_cache",
+        "$HOME/.cache/Homebrew/pip_cache",
+        "$HOME/.cache/Homebrew/glide_home",
+        "$HOME/.cache/Homebrew/gclient_cache"
+      ],
+      "native_hints": [
+        "brew cleanup -s"
+      ],
+      "notes": "cleanup.rb nested_cache? list. go_cache/go_mod_cache are often chmod read-only; may need chmod before delete. Not the user global cargo/go caches under ~/.cargo or ~/go."
+    },
+    {
+      "id": "hb-deep-gh-actions-artifact-cache",
+      "name": "Homebrew gh-actions-artifact cache",
+      "description": "Cached GitHub Actions artifacts under Homebrew cache (CI bottle/source staging).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/Homebrew/gh-actions-artifact",
+        "$HOME/.cache/Homebrew/gh-actions-artifact",
+        "$XDG_CACHE_HOME/Homebrew/gh-actions-artifact"
+      ],
+      "notes": "Scrubbed by brew cleanup. Safe if present."
+    },
+    {
+      "id": "hb-deep-linkage-desc-metadata",
+      "name": "Homebrew linkage and description cache DBs",
+      "description": "linkage.db and desc_cache.json metadata under Homebrew cache root.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 2,
+      "paths": [
+        "$HOME/Library/Caches/Homebrew"
+      ],
+      "include_globs": [
+        "linkage.db",
+        "linkage.db.db",
+        "desc_cache.json",
+        "descriptions.json",
+        "cask_descriptions.json",
+        "all_commands_list.txt",
+        "external_commands_list.txt",
+        ".cleaned"
+      ],
+      "native_hints": [
+        "brew cleanup"
+      ],
+      "notes": "File-level metadata only under cache root (not full cache wipe). Recreated on next brew doctor/cleanup/update. Do not use this rule to wipe downloads/ without the dedicated downloads rule."
+    },
+    {
+      "id": "hb-deep-portable-ruby-download",
+      "name": "Homebrew portable-ruby download cache",
+      "description": "Downloaded portable-ruby tarballs/directories under HOMEBREW_CACHE (not the active vendor install).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "$HOME/Library/Caches/Homebrew",
+        "$HOME/.cache/Homebrew",
+        "$XDG_CACHE_HOME/Homebrew"
+      ],
+      "include_globs": [
+        "portable-ruby*",
+        "portable-ruby-*/**",
+        "downloads/*portable-ruby*"
+      ],
+      "notes": "Historical portable-ruby-* dirs and downloads/*portable-ruby* artifacts. Active Ruby lives under Library/Homebrew/vendor/portable-ruby (separate report-only rule)."
+    },
+    {
+      "id": "hb-deep-portable-ruby-vendor-report",
+      "name": "Homebrew portable-ruby vendor install (report-only)",
+      "description": "Installed portable-ruby under Homebrew vendor; brew cleanup removes non-current versions only.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "/opt/homebrew/Library/Homebrew/vendor/portable-ruby",
+        "/opt/homebrew/Library/Homebrew/vendor/bundle"
+      ],
+      "native_hints": [
+        "brew cleanup",
+        "brew setup-ruby"
+      ],
+      "notes": "Do not rm current portable-ruby; brew will break. Inventory size only; prefer brew cleanup for old versions."
+    },
+    {
+      "id": "hb-deep-temp-cellar-bottles",
+      "name": "Homebrew bottle temp cellar and prefix tmp",
+      "description": "Temporary bottle extract staging under prefix var/homebrew/tmp (.cellar) and build temp.",
+      "category": "temp",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 1,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "/opt/homebrew/var/homebrew/tmp",
+        "/opt/homebrew/var/homebrew/tmp/.cellar"
+      ],
+      "native_hints": [
+        "brew cleanup"
+      ],
+      "notes": "HOMEBREW_TEMP_CELLAR = prefix/var/homebrew/tmp/.cellar. Safe after idle installs. Skip if brew install is running. Intel /usr/local prefix is never-touch under /usr in ppduster; not listed."
+    },
+    {
+      "id": "hb-deep-stale-locks",
+      "name": "Homebrew stale formula/cask lock files",
+      "description": "Aged lock files under prefix var/homebrew/locks left after interrupted brew operations.",
+      "category": "temp",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 2,
+      "delete_mode": "contents",
+      "max_depth": 2,
+      "paths": [
+        "/opt/homebrew/var/homebrew/locks"
+      ],
+      "native_hints": [
+        "brew cleanup"
+      ],
+      "notes": "HOMEBREW_LOCKS. Only remove aged unlocked locks; never delete active locks during brew. Prefer brew cleanup."
+    },
+    {
+      "id": "hb-deep-logs-deeper",
+      "name": "Homebrew logs deeper and Linux log layout",
+      "description": "Per-formula log directories under Homebrew logs plus Linux XDG log layout variants.",
+      "category": "logs",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Logs/Homebrew",
+        "$HOME/.cache/Homebrew/Logs",
+        "$XDG_CACHE_HOME/Homebrew/Logs"
+      ],
+      "native_hints": [
+        "brew cleanup"
+      ],
+      "notes": "macOS default HOMEBREW_LOGS is ~/Library/Logs/Homebrew (top-level also shipped). Structure is one subdir per formula name. Linux uses cache/Homebrew/Logs. HOMEBREW_LOGS env can override."
+    },
+    {
+      "id": "hb-deep-linuxbrew-home-cache",
+      "name": "Linuxbrew/Homebrew under $HOME caches",
+      "description": "User-tree Homebrew/Linuxbrew prefix caches and tmp (not Cellar).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/.linuxbrew/var/homebrew/tmp",
+        "$HOME/.linuxbrew/var/homebrew/cache",
+        "$HOME/.linuxbrew/var/cache",
+        "$HOME/homebrew/var/homebrew/tmp",
+        "$HOME/homebrew/var/homebrew/cache",
+        "$HOME/linuxbrew/.linuxbrew/var/homebrew/tmp",
+        "$HOME/linuxbrew/.linuxbrew/var/cache"
+      ],
+      "native_hints": [
+        "eval \"$($HOME/.linuxbrew/bin/brew shellenv)\"",
+        "brew cleanup -s"
+      ],
+      "notes": "Complements exotic-linuxbrew in batch 21 with tmp/cache focus. Standard macOS /opt/homebrew is separate. Do not wipe Cellar here."
+    },
+    {
+      "id": "hb-deep-linuxbrew-cellar-report",
+      "name": "Linuxbrew home Cellar/opt (report-only)",
+      "description": "Installed formulae under user linuxbrew/homebrew prefixes; inventory only.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "$HOME/.linuxbrew/Cellar",
+        "$HOME/.linuxbrew/opt",
+        "$HOME/linuxbrew/.linuxbrew/Cellar",
+        "$HOME/homebrew/Cellar"
+      ],
+      "native_hints": [
+        "brew cleanup",
+        "brew autoremove"
+      ],
+      "notes": "Never bulk-delete Cellar. Use brew uninstall / autoremove."
+    },
+    {
+      "id": "hb-deep-cellar-opt-caskroom-report",
+      "name": "Homebrew Cellar opt Caskroom (report-only)",
+      "description": "Installed formula kegs, opt symlinks, and Caskroom versions under default Apple Silicon prefix.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "/opt/homebrew/Cellar",
+        "/opt/homebrew/opt",
+        "/opt/homebrew/Caskroom",
+        "/opt/homebrew/var/homebrew/linked"
+      ],
+      "include_globs": [],
+      "native_hints": [
+        "brew cleanup",
+        "brew autoremove",
+        "brew list --versions",
+        "brew list --cask"
+      ],
+      "notes": "Report size only. Never wipe Cellar/opt/Caskroom. Old kegs: brew cleanup. Orphan casks: brew uninstall --cask. *.reinstall dirs under Cellar cleaned by brew cleanup."
+    },
+    {
+      "id": "hb-deep-taps-git-report",
+      "name": "Homebrew taps git repos (report-only)",
+      "description": "Tapped formula/cask git repositories; git object bloat after many updates is reclaimable only via git gc, not rm.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "/opt/homebrew/Library/Taps"
+      ],
+      "native_hints": [
+        "brew untap USER/REPO",
+        "brew tap --repair",
+        "git -C \"$(brew --repository)\" gc --aggressive",
+        "find \"$(brew --repository)/Library/Taps\" -name .git -type d"
+      ],
+      "notes": "Do not delete .git or tap trees blindly. Unused taps: brew untap. Git pack leftovers: git gc inside tap repos. Core API mode may have few local taps."
+    },
+    {
+      "id": "hb-deep-bundle-dumps-report",
+      "name": "brew bundle Brewfile dumps (report-only)",
+      "description": "User Brewfile snapshots from brew bundle dump; intentional state, not caches.",
+      "category": "leftovers",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "path",
+      "max_depth": 2,
+      "paths": [
+        "$HOME/.Brewfile",
+        "$HOME/Brewfile",
+        "$HOME/Brewfile.lock.json",
+        "$HOME/.homebrew/Brewfile",
+        "$HOME/.config/homebrew/Brewfile",
+        "$XDG_CONFIG_HOME/homebrew/Brewfile"
+      ],
+      "native_hints": [
+        "brew bundle dump",
+        "brew bundle check"
+      ],
+      "notes": "HOMEBREW_BUNDLE_FILE / global Brewfile locations. Never auto-delete; users keep these for machine setup."
+    },
+    {
+      "id": "hb-deep-mas-appstore-caches",
+      "name": "mas / Mac App Store user caches",
+      "description": "User Library caches used by Mac App Store and related agents (mas CLI drives MAS installs; no large private mas cache).",
+      "category": "caches",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Caches/com.apple.appstore",
+        "$HOME/Library/Caches/com.apple.appstoreagent",
+        "$HOME/Library/Caches/com.apple.appstorecomponentsd",
+        "$HOME/Library/Caches/com.apple.AppStore",
+        "$HOME/Library/Caches/com.apple.FileProviderDaemon.AppStoreService"
+      ],
+      "native_hints": [
+        "mas version",
+        "mas list"
+      ],
+      "notes": "mas-cli itself stores little; App Store download/metadata caches are regenerable. Does not uninstall MAS apps or receipts. Leave Preferences and account state alone."
+    },
+    {
+      "id": "hb-deep-cask-zap-residuals-report",
+      "name": "Cask zap residual user patterns (report-only)",
+      "description": "Document common user-Library residual roots left after brew uninstall --cask without --zap. Inventory guidance only; no bulk wipe.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "$HOME/Library/Application Support",
+        "$HOME/Library/Caches",
+        "$HOME/Library/HTTPStorages",
+        "$HOME/Library/Logs",
+        "$HOME/Library/Preferences",
+        "$HOME/Library/Saved Application State",
+        "$HOME/Library/WebKit",
+        "$HOME/Library/Cookies"
+      ],
+      "include_globs": [],
+      "native_hints": [
+        "brew uninstall --cask --zap TOKEN",
+        "brew list --cask",
+        "brew info --cask TOKEN"
+      ],
+      "notes": "zap stanzas typically trash per-token paths under Application Support, Caches, HTTPStorages, Logs, Preferences, Saved Application State, WebKit, Cookies. NEVER bulk-clean these roots. Report-only for awareness; reclaim only via brew uninstall --cask --zap or targeted known leftovers. Preferences/Cookies risk user settings."
+    }
+  ]
+}

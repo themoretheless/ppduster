@@ -1,0 +1,308 @@
+pack: dev-pkg-exotic
+rules:
+
+  - id: exotic-conda-mamba-envs-report
+    name: Conda/mamba/micromamba environments (report-only)
+    description: Named environments under common installer roots. Never auto-delete envs.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/micromamba/envs
+      - $HOME/.local/share/mamba/envs
+    delete_mode: path
+    max_depth: 2
+
+  - id: exotic-easybuild-software-report
+    name: EasyBuild installed software (report-only)
+    description: EasyBuild installpath with built modules and software.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.local/easybuild/software
+      - $HOME/.local/easybuild/modules
+      - $HOME/easybuild/software
+      - $HOME/easybuild/modules
+    delete_mode: contents
+    max_depth: 4
+
+  - id: exotic-easybuild-sources-build
+    name: EasyBuild sources and build directories
+    description: EasyBuild downloaded sources and temporary build trees under default prefix.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.local/easybuild/sources
+      - $HOME/.local/easybuild/build
+      - $HOME/easybuild/sources
+      - $HOME/easybuild/build
+      - $HOME/.cache/easybuild
+    delete_mode: contents
+    max_depth: 6
+
+  - id: exotic-guix-store-profiles-report
+    name: Guix store and profiles (report-only)
+    description: Guix store and user profile symlinks; GC via guix tools only.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - /gnu/store
+      - $HOME/.guix-profile
+      - $HOME/.config/guix/current
+    delete_mode: contents
+    max_depth: 3
+
+  - id: exotic-guix-user-caches
+    name: Guix user checkout and client caches
+    description: Guix ~/.cache/guix (channel checkouts and related client cache).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/guix
+      - $HOME/.cache/guix/checkouts
+      - $XDG_CACHE_HOME/guix
+    delete_mode: contents
+    max_depth: 6
+
+  - id: exotic-home-manager-state
+    name: home-manager generations and gcroots
+    description: home-manager state, gcroots, and profile generations that pin Nix store paths.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.local/state/home-manager
+      - $HOME/.local/state/home-manager/gcroots
+      - $HOME/.local/state/nix/profiles/home-manager
+      - $HOME/.cache/home-manager
+    delete_mode: contents
+    max_depth: 6
+
+  - id: exotic-linuxbrew-home
+    name: Linuxbrew / Homebrew under $HOME
+    description: "Homebrew-on-Linux (or portable) prefix under ~/.linuxbrew: tmp/cache/var only as cleanable; Cellar report-only."
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.linuxbrew/var/homebrew/tmp
+      - $HOME/.linuxbrew/var/homebrew/cache
+      - $HOME/.linuxbrew/var/cache
+      - $HOME/.linuxbrew/Homebrew/Library/Homebrew/vendor/portable-ruby/cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: exotic-linuxbrew-prefix-report
+    name: Linuxbrew prefix Cellar (report-only)
+    description: Installed formulae under ~/.linuxbrew Cellar/opt.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.linuxbrew/Cellar
+      - $HOME/.linuxbrew/opt
+      - $HOME/.linuxbrew
+    delete_mode: contents
+    max_depth: 3
+
+  - id: exotic-macports-user-distfiles-logs
+    name: MacPorts user distfiles, software archives, logs
+    description: User-writable MacPorts distfiles, archived software, build work, and logs (home prefix installs).
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/macports/var/macports/logs
+      - $HOME/macports/var/macports/build
+      - $HOME/Library/Logs/MacPorts
+    delete_mode: contents
+    max_depth: 6
+
+  - id: exotic-mise-cache-downloads
+    name: mise cache and downloads
+    description: mise (ex-rtx) internal cache and plugin download staging.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $XDG_CACHE_HOME/mise
+      - $XDG_DATA_HOME/mise/downloads
+    delete_mode: contents
+    max_depth: 6
+
+  - id: exotic-mise-installs-report
+    name: mise installed tool versions (report-only)
+    description: mise tool installs under data dir; report only.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.local/share/mise/installs
+      - $XDG_DATA_HOME/mise/installs
+    delete_mode: contents
+    max_depth: 4
+
+  - id: exotic-nix-darwin-user-leftovers
+    name: nix-darwin user leftovers
+    description: User-visible nix-darwin activation leftovers under $HOME (Nix Apps folder, profile state). Not system /run or /etc managed files.
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Applications/Nix Apps
+      - $HOME/.local/state/nix/profiles
+      - $HOME/.local/state/nix/gcroots
+    delete_mode: contents
+    max_depth: 5
+
+  - id: exotic-nix-store-profiles-report
+    name: Nix store and user profiles (report-only)
+    description: Nix store, user profile symlinks, and state dirs. Report size only; reclaim via nix GC tools.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - /nix/store
+      - $HOME/.local/state/nix/profiles
+      - $HOME/.local/share/nix
+      - $HOME/.nix-defexpr
+    delete_mode: contents
+    max_depth: 4
+
+  - id: exotic-nix-user-caches
+    name: Nix user evaluation and fetch caches
+    description: Regenerable Nix client caches under XDG/Library cache (eval, tarball, fetcher, binary-cache indexes). Not the Nix store.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $XDG_CACHE_HOME/nix
+      - $HOME/Library/Caches/nix
+      - $HOME/.cache/nix/eval-cache-v1
+      - $HOME/.cache/nix/eval-cache-v2
+      - $HOME/.cache/nix/tarball-cache
+      - $HOME/.cache/nix/fetcher-cache-v1
+      - $HOME/.cache/nix/binary-cache-v6
+    delete_mode: contents
+    max_depth: 6
+
+  - id: exotic-pixi-global-report
+    name: Pixi global home and tools (report-only)
+    description: Global pixi install root (~/.pixi) including globally installed tools/envs.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.pixi
+      - $HOME/.pixi/envs
+      - $HOME/.pixi/bin
+    delete_mode: contents
+    max_depth: 4
+
+  - id: exotic-pixi-rattler-deep-cache
+    name: Pixi / rattler deep package cache
+    description: prefix.dev pixi shared rattler cache including pkgs, repodata, uv-cache, and http-cache subdirs.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/rattler/cache
+      - $HOME/Library/Caches/rattler/cache/pkgs
+      - $HOME/Library/Caches/rattler/cache/repodata
+      - $HOME/Library/Caches/rattler/cache/uv-cache
+      - $HOME/Library/Caches/rattler/cache/http-cache
+      - $HOME/.cache/rattler/cache
+    delete_mode: contents
+    max_depth: 8
+
+  - id: exotic-pkgsrc-user
+    name: pkgsrc unprivileged distfiles and work
+    description: "pkgsrc bootstrap under home: distfiles, work objects, local package tree caches."
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/pkg/distfiles
+      - $HOME/pkg/usr/distfiles
+      - $HOME/pkg/usr/work
+      - $HOME/pkgsrc/packages
+    delete_mode: contents
+    max_depth: 6
+
+  - id: exotic-spack-caches
+    name: Spack source, stage, and misc caches
+    description: Spack downloaded sources, build stage, and ~/.spack misc_cache indexes.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.spack/cache
+      - $HOME/.spack/stage
+      - $HOME/spack/var/spack/cache
+      - $HOME/spack/var/spack/stage
+      - $HOME/.cache/spack
+      - $HOME/Library/Caches/spack
+    delete_mode: contents
+    max_depth: 6
+
+  - id: exotic-spack-install-tree-report
+    name: Spack install tree (report-only)
+    description: Spack installed package tree under user spack checkout.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/spack/opt/spack
+      - $HOME/.spack/opt
+    delete_mode: contents
+    max_depth: 4

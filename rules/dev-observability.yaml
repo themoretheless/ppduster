@@ -1,0 +1,389 @@
+pack: dev-observability
+rules:
+
+  - id: obs-datadog-agent-logs
+    name: Datadog Agent logs (macOS)
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - /opt/datadog-agent/logs
+      - /var/log/datadog
+    delete_mode: contents
+    max_depth: 3
+
+  - id: obs-datadog-agent-run-cache
+    name: Datadog Agent run and install temp
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - /opt/datadog-agent/run
+      - /tmp/dd_agent.log
+    delete_mode: contents
+    max_depth: 4
+
+  - id: obs-datadog-user-sdk-cache
+    name: Datadog user Library cache (SDK/agent UI)
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.datadoghq
+      - $HOME/Library/Logs/Datadog
+      - $HOME/Library/Logs/com.datadoghq.agent
+    delete_mode: contents
+    max_depth: 6
+
+  - id: obs-dynatrace-oneagent-logs
+    name: Dynatrace OneAgent logs
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - /var/log/dynatrace/oneagent
+      - /var/log/dynatrace
+      - $HOME/Library/Logs/dynatrace
+    delete_mode: contents
+    max_depth: 5
+
+  - id: obs-elastic-beats-data
+    name: Elastic Beats path.data (registry)
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - /opt/homebrew/var/lib/filebeat
+      - /opt/homebrew/var/lib/metricbeat
+      - /opt/homebrew/var/lib/packetbeat
+      - /opt/homebrew/var/lib/heartbeat
+      - /opt/homebrew/var/lib/auditbeat
+    delete_mode: contents
+    max_depth: 4
+
+  - id: obs-elastic-beats-logs
+    name: Elastic Beats path.logs
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - /opt/homebrew/var/log/filebeat
+      - /opt/homebrew/var/log/metricbeat
+      - /opt/homebrew/var/log/packetbeat
+      - /opt/homebrew/var/log/heartbeat
+      - /opt/homebrew/var/log/auditbeat
+      - $HOME/Library/Logs/filebeat
+      - $HOME/Library/Logs/metricbeat
+    delete_mode: contents
+    max_depth: 3
+
+  - id: obs-glances-cache-logs
+    name: Glances cache and logs
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/glances
+      - $HOME/Library/Caches/glances
+      - $HOME/Library/Logs/glances
+      - $HOME/.local/share/glances
+      - $HOME/Library/Application Support/glances
+    delete_mode: contents
+    max_depth: 3
+
+  - id: obs-grafana-alloy-agent-logs
+    name: Grafana Alloy and Agent Flow logs
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - /opt/homebrew/var/log
+    include_globs:
+      - alloy.log
+      - alloy.err.log
+      - "alloy*.log"
+      - "grafana-agent*.log"
+      - grafana-agent-flow.log
+      - grafana-agent-flow.err.log
+    delete_mode: contents
+    max_depth: 2
+
+  - id: obs-grafana-alloy-data
+    name: Grafana Alloy/Agent data and positions
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - /opt/homebrew/var/lib/alloy
+      - /opt/homebrew/var/lib/grafana-agent
+      - /opt/homebrew/var/lib/grafana-agent-flow
+    delete_mode: contents
+    max_depth: 4
+
+  - id: obs-grafana-desktop-user
+    name: Grafana desktop / user logs and caches
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Grafana
+      - $HOME/Library/Caches/com.grafana.Grafana
+      - $HOME/Library/Caches/grafana
+      - $HOME/Library/Application Support/Grafana/log
+      - $HOME/Library/Application Support/Grafana/logs
+    delete_mode: contents
+    max_depth: 4
+
+  - id: obs-honeycomb-local
+    name: Honeycomb CLI/agent local cache and logs
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.honeycomb
+      - $HOME/.config/honeycomb
+      - $HOME/Library/Caches/honeycomb
+      - $HOME/Library/Logs/honeycomb
+      - /opt/homebrew/var/log/refinery
+    delete_mode: contents
+    max_depth: 4
+
+  - id: obs-istat-menus-caches
+    name: iStat Menus caches and logs
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.bjango.istatmenus
+      - $HOME/Library/Caches/com.bjango.istatmenus.status
+      - $HOME/Library/Caches/com.bjango.istatmenus.agent
+      - $HOME/Library/Caches/com.bjango.istatmenus.menubar
+      - $HOME/Library/Caches/com.bjango.istatmenus.helpers
+      - $HOME/Library/Logs/iStat Menus
+      - $HOME/Library/Logs/com.bjango.istatmenus
+    delete_mode: contents
+    max_depth: 4
+
+  - id: obs-jaeger-local-storage
+    name: Jaeger local/badger storage and logs
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.jaeger
+      - $HOME/Library/Caches/jaeger
+      - /opt/homebrew/var/jaeger
+      - /opt/homebrew/var/lib/jaeger
+      - $HOME/Library/Logs/jaeger
+    delete_mode: contents
+    max_depth: 4
+
+  - id: obs-lightstep-local
+    name: Lightstep / OpenTelemetry Lightstep local
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.lightstep
+      - $HOME/Library/Caches/lightstep
+      - $HOME/Library/Logs/lightstep
+      - /opt/homebrew/var/log/lightstep
+      - /var/log/lightstep
+    delete_mode: contents
+    max_depth: 4
+
+  - id: obs-netdata-cache-logs
+    name: Netdata cache and logs
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - /opt/homebrew/var/cache/netdata
+      - /opt/homebrew/var/log/netdata
+      - $HOME/.netdata
+    delete_mode: contents
+    max_depth: 5
+
+  - id: obs-newrelic-infra-agent-dir
+    name: New Relic infrastructure agent data dir
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - /opt/homebrew/var/db/newrelic-infra
+      - /var/db/newrelic-infra
+    include_globs:
+      - "**/data/**"
+      - "**/tmp/**"
+      - "**/cache/**"
+      - "**/*.log"
+      - "**/*.log.*"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: obs-newrelic-infra-logs
+    name: New Relic infrastructure agent logs
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - /var/log/newrelic-infra
+      - /opt/homebrew/var/log/newrelic-infra
+      - $HOME/Library/Logs/NewRelic
+      - $HOME/Library/Logs/New Relic
+    delete_mode: contents
+    max_depth: 3
+
+  - id: obs-newrelic-user-caches
+    name: New Relic user caches
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.newrelic.NewRelic
+      - $HOME/Library/Caches/com.newrelic
+      - $HOME/Library/Caches/New Relic
+    delete_mode: contents
+    max_depth: 4
+
+  - id: obs-otel-collector-logs
+    name: OpenTelemetry Collector logs and data
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - /opt/homebrew/var/log/otelcol
+      - /var/log/otelcol
+      - /opt/homebrew/var/lib/otelcol
+      - $HOME/.otelcol
+      - $HOME/.config/otelcol
+      - $HOME/Library/Logs/opentelemetry
+      - $HOME/Library/Logs/otelcol
+      - $HOME/Library/Caches/opentelemetry
+    delete_mode: contents
+    max_depth: 4
+
+  - id: obs-prometheus-tsdb-report
+    name: Prometheus local TSDB (report-only)
+    category: tsdb
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - /opt/homebrew/var/prometheus
+      - /opt/homebrew/var/lib/prometheus
+      - $HOME/prometheus/data
+      - $HOME/.prometheus/data
+    delete_mode: contents
+    max_depth: 4
+
+  - id: obs-sentry-cli-config-report
+    name: Sentry CLI config dir (report-only)
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.sentry
+    delete_mode: contents
+    max_depth: 3
+
+  - id: obs-sentry-sdk-caches
+    name: Sentry SDK and SentryCrash caches
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/SentryCrash
+      - $HOME/Library/Caches/io.sentry.Sentry
+      - $HOME/Library/Caches/Sentry
+      - $HOME/Library/Logs/Sentry
+    delete_mode: contents
+    max_depth: 5
+
+  - id: obs-stats-app-caches
+    name: Stats.app (exelban) caches and logs
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/eu.exelban.Stats
+      - $HOME/Library/Logs/Stats
+      - $HOME/Library/Logs/eu.exelban.Stats
+    delete_mode: contents
+    max_depth: 4
+
+  - id: obs-statsd-dogstatsd
+    name: StatsD / DogStatsD logs
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - /opt/homebrew/var/log/statsd
+      - $HOME/Library/Logs/statsd
+      - /tmp/statsd
+    delete_mode: contents
+    max_depth: 3
+
+  - id: obs-zipkin-local
+    name: Zipkin local data and logs
+    category: cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.zipkin
+      - $HOME/Library/Caches/zipkin
+      - /opt/homebrew/var/zipkin
+      - $HOME/Library/Logs/zipkin
+    delete_mode: contents
+    max_depth: 4

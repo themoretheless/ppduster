@@ -1,0 +1,858 @@
+pack: apps-creative
+rules:
+
+  - id: creative-adobe-after-effects-caches
+    name: After Effects media and app caches
+    description: AE cache trees under Caches/Application Support. Disk Cache may be relocated; default Media Cache is under Common.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Adobe/After Effects
+      - "$HOME/Library/Application Support/Adobe/After Effects/*/Disk Cache"
+      - $HOME/Library/Logs/Adobe/After Effects
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-adobe-camera-raw-cache
+    name: Adobe Camera Raw cache
+    description: Camera Raw tile cache used by Photoshop/Lightroom Develop. Safe; rebuilds as images open. Can be large.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Adobe/CameraRaw/Cache
+      - $HOME/Library/Application Support/Adobe/CameraRaw/Cache
+      - $HOME/Library/Caches/Adobe/CameraRaw/Smart_Views
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-adobe-cc-support-caches
+    name: Creative Cloud client caches
+    description: ACC/CoreSync temp and cache folders. Avoid SLStore licensing.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Adobe/ACC/Cache
+      - $HOME/Library/Application Support/Adobe/ACC/TEMP
+      - $HOME/Library/Application Support/Adobe/CoreSync/plugins/livetype/.temp
+      - $HOME/Library/Application Support/Adobe/UXP/PluginsStorage
+      - $HOME/Library/Application Support/Adobe/CEP/extensions/.cache
+    exclude_globs:
+      - "**/SLStore/**"
+      - "**/SLCache/**"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-adobe-fonts-temp
+    name: Adobe Fonts / Typekit temp
+    description: Local Adobe Fonts sync temp and type support caches. Activated fonts re-sync from cloud.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Adobe/CoreSync/plugins/livetype
+      - $HOME/Library/Application Support/Adobe/TypeSupport
+      - $HOME/Library/Caches/Adobe/Fonts
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-adobe-library-caches
+    name: Adobe Library/Caches tree
+    description: Broad Adobe folder under ~/Library/Caches (Camera Raw, Photoshop, CEP, etc.). Prefer contents; apps rebuild.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Adobe
+      - $HOME/Library/Caches/CSXS
+      - $HOME/Library/Caches/com.adobe.Photoshop
+      - $HOME/Library/Caches/com.adobe.illustrator
+      - $HOME/Library/Caches/com.adobe.InDesign
+      - $HOME/Library/Caches/com.adobe.Acrobat.Pro
+      - $HOME/Library/Caches/com.adobe.Reader
+      - $HOME/Library/Caches/com.adobe.acc.AdobeDesktopService
+      - $HOME/Library/Caches/com.adobe.accmac
+      - $HOME/Library/Caches/com.adobe.CCXProcess
+      - $HOME/Library/Caches/com.adobe.AdobeCRDaemon
+      - $HOME/Library/Caches/Adobe Camera Raw 2
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-adobe-logs
+    name: Adobe and Creative Cloud logs
+    description: User-space Adobe/CC logs. Regenerable; not licenses or prefs.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Adobe
+      - $HOME/Library/Logs/CreativeCloud
+      - $HOME/Library/Logs/CSXS
+      - $HOME/Library/Logs/AdobeCRLogs
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-adobe-media-cache-db
+    name: Adobe shared Media Cache database
+    description: Media cache index/database next to Media Cache Files. Regenerable with cache files.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Adobe/Common/Media Cache
+    delete_mode: contents
+    max_depth: 5
+
+  - id: creative-adobe-media-cache-files
+    name: Adobe shared Media Cache Files
+    description: Premiere/AE/Media Encoder consolidated media cache (CFA etc.). Regenerable; close Adobe apps first.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Adobe/Common/Media Cache Files
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-adobe-media-encoder
+    name: Media Encoder cache and logs
+    description: Adobe Media Encoder local caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Adobe/Adobe Media Encoder
+      - $HOME/Library/Logs/Adobe/Adobe Media Encoder
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-adobe-peak-files
+    name: Adobe Peak Files (waveforms)
+    description: Premiere/AE audio waveform peak files (.pek). Regenerable on next import/open.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Adobe/Common/Peak Files
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-adobe-photoshop-cache
+    name: Photoshop app cache folders
+    description: Versioned Photoshop Cache under Application Support and CT font support caches. Not documents or presets.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Adobe/Adobe Photoshop 2023/Cache
+      - $HOME/Library/Application Support/Adobe/Adobe Photoshop 2024/Cache
+      - $HOME/Library/Application Support/Adobe/Adobe Photoshop 2025/Cache
+      - $HOME/Library/Application Support/Adobe/Adobe Photoshop 2026/Cache
+      - $HOME/Library/Caches/Adobe/Photoshop
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-adobe-premiere-caches
+    name: Premiere Pro cache and logs
+    description: Premiere-specific caches and logs. Media Cache under Common is separate rule.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Adobe/Premiere Pro
+      - "$HOME/Library/Application Support/Adobe/Premiere Pro/*/Profile-*/Caches"
+      - $HOME/Library/Logs/Adobe/Premiere Pro
+    include_globs:
+      - "**/*"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-adobe-team-projects-cache
+    name: Adobe Team Projects cache
+    description: Local Team Projects cache under Adobe Common. Regenerable from cloud/server.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Adobe/Common/Team Projects Cache
+    delete_mode: contents
+    max_depth: 5
+
+  - id: creative-adobe-xd-caches
+    name: Adobe XD caches and logs
+    description: XD desktop caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.adobe.xd
+      - $HOME/Library/Logs/Adobe/Adobe XD
+      - $HOME/Library/Application Support/Adobe/Adobe XD/Cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-affinity-caches
+    name: Affinity Photo/Designer/Publisher caches
+    description: Serif Affinity v1/v2 app caches and autosave temp. Not .afphoto documents.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.seriflabs.affinityphoto
+      - $HOME/Library/Caches/com.seriflabs.affinityphoto2
+      - $HOME/Library/Caches/com.seriflabs.affinitydesigner
+      - $HOME/Library/Caches/com.seriflabs.affinitydesigner2
+      - $HOME/Library/Caches/com.seriflabs.affinitypublisher
+      - $HOME/Library/Caches/com.seriflabs.affinitypublisher2
+      - $HOME/Library/Application Support/Affinity/Photo/2.0/temp
+      - $HOME/Library/Application Support/Affinity/Designer/2.0/temp
+      - $HOME/Library/Application Support/Affinity/Publisher/2.0/temp
+      - $HOME/Library/Logs/Affinity
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-audition-caches
+    name: Adobe Audition media cache
+    description: Audition peak/media cache (also uses Adobe Common). App-specific leftovers.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Adobe/Audition
+      - "$HOME/Library/Application Support/Adobe/Audition/*/Cache"
+      - $HOME/Library/Logs/Adobe/Audition
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-blender-caches
+    name: Blender caches
+    description: Blender BVH/asset/thumbnail caches under Application Support and Library/Caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Blender Foundation/Blender/3.6/cache
+      - $HOME/Library/Application Support/Blender Foundation/Blender/4.0/cache
+      - $HOME/Library/Application Support/Blender Foundation/Blender/4.1/cache
+      - $HOME/Library/Application Support/Blender Foundation/Blender/4.2/cache
+      - $HOME/Library/Application Support/Blender Foundation/Blender/4.3/cache
+      - $HOME/Library/Application Support/Blender Foundation/Blender/4.4/cache
+      - $HOME/Library/Application Support/Blender Foundation/Blender/4.5/cache
+      - $HOME/Library/Caches/org.blenderfoundation.blender
+      - $HOME/.cache/blender
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-books-caches
+    name: Books app caches
+    description: Apple Books artwork/network caches. Downloaded books content is report-only separately.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.iBooksX
+      - $HOME/Library/Caches/com.apple.iBooksX.BooksThumbnail
+      - $HOME/Library/Containers/com.apple.iBooksX/Data/Library/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-books-downloads-report
+    name: Books downloads (report-only)
+    description: Downloaded book/audiobook files. Report-only; re-download may require account and bandwidth.
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 60
+    paths:
+      - $HOME/Library/Containers/com.apple.BKAgentService/Data/Documents/iBooks
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-capture-one-caches
+    name: Capture One app caches and logs
+    description: Phase One Capture One app-level caches. Catalog-internal Cache (inside .cocatalog) is report-only elsewhere.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.phaseone.captureone14
+      - $HOME/Library/Caches/com.phaseone.captureone15
+      - $HOME/Library/Caches/com.phaseone.captureone16
+      - $HOME/Library/Caches/com.captureone.captureone
+      - $HOME/Library/Application Support/Capture One/Cache
+      - $HOME/Library/Logs/Capture One
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-cinema4d-maxon-caches
+    name: Cinema 4D / Maxon caches
+    description: Maxon asset browser cache and C4D temp/caches. Prefs layouts not wiped wholesale.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Preferences/Maxon/_assetcache
+      - $HOME/Library/Caches/net.maxon
+      - $HOME/Library/Caches/com.maxon
+      - $HOME/Library/Application Support/Maxon/_assetcache
+      - $HOME/Library/Logs/Maxon
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-davinci-gallery-report
+    name: DaVinci Resolve gallery stills (report-only)
+    description: Gallery stills may be intentional references. Report size only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Application Support/Blackmagic Design/DaVinci Resolve/Gallery
+    delete_mode: contents
+    max_depth: 5
+
+  - id: creative-davinci-resolve-app-support
+    name: DaVinci Resolve logs and caches
+    description: Blackmagic Design Resolve application logs/caches under Application Support. Project DB not targeted.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Blackmagic Design/DaVinci Resolve/logs
+      - $HOME/Library/Application Support/Blackmagic Design/DaVinci Resolve/CacheClip
+      - $HOME/Library/Caches/com.blackmagic-design.DaVinciResolve
+      - $HOME/Library/Caches/DaVinci Resolve
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-figma-caches
+    name: Figma desktop Electron caches
+    description: Figma Desktop Cache/Code Cache/GPUCache. Prefer subfolders over wiping entire Application Support/Figma (official nuclear reset).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Figma/Desktop/Cache
+      - $HOME/Library/Application Support/Figma/Desktop/Code Cache
+      - $HOME/Library/Application Support/Figma/Desktop/GPUCache
+      - $HOME/Library/Application Support/Figma/Desktop/ShaderCache
+      - $HOME/Library/Application Support/Figma/Desktop/Service Worker
+      - $HOME/Library/Application Support/Figma/DesktopProfile/Cache
+      - $HOME/Library/Application Support/Figma/DesktopProfile/Code Cache
+      - $HOME/Library/Application Support/Figma/DesktopProfile/GPUCache
+      - $HOME/Library/Caches/com.figma.Desktop
+      - $HOME/Library/Caches/com.figma.agent
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-final-cut-pro-caches
+    name: Final Cut Pro app caches and logs
+    description: FCP app caches/logs outside libraries. Library-internal Render/Transcoded media are separate report-only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.FinalCut
+      - $HOME/Library/Caches/com.apple.FinalCutTrial
+      - $HOME/Library/Application Support/Final Cut Pro/Caches
+      - $HOME/Library/Application Support/ProApps/Caches
+      - $HOME/Library/Logs/Final Cut Pro
+      - $HOME/Library/Logs/CoreMediaIO
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-garageband-caches
+    name: GarageBand caches and logs
+    description: GarageBand app caches. Not user song projects in Music/GarageBand.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.garageband10
+      - $HOME/Library/Caches/com.apple.garageband
+      - $HOME/Library/Logs/GarageBand
+      - $HOME/Library/Application Support/GarageBand/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-handbrake-caches
+    name: HandBrake caches and logs
+    description: HandBrake encode caches and logs. Not source/output video paths.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/fr.handbrake.HandBrake
+      - $HOME/Library/Application Support/HandBrake/cache
+      - $HOME/Library/Logs/HandBrake
+      - $HOME/Library/Containers/fr.handbrake.HandBrake/Data/Library/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-houdini-caches
+    name: Houdini caches and temp
+    description: SideFX Houdini user caches, crash temp, and logs. Not hip project files.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/houdini
+      - $HOME/Library/Caches/com.sidefx.houdini
+      - $HOME/Library/Logs/Houdini
+      - $HOME/Library/Logs/SideFX
+      - $HOME/houdini_temp
+      - "$HOME/Library/Application Support/SideFX/Houdini/*/cache"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-iina-caches
+    name: IINA caches
+    description: IINA (mpv frontend) caches and yt-dlp related temp under app support.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.colliderli.iina
+      - $HOME/Library/Application Support/com.colliderli.iina/cache
+      - $HOME/Library/Application Support/com.colliderli.iina/youtube-dl
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-illustrator-indesign-caches
+    name: Illustrator and InDesign caches
+    description: AI/ID recovery temp and caches. Not document files.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Adobe/Illustrator
+      - $HOME/Library/Caches/Adobe/InDesign
+      - "$HOME/Library/Application Support/Adobe/Adobe Illustrator */*/Cache"
+      - "$HOME/Library/Application Support/Adobe/Adobe InDesign */Cache"
+      - $HOME/Library/Logs/Adobe/Illustrator
+      - $HOME/Library/Logs/Adobe/InDesign
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-imovie-caches
+    name: iMovie app caches
+    description: iMovie app caches outside libraries. Render files inside .imovielibrary are report-only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.iMovieApp
+      - $HOME/Library/Caches/iMovie
+      - $HOME/Library/Containers/com.apple.iMovieApp/Data/Library/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-lightroom-cc-caches
+    name: Lightroom (cloud) caches
+    description: Lightroom desktop (cloud) caches; not photo cloud library content.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.adobe.lightroomCC
+      - $HOME/Library/Caches/com.adobe.LightroomCloudDesktop
+      - $HOME/Library/Application Support/Adobe/Lightroom CC/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-lightroom-classic-caches
+    name: Lightroom Classic app caches
+    description: LrC app-level caches and logs. Catalog Previews.lrdata is separate higher-risk rule.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.adobe.LightroomClassicCC7
+      - $HOME/Library/Caches/Adobe/Lightroom
+      - $HOME/Library/Logs/Adobe/Lightroom
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-logic-pro-caches
+    name: Logic Pro caches and logs
+    description: Logic Pro instrument/loop indexes and app caches. Not project freeze files or user Apple Loops under Library/Audio.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.logic10
+      - $HOME/Library/Caches/com.apple.logic.pro
+      - $HOME/Library/Logs/Logic
+      - $HOME/Library/Application Support/Logic/Cached Data
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-maya-caches
+    name: Autodesk Maya caches and logs
+    description: Maya user caches under Library. Project scene caches under Documents/maya projects excluded.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Autodesk
+      - $HOME/Library/Logs/Autodesk
+      - $HOME/Library/Application Support/Autodesk/ADSDK/Logs
+      - $HOME/Library/Application Support/Autodesk/Identity Services/Log
+      - "$HOME/Library/Application Support/Autodesk/Maya/*/cache"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-motion-caches
+    name: Motion caches and logs
+    description: Apple Motion app caches. Motion Templates under Movies are user content (excluded).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.motionapp
+      - $HOME/Library/Caches/com.apple.Motion
+      - $HOME/Library/Logs/Motion
+    delete_mode: contents
+    max_depth: 5
+
+  - id: creative-mpv-caches
+    name: mpv caches
+    description: mpv watch-later is user state (excluded). Only cache dirs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/io.mpv
+      - $HOME/.cache/mpv
+      - $HOME/Library/Application Support/mpv/cache
+    exclude_globs:
+      - "**/watch_later/**"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: creative-music-app-caches
+    name: Music app caches
+    description: Apple Music/Music.app artwork and network caches. Not Media.localized song files.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.Music
+      - $HOME/Library/Caches/com.apple.Music.MusicCacheExtension
+      - $HOME/Library/Caches/com.apple.AMPLibraryAgent
+      - $HOME/Library/Caches/com.apple.AppleMediaServices
+      - $HOME/Library/Containers/com.apple.Music/Data/Library/Caches
+    exclude_globs:
+      - "**/Media.localized/**"
+      - "**/iTunes Media/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-photos-app-caches
+    name: Photos app caches (not library)
+    description: Photos.app and related agent caches only. NEVER the .photoslibrary bundle or Masters/originals.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.Photos
+      - $HOME/Library/Caches/com.apple.cloudphotod
+      - $HOME/Library/Caches/com.apple.photoanalysisd
+      - $HOME/Library/Caches/com.apple.MediaAnalysisd
+      - $HOME/Library/Containers/com.apple.Photos/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.cloudphotod/Data/Library/Caches
+    exclude_globs:
+      - "**/*.photoslibrary/**"
+      - "**/photos.db*"
+      - "**/Photos.sqlite*"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-pixelmator-caches
+    name: Pixelmator Pro caches
+    description: Pixelmator / Pixelmator Pro caches under Library and sandboxed Containers.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.pixelmatorteam.pixelmator
+      - $HOME/Library/Caches/com.pixelmatorteam.pixelmator.x
+      - $HOME/Library/Containers/com.pixelmatorteam.pixelmator.x/Data/Library/Caches
+      - $HOME/Library/Containers/com.pixelmatorteam.pixelmator/Data/Library/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-podcasts-caches
+    name: Podcasts app caches
+    description: Podcasts artwork/network caches. Episode downloads are separate report-only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.podcasts
+      - $HOME/Library/Caches/com.apple.podcasts.MacPodcastsShelfExtension
+      - $HOME/Library/Containers/com.apple.podcasts/Data/Library/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-podcasts-downloads-report
+    name: Podcasts downloads (report-only)
+    description: Downloaded episode media may be re-fetched but user may want offline copies. Report-only.
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Group Containers/243LU875E5.groups.com.apple.podcasts
+      - $HOME/Library/Containers/com.apple.podcasts/Data/Library/Application Support/Podcasts
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-proapps-shared-logs
+    name: Apple ProApps shared logs
+    description: Shared Final Cut / Logic / Motion ProApps logging.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/ProApps
+      - $HOME/Library/Logs/FSKit
+      - $HOME/Library/Application Support/ProApps/Instrument Library/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-redshift-cache
+    name: Redshift render cache
+    description: Maxon Redshift texture/shader disk cache. Regenerable; medium rebuild cost.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/redshift/cache
+      - $HOME/Library/Caches/redshift
+      - $HOME/Library/Preferences/Redshift/cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-sketch-caches
+    name: Sketch caches and logs
+    description: Bohemian Coding Sketch caches. Documents are cloud/local .sketch files (untouched).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.bohemiancoding.sketch3
+      - $HOME/Library/Caches/com.bohemiancoding.sketch
+      - $HOME/Library/Application Support/com.bohemiancoding.sketch3/Caches
+      - $HOME/Library/Logs/com.bohemiancoding.sketch3
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-substance-caches
+    name: Substance / Adobe 3D caches
+    description: Substance Painter/Designer caches when installed via Creative Cloud.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/Allegorithmic
+      - $HOME/Library/Caches/Adobe/Substance
+      - $HOME/Library/Application Support/Adobe/Adobe Substance 3D Painter/cache
+      - $HOME/Library/Application Support/Adobe/Adobe Substance 3D Designer/cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-tv-app-caches
+    name: TV app caches
+    description: Apple TV app caches. Not purchased movie files in Movies/TV.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.TV
+      - $HOME/Library/Caches/com.apple.TV.TVCacheExtension
+      - $HOME/Library/Containers/com.apple.TV/Data/Library/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-unity-asset-store-cache
+    name: Unity Asset Store download cache
+    description: Downloaded Asset Store packages cache. Re-downloadable; medium network cost.
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Unity/Asset Store-5.x
+      - $HOME/Library/Application Support/Unity/Asset Store-5.x
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-unity-caches
+    name: Unity Editor and Hub caches
+    description: Unity GI/shader/package caches and Hub downloads cache. Project Library/ folders not scanned.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Unity/cache
+      - $HOME/Library/Unity/Packages
+      - $HOME/Library/Caches/com.unity3d.UnityEditor
+      - $HOME/Library/Caches/com.unity3d.unityhub
+      - $HOME/Library/Caches/com.unity3d.UnityEditor5.x
+      - $HOME/Library/Application Support/Unity/cache
+      - $HOME/Library/Application Support/UnityHub/Cache
+      - $HOME/Library/Logs/Unity
+      - $HOME/Library/Logs/UnityHub
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-unreal-ddc
+    name: Unreal Engine Derived Data Cache
+    description: UE local DDC and Zen data under Application Support. Safe but forces shader/asset rebuilds.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Epic/UnrealEngine/Common/DerivedDataCache
+      - $HOME/Library/Application Support/Epic/UnrealEngine/Common/Zen
+      - $HOME/Library/Application Support/Epic/UnrealEngine/5.3/DerivedDataCache
+      - $HOME/Library/Application Support/Epic/UnrealEngine/5.4/DerivedDataCache
+      - $HOME/Library/Application Support/Epic/UnrealEngine/5.5/DerivedDataCache
+      - $HOME/Library/Application Support/Epic/UnrealEngine/5.6/DerivedDataCache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: creative-unreal-logs-caches
+    name: Unreal Engine and Epic logs/caches
+    description: Epic Games Launcher and UE logs/caches outside project Saved folders.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Unreal Engine
+      - $HOME/Library/Logs/Epic Games Launcher
+      - $HOME/Library/Caches/com.epicgames.EpicGamesLauncher
+      - $HOME/Library/Caches/com.epicgames.UnrealEngineLauncher
+      - $HOME/Library/Application Support/Epic/EpicGamesLauncher/Data/EMS/EpicGamesLauncher/Logs
+    delete_mode: contents
+    max_depth: 8
+
+  - id: creative-vlc-caches
+    name: VLC caches and art
+    description: VLC HTTP/ thrash caches and cover art. Regenerable.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/org.videolan.vlc
+      - $HOME/Library/Application Support/org.videolan.vlc/cache
+      - $HOME/Library/Application Support/org.videolan.vlc/art
+      - $HOME/Library/Logs/vlc-log.txt
+    delete_mode: contents
+    max_depth: 6

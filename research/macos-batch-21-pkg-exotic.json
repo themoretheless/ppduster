@@ -1,0 +1,625 @@
+{
+  "batch": "21-pkg-exotic",
+  "platform": "macos",
+  "platform_focus": "macos",
+  "description": "Exotic / alternate package managers and user-tree installs under $HOME (and a few well-known system store roots as report-only). Covers Nix caches vs store, nix-darwin and home-manager user leftovers, MacPorts/pkgsrc/Fink distfiles and logs, Spack, Guix, conda/mamba/micromamba (envs report-only, pkgs cleanable), pixi/rattler deeper cache layout, EasyBuild, linuxbrew under home, asdf downloads, and mise cache/downloads. Prefer native GC (nix-collect-garbage, guix gc, port reclaim, spack clean, conda/mamba clean, brew cleanup) over blind rm for stores and profiles.",
+  "path_count": 116,
+  "risk_policy": {
+    "download_caches_distfiles_logs": "low or medium; contents-only + min_age",
+    "package_stores_install_trees": "report-only (Nix /gnu store, Spack opt, linuxbrew Cellar, mise/asdf installs)",
+    "environments_profiles": "report-only (conda/mamba/micromamba envs, nix/guix profiles, home-manager generations)",
+    "config_and_plugins": "never-touch (dotfiles, .config/nix-darwin, asdf plugins, mise shims)"
+  },
+  "notes": "Deepens coverage beyond macos-batch-03/09/10 for exotic PMs. $HOME-scoped where possible. /nix/store and /gnu/store listed report-only only for size inventory; never auto-delete. Config trees (.config/nix, .config/nix-darwin, .config/home-manager, .config/guix, ~/.spack/*.yaml) are not clean targets.",
+  "rules": [
+    {
+      "id": "exotic-nix-user-caches",
+      "name": "Nix user evaluation and fetch caches",
+      "description": "Regenerable Nix client caches under XDG/Library cache (eval, tarball, fetcher, binary-cache indexes). Not the Nix store.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/.cache/nix",
+        "$XDG_CACHE_HOME/nix",
+        "$HOME/Library/Caches/nix",
+        "$HOME/.cache/nix/eval-cache-v1",
+        "$HOME/.cache/nix/eval-cache-v2",
+        "$HOME/.cache/nix/tarball-cache",
+        "$HOME/.cache/nix/fetcher-cache-v1",
+        "$HOME/.cache/nix/binary-cache-v6"
+      ],
+      "native_hints": [
+        "rm -rf ~/.cache/nix/eval-cache-v2"
+      ],
+      "notes": "Safe to wipe; Nix rebuilds flake eval and fetch metadata. Does not free /nix/store. Prefer this over touching profiles."
+    },
+    {
+      "id": "exotic-nix-store-profiles-report",
+      "name": "Nix store and user profiles (report-only)",
+      "description": "Nix store, user profile symlinks, and state dirs. Report size only; reclaim via nix GC tools.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "/nix/store",
+        "$HOME/.nix-profile",
+        "$HOME/nix-profile",
+        "$HOME/.local/state/nix",
+        "$HOME/.local/state/nix/profiles",
+        "$HOME/.local/share/nix",
+        "$HOME/.nix-defexpr"
+      ],
+      "native_hints": [
+        "nix-collect-garbage -d",
+        "nix store gc",
+        "nix-store --optimise",
+        "nix profile wipe-history --older-than 7d"
+      ],
+      "notes": "Never rm /nix/store or profile links by hand. GC only removes unreferenced store paths. Keep channels/config intact."
+    },
+    {
+      "id": "exotic-nix-darwin-user-leftovers",
+      "name": "nix-darwin user leftovers",
+      "description": "User-visible nix-darwin activation leftovers under $HOME (Nix Apps folder, profile state). Not system /run or /etc managed files.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Applications/Nix Apps",
+        "$HOME/.local/state/nix/profiles",
+        "$HOME/.local/state/nix/gcroots"
+      ],
+      "native_hints": [
+        "darwin-rebuild switch --flake ~/.config/nix-darwin",
+        "sudo nix profile wipe-history --profile /nix/var/nix/profiles/system --older-than 7d"
+      ],
+      "notes": "Do not delete ~/.config/nix-darwin or flake sources. System profile history needs sudo + nix tools. Nix Apps is a convenience folder of links into the store."
+    },
+    {
+      "id": "exotic-home-manager-state",
+      "name": "home-manager generations and gcroots",
+      "description": "home-manager state, gcroots, and profile generations that pin Nix store paths.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/.local/state/home-manager",
+        "$HOME/.local/state/home-manager/gcroots",
+        "$HOME/.local/state/nix/profiles/home-manager",
+        "$HOME/.cache/home-manager"
+      ],
+      "native_hints": [
+        "home-manager expire-generations '-7 days'",
+        "nix-collect-garbage -d"
+      ],
+      "notes": "Prefer home-manager expire-generations then nix GC. Never delete ~/.config/home-manager or active generation blindly. Old generations block store GC."
+    },
+    {
+      "id": "exotic-macports-user-distfiles-logs",
+      "name": "MacPorts user distfiles, software archives, logs",
+      "description": "User-writable MacPorts distfiles, archived software, build work, and logs (home prefix installs).",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/.macports",
+        "$HOME/macports/var/macports/distfiles",
+        "$HOME/macports/var/macports/software",
+        "$HOME/macports/var/macports/logs",
+        "$HOME/macports/var/macports/build",
+        "$HOME/Library/Caches/MacPorts",
+        "$HOME/Library/Logs/MacPorts"
+      ],
+      "native_hints": [
+        "port clean --all installed",
+        "port reclaim"
+      ],
+      "notes": "Default system prefix is /opt/local (often root-owned; out of default $HOME clean). Prefer port reclaim for /opt/local."
+    },
+    {
+      "id": "exotic-pkgsrc-user",
+      "name": "pkgsrc unprivileged distfiles and work",
+      "description": "pkgsrc bootstrap under home: distfiles, work objects, local package tree caches.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/pkgsrc/distfiles",
+        "$HOME/pkg/distfiles",
+        "$HOME/pkg/usr/distfiles",
+        "$HOME/pkg/usr/work",
+        "$HOME/pkgsrc/packages",
+        "$HOME/Library/Caches/pkgsrc"
+      ],
+      "notes": "Unprivileged LOCALBASE often ~/pkg; DISTDIR/WRKOBJDIR may be under pkgsrc or pkg/usr. Do not wipe ~/pkg/bin or pkgdb without user intent (install tree)."
+    },
+    {
+      "id": "exotic-fink-user",
+      "name": "Fink user distfiles and caches",
+      "description": "Legacy Fink package manager caches when installed under the user home.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/fink/distfiles",
+        "$HOME/.fink",
+        "$HOME/Library/Caches/fink"
+      ],
+      "notes": "System Fink often uses /sw (privileged). Only user-tree paths listed."
+    },
+    {
+      "id": "exotic-spack-caches",
+      "name": "Spack source, stage, and misc caches",
+      "description": "Spack downloaded sources, build stage, and ~/.spack misc_cache indexes.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/.spack/cache",
+        "$HOME/.spack/stage",
+        "$HOME/spack/var/spack/cache",
+        "$HOME/spack/var/spack/stage",
+        "$HOME/.cache/spack",
+        "$HOME/Library/Caches/spack"
+      ],
+      "native_hints": [
+        "spack clean --downloads",
+        "spack clean --stage",
+        "spack clean --misc-cache",
+        "spack clean -a"
+      ],
+      "notes": "Default misc_cache is ~/.spack/cache; source_cache often $spack/var/spack/cache. Prefer spack clean. Do not delete ~/.spack/*.yaml config."
+    },
+    {
+      "id": "exotic-spack-install-tree-report",
+      "name": "Spack install tree (report-only)",
+      "description": "Spack installed package tree under user spack checkout.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/spack/opt/spack",
+        "$HOME/.spack/opt"
+      ],
+      "native_hints": [
+        "spack uninstall --all --dependents",
+        "spack gc"
+      ],
+      "notes": "Install prefixes are not disposable caches. Report size; uninstall via spack."
+    },
+    {
+      "id": "exotic-guix-user-caches",
+      "name": "Guix user checkout and client caches",
+      "description": "Guix ~/.cache/guix (channel checkouts and related client cache).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/.cache/guix",
+        "$HOME/.cache/guix/checkouts",
+        "$XDG_CACHE_HOME/guix"
+      ],
+      "notes": "Checkouts cache can be multi-GB; regenerable. Does not free /gnu/store."
+    },
+    {
+      "id": "exotic-guix-store-profiles-report",
+      "name": "Guix store and profiles (report-only)",
+      "description": "Guix store and user profile symlinks; GC via guix tools only.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "/gnu/store",
+        "$HOME/.guix-profile",
+        "$HOME/.config/guix/current"
+      ],
+      "native_hints": [
+        "guix gc",
+        "guix gc --delete-generations=1m"
+      ],
+      "notes": "Profiles are symlinks into /var/guix/profiles. Never rm store paths directly."
+    },
+    {
+      "id": "exotic-conda-mamba-envs-report",
+      "name": "Conda/mamba/micromamba environments (report-only)",
+      "description": "Named environments under common installer roots. Never auto-delete envs.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "path",
+      "max_depth": 2,
+      "paths": [
+        "$HOME/.conda/envs",
+        "$HOME/miniconda3/envs",
+        "$HOME/anaconda3/envs",
+        "$HOME/miniforge3/envs",
+        "$HOME/mambaforge/envs",
+        "$HOME/micromamba/envs",
+        "$HOME/.local/share/mamba/envs"
+      ],
+      "native_hints": [
+        "conda env list",
+        "mamba env list",
+        "micromamba env list",
+        "conda env remove -n NAME"
+      ],
+      "notes": "Envs hold user project stacks. Inventory only. Micromamba default root is ~/micromamba (MAMBA_ROOT_PREFIX)."
+    },
+    {
+      "id": "exotic-conda-mamba-pkgs",
+      "name": "Conda/mamba package download caches (pkgs)",
+      "description": "Tarball/extracted package caches shared by envs; cleanable and regenerable.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/.conda/pkgs",
+        "$HOME/miniconda3/pkgs",
+        "$HOME/anaconda3/pkgs",
+        "$HOME/miniforge3/pkgs",
+        "$HOME/mambaforge/pkgs",
+        "$HOME/Library/Caches/conda",
+        "$HOME/.cache/conda",
+        "$HOME/.mamba/pkgs",
+        "$HOME/Library/Caches/mamba",
+        "$HOME/.cache/mamba",
+        "$XDG_CACHE_HOME/mamba"
+      ],
+      "native_hints": [
+        "conda clean -a",
+        "mamba clean -a",
+        "micromamba clean -a"
+      ],
+      "notes": "pkgs/ only, never envs/. Forces re-download of packages. Paths vary by installer location."
+    },
+    {
+      "id": "exotic-micromamba-pkgs",
+      "name": "Micromamba root pkgs cache",
+      "description": "Micromamba/Mamba root-prefix package cache ($root_prefix/pkgs).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/micromamba/pkgs",
+        "$HOME/.local/share/mamba/pkgs",
+        "$HOME/.mamba/pkgs"
+      ],
+      "native_hints": [
+        "micromamba clean -a",
+        "mamba clean -a"
+      ],
+      "notes": "Default MAMBA_ROOT_PREFIX is ~/micromamba; pkgs is the shared download cache for all envs under that root."
+    },
+    {
+      "id": "exotic-pixi-rattler-deep-cache",
+      "name": "Pixi / rattler deep package cache",
+      "description": "prefix.dev pixi shared rattler cache including pkgs, repodata, uv-cache, and http-cache subdirs.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/rattler",
+        "$HOME/Library/Caches/rattler/cache",
+        "$HOME/Library/Caches/rattler/cache/pkgs",
+        "$HOME/Library/Caches/rattler/cache/repodata",
+        "$HOME/Library/Caches/rattler/cache/uv-cache",
+        "$HOME/Library/Caches/rattler/cache/http-cache",
+        "$HOME/.cache/rattler",
+        "$HOME/.cache/rattler/cache",
+        "$HOME/Library/Caches/pixi",
+        "$HOME/.cache/pixi",
+        "$XDG_CACHE_HOME/rattler",
+        "$XDG_CACHE_HOME/pixi"
+      ],
+      "native_hints": [
+        "pixi clean cache"
+      ],
+      "notes": "macOS default is ~/Library/Caches/rattler (override PIXI_CACHE_DIR / RATTLER_CACHE_DIR). Subdirs: pkgs, repodata, uv-cache, http-cache. Hard/reflinked into project .pixi/envs; deleting cache forces re-download but does not remove project envs."
+    },
+    {
+      "id": "exotic-pixi-global-report",
+      "name": "Pixi global home and tools (report-only)",
+      "description": "Global pixi install root (~/.pixi) including globally installed tools/envs.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/.pixi",
+        "$HOME/.pixi/envs",
+        "$HOME/.pixi/bin"
+      ],
+      "native_hints": [
+        "pixi global list",
+        "pixi global remove PACKAGE"
+      ],
+      "notes": "Project-local .pixi/envs under repos is out of scope for global walk. Report ~/.pixi size; remove tools via pixi global."
+    },
+    {
+      "id": "exotic-easybuild-sources-build",
+      "name": "EasyBuild sources and build directories",
+      "description": "EasyBuild downloaded sources and temporary build trees under default prefix.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/.local/easybuild/sources",
+        "$HOME/.local/easybuild/build",
+        "$HOME/easybuild/sources",
+        "$HOME/easybuild/build",
+        "$HOME/.cache/easybuild"
+      ],
+      "notes": "Default EASYBUILD_PREFIX is ~/.local/easybuild. sources/ and build/ are regenerable; software/ modules stay report-only."
+    },
+    {
+      "id": "exotic-easybuild-software-report",
+      "name": "EasyBuild installed software (report-only)",
+      "description": "EasyBuild installpath with built modules and software.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/.local/easybuild/software",
+        "$HOME/.local/easybuild/modules",
+        "$HOME/easybuild/software",
+        "$HOME/easybuild/modules"
+      ],
+      "notes": "Installed stacks; not disposable cache. Report only."
+    },
+    {
+      "id": "exotic-linuxbrew-home",
+      "name": "Linuxbrew / Homebrew under $HOME",
+      "description": "Homebrew-on-Linux (or portable) prefix under ~/.linuxbrew: tmp/cache/var only as cleanable; Cellar report-only.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/.linuxbrew/var/homebrew/tmp",
+        "$HOME/.linuxbrew/var/homebrew/cache",
+        "$HOME/.linuxbrew/var/cache",
+        "$HOME/.linuxbrew/Homebrew/Library/Homebrew/vendor/portable-ruby/cache"
+      ],
+      "native_hints": [
+        "eval \"$($HOME/.linuxbrew/bin/brew shellenv)\"",
+        "brew cleanup -s",
+        "brew autoremove"
+      ],
+      "notes": "Standard macOS Homebrew uses /opt/homebrew or /usr/local and Library/Caches/Homebrew (covered elsewhere). This rule is only ~/.linuxbrew user-tree installs. Prefer brew cleanup."
+    },
+    {
+      "id": "exotic-linuxbrew-prefix-report",
+      "name": "Linuxbrew prefix Cellar (report-only)",
+      "description": "Installed formulae under ~/.linuxbrew Cellar/opt.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "$HOME/.linuxbrew/Cellar",
+        "$HOME/.linuxbrew/opt",
+        "$HOME/.linuxbrew"
+      ],
+      "native_hints": [
+        "brew uninstall FORMULA",
+        "brew cleanup -s"
+      ],
+      "notes": "Full prefix inventory. Do not bulk-delete Cellar."
+    },
+    {
+      "id": "exotic-asdf-downloads",
+      "name": "asdf plugin downloads and tmp",
+      "description": "asdf download staging and temp (not installed tool versions or plugins).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/.asdf/downloads",
+        "$HOME/.asdf/tmp",
+        "$HOME/.cache/asdf",
+        "$HOME/Library/Caches/asdf"
+      ],
+      "notes": "ASDF_DATA_DIR default ~/.asdf. downloads/ holds plugin-fetched archives before install. Never delete ~/.asdf/plugins or shims."
+    },
+    {
+      "id": "exotic-asdf-installs-report",
+      "name": "asdf installed tool versions (report-only)",
+      "description": "asdf installs tree; report size only.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/.asdf/installs"
+      ],
+      "native_hints": [
+        "asdf list",
+        "asdf uninstall PLUGIN VERSION"
+      ],
+      "notes": "Only remove versions proven unused vs .tool-versions. Keep plugins/shims/config."
+    },
+    {
+      "id": "exotic-mise-cache-downloads",
+      "name": "mise cache and downloads",
+      "description": "mise (ex-rtx) internal cache and plugin download staging.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/.cache/mise",
+        "$HOME/Library/Caches/mise",
+        "$XDG_CACHE_HOME/mise",
+        "$HOME/.local/share/mise/downloads",
+        "$XDG_DATA_HOME/mise/downloads"
+      ],
+      "native_hints": [
+        "mise cache clear",
+        "mise cache prune"
+      ],
+      "notes": "macOS cache default often ~/Library/Caches/mise; data dir ~/.local/share/mise. downloads/ are install staging tarballs; safe to clear."
+    },
+    {
+      "id": "exotic-mise-installs-report",
+      "name": "mise installed tool versions (report-only)",
+      "description": "mise tool installs under data dir; report only.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "default_enabled": false,
+      "report_only": true,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "paths": [
+        "$HOME/.local/share/mise/installs",
+        "$XDG_DATA_HOME/mise/installs"
+      ],
+      "native_hints": [
+        "mise list",
+        "mise uninstall TOOL@VERSION",
+        "mise prune"
+      ],
+      "notes": "Never bulk-delete installs. Prefer mise prune for unused versions. Keep shims and config."
+    }
+  ],
+  "never_touch_reminders": [
+    "$HOME/.config/nix",
+    "$HOME/.config/nix-darwin",
+    "$HOME/.config/home-manager",
+    "$HOME/.config/guix",
+    "$HOME/.asdf/plugins",
+    "$HOME/.asdf/shims",
+    "$HOME/.local/share/mise/shims",
+    "$HOME/.spack/compilers.yaml",
+    "$HOME/.spack/packages.yaml",
+    "$HOME/.spack/config.yaml",
+    "$HOME/.ssh",
+    "$HOME/.gnupg"
+  ],
+  "sources": [
+    "Nix: ~/.cache/nix eval/tarball/fetcher caches; GC via nix-collect-garbage / nix store gc",
+    "nix-darwin: system profiles under /nix/var; user Nix Apps and XDG state leftovers",
+    "home-manager: ~/.local/state/home-manager and nix profiles; expire-generations",
+    "MacPorts: distfiles/software/logs under user prefix or Library/Caches/MacPorts",
+    "pkgsrc unprivileged: ~/pkg LOCALBASE, distfiles/work",
+    "Fink: ~/fink/distfiles, ~/.fink",
+    "Spack: source_cache, stage, misc_cache ~/.spack/cache; spack clean",
+    "Guix: ~/.cache/guix/checkouts; store /gnu/store report-only; guix gc",
+    "conda/mamba: envs report-only; pkgs cleanable; micromamba ~/micromamba/pkgs",
+    "pixi: Library/Caches/rattler with pkgs/repodata/uv-cache/http-cache",
+    "EasyBuild: default ~/.local/easybuild/{sources,build,software,modules}",
+    "linuxbrew: ~/.linuxbrew var/cache/tmp cleanable; Cellar report-only",
+    "asdf: downloads/tmp only; installs report-only",
+    "mise: cache + downloads cleanable; installs report-only"
+  ]
+}

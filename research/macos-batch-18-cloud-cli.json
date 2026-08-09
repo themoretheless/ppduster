@@ -1,0 +1,759 @@
+{
+  "batch": "18-cloud-cli",
+  "platform": "macos",
+  "title": "Cloud CLI caches and regenerable state under $HOME",
+  "notes": "Deploy/platform CLIs, K8s client caches, IaC plugin caches. Prefer contents-only + age gates. NEVER delete long-lived credentials: $HOME/.aws/credentials, $HOME/.aws/config, azureProfile.json / MSAL / TokenCache under .azure, gcloud application_default_credentials / credentials.db / access_tokens.db, kubeconfig, vercel/netlify/render auth.json. sops and age are out of scope (secrets tooling). aws-vault is report-only. Engine never-touch currently prefixes entire $HOME/.aws and $HOME/.config/gcloud; AWS CLI cache paths below are still catalogued for reclaim when safety allowlists narrow to credentials files only. Deeper expansions beyond batch-03: terraform providers/checkpoint, pulumi policies/templates, helm registry, kubectl discovery/http subdirs, krew index/store.",
+  "already_covered_primary": [
+    "$HOME/.aws/cli/cache",
+    "$HOME/.cache/gcloud",
+    "$HOME/Library/Caches/helm",
+    "$HOME/.cache/helm",
+    "$HOME/.local/share/helm",
+    "$HOME/.kube/cache",
+    "$HOME/.cache/kubectl",
+    "$HOME/.pulumi/plugins",
+    "$HOME/.terraform.d/plugin-cache",
+    "$HOME/.terraform.d/providers",
+    "$HOME/Library/Caches/terraform"
+  ],
+  "never_delete": [
+    "$HOME/.aws/credentials",
+    "$HOME/.aws/config",
+    "$HOME/.azure/azureProfile.json",
+    "$HOME/.azure/clouds.config",
+    "$HOME/.azure/config",
+    "$HOME/.azure/msal_token_cache.json",
+    "$HOME/.azure/msal_token_cache.bin",
+    "$HOME/.azure/accessTokens.json",
+    "$HOME/.azure/TokenCache.dat",
+    "$HOME/.config/gcloud/credentials.db",
+    "$HOME/.config/gcloud/application_default_credentials.json",
+    "$HOME/.config/gcloud/access_tokens.db",
+    "$HOME/.kube/config",
+    "$HOME/.sops.yaml",
+    "$HOME/.age",
+    "$HOME/Library/Application Support/com.vercel.cli/auth.json",
+    "$HOME/Library/Preferences/netlify/config.json"
+  ],
+  "path_count": 122,
+  "risk_policy": {
+    "http_discovery_logs_plugin_download_caches": "low or medium, age-gated",
+    "cli_auth_token_files": "report-only or never-touch",
+    "installed_cli_plugins_extensions_binaries": "medium (re-download cost)",
+    "aws_vault_keychain_sessions": "report-only only",
+    "sops_age": "excluded entirely"
+  },
+  "rules": [
+    {
+      "id": "cloud-aws-cli-cache",
+      "name": "AWS CLI temporary credential cache",
+      "description": "Regenerable STS assume-role / process-credential JSON under cli/cache. Not long-lived access keys.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.aws/cli/cache"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Contains short-lived AccessKeyId/SecretAccessKey/SessionToken JSON from assume-role. Re-fetched on next CLI use. NEVER $HOME/.aws/credentials or config. Runtime never-touch may still prefix-block entire .aws until safety is refined."
+    },
+    {
+      "id": "cloud-aws-sso-login-cache-report",
+      "name": "AWS SSO and login token caches (report-only)",
+      "description": "SSO and aws login on-disk token caches; report size only, do not auto-delete.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.aws/sso/cache",
+        "$HOME/.aws/login/cache"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Session/token material. Clearing forces re-auth (aws sso login / aws login). Inventory only. Never credentials or config files."
+    },
+    {
+      "id": "cloud-saml2aws-cache-report",
+      "name": "saml2aws credential cache (report-only)",
+      "description": "saml2aws profile cache under .aws/saml2aws (and optional custom credentials-file).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.aws/saml2aws",
+        "$HOME/.saml2aws.cache"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "SAML assertion / temp AWS creds cache. Report-only; clearing forces re-login. Do not treat as generic junk."
+    },
+    {
+      "id": "cloud-aws-vault-report",
+      "name": "aws-vault sessions and file backend (report-only)",
+      "description": "aws-vault encrypted credential store and session metadata. Keychain backend has no bulk path wipe.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.awsvault",
+        "$HOME/Library/Caches/aws-vault"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Default macOS backend is Keychain (not a disk cache). File backend uses AWS_VAULT_FILE_DIR (~/.awsvault). Sessions are sensitive; report-only only. Prefer aws-vault clear / keychain UI."
+    },
+    {
+      "id": "cloud-azure-cli-logs",
+      "name": "Azure CLI logs",
+      "description": "Azure CLI log_dir default under ~/.azure/logs (command logs, not tokens).",
+      "category": "logs",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.azure/logs",
+        "$HOME/.azure/commands"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Default logging.enable_log_file writes under AZURE_CONFIG_DIR/logs. commands/ holds command inventory cache. Never azureProfile.json, config, clouds.config, TokenCache.dat, msal_token_cache*, accessTokens.json."
+    },
+    {
+      "id": "cloud-azure-cli-telemetry-version",
+      "name": "Azure CLI telemetry and version-check junk",
+      "description": "Telemetry events and version check artifacts under ~/.azure.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.azure/telemetry",
+        "$HOME/.azure/versionCheck.json",
+        "$HOME/.azure/commandIndex.json",
+        "$HOME/.azure/az.sess"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Regenerable CLI housekeeping. Prefer az cache purge for object cache; do not wipe whole ~/.azure."
+    },
+    {
+      "id": "cloud-azure-cli-extensions",
+      "name": "Azure CLI installed extensions",
+      "description": "Dynamically installed az extensions under cliextensions (reinstallable).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/.azure/cliextensions"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "az extension add re-downloads. Medium due to reinstall cost and offline use."
+    },
+    {
+      "id": "cloud-azure-cli-msal-http-cache",
+      "name": "Azure CLI MSAL HTTP cache (not token cache)",
+      "description": "MSAL HTTP response cache files (not msal_token_cache credentials).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.azure/msal_http_cache.bin"
+      ],
+      "delete_mode": "path",
+      "max_depth": 1,
+      "notes": "HTTP layer cache only. Explicitly exclude msal_token_cache.json/bin and TokenCache.dat (auth)."
+    },
+    {
+      "id": "cloud-gcloud-cache",
+      "name": "gcloud CLI user cache",
+      "description": "gcloud / Cloud SDK cache under XDG/Library cache roots (not CLOUDSDK_CONFIG secrets).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.cache/gcloud",
+        "$HOME/Library/Caches/gcloud",
+        "$HOME/Library/Caches/google-cloud-sdk",
+        "$HOME/Library/Caches/Google/Cloud SDK"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Never delete $HOME/.config/gcloud credentials.db, application_default_credentials.json, access_tokens.db, or configurations/. Engine never-touch covers .config/gcloud tree."
+    },
+    {
+      "id": "cloud-gcloud-logs-report",
+      "name": "gcloud CLI logs under config dir (report-only)",
+      "description": "gcloud file logs live under CLOUDSDK_CONFIG/logs (default ~/.config/gcloud/logs).",
+      "category": "logs",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.config/gcloud/logs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Logs are regenerable (max_log_days default 30) but path sits under never-touch .config/gcloud. Prefer gcloud config set core/disable_file_logging or native log GC. Report size only unless safety allowlists logs subpath."
+    },
+    {
+      "id": "cloud-doctl-cache",
+      "name": "doctl DigitalOcean CLI cache and support dirs",
+      "description": "doctl cache/support paths on macOS (config with tokens stays report-only).",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/doctl",
+        "$HOME/.cache/doctl",
+        "$HOME/Library/Caches/com.digitalocean.doctl"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Config/token default is ~/Library/Application Support/doctl/config.yaml (do not delete). Caches only here."
+    },
+    {
+      "id": "cloud-doctl-config-report",
+      "name": "doctl config directory (report-only)",
+      "description": "doctl auth/config store; inventory only.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/doctl",
+        "$HOME/.config/doctl"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Contains API tokens. Never auto-clean."
+    },
+    {
+      "id": "cloud-flyctl-logs-cache",
+      "name": "flyctl agent logs and cache state",
+      "description": "Fly.io flyctl agent logs and regenerable state under ~/.fly (not auth config).",
+      "category": "logs",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.fly/agent-logs",
+        "$HOME/.fly/logs",
+        "$HOME/.fly/cache",
+        "$HOME/Library/Caches/flyctl",
+        "$HOME/Library/Caches/fly"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Keep ~/.fly/config.yml and tokens. ~/.fly/bin is installed binary tree (separate medium rule)."
+    },
+    {
+      "id": "cloud-flyctl-bin-report",
+      "name": "flyctl self-installed binaries (report-only)",
+      "description": "flyctl install script places binaries under ~/.fly/bin.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.fly/bin"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 2,
+      "notes": "Not a cache; reinstall via fly install script. Report only."
+    },
+    {
+      "id": "cloud-heroku-cli-cache",
+      "name": "Heroku CLI caches",
+      "description": "Heroku CLI cache dirs (Library/Caches on macOS, XDG on Linux).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/heroku",
+        "$HOME/.cache/heroku",
+        "$XDG_CACHE_HOME/heroku"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Official reset also removes ~/.local/share/heroku. Caches/logs only here; not netrc auth."
+    },
+    {
+      "id": "cloud-heroku-cli-data",
+      "name": "Heroku CLI client and plugin data",
+      "description": "Self-updating Heroku client tarball and plugins under share/data.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/.local/share/heroku",
+        "$XDG_DATA_HOME/heroku",
+        "$HOME/Library/Application Support/heroku"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "client/ and plugins re-download on next heroku invocation. Medium reinstall cost."
+    },
+    {
+      "id": "cloud-railway-cli",
+      "name": "Railway CLI install and cache",
+      "description": "Railway CLI home under ~/.railway (bin install + local state).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/.railway",
+        "$HOME/Library/Caches/railway",
+        "$HOME/.cache/railway"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "May hold auth token files; prefer deleting only cache/bin subdirs when present. Medium / not default."
+    },
+    {
+      "id": "cloud-render-cli-report",
+      "name": "Render CLI config (report-only)",
+      "description": "Render CLI stores workspace config at ~/.render/cli.yaml (tokens).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.render"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Primary file is cli.yaml with auth. No large public cache documented; report-only."
+    },
+    {
+      "id": "cloud-vercel-cli-cache",
+      "name": "Vercel CLI caches",
+      "description": "Vercel CLI non-auth caches under Library Caches / XDG.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/com.vercel.cli",
+        "$HOME/Library/Caches/vercel",
+        "$HOME/.cache/vercel",
+        "$HOME/.cache/com.vercel.cli"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Auth lives in Application Support/com.vercel.cli (auth.json, config.json) - never delete those as junk."
+    },
+    {
+      "id": "cloud-vercel-cli-auth-report",
+      "name": "Vercel CLI global config (report-only)",
+      "description": "Global Vercel CLI data dir with auth.json and config.json.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/com.vercel.cli",
+        "$HOME/.local/share/com.vercel.cli"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Tokens. Report only."
+    },
+    {
+      "id": "cloud-netlify-cli-report",
+      "name": "Netlify CLI config and logs (report-only / logs)",
+      "description": "Netlify CLI global config (tokens) plus optional log/cache dirs.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Preferences/netlify",
+        "$HOME/.config/netlify",
+        "$HOME/.netlify",
+        "$HOME/Library/Caches/netlify",
+        "$HOME/.cache/netlify"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Primary global config is Preferences/netlify/config.json (auth). CLI has little pure disk cache; inventory only."
+    },
+    {
+      "id": "cloud-supabase-cli-cache",
+      "name": "Supabase CLI home cache",
+      "description": "Supabase CLI places cache/binaries under ~/.supabase.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/.supabase",
+        "$HOME/Library/Caches/supabase",
+        "$HOME/.cache/supabase"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "May include downloaded CLI binaries and temp project tooling. Not project-local supabase/ migrations. Medium."
+    },
+    {
+      "id": "cloud-planetscale-cli-report",
+      "name": "PlanetScale pscale config (report-only)",
+      "description": "pscale config/token store (~/.config/planetscale).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.config/planetscale",
+        "$HOME/Library/Caches/planetscale",
+        "$HOME/Library/Caches/pscale",
+        "$HOME/.cache/pscale"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Default config pscale.yml holds auth. Caches if present are small; report-only for safety."
+    },
+    {
+      "id": "cloud-neonctl-report",
+      "name": "Neon neonctl config (report-only)",
+      "description": "neonctl credentials.json under ~/.config/neonctl.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.config/neonctl",
+        "$HOME/Library/Caches/neonctl",
+        "$HOME/.cache/neonctl"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Auth credentials. Report only."
+    },
+    {
+      "id": "cloud-turso-cli-report",
+      "name": "Turso CLI settings (report-only)",
+      "description": "Turso CLI settings.json under Application Support / XDG config.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/turso",
+        "$HOME/.config/turso",
+        "$HOME/Library/Caches/turso",
+        "$HOME/.cache/turso"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "settings.json holds login state. Report only."
+    },
+    {
+      "id": "cloud-wrangler-cache",
+      "name": "Cloudflare Wrangler caches",
+      "description": "Wrangler global/user caches (not project .wrangler/state with local D1/KV).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.wrangler",
+        "$HOME/.cache/wrangler",
+        "$HOME/Library/Caches/wrangler",
+        "$HOME/Library/Caches/com.cloudflare.wrangler"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Global OAuth may live under ~/.wrangler/config; if present treat as medium/report. Prefer cache subdirs. Project node_modules/.cache/wrangler is project-local (not global rule root)."
+    },
+    {
+      "id": "cloud-terraform-deeper",
+      "name": "Terraform plugin cache and checkpoint (deeper)",
+      "description": "TF plugin-cache, providers, checkpoint cache, and alternate cache roots beyond primary batch-03.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/.terraform.d/plugin-cache",
+        "$HOME/.terraform.d/providers",
+        "$HOME/.terraform.d/checkpoint_cache",
+        "$HOME/.terraform.d/checkpoint_signature",
+        "$HOME/Library/Caches/terraform",
+        "$HOME/.cache/terraform",
+        "$HOME/.cache/opentofu"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "TF_PLUGIN_CACHE_DIR style. Project .terraform/ modules stay out of global rules. OpenTofu may share or use similar home layouts. credentials.tfrc.json is never-touch (not listed)."
+    },
+    {
+      "id": "cloud-pulumi-deeper",
+      "name": "Pulumi plugins policies templates (deeper)",
+      "description": "Pulumi downloaded plugins plus policies and templates under ~/.pulumi.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/.pulumi/plugins",
+        "$HOME/.pulumi/policies",
+        "$HOME/.pulumi/templates",
+        "$HOME/.pulumi/workspaces",
+        "$HOME/Library/Caches/pulumi",
+        "$HOME/.cache/pulumi"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "pulumi plugin rm manages plugins. Do not delete ~/.pulumi/credentials.json or stacks state carelessly. bin/ is language plugins shipped with CLI (report-only separate)."
+    },
+    {
+      "id": "cloud-pulumi-bin-report",
+      "name": "Pulumi CLI bundled bin plugins (report-only)",
+      "description": "Language/policy plugins co-located with Pulumi under ~/.pulumi/bin.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.pulumi/bin"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Part of CLI install layout. Report only."
+    },
+    {
+      "id": "cloud-crossplane-cli-cache",
+      "name": "Crossplane CLI schema cache",
+      "description": "crossplane CLI --cache-dir default ~/.crossplane/cache.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.crossplane/cache",
+        "$HOME/.crossplane"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Schema/package download cache for validation. --clean-cache flag regenerates."
+    },
+    {
+      "id": "cloud-kubectl-cache-deeper",
+      "name": "kubectl discovery and HTTP caches (deeper)",
+      "description": "kubectl --cache-dir default and common subdirs discovery/http.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.kube/cache",
+        "$HOME/.kube/cache/discovery",
+        "$HOME/.kube/cache/http",
+        "$HOME/.kube/http-cache",
+        "$HOME/.cache/kubectl",
+        "$HOME/Library/Caches/kubectl"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "Regenerable OpenAPI/discovery and HTTP caches. NEVER $HOME/.kube/config or custom kubeconfig files."
+    },
+    {
+      "id": "cloud-stern-config-report",
+      "name": "stern config (report-only)",
+      "description": "stern multi-pod log tailer config (no large cache).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.config/stern",
+        "$HOME/Library/Application Support/stern"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 2,
+      "notes": "config.yaml defaults only. No bulk cache; report-only."
+    },
+    {
+      "id": "cloud-k9s-cache",
+      "name": "k9s screen dumps logs and benchmarks",
+      "description": "k9s regenerable dumps/logs/benchmarks (config skins stay).",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.local/state/k9s",
+        "$HOME/Library/Caches/k9s",
+        "$HOME/.cache/k9s",
+        "$HOME/Library/Logs/k9s"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Config under Application Support/k9s is user skins/views (keep). Screen dumps and logs under state/Caches are regenerable. Temp-dir dumps (k9s-screens-*) are host TMPDIR; match via include_globs only if scanner supports temp roots separately.",
+      "include_globs": [
+        "**/k9s-screens-*",
+        "**/k9s*.log"
+      ]
+    },
+    {
+      "id": "cloud-helm-deeper",
+      "name": "Helm repository and registry caches (deeper)",
+      "description": "Helm chart repo indexes and OCI registry caches under HELM_CACHE_HOME.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/Library/Caches/helm",
+        "$HOME/Library/Caches/helm/repository",
+        "$HOME/Library/Caches/helm/registry",
+        "$HOME/.cache/helm",
+        "$HOME/.cache/helm/repository",
+        "$HOME/.cache/helm/registry",
+        "$HOME/.local/share/helm/plugins"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "helm repo update rebuilds indexes. Do not delete repositories.yaml under config. Plugins reinstallable (medium if large)."
+    },
+    {
+      "id": "cloud-krew",
+      "name": "krew kubectl plugin index and store",
+      "description": "krew root: index clones and installed plugin versions (not PATH bin symlinks only).",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/.krew/store",
+        "$HOME/.krew/index",
+        "$HOME/.krew/receipts",
+        "$HOME/.krew/download"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "KREW_ROOT default ~/.krew. Deleting store/index forces reinstall of plugins (kubectl krew install). Keep bin/ on PATH or re-link. Medium."
+    },
+    {
+      "id": "cloud-kustomize-cache",
+      "name": "kustomize plugin and cache dirs",
+      "description": "kustomize XDG cache/plugin locations when present.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/.cache/kustomize",
+        "$HOME/Library/Caches/kustomize",
+        "$HOME/.config/kustomize/plugin",
+        "$HOME/Library/Application Support/kustomize"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "kustomize is mostly project-local; global plugin cache is optional. Safe regenerable if present."
+    },
+    {
+      "id": "cloud-argocd-cli-report",
+      "name": "Argo CD CLI config (report-only)",
+      "description": "argocd login stores server auth under ~/.config/argocd.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.config/argocd",
+        "$HOME/.argocd",
+        "$HOME/Library/Caches/argocd",
+        "$HOME/.cache/argocd"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Auth tokens for argocd CLI. Report only. Cache dirs if any are secondary."
+    },
+    {
+      "id": "cloud-flux-cli",
+      "name": "Flux CLI cache and config leftovers",
+      "description": "flux CLI local cache/check directories when present under home.",
+      "category": "package-cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.flux",
+        "$HOME/.cache/flux",
+        "$HOME/Library/Caches/flux",
+        "$HOME/.cache/fluxcd",
+        "$HOME/Library/Caches/fluxcd"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Flux is mostly cluster-side; CLI may leave small local caches. kubeconfig remains never-touch."
+    }
+  ]
+}

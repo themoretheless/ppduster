@@ -1,0 +1,702 @@
+pack: apps-office-electron
+rules:
+
+  - id: macos-archive-utility-and-unarchivers
+    name: Archive Utility, The Unarchiver, Keka, BetterZip temps/caches
+    description: Built-in Archive Utility and third-party unarchiver caches/temps.
+    category: temp
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 2
+    paths:
+      - $HOME/Library/Caches/com.apple.archiveutility
+      - $HOME/Library/Group Containers/group.com.apple.ArchiveUtility.PKSignedContainer
+      - $HOME/Library/Caches/cx.c3.theunarchiver
+      - $HOME/Library/Caches/com.macpaw.site.theunarchiver
+      - $HOME/Library/Caches/com.aone.keka
+      - $HOME/Library/Caches/com.aone.keka.helper
+      - $HOME/Library/Caches/com.aone.keka.xpc
+      - $HOME/Library/Caches/com.macitbetter.betterzip
+      - $HOME/Library/Caches/com.macitbetter.betterzip.Finder-Extension
+      - $HOME/Library/Logs/Keka
+      - $HOME/Library/Logs/The Unarchiver
+    include_globs:
+      - "com.apple.archiveutility/**"
+      - "Keka*/**"
+      - "The Unarchiver*/**"
+      - "BetterZip*/**"
+      - "Unarchiver*/**"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-chrome-disk-and-apps-cache
+    name: Google Chrome disk cache and Chrome Apps media cache
+    description: Chrome browser disk/GPU/shader caches and platform-app related cache trees; not profile cookies/logins.
+    category: browser-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.google.Chrome
+      - $HOME/Library/Caches/com.google.Chrome.helper
+      - $HOME/Library/Application Support/Google/Chrome/ShaderCache
+      - $HOME/Library/Application Support/Google/Chrome/GrShaderCache
+      - $HOME/Library/Application Support/Google/Chrome/GraphiteDawnCache
+      - $HOME/Library/Application Support/Google/Chrome/Default/GPUCache
+      - $HOME/Library/Application Support/Google/Chrome/Default/Code Cache
+      - $HOME/Library/Application Support/Google/Chrome/Default/Service Worker/CacheStorage
+      - $HOME/Library/Application Support/Google/Chrome/Default/Service Worker/ScriptCache
+      - $HOME/Library/Application Support/Google/Chrome/Chrome Apps.localized
+      - $HOME/Applications/Chrome Apps.localized
+    delete_mode: contents
+    max_depth: 6
+
+  - id: macos-colorsync-user-caches
+    name: ColorSync user caches
+    description: ColorSync display/profile caches under user Caches (not custom ICC profile libraries).
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.apple.ColorSync
+      - $HOME/Library/Caches/com.apple.colorsync.displayservices
+      - $HOME/Library/Caches/com.apple.ColorSyncUtils
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-crash-and-diagnostic-reports
+    name: CrashReporter and DiagnosticReports (user)
+    description: User crash and diagnostic .ips/.crash reports under ~/Library/Logs and Application Support.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/DiagnosticReports/Retired
+      - $HOME/Library/Application Support/CrashReporter
+      - $HOME/Library/Application Support/DiagnosticReports
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-cups-print-leftovers
+    name: CUPS / print job leftovers (user)
+    description: User Printers tree and print-proxy caches; not system /var/spool/cups.
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Printers
+      - $HOME/Library/Caches/com.apple.print.PrinterProxy
+      - $HOME/Library/Caches/com.apple.printingmanager
+      - $HOME/Library/Caches/com.apple.printcenter
+      - $HOME/Library/Caches/com.apple.ipp.ipp-util
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-cursor-caches
+    name: Cursor editor caches (not settings)
+    description: Cursor Electron caches parallel to VS Code; never User/ or ~/.cursor settings.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Cursor/Cache
+      - $HOME/Library/Application Support/Cursor/CachedData
+      - $HOME/Library/Application Support/Cursor/Code Cache
+      - $HOME/Library/Application Support/Cursor/GPUCache
+      - $HOME/Library/Application Support/Cursor/DawnGraphiteCache
+      - $HOME/Library/Application Support/Cursor/DawnWebGPUCache
+      - $HOME/Library/Application Support/Cursor/CachedExtensionVSIXs
+      - $HOME/Library/Application Support/Cursor/logs
+      - $HOME/Library/Application Support/Cursor/Crashpad
+      - $HOME/Library/Caches/com.todesktop.230313mzl4w4u92
+      - $HOME/Library/Caches/com.todesktop.230313mzl4w4u92.ShipIt
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-db-clients-caches
+    name: DB client caches (Compass, RedisInsight, TablePlus, Sequel Ace, Beekeeper)
+    description: Desktop DB tool Electron/NSURL caches and logs; not connection credentials stores.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/MongoDB Compass/Cache
+      - $HOME/Library/Application Support/MongoDB Compass/Code Cache
+      - $HOME/Library/Application Support/MongoDB Compass/GPUCache
+      - $HOME/Library/Application Support/MongoDB Compass/logs
+      - $HOME/Library/Caches/com.mongodb.compass
+      - $HOME/Library/Application Support/RedisInsight/Cache
+      - $HOME/Library/Application Support/RedisInsight/Code Cache
+      - $HOME/Library/Application Support/RedisInsight/GPUCache
+      - $HOME/Library/Application Support/RedisInsight/logs
+      - $HOME/Library/Caches/org.redisdesktop.rds
+      - $HOME/Library/Caches/com.tinyapp.TablePlus
+      - $HOME/Library/Application Support/com.tinyapp.TablePlus/Cache
+      - $HOME/Library/Logs/TablePlus
+      - $HOME/Library/Caches/com.sequel-ace.sequel-ace
+      - $HOME/Library/Logs/Sequel Ace
+      - $HOME/Library/Application Support/beekeeper-studio/Cache
+      - $HOME/Library/Application Support/beekeeper-studio/Code Cache
+      - $HOME/Library/Application Support/beekeeper-studio/GPUCache
+      - $HOME/Library/Application Support/beekeeper-studio/logs
+      - $HOME/Library/Caches/io.beekeeperstudio.desktop
+      - $HOME/Library/Caches/io.beekeeperstudio.desktop.ShipIt
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-dmg-mount-residuals
+    name: Disk image agent caches and TMP dmg residuals
+    description: DiskImages agent caches and temporary dmg extract residuals under user TMPDIR.
+    category: temp
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 2
+    paths:
+      - $HOME/Library/Caches/com.apple.DiskImages.DiskImageAgent
+      - $HOME/Library/Logs/DiskImages
+    include_globs:
+      - "dmg.*"
+      - "dmg.*/**"
+      - "*.dmg.**"
+      - "com.apple.DiskImages*/**"
+      - "TemporaryItems/**/*.dmg"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-docker-desktop-caches-logs
+    name: Docker Desktop Electron caches and host logs
+    description: Docker Desktop UI Electron caches and host/vm log trees. Not VM disk images.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Docker Desktop/Cache
+      - $HOME/Library/Application Support/Docker Desktop/Code Cache
+      - $HOME/Library/Application Support/Docker Desktop/GPUCache
+      - $HOME/Library/Application Support/Docker Desktop/logs
+      - $HOME/Library/Application Support/Docker Desktop/blob_storage
+      - $HOME/Library/Containers/com.docker.docker/Data/log
+      - $HOME/Library/Containers/com.docker.docker/Data/log/host
+      - $HOME/Library/Containers/com.docker.docker/Data/log/vm
+      - $HOME/Library/Caches/com.docker.docker
+      - $HOME/Library/Caches/com.electron.dockerdesktop
+      - $HOME/Library/Caches/com.electron.dockerdesktop.ShipIt
+      - $HOME/Library/Logs/Docker Desktop
+      - $HOME/Library/Logs/DockerDesktop
+    delete_mode: contents
+    max_depth: 6
+
+  - id: macos-docker-desktop-disk-report
+    name: Docker Desktop VM disk images (report-only)
+    description: Docker.raw / Docker.qcow2 host disk images. Inventory only.
+    category: report-only
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw
+      - $HOME/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.qcow2
+      - $HOME/Library/Containers/com.docker.docker/Data/com.docker.driver.amd64-linux/Docker.raw
+      - $HOME/Library/Containers/com.docker.docker/Data/com.docker.driver.amd64-linux/Docker.qcow2
+    delete_mode: path
+    max_depth: 1
+
+  - id: macos-electron-generic-shipit-caches
+    name: Generic Electron/Squirrel ShipIt update caches
+    description: "Common *.ShipIt and known Electron updater cache roots under ~/Library/Caches."
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.electron.dockerdesktop.ShipIt
+      - $HOME/Library/Caches/electron
+      - $HOME/Library/Caches/SquirrelTemp
+    include_globs:
+      - "*.ShipIt/**"
+      - "**/ShipIt/**"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-figma-electron-cache
+    name: Figma desktop Electron caches
+    description: Figma DesktopProfile/Desktop Electron caches; not design files (cloud).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Figma/DesktopProfile
+      - $HOME/Library/Application Support/Figma/Desktop
+      - $HOME/Library/Application Support/Figma/Cache
+      - $HOME/Library/Application Support/Figma/Code Cache
+      - $HOME/Library/Application Support/Figma/GPUCache
+      - $HOME/Library/Caches/com.figma.Desktop
+      - $HOME/Library/Caches/com.figma.Desktop.ShipIt
+      - $HOME/Library/Logs/Figma
+    delete_mode: contents
+    max_depth: 6
+
+  - id: macos-git-clients-caches
+    name: Sourcetree, Tower, GitKraken caches and logs
+    description: Other popular Git GUI caches/logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.torusknot.SourceTreeNotMAS
+      - $HOME/Library/Caches/com.torusknot.SourceTree
+      - $HOME/Library/Application Support/SourceTree/cache
+      - $HOME/Library/Logs/SourceTree
+      - $HOME/Library/Caches/com.fournova.Tower3
+      - $HOME/Library/Caches/com.fournova.Tower2
+      - $HOME/Library/Application Support/com.fournova.Tower3/Cache
+      - $HOME/Library/Logs/com.fournova.Tower3
+      - $HOME/Library/Application Support/GitKraken/Cache
+      - $HOME/Library/Application Support/GitKraken/Code Cache
+      - $HOME/Library/Application Support/GitKraken/GPUCache
+      - $HOME/Library/Application Support/GitKraken/logs
+      - $HOME/Library/Caches/com.axosoft.GitKraken
+      - $HOME/Library/Caches/com.axosoft.GitKraken.ShipIt
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-github-desktop-electron-cache
+    name: GitHub Desktop caches and logs
+    description: GitHub Desktop Electron caches, ShipIt, and logs (not git repos).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/GitHub Desktop/Cache
+      - $HOME/Library/Application Support/GitHub Desktop/Code Cache
+      - $HOME/Library/Application Support/GitHub Desktop/GPUCache
+      - $HOME/Library/Application Support/GitHub Desktop/DawnGraphiteCache
+      - $HOME/Library/Application Support/GitHub Desktop/DawnWebGPUCache
+      - $HOME/Library/Application Support/GitHub Desktop/logs
+      - $HOME/Library/Application Support/GitHub Desktop/blob_storage
+      - $HOME/Library/Caches/com.github.GitHubClient
+      - $HOME/Library/Caches/com.github.GitHubClient.ShipIt
+      - $HOME/Library/Caches/com.github.githubapp
+      - $HOME/Library/Logs/GitHub Desktop
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-google-updater-caches
+    name: Google Updater / Keystone caches
+    description: Google software update caches (Chrome, Drive helpers).
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.google.GoogleUpdater
+      - $HOME/Library/Caches/com.google.Keystone
+      - $HOME/Library/Google/GoogleSoftwareUpdate
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-installer-pkg-dmg-caches
+    name: "Installer leftovers: Caches .pkg/.dmg and Homebrew Cask downloads"
+    description: Downloaded installer media left in user Caches and Homebrew download cache.
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/Homebrew/downloads
+      - $HOME/Library/Caches/Homebrew/Cask
+      - $HOME/Library/Caches/INSTALLATION
+      - $HOME/Library/Caches/com.apple.installer.osinstallersetupd
+      - $HOME/Library/Caches/com.apple.SoftwareUpdate
+    include_globs:
+      - "**/*.pkg"
+      - "**/*.dmg"
+      - "**/*.zip"
+      - "**/*.tar.gz"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: macos-lens-postman-insomnia-caches
+    name: Lens, Postman, Insomnia Electron caches
+    description: API/K8s Electron client caches and ShipIt leftovers.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Lens/Cache
+      - $HOME/Library/Application Support/Lens/Code Cache
+      - $HOME/Library/Application Support/Lens/GPUCache
+      - $HOME/Library/Application Support/Lens/logs
+      - $HOME/Library/Caches/com.electron.kontena-lens
+      - $HOME/Library/Caches/com.electron.kontena-lens.ShipIt
+      - $HOME/Library/Application Support/Postman/Cache
+      - $HOME/Library/Application Support/Postman/Code Cache
+      - $HOME/Library/Application Support/Postman/GPUCache
+      - $HOME/Library/Application Support/Postman/logs
+      - $HOME/Library/Application Support/Postman/blob_storage
+      - $HOME/Library/Caches/com.postmanlabs.mac
+      - $HOME/Library/Caches/com.postmanlabs.mac.ShipIt
+      - $HOME/Library/Application Support/Insomnia/Cache
+      - $HOME/Library/Application Support/Insomnia/Code Cache
+      - $HOME/Library/Application Support/Insomnia/GPUCache
+      - $HOME/Library/Application Support/Insomnia/logs
+      - $HOME/Library/Caches/com.insomnia.app
+      - $HOME/Library/Caches/com.insomnia.app.ShipIt
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-libreoffice-temp-cache
+    name: LibreOffice temp and cache
+    description: LibreOffice user temp and Caches; not full profile (config/templates).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 3
+    paths:
+      - $HOME/Library/Application Support/LibreOffice/4/user/temp
+      - $HOME/Library/Application Support/LibreOffice/5/user/temp
+      - $HOME/Library/Application Support/LibreOffice/6/user/temp
+      - $HOME/Library/Application Support/LibreOffice/7/user/temp
+      - $HOME/Library/Application Support/libreoffice/3/user/temp
+      - $HOME/Library/Caches/LibreOffice
+      - $HOME/Library/Caches/org.libreoffice.script
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-macfuse-caches
+    name: macFUSE / osxfuse caches and logs
+    description: User-level macFUSE caches and logs (not kernel extensions).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/io.macfuse
+      - $HOME/Library/Caches/io.macfuse.filesystems.osxfusefs
+      - $HOME/Library/Caches/com.github.osxfuse.OSXFUSE
+      - $HOME/Library/Logs/macFUSE
+      - $HOME/Library/Logs/osxfuse
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-notion-electron-cache
+    name: Notion and Notion Calendar Electron caches
+    description: Notion desktop caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Notion/Cache
+      - $HOME/Library/Application Support/Notion/Code Cache
+      - $HOME/Library/Application Support/Notion/GPUCache
+      - $HOME/Library/Application Support/Notion/DawnGraphiteCache
+      - $HOME/Library/Application Support/Notion/DawnWebGPUCache
+      - $HOME/Library/Application Support/Notion/logs
+      - $HOME/Library/Application Support/Notion/blob_storage
+      - $HOME/Library/Application Support/Notion Calendar/Cache
+      - $HOME/Library/Application Support/Notion Calendar/Code Cache
+      - $HOME/Library/Application Support/Notion Calendar/GPUCache
+      - $HOME/Library/Caches/notion.id
+      - $HOME/Library/Caches/notion.id.ShipIt
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-obsidian-electron-cache
+    name: Obsidian Electron caches
+    description: Obsidian desktop Chromium caches; never vault files or obsidian.json config.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/obsidian/Cache
+      - $HOME/Library/Application Support/obsidian/Code Cache
+      - $HOME/Library/Application Support/obsidian/GPUCache
+      - $HOME/Library/Application Support/obsidian/DawnGraphiteCache
+      - $HOME/Library/Application Support/obsidian/DawnWebGPUCache
+      - $HOME/Library/Application Support/obsidian/blob_storage
+      - $HOME/Library/Caches/md.obsidian
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-office-addin-wef-cache
+    name: Microsoft Office add-in / OsfWebHost / WEF cache
+    description: Office JS add-in web host and WEF package caches (regenerable; clears sideloaded add-ins).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.Microsoft.OsfWebHost/Data
+      - $HOME/Library/Containers/com.microsoft.Word/Data/Documents/wef
+      - $HOME/Library/Containers/com.microsoft.Excel/Data/Documents/wef
+      - $HOME/Library/Containers/com.microsoft.Powerpoint/Data/Documents/wef
+      - $HOME/Library/Containers/com.microsoft.Word/Data/Library/Application Support/Microsoft/Office/16.0/Wef
+      - $HOME/Library/Containers/com.microsoft.Excel/Data/Library/Application Support/Microsoft/Office/16.0/Wef
+      - $HOME/Library/Containers/com.microsoft.Powerpoint/Data/Library/Application Support/Microsoft/Office/16.0/Wef
+      - $HOME/Library/Containers/com.microsoft.Office365ServiceV2/Data/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: macos-office-font-cache-legacy
+    name: Microsoft Office font cache (legacy prefs)
+    description: Legacy Office Font Cache files under Preferences/Microsoft (not user font files).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Preferences/Microsoft/Office Font Cache
+      - $HOME/Library/Preferences/Microsoft/Office 2008/Office Font Cache
+      - $HOME/Library/Preferences/Microsoft/Office 2011/Office Font Cache
+    delete_mode: path
+    max_depth: 1
+
+  - id: macos-office-mau-and-bundle-caches
+    name: "Microsoft AutoUpdate and com.microsoft.* Caches"
+    description: "MAU clones/update caches and loose com.microsoft.* cache bundles under ~/Library/Caches."
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.microsoft.autoupdate2
+      - $HOME/Library/Caches/com.microsoft.autoupdate.helper
+      - $HOME/Library/Caches/com.microsoft.office.licensingV2.helper
+      - $HOME/Library/Caches/com.microsoft.Word
+      - $HOME/Library/Caches/com.microsoft.Excel
+      - $HOME/Library/Caches/com.microsoft.Powerpoint
+      - $HOME/Library/Caches/com.microsoft.Outlook
+      - $HOME/Library/Caches/com.microsoft.onenote.mac
+      - $HOME/Library/Caches/Microsoft
+      - $HOME/Library/Caches/com.microsoft.teams
+      - $HOME/Library/Caches/com.microsoft.teams2
+      - $HOME/Library/Caches/com.microsoft.OneDrive
+      - $HOME/Library/Caches/com.microsoft.OneDriveStandaloneUpdater
+      - $HOME/Library/Caches/com.microsoft.edgemac
+      - $HOME/Library/Caches/Microsoft Edge
+      - $HOME/Library/Caches/com.microsoft.EdgeUpdater
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-office-teams-electron-cache
+    name: Microsoft Teams Electron caches and logs
+    description: Classic and new Teams desktop Chromium caches and log trees (not chat history stores).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 5
+    paths:
+      - $HOME/Library/Application Support/Microsoft/Teams/Cache
+      - $HOME/Library/Application Support/Microsoft/Teams/Code Cache
+      - $HOME/Library/Application Support/Microsoft/Teams/GPUCache
+      - $HOME/Library/Application Support/Microsoft/Teams/blob_storage
+      - $HOME/Library/Application Support/Microsoft/Teams/logs
+      - $HOME/Library/Application Support/Microsoft/Teams/Service Worker/CacheStorage
+      - $HOME/Library/Application Support/Microsoft Teams/Cache
+      - $HOME/Library/Application Support/Microsoft Teams/Code Cache
+      - $HOME/Library/Application Support/Microsoft Teams/GPUCache
+      - $HOME/Library/Application Support/Microsoft Teams/logs
+      - $HOME/Library/Logs/Microsoft Teams
+      - $HOME/Library/Logs/Microsoft
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-office-word-excel-ppt-caches
+    name: Microsoft Office app container caches
+    description: Word/Excel/PowerPoint/Outlook/OneNote sandbox Library/Caches (not documents).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.microsoft.Word/Data/Library/Caches
+      - $HOME/Library/Containers/com.microsoft.Excel/Data/Library/Caches
+      - $HOME/Library/Containers/com.microsoft.Powerpoint/Data/Library/Caches
+      - $HOME/Library/Containers/com.microsoft.Outlook/Data/Library/Caches
+      - $HOME/Library/Containers/com.microsoft.onenote.mac/Data/Library/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: macos-preview-caches
+    name: Preview app caches
+    description: Preview container and bundle caches (not PDF documents).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.Preview/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.Preview/Data/tmp
+      - $HOME/Library/Caches/com.apple.Preview
+      - $HOME/Library/Caches/com.apple.quicklook.ui.helper
+      - $HOME/Library/Caches/com.apple.QuickLookDaemon
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-qbittorrent-logs
+    name: qBittorrent logs and cache
+    description: qBittorrent log files and URL cache; not torrent content or .torrent files.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/qBittorrent/logs
+      - $HOME/Library/Caches/org.qbittorrent.qBittorrent
+      - $HOME/Library/Caches/com.qbittorrent.qBittorrent
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-quicktime-media-caches
+    name: QuickTime Player and media playback caches
+    description: QuickTime Player X and related media caches (not Movies library).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.QuickTimePlayerX
+      - $HOME/Library/Containers/com.apple.QuickTimePlayerX/Data/Library/Caches
+      - $HOME/Library/Caches/com.apple.AppleMediaServices
+      - $HOME/Library/Caches/com.apple.MediaPlayer
+    delete_mode: contents
+    max_depth: 5
+
+  - id: macos-textedit-autosave-careful
+    name: TextEdit autosave leftovers (careful)
+    description: "TextEdit autosave and TemporaryItems. May hold unsaved documents: medium / close app first."
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Containers/com.apple.TextEdit/Data/Library/Autosave Information
+      - $TMPDIR/TemporaryItems/(A Document Being Saved By TextEdit)
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-transmission-incomplete-report
+    name: Transmission incomplete downloads (report-only)
+    description: "Transmission incomplete download directory: may contain wanted partial torrents."
+    category: report-only
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Application Support/Transmission/Incomplete
+      - $HOME/Library/Application Support/Transmission/incomplete
+      - $HOME/Library/Caches/org.m0k.transmission
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-user-font-caches
+    name: User font caches (not font files)
+    description: ATS/FontRegistry/iWork font caches under user Caches; never ~/Library/Fonts.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.apple.FontRegistry
+      - $HOME/Library/Caches/com.apple.ATS
+      - $HOME/Library/Caches/com.apple.iwork.fonts
+      - $HOME/Library/Caches/com.apple.amsengagementd.fonts
+      - $HOME/Library/Caches/com.apple.fontd
+    delete_mode: contents
+    max_depth: 4
+
+  - id: macos-user-package-receipts
+    name: User-level package receipts
+    description: Rare per-user Installer receipts under ~/Library/Receipts (not /var/db/receipts).
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 90
+    paths:
+      - $HOME/Library/Receipts
+    include_globs:
+      - "*.bom"
+      - "*.plist"
+    delete_mode: contents
+    max_depth: 2
+
+  - id: macos-vscode-caches
+    name: VS Code / Code Insiders caches (not settings)
+    description: Electron/Chromium and VS Code CachedData/extension VSIX caches and logs; never User/.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Application Support/Code/Cache
+      - $HOME/Library/Application Support/Code/CachedData
+      - $HOME/Library/Application Support/Code/Code Cache
+      - $HOME/Library/Application Support/Code/GPUCache
+      - $HOME/Library/Application Support/Code/DawnGraphiteCache
+      - $HOME/Library/Application Support/Code/DawnWebGPUCache
+      - $HOME/Library/Application Support/Code/CachedExtensionVSIXs
+      - $HOME/Library/Application Support/Code/CachedProfilesData
+      - $HOME/Library/Application Support/Code/CachedConfigurations
+      - $HOME/Library/Application Support/Code/logs
+      - $HOME/Library/Application Support/Code/Crashpad
+      - $HOME/Library/Application Support/Code - Insiders/Cache
+      - $HOME/Library/Application Support/Code - Insiders/CachedData
+      - $HOME/Library/Application Support/Code - Insiders/Code Cache
+      - $HOME/Library/Application Support/Code - Insiders/GPUCache
+      - $HOME/Library/Application Support/Code - Insiders/CachedExtensionVSIXs
+      - $HOME/Library/Application Support/Code - Insiders/logs
+      - $HOME/Library/Application Support/Code - Insiders/Crashpad
+      - $HOME/Library/Caches/com.microsoft.VSCode
+      - $HOME/Library/Caches/com.microsoft.VSCode.ShipIt
+      - $HOME/Library/Caches/com.microsoft.VSCodeInsiders
+      - $HOME/Library/Caches/com.microsoft.VSCodeInsiders.ShipIt
+    delete_mode: contents
+    max_depth: 5

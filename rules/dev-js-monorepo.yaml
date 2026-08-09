@@ -1,0 +1,478 @@
+pack: dev-js-monorepo
+rules:
+
+  - id: js-biome-rome-cache
+    name: Biome and Rome toolchain caches
+    description: Biome (Rome fork) daemon logs/caches under ~/.cache/biome; legacy Rome under ~/.cache/rome. Never Apple Library/Biome.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/biome
+      - $XDG_CACHE_HOME/biome
+      - $HOME/.cache/rome
+      - $XDG_CACHE_HOME/rome
+      - "$HOME/Library/Caches/@biomejs"
+      - $HOME/Library/Caches/biomejs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-bun-deeper
+    name: Bun install cache and global residuals
+    description: Bun global module cache and install-side residuals under ~/.bun and Library/Caches/Bun.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.bun/install/global/cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: js-bun-global-packages-report
+    name: Bun global packages (report-only)
+    description: Globally installed Bun packages under install/global; report size only.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.bun/install/global
+    delete_mode: path
+    max_depth: 4
+
+  - id: js-changesets-cache
+    name: Changesets tool caches under home
+    description: "Optional @changesets CLI caches when stored under XDG/Library cache roots (not project .changeset)."
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.cache/changesets
+      - $HOME/Library/Caches/changesets
+      - $XDG_CACHE_HOME/changesets
+    delete_mode: contents
+    max_depth: 4
+
+  - id: js-chromatic-cache
+    name: Chromatic CLI caches
+    description: Chromatic publish/CLI residual caches under home cache directories.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/chromatic
+      - $HOME/Library/Caches/chromatic
+      - $XDG_CACHE_HOME/chromatic
+    delete_mode: contents
+    max_depth: 4
+
+  - id: js-corepack-cache
+    name: Corepack package-manager cache
+    description: Corepack COREPACK_HOME default ~/.cache/node/corepack (and legacy ~/.node/corepack).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.cache/node/corepack
+      - $XDG_CACHE_HOME/node/corepack
+      - $HOME/.node/corepack
+      - $HOME/Library/Caches/node/corepack
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-cypress-residual
+    name: Cypress binary cache residuals
+    description: Cypress binary cache default macOS ~/Library/Caches/Cypress and Linux-style ~/.cache/Cypress.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.cache/Cypress
+      - $XDG_CACHE_HOME/Cypress
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-deno-deeper
+    name: Deno DENO_DIR deeper subtrees
+    description: Deno module, npm-compat, gen, and deps caches under Library/Caches/deno and ~/.deno residuals.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $XDG_CACHE_HOME/deno
+      - $HOME/.deno/npm
+      - $HOME/.deno/deps
+    delete_mode: contents
+    max_depth: 6
+
+  - id: js-electron-download-deeper
+    name: Electron download and electron-gyp deeper caches
+    description: Electron binary download caches, electron-builder artifacts, and electron-gyp native rebuild headers.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.electron
+      - $HOME/.electron-gyp
+      - $XDG_CACHE_HOME/electron
+      - $XDG_CACHE_HOME/electron-builder
+    delete_mode: contents
+    max_depth: 6
+
+  - id: js-esbuild-residual
+    name: esbuild binary and residual caches
+    description: esbuild downloaded binary/transform caches under XDG and Library residual paths.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/esbuild
+      - $XDG_CACHE_HOME/esbuild
+    delete_mode: contents
+    max_depth: 4
+
+  - id: js-fnm-residual
+    name: fnm residual caches
+    description: fnm residual download/cache trees under home when separate from full node-versions store; multi-shell temp not under home.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.local/share/fnm/node-versions
+      - $HOME/.fnm/node-versions
+      - $HOME/Library/Caches/fnm
+      - $HOME/.cache/fnm
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-jest-cache-home
+    name: Jest dependency caches under home
+    description: Jest cacheDirectory when relocated under home cache roots or residual jest dirs under Library/Caches (default is often OS temp).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/.cache/jest
+      - $HOME/Library/Caches/jest
+      - $XDG_CACHE_HOME/jest
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-lerna-home-cache
+    name: Lerna home / Nx-backed caches
+    description: Lerna 6+ computation cache via Nx-style home or dedicated lerna cache dirs under known cache roots.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/lerna
+      - $HOME/Library/Caches/lerna
+      - $XDG_CACHE_HOME/lerna
+      - $HOME/.lerna
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-mochawesome-cache-home
+    name: mochawesome residual under home caches
+    description: Mochawesome report assets/caches only if stored under known home cache roots (not project reports).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/mochawesome
+      - $HOME/Library/Caches/mochawesome
+      - $XDG_CACHE_HOME/mochawesome
+    delete_mode: contents
+    max_depth: 4
+
+  - id: js-n-residual
+    name: n (tj/n) version cache residual
+    description: User-prefix n installs when N_PREFIX=$HOME/.n; cache of downloaded Node versions under versions.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.n/n/versions
+      - $HOME/.n/n/cache
+      - $HOME/.n/cache
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-node-gyp-residual
+    name: node-gyp residual headers caches
+    description: node-gyp headers/objects residual under home and Library caches.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $XDG_CACHE_HOME/node-gyp
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-nvs-cache
+    name: nvs Node version residual
+    description: NVS_HOME default ~/.nvs download/cache trees (not shell integration scripts alone).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.nvs/cache
+      - $HOME/.nvs/.cache
+      - $HOME/.nvs/node
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-nx-home-cache-deeper
+    name: Nx home computation and daemon caches
+    description: Nx global home cache, workspace-data, and daemon state when NX_CACHE_DIRECTORY / home layout uses ~/.nx (not project .nx).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.nx/workspace-data
+      - $HOME/.nx
+      - $HOME/Library/Caches/nx
+      - $XDG_CACHE_HOME/nx
+    delete_mode: contents
+    max_depth: 6
+
+  - id: js-parcel-cache-home
+    name: Parcel caches under home
+    description: Parcel filesystem caches when relocated under home cache roots (default project .parcel-cache is out of scope).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/parcel
+      - $HOME/Library/Caches/parcel
+      - $XDG_CACHE_HOME/parcel
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-playwright-residual
+    name: Playwright browser download residuals
+    description: ms-playwright browser binaries and related WebKit/Electron playwright caches under home.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $XDG_CACHE_HOME/ms-playwright
+      - $HOME/Library/Caches/ms-playwright-go
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-pnpm-side-caches-deeper
+    name: pnpm metadata dlx and state side caches
+    description: pnpm cacheDir (metadata, dlx, verification) and stateDir; not the shared content-addressable store.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $XDG_CACHE_HOME/pnpm
+      - $HOME/.pnpm-state
+      - $HOME/.local/state/pnpm
+      - $XDG_STATE_HOME/pnpm
+      - $HOME/Library/pnpm/.tools
+    delete_mode: contents
+    max_depth: 6
+
+  - id: js-pnpm-store-report
+    name: pnpm shared store (report-only)
+    description: Content-addressable store; deleting breaks hardlinked node_modules until re-fetch.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - $XDG_DATA_HOME/pnpm/store
+    delete_mode: path
+    max_depth: 3
+
+  - id: js-puppeteer-cache-residual
+    name: Puppeteer browser cache residual
+    description: Puppeteer Chromium download cache under home (companion to Playwright/Cypress).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Caches/puppeteer
+      - $XDG_CACHE_HOME/puppeteer
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-rush-global-folder
+    name: Rush global folder
+    description: "Rush RUSH_GLOBAL_FOLDER default ~/.rush: rush-lib engine installs and shared package-manager bits (not per-repo common/temp)."
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.rush
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-size-limit-cache
+    name: size-limit caches
+    description: size-limit comparison/build caches under home cache roots.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/size-limit
+      - $HOME/Library/Caches/size-limit
+      - $XDG_CACHE_HOME/size-limit
+    delete_mode: contents
+    max_depth: 4
+
+  - id: js-storybook-cache-home
+    name: Storybook caches under home
+    description: Storybook manager/builder caches when under home cache roots (not project node_modules/.cache/storybook walk).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/storybook
+      - $HOME/Library/Caches/storybook
+      - $XDG_CACHE_HOME/storybook
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-swc-cache-home
+    name: SWC plugin and transform caches
+    description: SWC experimental cacheRoot and plugin wasm caches under home cache dirs (not project .swc unless under known cache root).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/swc
+      - $HOME/Library/Caches/swc
+      - $XDG_CACHE_HOME/swc
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-turbo-deeper
+    name: Turborepo daemon and home task caches
+    description: Turbo home daemon sockets/logs and task cache trees outside project .turbo.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $XDG_CACHE_HOME/turbo
+    delete_mode: contents
+    max_depth: 6
+
+  - id: js-vitest-cache-home
+    name: Vitest caches under home
+    description: Vitest/Vite-related transform caches when stored under home cache directories.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/.cache/vitest
+      - $HOME/Library/Caches/vitest
+      - $XDG_CACHE_HOME/vitest
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-volta-residual
+    name: Volta download cache residuals
+    description: Volta tool download cache and tmp (not bin shims or pinned tools inventory).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.volta/log
+    delete_mode: contents
+    max_depth: 5
+
+  - id: js-volta-tools-report
+    name: Volta installed tools (report-only)
+    description: Volta-managed Node/Yarn/npm tool installs; report only.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.volta/tools
+      - $HOME/.volta/bin
+    delete_mode: path
+    max_depth: 4
+
+  - id: js-yarn-berry-global-folder
+    name: Yarn Berry globalFolder residuals
+    description: Yarn 2+ default globalFolder ~/.yarn/berry beyond primary cache (metadata, indexes, mirror-style side data).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.yarn/berry/metadata
+      - $HOME/.yarn/berry/index
+      - $HOME/.yarn/berry
+    exclude_globs:
+      - "**/global/**"
+    delete_mode: contents
+    max_depth: 6

@@ -1,0 +1,513 @@
+pack: apps-mdm-enterprise
+rules:
+
+  - id: edr-carbon-black-user-logs
+    name: Carbon Black user residual logs/caches
+    description: User Library residual for Carbon Black / Broadcom sensor UI if present.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/CarbonBlack
+      - $HOME/Library/Logs/VMware Carbon Black
+      - $HOME/Library/Logs/com.vmware.carbonblack
+      - $HOME/Library/Caches/com.vmware.carbonblack.cloud.se-agent
+      - $HOME/Library/Caches/com.broadcom.carbonblack.daemon
+    delete_mode: contents
+    max_depth: 5
+
+  - id: edr-crowdstrike-user-residual
+    name: CrowdStrike Falcon user residual caches/logs
+    description: Rare user-level Falcon helper caches/logs if present.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/CrowdStrike
+      - $HOME/Library/Logs/Falcon
+      - $HOME/Library/Caches/com.crowdstrike.falcon.Agent
+    delete_mode: contents
+    max_depth: 5
+
+  - id: edr-fleet-desktop-logs
+    name: Fleet Desktop and orbit user logs
+    description: Fleet Desktop log files and orbit stderr under user Logs (fleetd user-facing agent).
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Fleet
+      - $HOME/Library/Logs/fleet-desktop
+      - $HOME/Library/Logs/Orbit
+      - $HOME/Library/Caches/com.fleetdm.orbit
+      - $HOME/Library/Caches/com.fleetdm.fleet-desktop
+    include_globs:
+      - "**/*"
+      - "**/fleet-desktop.log"
+      - "**/orbit*.log"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: edr-kolide-user-residual
+    name: Kolide launcher user residual
+    description: User-visible Kolide/1Password device trust residual caches and logs.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Kolide
+      - $HOME/Library/Logs/kolide-launcher
+      - $HOME/Library/Caches/com.kolide.launcher
+      - $HOME/Library/Caches/com.kolide.agent
+    delete_mode: contents
+    max_depth: 5
+
+  - id: edr-osquery-user-logs
+    name: osquery user logs and extensions residual
+    description: User-writable osquery logs when configured under home, plus common cache residual.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/osquery
+      - $HOME/.osquery
+      - $HOME/Library/Caches/io.osquery.agent
+      - $HOME/Library/Logs/orbit
+    exclude_globs:
+      - "**/osquery.db"
+      - "**/osquery.db/**"
+      - "**/secret*"
+      - "**/enroll*"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: edr-sentinelone-user-logs-caches
+    name: SentinelOne user logs and caches
+    description: User-visible SentinelOne helper logs/caches; agent core is system.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/SentinelOne
+      - $HOME/Library/Logs/sentinelone
+      - $HOME/Library/Caches/com.sentinelone.sentineld-helper
+      - $HOME/Library/Caches/com.sentinelone.sentinel-helper
+    delete_mode: contents
+    max_depth: 5
+
+  - id: epm-cyberark-user-logs-caches
+    name: CyberArk EPM user logs and caches
+    description: CyberArk Endpoint Privilege Manager UI logs and caches; support zips may be user-owned under temp.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/CyberArk
+      - $HOME/Library/Logs/CyberArkEPM
+      - $HOME/Library/Caches/com.cyberark.CyberArkEPMUI
+      - $HOME/Library/HTTPStorages/com.cyberark.CyberArkEPMUI
+      - $HOME/Library/Saved Application State/com.cyberark.CyberArkEPMUI.savedState
+    delete_mode: contents
+    max_depth: 6
+
+  - id: idp-duo-desktop-config-report
+    name: Duo Desktop Application Support config (report-only)
+    description: Duo Desktop non-cache Application Support residual.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Duo Desktop
+      - $HOME/Library/Application Support/com.duosecurity.duo-desktop
+    exclude_globs:
+      - logs
+      - "logs/**"
+      - Cache
+      - "Cache/**"
+      - Caches
+      - "Caches/**"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: idp-duo-desktop-logs-caches
+    name: Duo Desktop logs and caches
+    description: Duo Desktop (Device Health) diagnostic logs and app caches.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Duo Desktop
+      - $HOME/Library/Logs/Duo
+      - $HOME/Library/Caches/com.duosecurity.duo-desktop
+      - $HOME/Library/Caches/com.duosecurity.Duo-Desktop
+      - $HOME/Library/HTTPStorages/com.duosecurity.duo-desktop
+      - $HOME/Library/WebKit/com.duosecurity.duo-desktop
+      - $HOME/Library/Application Support/Duo Desktop/logs
+      - $HOME/Library/Application Support/Duo Desktop/Cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: idp-microsoft-authenticator-residual
+    name: Microsoft Authenticator residual (desktop)
+    description: Rare Mac residual caches/logs for Authenticator or related MS account helpers.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.microsoft.Authenticator
+      - $HOME/Library/Logs/Microsoft Authenticator
+      - $HOME/Library/Containers/com.microsoft.Authenticator/Data/Library/Caches
+      - $HOME/Library/Containers/com.microsoft.Authenticator/Data/Library/Logs
+    delete_mode: contents
+    max_depth: 8
+
+  - id: idp-okta-verify-logs-caches
+    name: Okta Verify desktop logs and caches
+    description: Okta Verify macOS shared group container logs and app caches.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Group Containers/B7F62B65BN.group.okta.macverify.shared/Logs
+      - $HOME/Library/Logs/Okta
+      - $HOME/Library/Logs/Okta Verify
+      - $HOME/Library/Caches/com.okta.mobile
+      - $HOME/Library/Caches/com.okta.mobile.auth-service-extension
+      - $HOME/Library/HTTPStorages/com.okta.mobile
+      - $HOME/Library/WebKit/com.okta.mobile
+    delete_mode: contents
+    max_depth: 6
+
+  - id: idp-okta-verify-support-report
+    name: Okta Verify Application Support residual (report-only)
+    description: Okta Verify Application Support may hold device registration residual.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Okta
+      - $HOME/Library/Application Support/com.okta.mobile
+      - $HOME/Library/Group Containers/B7F62B65BN.group.okta.macverify.shared
+    exclude_globs:
+      - Logs
+      - "Logs/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mdm-addigy-user-logs-caches
+    name: Addigy user-visible logs and caches
+    description: User Library residual for Addigy tray/UI if present; package/collector data is system-side.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Addigy
+      - $HOME/Library/Caches/com.addigy.menu
+      - $HOME/Library/Caches/com.addigy.Agent
+      - $HOME/Library/HTTPStorages/com.addigy.menu
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mdm-apple-configurator-support-report
+    name: Apple Configurator Application Support residual (report-only)
+    description: Configurator blueprints, device info caches, and support data that may include device serials.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/com.apple.configurator
+      - $HOME/Library/Application Support/Apple Configurator
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mdm-apple-configurator-user
+    name: Apple Configurator user caches and logs
+    description: Apple Configurator 2 UI caches, logs, and container caches for admins who run Configurator locally.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.apple.configurator.xpc.Devices
+      - $HOME/Library/Logs/Apple Configurator
+      - $HOME/Library/Logs/com.apple.configurator
+      - $HOME/Library/Containers/com.apple.configurator.ui/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.configurator.ui/Data/Library/Logs
+    delete_mode: contents
+    max_depth: 8
+
+  - id: mdm-enrollment-profiles-report
+    name: Enrollment profile residual (report-only)
+    description: User-level enrollment/profile install leftovers and profile tool caches; not system enrollment DB.
+    category: system-data
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Preferences/com.apple.ManagedClient.plist
+      - $HOME/Library/Preferences/com.apple.mdmclient.plist
+    delete_mode: path
+    max_depth: 1
+
+  - id: mdm-generic-enterprise-agent-logs
+    name: Generic enterprise agent user log folders
+    description: Common catch-all user log directories for MDM/security agents.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Logs/MDM
+      - $HOME/Library/Logs/Enterprise
+      - $HOME/Library/Logs/Security Agent
+    delete_mode: contents
+    max_depth: 5
+
+  - id: mdm-intune-company-portal-caches
+    name: Company Portal caches and WebKit
+    description: Company Portal Mac caches, HTTPStorages, WebKit, and container caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.microsoft.CompanyPortalMac
+      - $HOME/Library/Caches/com.microsoft.CompanyPortal
+      - $HOME/Library/HTTPStorages/com.microsoft.CompanyPortalMac
+      - $HOME/Library/WebKit/com.microsoft.CompanyPortalMac
+      - $HOME/Library/Containers/com.microsoft.CompanyPortalMac/Data/Library/Caches
+      - $HOME/Library/Containers/com.microsoft.CompanyPortalMac/Data/Library/Logs
+    delete_mode: contents
+    max_depth: 8
+
+  - id: mdm-intune-company-portal-residual-report
+    name: Company Portal Application Support residual (report-only)
+    description: User Application Support and group containers for Company Portal / Intune identity residual.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/Company Portal
+      - $HOME/Library/Application Support/com.microsoft.CompanyPortalMac
+      - $HOME/Library/Group Containers/UBF8T346G9.com.microsoft.intuneoofplugin
+      - $HOME/Library/Group Containers/UBF8T346G9.OfficeOneDriveSyncIntegration
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mdm-intune-user-logs
+    name: Microsoft Intune / Company Portal user logs
+    description: IntuneMDMAgent and Company Portal logs under user Library/Logs.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Microsoft/Intune
+      - $HOME/Library/Logs/Company Portal
+      - $HOME/Library/Logs/Microsoft/Company Portal
+    delete_mode: contents
+    max_depth: 5
+
+  - id: mdm-jamf-selfservice-caches
+    name: Jamf Self Service caches and WebKit
+    description: User caches, HTTPStorages, WebKit, and ShipIt leftovers for Jamf Self Service bundle IDs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.jamfsoftware.selfservice.mac
+      - $HOME/Library/Caches/com.jamf.selfservice
+      - $HOME/Library/Caches/com.jamf.management.Jamf
+      - $HOME/Library/HTTPStorages/com.jamfsoftware.selfservice.mac
+      - $HOME/Library/WebKit/com.jamfsoftware.selfservice.mac
+      - $HOME/Library/WebKit/com.jamf.selfservice
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mdm-jamf-selfservice-logs
+    name: Jamf Self Service user logs
+    description: Self Service / Self Service+ debug and app logs under user Library/Logs/JAMF.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/JAMF
+      - $HOME/Library/Logs/Jamf
+    delete_mode: contents
+    max_depth: 5
+
+  - id: mdm-jamf-selfservice-saved-state
+    name: Jamf Self Service saved application state
+    description: Window restoration state for Jamf Self Service.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Saved Application State/com.jamfsoftware.selfservice.mac.savedState
+      - $HOME/Library/Saved Application State/com.jamf.selfservice.savedState
+    delete_mode: contents
+    max_depth: 4
+
+  - id: mdm-jumpcloud-user-logs-caches
+    name: JumpCloud agent tray user logs and caches
+    description: JumpCloud menu/tray user logs and caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/JumpCloud
+      - $HOME/Library/Logs/JumpCloud-Menu
+      - $HOME/Library/Caches/com.jumpcloud.jcagent-tray
+      - $HOME/Library/Caches/com.jumpcloud.JumpCloud-Menu
+      - $HOME/Library/HTTPStorages/com.jumpcloud.jcagent-tray
+      - $HOME/Library/WebKit/com.jumpcloud.JumpCloud-Menu
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mdm-kandji-user-logs-caches
+    name: Kandji menu/self-service user logs and caches
+    description: User-level Kandji Menu / Self Service logs and bundle caches when present.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Kandji
+      - $HOME/Library/Caches/io.kandji.Kandji-Menu
+      - $HOME/Library/Caches/io.kandji.Self-Service
+      - $HOME/Library/Caches/io.kandji.Legacy
+      - $HOME/Library/HTTPStorages/io.kandji.Kandji-Menu
+      - $HOME/Library/HTTPStorages/io.kandji.Self-Service
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mdm-managed-preferences-user-report
+    name: User Managed Preferences / profile payload residual (report-only)
+    description: Per-user Managed Preferences and ConfigurationProfiles residual reflecting MDM payloads.
+    category: system-data
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Managed Preferences
+      - $HOME/Library/ConfigurationProfiles
+    delete_mode: contents
+    max_depth: 5
+
+  - id: mdm-managedclient-user-logs
+    name: ManagedClient / mdmclient user-visible logs
+    description: Any user-copied ManagedClient logs or mdmclient debug exports under user Logs.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Logs/ManagedClient
+      - $HOME/Library/Logs/mdmclient
+    delete_mode: contents
+    max_depth: 4
+
+  - id: mdm-mosyle-user-logs-caches
+    name: Mosyle Business user logs and caches
+    description: Mosyle Business/manager user logs, caches, HTTPStorages.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Mosyle
+      - $HOME/Library/Logs/Mosyle Business
+      - $HOME/Library/Caches/com.mosyle.macos.business
+      - $HOME/Library/Caches/business.mosyle.mdm
+      - $HOME/Library/HTTPStorages/com.mosyle.macos.business
+      - $HOME/Library/WebKit/com.mosyle.macos.business
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mdm-workspace-one-hub-logs-caches
+    name: Workspace ONE Intelligent Hub user logs and caches
+    description: AirWatch / Omnissa Intelligent Hub user logs, caches, WebKit, HTTPStorages.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Intelligent Hub
+      - $HOME/Library/Logs/AirWatch
+      - $HOME/Library/Logs/Workspace ONE Intelligent Hub
+      - $HOME/Library/Caches/com.air-watch.mac.agent
+      - $HOME/Library/Caches/com.airwatch.mac.agent
+      - $HOME/Library/Caches/com.vmware.hub.mac
+      - $HOME/Library/HTTPStorages/com.vmware.hub.mac
+      - $HOME/Library/WebKit/com.vmware.hub.mac
+      - $HOME/Library/WebKit/com.air-watch.mac.agent
+    delete_mode: contents
+    max_depth: 6
+
+  - id: mdm-workspace-one-hub-saved-state
+    name: Workspace ONE Hub saved state
+    description: Saved application state for Intelligent Hub / AirWatch agent UI.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Saved Application State/com.vmware.hub.mac.savedState
+      - $HOME/Library/Saved Application State/com.air-watch.mac.agent.savedState
+    delete_mode: contents
+    max_depth: 4

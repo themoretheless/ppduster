@@ -1,0 +1,721 @@
+pack: macos-containers
+rules:
+
+  - id: alacritty-kitty-caches-logs
+    name: Alacritty and Kitty caches and logs
+    description: GPU terminal emulator residual caches/logs. Not config files.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/org.alacritty
+      - $HOME/Library/Caches/alacritty
+      - $HOME/Library/Logs/alacritty
+      - $HOME/Library/Caches/net.kovidgoyal.kitty
+      - $HOME/Library/Caches/kitty
+      - $HOME/Library/Logs/kitty
+      - $HOME/Library/Saved Application State/org.alacritty.savedState
+      - $HOME/Library/Saved Application State/net.kovidgoyal.kitty.savedState
+    delete_mode: contents
+    max_depth: 5
+
+  - id: apple-archiveutility-residual
+    name: Archive Utility residual caches and ops
+    description: Archive Utility container Caches/Logs/tmp and PKSigned unarchive operations temp.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 3
+    paths:
+      - $HOME/Library/Containers/com.apple.archiveutility/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.archiveutility/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.archiveutility/Data/tmp
+      - $HOME/Library/Group Containers/group.com.apple.ArchiveUtility.PKSignedContainer/PKSignedContainer-UnarchiveOperations
+      - $HOME/Library/Group Containers/group.com.apple.ArchiveUtility.PKSignedContainer/Library/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: apple-automator-scripteditor-residual
+    name: Automator and Script Editor residual caches
+    description: Automator and Script Editor Caches/Logs/tmp and host Caches bundles.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.Automator/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.Automator/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.Automator/Data/tmp
+      - $HOME/Library/Containers/com.apple.ScriptEditor2/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.ScriptEditor2/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.ScriptEditor2/Data/tmp
+      - $HOME/Library/Caches/com.apple.Automator
+      - $HOME/Library/Caches/com.apple.ScriptEditor2
+      - $HOME/Library/Caches/com.apple.ScriptEditor.idlesleepprevention
+      - $HOME/Library/Logs/Automator
+      - $HOME/Library/Logs/Script Editor
+    delete_mode: contents
+    max_depth: 5
+
+  - id: apple-calculator-caches
+    name: Calculator residual caches
+    description: Calculator app container Caches/tmp/HTTPStorages and host Caches bundle.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.calculator/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.calculator/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.calculator/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.calculator/Data/tmp
+      - $HOME/Library/Containers/com.apple.calculator.CalculatorWidget/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.calculator.CalculatorWidget/Data/tmp
+      - $HOME/Library/Caches/com.apple.calculator
+    delete_mode: contents
+    max_depth: 6
+
+  - id: apple-chess-stickies-grapher-caches
+    name: Chess, Stickies, Grapher residual caches
+    description: Built-in Chess/Stickies/Grapher Caches/Logs/tmp only.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.Chess/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.Chess/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.Chess/Data/tmp
+      - $HOME/Library/Caches/com.apple.Chess
+      - $HOME/Library/Containers/com.apple.Stickies/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.Stickies/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.Stickies/Data/tmp
+      - $HOME/Library/Caches/com.apple.Stickies
+      - $HOME/Library/Containers/com.apple.grapher/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.grapher/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.grapher/Data/tmp
+      - $HOME/Library/Caches/com.apple.grapher
+      - $HOME/Library/Saved Application State/com.apple.Chess.savedState
+      - $HOME/Library/Saved Application State/com.apple.Stickies.savedState
+      - $HOME/Library/Saved Application State/com.apple.grapher.savedState
+    delete_mode: contents
+    max_depth: 5
+
+  - id: apple-clock-worldclock-caches
+    name: Clock and World Clock residual caches
+    description: Clock app, World Clock widget, and mobiletimerd residual caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.clock/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.clock/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.clock/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.clock/Data/tmp
+      - $HOME/Library/Containers/com.apple.clock.WorldClockWidget/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.clock.WorldClockWidget/Data/tmp
+      - $HOME/Library/Containers/com.apple.mobiletimer.ClockAppIntents/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.mobiletimer-framework.MobileTimerIntents/Data/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.mobiletimerd/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.mobiletimerd/Library/Logs
+      - $HOME/Library/Caches/com.apple.clock
+      - $HOME/Library/Caches/com.apple.mobiletimer
+    delete_mode: contents
+    max_depth: 5
+
+  - id: apple-console-activitymonitor-caches
+    name: Console and Activity Monitor residual
+    description: Console and Activity Monitor Caches/Logs/tmp residual.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.apple.Console
+      - $HOME/Library/Caches/com.apple.ActivityMonitor
+      - $HOME/Library/Logs/Console
+      - $HOME/Library/Containers/com.apple.Console/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.Console/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.Console/Data/tmp
+      - $HOME/Library/Containers/com.apple.ActivityMonitor/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.ActivityMonitor/Data/tmp
+      - $HOME/Library/Saved Application State/com.apple.Console.savedState
+      - $HOME/Library/Saved Application State/com.apple.ActivityMonitor.savedState
+    delete_mode: contents
+    max_depth: 5
+
+  - id: apple-diskutility-sysinfo-caches
+    name: Disk Utility and System Information residual
+    description: Disk Utility and System Profiler residual caches/logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.apple.DiskUtility
+      - $HOME/Library/Caches/com.apple.SystemProfiler
+      - $HOME/Library/Caches/com.apple.systempreferences
+      - $HOME/Library/Containers/com.apple.DiskUtility/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.DiskUtility/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.DiskUtility/Data/tmp
+      - $HOME/Library/Containers/com.apple.SystemProfiler/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.SystemProfiler/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.SystemProfiler.AboutExtension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.SystemProfiler.AboutExtension/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.SystemProfiler.AboutExtension/Data/tmp
+      - $HOME/Library/Saved Application State/com.apple.DiskUtility.savedState
+      - $HOME/Library/Saved Application State/com.apple.SystemProfiler.savedState
+    delete_mode: contents
+    max_depth: 5
+
+  - id: apple-fontbook-residual-caches
+    name: Font Book residual caches
+    description: Font Book container and host residual caches. Not user font files.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.FontBook/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.FontBook/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.FontBook/Data/tmp
+      - $HOME/Library/Caches/com.apple.FontBook
+      - $HOME/Library/Saved Application State/com.apple.FontBook.savedState
+    delete_mode: contents
+    max_depth: 5
+
+  - id: apple-freeform-residual-caches
+    name: Freeform residual caches only
+    description: Freeform container Caches/Logs/tmp/HTTPStorages. Never board documents.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.freeform/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.freeform/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.freeform/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.freeform/Data/Library/WebKit
+      - $HOME/Library/Containers/com.apple.freeform/Data/tmp
+      - $HOME/Library/Containers/com.apple.freeform.sharingextension/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.freeform.USDRendererExtension/Data/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.freeform/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.freeform/Library/Logs
+      - $HOME/Library/Caches/com.apple.freeform
+    delete_mode: contents
+    max_depth: 6
+
+  - id: apple-home-residual-caches
+    name: Home residual caches only
+    description: Home app residual Caches/HTTPStorages/tmp. Never HomeKit configuration.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.Home/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.Home/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.Home/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.Home/Data/Library/WebKit
+      - $HOME/Library/Containers/com.apple.Home/Data/tmp
+      - $HOME/Library/Containers/com.apple.Home.HomeWidget.Interactive/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.Home.HomeEnergyWidgets/Data/Library/Caches
+      - $HOME/Library/Group Containers/com.apple.Home.group/Library/Caches
+      - $HOME/Library/Group Containers/com.apple.Home.group/Library/Logs
+      - $HOME/Library/Caches/com.apple.Home
+      - $HOME/Library/Caches/com.apple.HomeKit
+    delete_mode: contents
+    max_depth: 6
+
+  - id: apple-journal-residual-caches
+    name: Journal residual caches only
+    description: Journal app Caches/Logs/tmp residual. Never journal entries or media.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.journal/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.journal/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.journal/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.journal/Data/Library/WebKit
+      - $HOME/Library/Containers/com.apple.journal/Data/tmp
+      - $HOME/Library/Containers/com.apple.journal.widgets/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.journal.widgets.secure/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.journal.JournalShareExtension/Data/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.Journal/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.Journal/Library/Logs
+      - $HOME/Library/Caches/com.apple.journal
+    delete_mode: contents
+    max_depth: 6
+
+  - id: apple-news-container-caches
+    name: News container and group residual caches
+    description: Apple News article image and HTTP caches under container/group.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.news/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.news/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.news/Data/Library/WebKit
+      - $HOME/Library/Containers/com.apple.news/Data/tmp
+      - $HOME/Library/Containers/com.apple.news.widget/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.news.articlenotificationextension/Data/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.news/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.newsd/Library/Caches
+      - $HOME/Library/Caches/com.apple.news
+      - $HOME/Library/Caches/com.apple.newsd
+    delete_mode: contents
+    max_depth: 6
+
+  - id: apple-passwords-residual-caches
+    name: Passwords.app residual caches only
+    description: Passwords residual Caches/HTTPStorages/tmp. Never credentials or vault data.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.Passwords/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.Passwords/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.Passwords/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.Passwords/Data/tmp
+      - $HOME/Library/Containers/com.apple.Passwords.MenuBarExtra/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.Passwords.MenuBarExtra/Data/tmp
+      - $HOME/Library/Containers/com.apple.PasswordManagerBrowserExtensionHelper/Data/Library/Caches
+      - $HOME/Library/Caches/com.apple.Passwords
+    delete_mode: contents
+    max_depth: 5
+
+  - id: apple-preview-autosave-careful
+    name: Preview autosave leftovers (careful)
+    description: Preview Autosave Information. May hold unsaved document state.
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Containers/com.apple.Preview/Data/Library/Autosave Information
+    delete_mode: contents
+    max_depth: 4
+
+  - id: apple-preview-deeper-residual
+    name: Preview deeper residual caches
+    description: Preview container Caches/tmp/Logs/HTTPStorages/WebKit plus host QuickLook helpers.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.Preview/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.Preview/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.Preview/Data/Library/WebKit
+      - $HOME/Library/Caches/com.apple.quicklook.QuickLookUIService
+      - $HOME/Library/Containers/com.apple.quicklook.ui.helper/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.quicklook.QuickLookUIService/Data/Library/Caches
+      - $HOME/Library/Group Containers/com.apple.PreviewLegacySignaturesConversion/Library/Caches
+      - $HOME/Library/Saved Application State/com.apple.Preview.savedState
+    delete_mode: contents
+    max_depth: 6
+
+  - id: apple-quicktime-residual-caches
+    name: QuickTime Player residual caches
+    description: QuickTime Player X container and host media playback caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.QuickTimePlayerX/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.QuickTimePlayerX/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.QuickTimePlayerX/Data/tmp
+      - $HOME/Library/Saved Application State/com.apple.QuickTimePlayerX.savedState
+    delete_mode: contents
+    max_depth: 5
+
+  - id: apple-screenshot-residual-caches
+    name: Screenshot app residual caches
+    description: Screenshot launcher/control residual Caches/tmp. Not user screenshot files.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.controls.screenshot/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.controls.screenshot/Data/tmp
+      - $HOME/Library/Containers/com.apple.screenshot.launcher/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.screenshot.launcher/Data/tmp
+      - $HOME/Library/Caches/com.apple.screencaptureui
+      - $HOME/Library/Caches/com.apple.screenshot.launcher
+      - $HOME/Library/Group Containers/group.com.apple.screencapture/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.screencapture/Library/Logs
+    exclude_globs:
+      - ScreenRecordings
+      - "ScreenRecordings/**"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: apple-shortcuts-residual-caches
+    name: Shortcuts residual caches and logs
+    description: Shortcuts runtime Caches/Logs/tmp. Never saved workflows.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.shortcuts/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.shortcuts/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.shortcuts/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.shortcuts/Data/tmp
+      - $HOME/Library/Containers/com.apple.shortcuts.Run-Workflow/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.shortcuts.ShortcutsWidget/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.shortcuts.ThumbnailExtension/Data/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.shortcuts/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.shortcuts/Library/Logs
+      - $HOME/Library/Group Containers/group.is.workflow.shortcuts/Library/Caches
+      - $HOME/Library/Group Containers/group.is.workflow.my.app/Library/Caches
+      - $HOME/Library/Caches/com.apple.shortcuts
+      - $HOME/Library/Caches/com.apple.WorkflowKit.BackgroundShortcutRunner
+    delete_mode: contents
+    max_depth: 6
+
+  - id: apple-stocks-container-caches
+    name: Stocks container and group residual caches
+    description: Stocks quote/chart caches; not watchlist preferences as wipe target.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.stocks/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.stocks/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.stocks/Data/Library/WebKit
+      - $HOME/Library/Containers/com.apple.stocks/Data/tmp
+      - $HOME/Library/Containers/com.apple.stocks.widget/Data/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.stocks/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.stocks-news/Library/Caches
+      - $HOME/Library/Caches/com.apple.stocks
+      - $HOME/Library/Caches/com.apple.stocks.widget
+    exclude_globs:
+      - CloudKit
+      - "CloudKit/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: apple-terminal-residual-caches
+    name: Terminal.app residual caches and logs
+    description: Terminal host Caches/Logs and container residual if present. Not shell history.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.apple.Terminal
+      - $HOME/Library/Logs/Terminal
+      - $HOME/Library/Containers/com.apple.Terminal/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.Terminal/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.Terminal/Data/tmp
+      - $HOME/Library/Saved Application State/com.apple.Terminal.savedState
+    delete_mode: contents
+    max_depth: 5
+
+  - id: apple-textedit-autosave-careful
+    name: TextEdit autosave leftovers (careful)
+    description: TextEdit Autosave Information and TemporaryItems document stubs.
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Containers/com.apple.TextEdit/Data/Library/Autosave Information
+      - $TMPDIR/TemporaryItems/(A Document Being Saved By TextEdit)
+    delete_mode: contents
+    max_depth: 4
+
+  - id: apple-textedit-residual-caches
+    name: TextEdit residual caches
+    description: TextEdit container Caches/Logs/tmp residual (not autosave).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.TextEdit/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.TextEdit/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.TextEdit/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.TextEdit/Data/tmp
+      - $HOME/Library/Caches/com.apple.TextEdit
+      - $HOME/Library/Saved Application State/com.apple.TextEdit.savedState
+    delete_mode: contents
+    max_depth: 5
+
+  - id: apple-voicememos-residual-caches
+    name: Voice Memos residual caches only
+    description: Voice Memos Caches/HTTPStorages/tmp. Never recordings library.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Containers/com.apple.VoiceMemos/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.VoiceMemos/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.VoiceMemos/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.VoiceMemos/Data/tmp
+      - $HOME/Library/Containers/com.apple.VoiceMemos.RecordWidget/Data/Library/Caches
+      - $HOME/Library/Caches/com.apple.VoiceMemos
+      - $HOME/Library/Group Containers/group.com.apple.VoiceMemos.shared/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.VoiceMemos.shared/Library/Logs
+    exclude_globs:
+      - Recordings
+      - "Recordings/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: apple-weather-container-caches
+    name: Weather container and group residual caches
+    description: Weather tiles/HTTP caches under container and weather group Library/Caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.apple.weather/Data/Library/HTTPStorages
+      - $HOME/Library/Containers/com.apple.weather/Data/Library/Logs
+      - $HOME/Library/Containers/com.apple.weather/Data/Library/WebKit
+      - $HOME/Library/Containers/com.apple.weather/Data/tmp
+      - $HOME/Library/Containers/com.apple.weather.widget/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.weather.menu/Data/Library/Caches
+      - $HOME/Library/Containers/com.apple.weather.WeatherIntents/Data/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.weather/Library/Caches
+      - $HOME/Library/Group Containers/group.com.apple.weather/Library/Logs
+      - $HOME/Library/Caches/com.apple.weather
+      - $HOME/Library/Caches/com.apple.weatherd
+    exclude_globs:
+      - CloudKit
+      - "CloudKit/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: containers-httpstorages-host-residual
+    name: Host HTTPStorages for utility bundle IDs
+    description: User Library/HTTPStorages residual for common utility bundle IDs.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/HTTPStorages/com.apple.calculator
+      - $HOME/Library/HTTPStorages/com.apple.weather
+      - $HOME/Library/HTTPStorages/com.apple.stocks
+      - $HOME/Library/HTTPStorages/com.apple.news
+      - $HOME/Library/HTTPStorages/com.apple.freeform
+      - $HOME/Library/HTTPStorages/com.apple.journal
+      - $HOME/Library/HTTPStorages/com.apple.Passwords
+      - $HOME/Library/HTTPStorages/com.apple.shortcuts
+      - $HOME/Library/HTTPStorages/com.apple.Preview
+      - $HOME/Library/HTTPStorages/com.apple.QuickTimePlayerX
+      - $HOME/Library/HTTPStorages/com.apple.TextEdit
+      - $HOME/Library/HTTPStorages/com.apple.Home
+      - $HOME/Library/HTTPStorages/com.apple.VoiceMemos
+      - $HOME/Library/HTTPStorages/com.apple.clock
+      - $HOME/Library/HTTPStorages/com.apple.FontBook
+      - $HOME/Library/HTTPStorages/com.apple.Terminal
+      - $HOME/Library/HTTPStorages/com.googlecode.iterm2
+      - $HOME/Library/HTTPStorages/dev.warp.Warp-Stable
+    delete_mode: contents
+    max_depth: 4
+
+  - id: containers-orphaned-saved-state-utils
+    name: Utility apps Saved Application State residual
+    description: Saved Application State for common utilities (window restore junk).
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Saved Application State/com.apple.calculator.savedState
+      - $HOME/Library/Saved Application State/com.apple.weather.savedState
+      - $HOME/Library/Saved Application State/com.apple.stocks.savedState
+      - $HOME/Library/Saved Application State/com.apple.news.savedState
+      - $HOME/Library/Saved Application State/com.apple.freeform.savedState
+      - $HOME/Library/Saved Application State/com.apple.journal.savedState
+      - $HOME/Library/Saved Application State/com.apple.Passwords.savedState
+      - $HOME/Library/Saved Application State/com.apple.shortcuts.savedState
+      - $HOME/Library/Saved Application State/com.apple.Automator.savedState
+      - $HOME/Library/Saved Application State/com.apple.ScriptEditor2.savedState
+      - $HOME/Library/Saved Application State/com.apple.FontBook.savedState
+      - $HOME/Library/Saved Application State/com.apple.archiveutility.savedState
+      - $HOME/Library/Saved Application State/com.apple.Home.savedState
+      - $HOME/Library/Saved Application State/com.apple.clock.savedState
+      - $HOME/Library/Saved Application State/com.apple.VoiceMemos.savedState
+    delete_mode: contents
+    max_depth: 3
+
+  - id: containers-webkit-host-residual-utils
+    name: Host WebKit residual for utility apps
+    description: Library/WebKit process dirs for utility bundle IDs if present.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/WebKit/com.apple.news
+      - $HOME/Library/WebKit/com.apple.stocks
+      - $HOME/Library/WebKit/com.apple.weather
+      - $HOME/Library/WebKit/com.apple.freeform
+      - $HOME/Library/WebKit/com.apple.journal
+      - $HOME/Library/WebKit/com.apple.Home
+      - $HOME/Library/WebKit/com.apple.Preview
+      - $HOME/Library/WebKit/com.apple.shortcuts
+      - $HOME/Library/WebKit/com.apple.Passwords
+    delete_mode: contents
+    max_depth: 5
+
+  - id: group-containers-inventory-report
+    name: Group Containers inventory (report-only)
+    description: Inventory Group Containers sizes. Document/shared-data groups are not wipe targets.
+    category: report-only
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Group Containers
+    delete_mode: contents
+    max_depth: 2
+
+  - id: group-containers-pattern-caches-logs
+    name: Group Containers Caches and Logs pattern
+    description: Library/Caches and Library/Logs under app groups only.
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Group Containers
+    include_globs:
+      - "*/Library/Caches/**"
+      - "*/Library/Logs/**"
+    exclude_globs:
+      - com.apple.messages
+      - "com.apple.messages/**"
+      - group.com.apple.mail
+      - "group.com.apple.mail/**"
+      - group.com.apple.calendar
+      - "group.com.apple.calendar/**"
+      - group.com.apple.notes
+      - "group.com.apple.notes/**"
+      - com.apple.MailPersonaStorage
+      - "com.apple.MailPersonaStorage/**"
+      - "group.com.apple.Photos*"
+      - "group.com.apple.Photos*/**"
+      - com.apple.bird
+      - "com.apple.bird/**"
+      - group.com.apple.CloudDocs
+      - "group.com.apple.CloudDocs/**"
+      - group.com.apple.VoiceMemos.shared
+      - "group.com.apple.VoiceMemos.shared/**"
+      - group.com.apple.freeform
+      - "group.com.apple.freeform/**"
+      - group.com.apple.Journal
+      - "group.com.apple.Journal/**"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: hyper-fig-caches-logs
+    name: Hyper and Fig residual caches
+    description: Hyper Electron caches and Fig/Codex-era Fig residual caches/logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/co.zeit.hyper
+      - $HOME/Library/Caches/Hyper
+      - $HOME/Library/Application Support/Hyper/Cache
+      - $HOME/Library/Application Support/Hyper/Code Cache
+      - $HOME/Library/Application Support/Hyper/GPUCache
+      - $HOME/Library/Application Support/Hyper/logs
+      - $HOME/Library/Logs/Hyper
+      - $HOME/Library/Caches/com.fig.desktop
+      - $HOME/Library/Caches/com.withfig.fig
+      - $HOME/Library/Caches/fig
+      - $HOME/Library/Application Support/fig/logs
+      - $HOME/Library/Application Support/fig/Cache
+      - $HOME/Library/Logs/fig
+      - $HOME/Library/Logs/com.fig.desktop
+    delete_mode: contents
+    max_depth: 5
+
+  - id: iterm2-caches-logs
+    name: iTerm2 caches and logs
+    description: iTerm2 disk caches and log directory. Not DynamicProfiles or prefs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.googlecode.iterm2
+      - $HOME/Library/Logs/iTerm2
+      - $HOME/Library/Application Support/iTerm2/logs
+      - $HOME/Library/Application Support/iTerm2/Cache
+      - $HOME/Library/Saved Application State/com.googlecode.iterm2.savedState
+    delete_mode: contents
+    max_depth: 5
+
+  - id: warp-terminal-caches-logs
+    name: Warp terminal caches and logs
+    description: Warp Stable/Preview caches and logs under Caches and Application Support.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/dev.warp.Warp-Stable
+      - $HOME/Library/Caches/dev.warp.Warp-Preview
+      - $HOME/Library/Logs/dev.warp.Warp-Stable
+      - $HOME/Library/Logs/dev.warp.Warp-Preview
+      - $HOME/Library/Application Support/dev.warp.Warp-Stable/cache
+      - $HOME/Library/Application Support/dev.warp.Warp-Stable/logs
+      - $HOME/Library/Application Support/dev.warp.Warp-Preview/cache
+      - $HOME/Library/Application Support/dev.warp.Warp-Preview/logs
+      - $HOME/Library/Saved Application State/dev.warp.Warp-Stable.savedState
+    delete_mode: contents
+    max_depth: 6

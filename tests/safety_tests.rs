@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn bin() -> PathBuf {
@@ -69,4 +70,55 @@ fn clean_without_yes_is_dry_run() {
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Dry-run") || stderr.contains("dry-run") || true);
+}
+
+#[test]
+fn extended_rule_packs_are_quarantined_report_only() {
+    #[derive(serde::Deserialize)]
+    struct RuleFile {
+        rules: Vec<RuleSafety>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RuleSafety {
+        id: String,
+        risk: String,
+        default_enabled: bool,
+    }
+
+    const REVIEWED_CORE_PACKS: &[&str] = &[
+        "apps.yaml",
+        "dev.yaml",
+        "linux.yaml",
+        "macos.yaml",
+        "windows.yaml",
+    ];
+    let rules_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("rules");
+    for entry in fs::read_dir(&rules_dir).expect("read rules directory") {
+        let path = entry.expect("read rule entry").path();
+        if path.extension().and_then(|value| value.to_str()) != Some("yaml") {
+            continue;
+        }
+        let name = path.file_name().and_then(|value| value.to_str()).unwrap();
+        if REVIEWED_CORE_PACKS.contains(&name) {
+            continue;
+        }
+        let contents = fs::read_to_string(&path).expect("read extended rule pack");
+        let pack: RuleFile = serde_yaml::from_str(&contents).expect("parse extended rule pack");
+        for rule in pack.rules {
+            assert_eq!(
+                rule.risk,
+                "report-only",
+                "{} rule {} must remain report-only until path-level review",
+                path.display(),
+                rule.id
+            );
+            assert!(
+                !rule.default_enabled,
+                "{} rule {} must remain disabled until path-level review",
+                path.display(),
+                rule.id
+            );
+        }
+    }
 }

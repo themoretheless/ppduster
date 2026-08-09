@@ -1,0 +1,645 @@
+{
+  "batch": "28-pwa-helpers",
+  "platform_focus": "macos",
+  "path_count": 136,
+  "notes": "Browser helpers, PWA/app residuals, and browser automation tooling caches under $HOME on macOS. Focus: Chrome Apps residuals, Edge/WebView residual leaves, Electron Fiddle, NW.js, CEF samples, browser pickers (Browserosaurus/Choosy/Velja/OpenIn/Default Browser), Safari Technology Preview + WebKit nightlies, deeper Playwright/Puppeteer/Cypress binary trees, Selenium/WebdriverIO drivers, BrowserStack Local / Sauce Connect / LambdaTest Underpass tunnels, Lighthouse CI and PageSpeed residual caches. Excludes cookies, Login Data, History, Bookmarks, keychains, whole browser profiles, and project test artifacts (cypress/videos, playwright-report). Prefer quit-app-first for Electron helpers and browsers. Deeper leaves extend shallow coverage already present in batch-03 (ms-playwright/Cypress roots) and batch-07 (Chrome Apps.localized).",
+  "sources": [
+    "Playwright docs: ~/Library/Caches/ms-playwright browser binary layout (chromium/firefox/webkit/ffmpeg/headless_shell revision folders)",
+    "Puppeteer docs: ~/.cache/puppeteer Chrome for Testing + chrome-headless-shell (v19+)",
+    "Cypress advanced install: ~/Library/Caches/Cypress binary cache; Application Support/Logs residual",
+    "Selenium Manager: ~/.cache/selenium drivers and browsers; Python webdriver-manager ~/.wdm",
+    "WebdriverIO BrowserStack service: ~/.browserstack local binary cache",
+    "Homebrew cask zap: electron-fiddle, nwjs, browserosaurus, choosy, openin, safari-technology-preview, browserstacklocal",
+    "CEF docs: macOS default ~/Library/Application Support/CEF/User Data cache_path roots",
+    "LambdaTest Underpass docs: ~/Library/Application Support/Underpass/logs",
+    "Live host: ms-playwright chromium/ffmpeg/webkit revision dirs; org.webkit.Playwright; Microsoft EdgeUpdater caches"
+  ],
+  "rules": [
+    {
+      "id": "macos-chrome-apps-pwa-residuals",
+      "name": "Chrome Apps and installed PWA shortcut residuals",
+      "description": "Legacy Chrome Apps.localized trees and channel-local PWA/app shortcut bundles under user Applications and Application Support. Regenerable after reinstalling PWAs from chrome://apps.",
+      "category": "browser-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Applications/Chrome Apps.localized",
+        "$HOME/Library/Application Support/Google/Chrome/Chrome Apps.localized",
+        "$HOME/Library/Application Support/Google/Chrome Beta/Chrome Apps.localized",
+        "$HOME/Library/Application Support/Google/Chrome Dev/Chrome Apps.localized",
+        "$HOME/Library/Application Support/Google/Chrome Canary/Chrome Apps.localized",
+        "$HOME/Library/Application Support/Google/Chrome for Testing/Chrome Apps.localized",
+        "$HOME/Library/Application Support/Chromium/Chrome Apps.localized"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Removes desktop/Dock PWA wrappers only. Does not wipe browser profiles, cookies, or extensions. User may need to re-install PWAs."
+    },
+    {
+      "id": "macos-edge-webview-residuals",
+      "name": "Edge WebView / EdgeUpdater residual caches",
+      "description": "Microsoft Edge embedded WebView-style residual folders and EdgeUpdater package caches on macOS. App-scoped EBWebView trees when present under Application Support.",
+      "category": "browser-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/com.microsoft.EdgeUpdater",
+        "$HOME/Library/Caches/Microsoft Edge WebView",
+        "$HOME/Library/Application Support/Microsoft/EdgeUpdater",
+        "$HOME/Library/Application Support/Microsoft Edge/EBWebView",
+        "$HOME/Library/Application Support/Microsoft Edge Beta/EBWebView",
+        "$HOME/Library/Application Support/Microsoft Edge Dev/EBWebView",
+        "$HOME/Library/Application Support/Microsoft Edge Canary/EBWebView",
+        "$HOME/Library/Application Support/zoom.us/data/Webview2Cache"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/Code Cache/**",
+        "**/GPUCache/**",
+        "**/ShaderCache/**",
+        "**/GrShaderCache/**",
+        "**/DawnCache/**",
+        "**/component_crx_cache/**",
+        "**/*.tmp",
+        "**/logs/**"
+      ],
+      "exclude_globs": [
+        "**/Cookies*",
+        "**/Login Data*",
+        "**/Preferences",
+        "**/Local State"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "report_only": false,
+      "notes": "WebView2 is primarily Windows; macOS residuals still appear via EdgeUpdater and some Microsoft embeds. Prefer include_globs so host app profiles outside cache leaves stay intact."
+    },
+    {
+      "id": "macos-electron-fiddle-caches",
+      "name": "Electron Fiddle caches and fiddle-core downloads",
+      "description": "Electron Fiddle electron version downloads (fiddle-core), app cache, HTTP storage, and logs. Large regenerable binary cache for experimenting with Electron versions.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/Library/Caches/fiddle-core",
+        "$HOME/Library/Caches/com.electron.fiddle",
+        "$HOME/Library/Caches/com.electron.fiddle.ShipIt",
+        "$HOME/Library/HTTPStorages/com.electron.fiddle",
+        "$HOME/Library/Logs/Electron Fiddle",
+        "$HOME/Library/Saved Application State/com.electron.fiddle.savedState"
+      ],
+      "include_globs": [],
+      "exclude_globs": [],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Does not delete Application Support/Electron Fiddle project list (user fiddles). fiddle-core re-downloads Electron versions on demand."
+    },
+    {
+      "id": "macos-nwjs-caches",
+      "name": "NW.js caches and residual app data",
+      "description": "NW.js (node-webkit) SDK sample/app caches under Library Caches and Application Support.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/Library/Caches/nwjs",
+        "$HOME/Library/Caches/io.nwjs.nwjs",
+        "$HOME/Library/Application Support/nwjs",
+        "$HOME/Library/Saved Application State/io.nwjs.nwjs.savedState"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/Code Cache/**",
+        "**/GPUCache/**",
+        "**/ShaderCache/**",
+        "**/blob_storage/**",
+        "**/logs/**"
+      ],
+      "exclude_globs": [
+        "**/Local Storage/**",
+        "**/IndexedDB/**",
+        "**/Cookies*"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 7,
+      "report_only": false,
+      "notes": "Medium: Application Support may hold sample app state. Prefer cache leaves via include_globs."
+    },
+    {
+      "id": "macos-cef-samples-caches",
+      "name": "CEF sample and user-data caches",
+      "description": "Chromium Embedded Framework default user-data and cefclient/cefsimple sample caches on macOS.",
+      "category": "browser-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/Library/Application Support/CEF",
+        "$HOME/Library/Application Support/CEF/User Data",
+        "$HOME/Library/Application Support/cef_user_data",
+        "$HOME/Library/Application Support/cefclient",
+        "$HOME/Library/Application Support/cefsimple",
+        "$HOME/Library/Caches/CEF",
+        "$HOME/Library/Caches/cef_user_data",
+        "$HOME/Library/Caches/org.cef.cefclient",
+        "$HOME/Library/Caches/org.cef.cefsimple"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/Code Cache/**",
+        "**/GPUCache/**",
+        "**/ShaderCache/**",
+        "**/GrShaderCache/**",
+        "**/DawnCache/**",
+        "**/blob_storage/**"
+      ],
+      "exclude_globs": [
+        "**/Cookies*",
+        "**/Login Data*",
+        "**/Local Storage/**",
+        "**/IndexedDB/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "report_only": false,
+      "notes": "CEF default root_cache_path on macOS is under Application Support/CEF. Only cache-like leaves when AS root is targeted."
+    },
+    {
+      "id": "macos-browserosaurus-caches",
+      "name": "Browserosaurus caches and residual state",
+      "description": "Browserosaurus (retired browser prompter) caches and Application Support residual. Preferences plist left alone when only caches targeted.",
+      "category": "browser-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/com.browserosaurus",
+        "$HOME/Library/Caches/Browserosaurus",
+        "$HOME/Library/Logs/Browserosaurus",
+        "$HOME/Library/HTTPStorages/com.browserosaurus",
+        "$HOME/Library/Saved Application State/com.browserosaurus.savedState"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Application Support/Browserosaurus may hold browser list config; not wiped by default (cache/log only)."
+    },
+    {
+      "id": "macos-choosy-caches",
+      "name": "Choosy caches and HTTP storage",
+      "description": "Choosy browser-picker regenerable caches and HTTPStorages. Does not remove rules/config under Application Support/Choosy.",
+      "category": "browser-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/com.choosyosx.Choosy",
+        "$HOME/Library/HTTPStorages/com.choosyosx.Choosy",
+        "$HOME/Library/Logs/Choosy"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "report_only": false,
+      "notes": "Leave Application Support/Choosy and browser NativeMessagingHosts registrations; those are configuration."
+    },
+    {
+      "id": "macos-velja-caches",
+      "name": "Velja caches and HTTP storage",
+      "description": "Velja (Sindre Sorhus browser picker) caches, including team-id-prefixed cache folders when present.",
+      "category": "browser-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/com.sindresorhus.Velja",
+        "$HOME/Library/Caches/42f94541.com.sindresorhus.velja",
+        "$HOME/Library/HTTPStorages/com.sindresorhus.Velja",
+        "$HOME/Library/Logs/Velja",
+        "$HOME/Library/WebKit/com.sindresorhus.Velja"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Does not remove Preferences or browser rules. Team-id prefix 42f94541 observed in uninstall guides."
+    },
+    {
+      "id": "macos-openin-caches",
+      "name": "OpenIn caches and HTTP storage",
+      "description": "OpenIn (loshadki) link router caches and HTTPStorages. Containers hold preferences; only caches targeted.",
+      "category": "browser-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/app.loshadki.OpenIn",
+        "$HOME/Library/HTTPStorages/app.loshadki.OpenIn",
+        "$HOME/Library/Logs/OpenIn",
+        "$HOME/Library/WebKit/app.loshadki.OpenIn"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Leave Containers and Preferences for routing rules."
+    },
+    {
+      "id": "macos-default-browser-helper-caches",
+      "name": "Default Browser helper caches",
+      "description": "Sindre Default Browser helper and related default-browser switcher caches.",
+      "category": "browser-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/com.sindresorhus.Default-Browser",
+        "$HOME/Library/Caches/com.sindresorhus.default-browser",
+        "$HOME/Library/HTTPStorages/com.sindresorhus.Default-Browser"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "report_only": false,
+      "notes": "CLI default-browser leaves little on disk; caches are regenerative stubs when present."
+    },
+    {
+      "id": "macos-safari-technology-preview-caches",
+      "name": "Safari Technology Preview caches",
+      "description": "Safari Technology Preview HTTP/WebKit caches, WebKit data, and container caches. Regenerable; not History/Bookmarks.",
+      "category": "browser-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/com.apple.SafariTechnologyPreview",
+        "$HOME/Library/WebKit/com.apple.SafariTechnologyPreview",
+        "$HOME/Library/SafariTechnologyPreview",
+        "$HOME/Library/Containers/com.apple.SafariTechnologyPreview/Data/Library/Caches",
+        "$HOME/Library/Containers/com.apple.SafariTechnologyPreview/Data/Library/WebKit",
+        "$HOME/Library/Containers/com.apple.SafariTechnologyPreview.CacheDeleteExtension/Data/Library/Caches"
+      ],
+      "include_globs": [
+        "**/WebKitCache/**",
+        "**/fsCachedData/**",
+        "**/Cache.db*",
+        "**/Webpage Previews/**",
+        "**/TabSnapshots/**",
+        "**/HSTS/**",
+        "**/*"
+      ],
+      "exclude_globs": [
+        "**/Bookmarks*",
+        "**/History*",
+        "**/CloudTabs*",
+        "**/PerSitePreferences*"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Close STP first. Library/SafariTechnologyPreview can mix cache with reading-list style data; exclude bookmark/history-like names."
+    },
+    {
+      "id": "macos-webkit-nightly-minibrowser-caches",
+      "name": "WebKit nightly MiniBrowser caches",
+      "description": "WebKit nightly / MiniBrowser / WebKitTestRunner style caches under org.webkit.* identifiers.",
+      "category": "browser-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/org.webkit.MiniBrowser",
+        "$HOME/Library/Caches/org.webkit.WebKitTestRunner",
+        "$HOME/Library/Caches/org.webkit.Playwright",
+        "$HOME/Library/WebKit/org.webkit.MiniBrowser",
+        "$HOME/Library/WebKit/org.webkit.WebKitTestRunner",
+        "$HOME/Library/Application Support/org.webkit.MiniBrowser",
+        "$HOME/Library/Saved Application State/org.webkit.MiniBrowser.savedState"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Playwright ships a WebKit build whose support process may also create org.webkit.Playwright under Caches (overlap with playwright rule)."
+    },
+    {
+      "id": "macos-playwright-browsers-deep",
+      "name": "Playwright browser download cache (deep)",
+      "description": "Full Playwright browser binary tree: Chromium, Firefox, WebKit, ffmpeg, headless shell, and Go/driver side caches. Large regenerable downloads.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/Library/Caches/ms-playwright",
+        "$HOME/.cache/ms-playwright",
+        "$HOME/Library/Caches/ms-playwright-go",
+        "$HOME/.cache/ms-playwright-go",
+        "$HOME/Library/Caches/org.webkit.Playwright",
+        "$HOME/Library/Caches/com.electron.playwright",
+        "$HOME/Library/Caches/playwright",
+        "$HOME/.local/share/ms-playwright"
+      ],
+      "include_globs": [
+        "**/chromium-*/**",
+        "**/chromium_headless_shell-*/**",
+        "**/firefox-*/**",
+        "**/webkit-*/**",
+        "**/ffmpeg-*/**",
+        "**/winldd-*/**",
+        "**/mcp-*/**",
+        "**/*"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Reclaim often multi-GB. Re-run npx playwright install. Respect PLAYWRIGHT_BROWSERS_PATH if customized outside these roots (not discovered here)."
+    },
+    {
+      "id": "macos-puppeteer-chrome-downloads",
+      "name": "Puppeteer Chrome for Testing downloads",
+      "description": "Puppeteer v19+ global browser cache (~/.cache/puppeteer) holding Chrome for Testing and chrome-headless-shell builds.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/.cache/puppeteer",
+        "$HOME/Library/Caches/puppeteer",
+        "$HOME/.local/share/puppeteer",
+        "$HOME/Library/Caches/chrome-for-testing",
+        "$HOME/.cache/chrome-for-testing"
+      ],
+      "include_globs": [
+        "**/chrome/**",
+        "**/chrome-headless-shell/**",
+        "**/chromium/**",
+        "**/Firefox*/**",
+        "**/*"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Re-download via npx puppeteer browsers install. Project-local .cache/puppeteer under repos not targeted."
+    },
+    {
+      "id": "macos-cypress-binary-cache-deep",
+      "name": "Cypress binary cache and residual app data",
+      "description": "Cypress versioned binary cache (~/Library/Caches/Cypress/<version>), plus Application Support residual caches/logs. Not project cypress/videos or screenshots.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/Library/Caches/Cypress",
+        "$HOME/.cache/Cypress",
+        "$HOME/Library/Caches/cypress",
+        "$HOME/Library/Caches/cypress-io",
+        "$HOME/Library/Application Support/Cypress/Cache",
+        "$HOME/Library/Application Support/Cypress/cy",
+        "$HOME/Library/Logs/Cypress",
+        "$HOME/Library/Caches/com.electron.cypress",
+        "$HOME/Library/Caches/com.electron.cypress.ShipIt"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Binary folders are large (hundreds of MB each version). cypress cache prune also works. Do not delete project fixtures."
+    },
+    {
+      "id": "macos-selenium-webdriver-caches",
+      "name": "Selenium Manager and WebDriver driver caches",
+      "description": "Selenium Manager (~/.cache/selenium) drivers/browsers, Python webdriver-manager (~/.wdm), and related chromedriver/geckodriver caches.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/.cache/selenium",
+        "$HOME/Library/Caches/selenium",
+        "$HOME/.wdm",
+        "$HOME/.cache/webdriver",
+        "$HOME/Library/Caches/webdriver",
+        "$HOME/.cache/chromedriver",
+        "$HOME/.cache/geckodriver",
+        "$HOME/.cache/msedgedriver"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "report_only": false,
+      "notes": "Selenium Manager re-resolves drivers on next test run. Safe low-risk reclaim of automation binaries."
+    },
+    {
+      "id": "macos-webdriverio-caches",
+      "name": "WebdriverIO residual caches",
+      "description": "WebdriverIO local caches and service residual folders when present under home cache roots.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/.wdio",
+        "$HOME/.cache/webdriverio",
+        "$HOME/Library/Caches/webdriverio",
+        "$HOME/.cache/wdio",
+        "$HOME/Library/Caches/wdio"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "WDIO often reuses Playwright/Selenium caches covered by sibling rules; this covers WDIO-specific residual dirs."
+    },
+    {
+      "id": "macos-browserstack-local-caches",
+      "name": "BrowserStack Local binary and app caches",
+      "description": "BrowserStack Local tunnel binary under ~/.browserstack and native app caches (com.browserstack.Local).",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.browserstack",
+        "$HOME/Library/Caches/com.browserstack.Local",
+        "$HOME/Library/Caches/com.browserstack.local",
+        "$HOME/Library/HTTPStorages/com.browserstack.local",
+        "$HOME/Library/Logs/BrowserStackLocal",
+        "$HOME/Library/Logs/BrowserStack",
+        "$HOME/Library/Application Support/BrowserStackLocal"
+      ],
+      "include_globs": [
+        "**/BrowserStackLocal*",
+        "**/bin/**",
+        "**/Cache/**",
+        "**/logs/**",
+        "**/*"
+      ],
+      "exclude_globs": [
+        "**/*key*",
+        "**/*token*",
+        "**/*credential*"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Binary re-downloads on next local test. Exclude credential-like filenames if present under .browserstack."
+    },
+    {
+      "id": "macos-sauce-labs-connect-caches",
+      "name": "Sauce Labs Connect residual caches and logs",
+      "description": "Sauce Connect proxy residual dirs, caches, and home config cache leaves (not stored credentials).",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.sauce",
+        "$HOME/.cache/sauce-connect",
+        "$HOME/.cache/sauce",
+        "$HOME/Library/Caches/com.saucelabs.Sauce-Connect",
+        "$HOME/Library/Caches/com.saucelabs",
+        "$HOME/Library/Logs/Sauce Connect",
+        "$HOME/Library/Logs/sauce-connect",
+        "$HOME/Library/Application Support/Sauce Labs"
+      ],
+      "include_globs": [
+        "**/logs/**",
+        "**/cache/**",
+        "**/Cache/**",
+        "**/*.log",
+        "**/sc-*/**",
+        "**/*"
+      ],
+      "exclude_globs": [
+        "**/credentials*",
+        "**/config.yml",
+        "**/config.yaml",
+        "**/*.pem",
+        "**/*token*"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Sauce Connect logs also land in $TMPDIR as sc-*.log (covered by generic tmp aging elsewhere). Do not wipe auth config files."
+    },
+    {
+      "id": "macos-lambdatest-underpass-caches",
+      "name": "LambdaTest Underpass tunnel caches and logs",
+      "description": "LambdaTest (TestMu) Underpass desktop tunnel app logs/caches and Lambda tunnel residual home dirs.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Application Support/Underpass/logs",
+        "$HOME/Library/Application Support/Underpass/Cache",
+        "$HOME/Library/Caches/Underpass",
+        "$HOME/Library/Caches/com.lambdatest.Underpass",
+        "$HOME/Library/Logs/Underpass",
+        "$HOME/.lambdatest",
+        "$HOME/Library/Application Support/LambdaTest",
+        "$HOME/Library/Caches/LambdaTest"
+      ],
+      "include_globs": [
+        "**/logs/**",
+        "**/Cache/**",
+        "**/cache/**",
+        "**/*.log",
+        "**/bin/**",
+        "**/*"
+      ],
+      "exclude_globs": [
+        "**/*key*",
+        "**/*token*",
+        "**/credentials*"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Official docs place Underpass logs at ~/Library/Application Support/Underpass/logs on macOS."
+    },
+    {
+      "id": "macos-lighthouse-pagespeed-caches",
+      "name": "Lighthouse CI and PageSpeed residual caches",
+      "description": "Lighthouse CI (.lighthouseci), lighthouse CLI caches, and PageSpeed Insights CLI residual caches.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.lighthouseci",
+        "$HOME/.cache/lighthouse",
+        "$HOME/Library/Caches/lighthouse",
+        "$HOME/.cache/lighthouseci",
+        "$HOME/Library/Caches/lighthouseci",
+        "$HOME/.cache/psi",
+        "$HOME/.cache/pagespeed",
+        "$HOME/Library/Caches/pagespeed",
+        "$HOME/Library/Caches/com.google.pagespeed"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "report_only": false,
+      "notes": "Project-local .lighthouseci under repos is not targeted (home roots only). Reports regenerate on next audit."
+    },
+    {
+      "id": "macos-chrome-for-testing-channel-cache",
+      "name": "Chrome for Testing channel caches",
+      "description": "Chrome for Testing channel HTTP/code caches used by automation stacks alongside Playwright/Puppeteer downloads.",
+      "category": "browser-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/Google/Chrome for Testing",
+        "$HOME/Library/Caches/com.google.chrome.for.testing",
+        "$HOME/Library/Application Support/Google/Chrome for Testing"
+      ],
+      "include_globs": [
+        "**/Cache/**",
+        "**/Code Cache/**",
+        "**/GPUCache/**",
+        "**/ShaderCache/**",
+        "**/GrShaderCache/**",
+        "**/GraphiteDawnCache/**",
+        "**/Media Cache/**",
+        "**/component_crx_cache/**"
+      ],
+      "exclude_globs": [
+        "**/Cookies*",
+        "**/Login Data*",
+        "**/Web Data*",
+        "**/History*"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "report_only": false,
+      "notes": "Complements puppeteer/playwright binary rules; this is the installed channel profile cache, not the versioned browser tarball cache."
+    }
+  ]
+}

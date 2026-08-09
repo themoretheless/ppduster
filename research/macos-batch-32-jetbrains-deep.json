@@ -1,0 +1,683 @@
+{
+  "batch": "32-jetbrains-deep",
+  "platform": "macos",
+  "platform_focus": "macos",
+  "title": "JetBrains product-specific system caches, indexes, and logs",
+  "description": "Deep product-level JetBrains coverage under ~/Library/Caches, ~/Library/Logs, and carefully scoped Application Support system residuals. Products: IntelliJ IDEA (Ultimate/Community), WebStorm, PyCharm (Pro/CE), GoLand, CLion, Rider, RubyMine, PhpStorm, DataGrip, AppCode, Android Studio residual, Fleet, Toolbox caches, MPS. Prefer caches + logs + index. LocalHistory is report-only / medium careful. Never wipe config, options, keymaps, or installed plugins trees as default.",
+  "notes": "Deepens beyond coarse $HOME/Library/Caches/JetBrains and $HOME/Library/Logs/JetBrains roots in dev.yaml / dev-extended / batch-03 / batch-08. Modern JetBrains layout (post ~2019): idea.system.path = ~/Library/Caches/JetBrains/<product><version>; idea.log.path = ~/Library/Logs/JetBrains/<product><version>; idea.config.path and idea.plugins.path = ~/Library/Application Support/JetBrains/<product><version> (config/plugins NEVER default clean). Host-verified on this machine: Rider/DataGrip/RustRover/Toolbox under Caches and Logs; system subdirs include caches, index, tmp, LocalHistory, jcef_cache, plugins (download meta under system), fileHistory. Toolbox download cache observed multi-GB under Caches/JetBrains/Toolbox/download. Legacy pre-JetBrains-parent product cache roots and Application Support */system|caches|localHistory residuals included for old installs.",
+  "safety_notes": [
+    "Never default-delete entire ~/Library/Application Support/JetBrains/<product>* (config: options, keymaps, codestyles, colors, scratches, settingsSync).",
+    "Never default-delete Application Support .../plugins (user-installed plugins). System-dir plugin download caches under Caches/.../plugins are regenerable and OK.",
+    "LocalHistory and fileHistory: medium, report-only preferred; wiping loses IDE local edit history across projects for that IDE version.",
+    "Do not wipe Toolbox apps install trees, accounts.json, state.json, channels, or scripts; only download/temp/logs/recovery caches.",
+    "Android Studio: prefer versioned caches/logs/system; leave Google/AndroidStudio*/options and whole config roots.",
+    "Fleet: clear Caches/JetBrains/Fleet* and logs only; leave Application Support Fleet config.",
+    "Prefer IDE Help | Invalidate Caches / Delete Leftover IDE Directories / Toolbox Clear download cache when user wants official cleanup.",
+    "SharedIndexes and global-model-cache are regenerable but large re-downloads; min_age recommended.",
+    "Do not touch project .idea/ under source trees; this batch is home Library only."
+  ],
+  "risk_policy": {
+    "product_system_caches_index_tmp": "medium (re-index cost; default_enabled false)",
+    "product_logs_thread_dumps": "low to medium",
+    "localHistory_fileHistory": "report-only or medium careful",
+    "toolbox_download_temp": "low to medium (safe re-download)",
+    "config_plugins_options": "never-touch (excluded from clean rules)",
+    "legacy_app_support_system": "medium contents-only under system|caches|index only"
+  },
+  "sources": [
+    "JetBrains IntelliJ IDEA docs: Directories used by the IDE (config / system / plugins / logs paths on macOS)",
+    "JetBrains Rider docs: same directory layout with RiderYYYY.N product code",
+    "intellij-support HC article 206544519: macOS Application Support vs Caches vs Logs",
+    "Toolbox FAQ / support: Clear download cache; macOS logs ~/Library/Logs/JetBrains/Toolbox",
+    "Host verification: ~/Library/Caches/JetBrains/{Rider*,DataGrip*,RustRover*,Toolbox}, LocalHistory, index, caches, jcef_cache; Toolbox download multi-GB; Logs/JetBrains product dirs"
+  ],
+  "path_count": 142,
+  "rules": [
+    {
+      "id": "jb-intellij-system-caches",
+      "name": "IntelliJ IDEA system caches and index",
+      "description": "Ultimate/Community idea.system.path: regenerable caches, indexes, tmp, JCEF under Caches/JetBrains.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "report_only": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/IntelliJIdea*",
+        "$HOME/Library/Caches/JetBrains/IdeaIC*",
+        "$HOME/Library/Caches/JetBrains/IntelliJIdea*/caches",
+        "$HOME/Library/Caches/JetBrains/IntelliJIdea*/index",
+        "$HOME/Library/Caches/JetBrains/IntelliJIdea*/tmp",
+        "$HOME/Library/Caches/JetBrains/IntelliJIdea*/jcef_cache",
+        "$HOME/Library/Caches/JetBrains/IdeaIC*/caches",
+        "$HOME/Library/Caches/JetBrains/IdeaIC*/index",
+        "$HOME/Library/Caches/JetBrains/IdeaIC*/tmp",
+        "$HOME/Library/Caches/IntelliJIdea*",
+        "$HOME/Library/Caches/IdeaIC*"
+      ],
+      "exclude_globs": [
+        "**/LocalHistory/**",
+        "**/fileHistory/**"
+      ],
+      "notes": "Exclude LocalHistory via globs when scanning whole product root; dedicated report-only rule covers history. Legacy roots without JetBrains/ parent for old installs."
+    },
+    {
+      "id": "jb-intellij-logs",
+      "name": "IntelliJ IDEA logs",
+      "description": "idea.log.path product logs, thread dumps, indexing diagnostics.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "report_only": false,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Logs/JetBrains/IntelliJIdea*",
+        "$HOME/Library/Logs/JetBrains/IdeaIC*"
+      ],
+      "notes": "Safe regenerable logs. IDE recreates idea.log on next start."
+    },
+    {
+      "id": "jb-webstorm-system-caches",
+      "name": "WebStorm system caches and index",
+      "description": "WebStorm system directory under Library/Caches.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/WebStorm*",
+        "$HOME/Library/Caches/JetBrains/WebStorm*/caches",
+        "$HOME/Library/Caches/JetBrains/WebStorm*/index",
+        "$HOME/Library/Caches/JetBrains/WebStorm*/tmp",
+        "$HOME/Library/Caches/JetBrains/WebStorm*/jcef_cache",
+        "$HOME/Library/Caches/WebStorm*"
+      ],
+      "exclude_globs": [
+        "**/LocalHistory/**",
+        "**/fileHistory/**"
+      ],
+      "notes": "Forces re-index of JS/TS projects. Leave Application Support WebStorm* config."
+    },
+    {
+      "id": "jb-webstorm-logs",
+      "name": "WebStorm logs",
+      "description": "WebStorm product logs under Library/Logs/JetBrains.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Logs/JetBrains/WebStorm*"
+      ]
+    },
+    {
+      "id": "jb-pycharm-system-caches",
+      "name": "PyCharm system caches and index",
+      "description": "PyCharm Professional and Community system caches/index/tmp.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/PyCharm*",
+        "$HOME/Library/Caches/JetBrains/PyCharmCE*",
+        "$HOME/Library/Caches/JetBrains/PyCharm*/caches",
+        "$HOME/Library/Caches/JetBrains/PyCharm*/index",
+        "$HOME/Library/Caches/JetBrains/PyCharm*/tmp",
+        "$HOME/Library/Caches/JetBrains/PyCharmCE*/caches",
+        "$HOME/Library/Caches/JetBrains/PyCharmCE*/index",
+        "$HOME/Library/Caches/PyCharm*",
+        "$HOME/Library/Caches/PyCharmCE*"
+      ],
+      "exclude_globs": [
+        "**/LocalHistory/**",
+        "**/fileHistory/**"
+      ],
+      "notes": "PyCharm* glob also matches Pro versioned dirs; CE listed explicitly for clarity."
+    },
+    {
+      "id": "jb-pycharm-logs",
+      "name": "PyCharm logs",
+      "description": "PyCharm Pro/CE logs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Logs/JetBrains/PyCharm*",
+        "$HOME/Library/Logs/JetBrains/PyCharmCE*"
+      ]
+    },
+    {
+      "id": "jb-goland-system-caches",
+      "name": "GoLand system caches and index",
+      "description": "GoLand system directory caches/index/tmp/jcef.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/GoLand*",
+        "$HOME/Library/Caches/JetBrains/GoLand*/caches",
+        "$HOME/Library/Caches/JetBrains/GoLand*/index",
+        "$HOME/Library/Caches/JetBrains/GoLand*/tmp",
+        "$HOME/Library/Caches/GoLand*"
+      ],
+      "exclude_globs": [
+        "**/LocalHistory/**",
+        "**/fileHistory/**"
+      ]
+    },
+    {
+      "id": "jb-goland-logs",
+      "name": "GoLand logs",
+      "description": "GoLand product logs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Logs/JetBrains/GoLand*"
+      ]
+    },
+    {
+      "id": "jb-clion-system-caches",
+      "name": "CLion system caches and index",
+      "description": "CLion C/C++ IDE system caches and indexes.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/CLion*",
+        "$HOME/Library/Caches/JetBrains/CLion*/caches",
+        "$HOME/Library/Caches/JetBrains/CLion*/index",
+        "$HOME/Library/Caches/JetBrains/CLion*/tmp",
+        "$HOME/Library/Caches/CLion*"
+      ],
+      "exclude_globs": [
+        "**/LocalHistory/**",
+        "**/fileHistory/**"
+      ],
+      "notes": "Does not remove CMake build trees under projects; only IDE system cache."
+    },
+    {
+      "id": "jb-clion-logs",
+      "name": "CLion logs",
+      "description": "CLion product logs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Logs/JetBrains/CLion*"
+      ]
+    },
+    {
+      "id": "jb-rider-system-caches",
+      "name": "Rider system caches and index",
+      "description": "Rider system caches including index, resharper-host artifacts, tmp, jcef.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/Rider*",
+        "$HOME/Library/Caches/JetBrains/Rider*/caches",
+        "$HOME/Library/Caches/JetBrains/Rider*/index",
+        "$HOME/Library/Caches/JetBrains/Rider*/tmp",
+        "$HOME/Library/Caches/JetBrains/Rider*/jcef_cache",
+        "$HOME/Library/Caches/JetBrains/Rider*/resharper-host",
+        "$HOME/Library/Caches/JetBrains/Rider*/plugins",
+        "$HOME/Library/Caches/Rider*"
+      ],
+      "exclude_globs": [
+        "**/LocalHistory/**",
+        "**/fileHistory/**"
+      ],
+      "notes": "Host-verified: caches, index, jcef_cache, resharper-host, plugins under system root. Re-index + ReSharper caches rebuild on next open."
+    },
+    {
+      "id": "jb-rider-logs",
+      "name": "Rider logs",
+      "description": "Rider frontend/backend logs, thread dumps, unit test logs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Logs/JetBrains/Rider*"
+      ],
+      "notes": "Host-verified large log trees (backend, idea.log, threadDumps, UnitTestLogs)."
+    },
+    {
+      "id": "jb-rubymine-system-caches",
+      "name": "RubyMine system caches and index",
+      "description": "RubyMine system caches/index/tmp.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/RubyMine*",
+        "$HOME/Library/Caches/JetBrains/RubyMine*/caches",
+        "$HOME/Library/Caches/JetBrains/RubyMine*/index",
+        "$HOME/Library/Caches/JetBrains/RubyMine*/tmp",
+        "$HOME/Library/Caches/RubyMine*"
+      ],
+      "exclude_globs": [
+        "**/LocalHistory/**",
+        "**/fileHistory/**"
+      ]
+    },
+    {
+      "id": "jb-rubymine-logs",
+      "name": "RubyMine logs",
+      "description": "RubyMine product logs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Logs/JetBrains/RubyMine*"
+      ]
+    },
+    {
+      "id": "jb-phpstorm-system-caches",
+      "name": "PhpStorm system caches and index",
+      "description": "PhpStorm system caches/index/tmp (historically very large content caches).",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/PhpStorm*",
+        "$HOME/Library/Caches/JetBrains/PhpStorm*/caches",
+        "$HOME/Library/Caches/JetBrains/PhpStorm*/index",
+        "$HOME/Library/Caches/JetBrains/PhpStorm*/tmp",
+        "$HOME/Library/Caches/PhpStorm*",
+        "$HOME/Library/Caches/WebIde*"
+      ],
+      "exclude_globs": [
+        "**/LocalHistory/**",
+        "**/fileHistory/**"
+      ],
+      "notes": "WebIde* is legacy PhpStorm product code on very old installs."
+    },
+    {
+      "id": "jb-phpstorm-logs",
+      "name": "PhpStorm logs",
+      "description": "PhpStorm product logs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Logs/JetBrains/PhpStorm*"
+      ]
+    },
+    {
+      "id": "jb-datagrip-system-caches",
+      "name": "DataGrip system caches and index",
+      "description": "DataGrip system caches/index/tmp.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/DataGrip*",
+        "$HOME/Library/Caches/JetBrains/DataGrip*/caches",
+        "$HOME/Library/Caches/JetBrains/DataGrip*/index",
+        "$HOME/Library/Caches/JetBrains/DataGrip*/tmp",
+        "$HOME/Library/Caches/DataGrip*"
+      ],
+      "exclude_globs": [
+        "**/LocalHistory/**",
+        "**/fileHistory/**"
+      ],
+      "notes": "Does not remove Application Support data sources or consoles; only system cache."
+    },
+    {
+      "id": "jb-datagrip-logs",
+      "name": "DataGrip logs",
+      "description": "DataGrip product logs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Logs/JetBrains/DataGrip*"
+      ]
+    },
+    {
+      "id": "jb-appcode-system-caches",
+      "name": "AppCode system caches and index",
+      "description": "AppCode (discontinued but residual) system caches on macOS.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/AppCode*",
+        "$HOME/Library/Caches/JetBrains/AppCode*/caches",
+        "$HOME/Library/Caches/JetBrains/AppCode*/index",
+        "$HOME/Library/Caches/AppCode*"
+      ],
+      "exclude_globs": [
+        "**/LocalHistory/**",
+        "**/fileHistory/**"
+      ],
+      "notes": "AppCode is discontinued; residual versioned dirs are safe leftovers for cleanup after min_age."
+    },
+    {
+      "id": "jb-appcode-logs",
+      "name": "AppCode logs residual",
+      "description": "AppCode residual logs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Logs/JetBrains/AppCode*"
+      ]
+    },
+    {
+      "id": "jb-android-studio-residual",
+      "name": "Android Studio residual caches and logs",
+      "description": "Android Studio JetBrains-based system caches/logs beyond batch-08 mobile coverage: versioned Google and plain layouts, JetBrains/AndroidStudio system dirs.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/Google/AndroidStudio*",
+        "$HOME/Library/Caches/AndroidStudio*",
+        "$HOME/Library/Caches/JetBrains/AndroidStudio*",
+        "$HOME/Library/Caches/JetBrains/AndroidStudio*/caches",
+        "$HOME/Library/Caches/JetBrains/AndroidStudio*/index",
+        "$HOME/Library/Caches/JetBrains/AndroidStudio*/tmp",
+        "$HOME/Library/Logs/Google/AndroidStudio*",
+        "$HOME/Library/Logs/AndroidStudio*",
+        "$HOME/Library/Logs/JetBrains/AndroidStudio*",
+        "$HOME/Library/Application Support/Google/AndroidStudio*/caches",
+        "$HOME/Library/Application Support/Google/AndroidStudio*/system",
+        "$HOME/Library/Application Support/AndroidStudio*/caches",
+        "$HOME/Library/Application Support/AndroidStudio*/system"
+      ],
+      "exclude_globs": [
+        "**/options/**",
+        "**/keymaps/**",
+        "**/plugins/**",
+        "**/codestyles/**"
+      ],
+      "notes": "Contents-only under caches/system. Never wipe whole Application Support product root (config/plugins)."
+    },
+    {
+      "id": "jb-fleet-caches-logs",
+      "name": "Fleet caches and logs",
+      "description": "JetBrains Fleet editor system cache and logs (known large cache consumers).",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/Fleet*",
+        "$HOME/Library/Caches/JetBrains/Fleet",
+        "$HOME/Library/Caches/Fleet",
+        "$HOME/Library/Logs/JetBrains/Fleet*",
+        "$HOME/Library/Logs/JetBrains/Fleet",
+        "$HOME/Library/Logs/Fleet"
+      ],
+      "notes": "Community reports multi-GB Fleet cache under Library/Caches/JetBrains/Fleet. Leave Application Support Fleet config."
+    },
+    {
+      "id": "jb-toolbox-download-temp",
+      "name": "Toolbox download and temp caches",
+      "description": "Toolbox App download cache (installers/patches), temp, recovery. Safe; re-downloads as needed.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 3,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/Toolbox/download",
+        "$HOME/Library/Caches/JetBrains/Toolbox/temp",
+        "$HOME/Library/Caches/JetBrains/Toolbox/backup",
+        "$HOME/Library/Caches/JetBrains/Toolbox/recovery",
+        "$HOME/Library/Caches/JetBrains/Toolbox"
+      ],
+      "exclude_globs": [
+        "**/ipc/**",
+        "**/ports/**",
+        "**/s-*"
+      ],
+      "native_hints": [
+        "Toolbox App → Settings → Tools → Clear download cache"
+      ],
+      "notes": "Host-verified multi-GB download cache under Caches/JetBrains/Toolbox/download (dmg/jar patches). Do not delete Application Support Toolbox state/accounts/apps."
+    },
+    {
+      "id": "jb-toolbox-logs",
+      "name": "Toolbox logs",
+      "description": "Toolbox App logs and update logs under Library/Logs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "paths": [
+        "$HOME/Library/Logs/JetBrains/Toolbox"
+      ],
+      "notes": "Host-verified toolbox.*.log, launchd stdio, update-* logs."
+    },
+    {
+      "id": "jb-mps-system-caches",
+      "name": "MPS system caches and logs",
+      "description": "JetBrains MPS (Meta Programming System) caches, index, logs.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/MPS*",
+        "$HOME/Library/Caches/JetBrains/MPS*/caches",
+        "$HOME/Library/Caches/JetBrains/MPS*/index",
+        "$HOME/Library/Caches/JetBrains/MPS*/tmp",
+        "$HOME/Library/Caches/MPS*",
+        "$HOME/Library/Logs/JetBrains/MPS*"
+      ],
+      "exclude_globs": [
+        "**/LocalHistory/**",
+        "**/fileHistory/**"
+      ]
+    },
+    {
+      "id": "jb-localhistory-report",
+      "name": "IDE LocalHistory and fileHistory (report-only)",
+      "description": "Local edit history under system dirs. Inventory only; wiping loses per-file local history for that IDE version.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/*/LocalHistory",
+        "$HOME/Library/Caches/JetBrains/*/fileHistory",
+        "$HOME/Library/Application Support/JetBrains/*/LocalHistory",
+        "$HOME/Library/Application Support/JetBrains/*/localHistory",
+        "$HOME/Library/Application Support/Google/AndroidStudio*/localHistory",
+        "$HOME/Library/Application Support/AndroidStudio*/localHistory"
+      ],
+      "notes": "Host-verified LocalHistory + fileHistory under Rider system dir. Medium/careful if ever promoted off report-only. Prefer report for user decision."
+    },
+    {
+      "id": "jb-legacy-app-support-system",
+      "name": "Legacy Application Support system/caches residuals",
+      "description": "Older JetBrains layouts kept system caches under Application Support .../system or .../caches. Contents-only; never sibling options/plugins.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Application Support/JetBrains/IntelliJIdea*/system",
+        "$HOME/Library/Application Support/JetBrains/IntelliJIdea*/caches",
+        "$HOME/Library/Application Support/JetBrains/IdeaIC*/system",
+        "$HOME/Library/Application Support/JetBrains/WebStorm*/system",
+        "$HOME/Library/Application Support/JetBrains/WebStorm*/caches",
+        "$HOME/Library/Application Support/JetBrains/PyCharm*/system",
+        "$HOME/Library/Application Support/JetBrains/PyCharmCE*/system",
+        "$HOME/Library/Application Support/JetBrains/GoLand*/system",
+        "$HOME/Library/Application Support/JetBrains/CLion*/system",
+        "$HOME/Library/Application Support/JetBrains/Rider*/system",
+        "$HOME/Library/Application Support/JetBrains/RubyMine*/system",
+        "$HOME/Library/Application Support/JetBrains/PhpStorm*/system",
+        "$HOME/Library/Application Support/JetBrains/DataGrip*/system",
+        "$HOME/Library/Application Support/JetBrains/AppCode*/system",
+        "$HOME/Library/Application Support/JetBrains/MPS*/system"
+      ],
+      "notes": "Modern installs put system under Library/Caches; these paths catch leftovers after upgrades."
+    },
+    {
+      "id": "jb-shared-daemon-xdg",
+      "name": "JetBrains shared Daemon and XDG cache residuals",
+      "description": "Shared JetBrains Daemon/acp-agents under Caches and Linux-style ~/.cache/JetBrains on macOS.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/Daemon",
+        "$HOME/Library/Caches/JetBrains/acp-agents",
+        "$HOME/Library/Logs/JetBrains/Daemon",
+        "$HOME/.cache/JetBrains",
+        "$XDG_CACHE_HOME/JetBrains"
+      ],
+      "notes": "Host has Daemon and acp-agents under Caches/JetBrains. XDG path for custom layouts / Linux-compat."
+    },
+    {
+      "id": "jb-rustrover-dataspell-residual",
+      "name": "RustRover and DataSpell residual caches/logs",
+      "description": "Adjacent JetBrains IDEs often installed via Toolbox; same system/logs layout.",
+      "category": "dev",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "paths": [
+        "$HOME/Library/Caches/JetBrains/RustRover*",
+        "$HOME/Library/Caches/JetBrains/RustRover*/caches",
+        "$HOME/Library/Caches/JetBrains/RustRover*/index",
+        "$HOME/Library/Caches/JetBrains/DataSpell*",
+        "$HOME/Library/Caches/JetBrains/DataSpell*/caches",
+        "$HOME/Library/Caches/JetBrains/DataSpell*/index",
+        "$HOME/Library/Logs/JetBrains/RustRover*",
+        "$HOME/Library/Logs/JetBrains/DataSpell*"
+      ],
+      "exclude_globs": [
+        "**/LocalHistory/**",
+        "**/fileHistory/**"
+      ],
+      "notes": "Host-verified RustRover system dirs present. Same safety model as other IDEs."
+    },
+    {
+      "id": "jb-saved-state-residual",
+      "name": "JetBrains Saved Application State residual",
+      "description": "macOS window restoration state for JetBrains apps; regenerable.",
+      "category": "leftovers",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "paths": [
+        "$HOME/Library/Saved Application State/com.jetbrains.*"
+      ],
+      "notes": "Bundle-id style Saved State folders. Safe; apps recreate."
+    }
+  ]
+}

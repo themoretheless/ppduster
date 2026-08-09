@@ -1,0 +1,892 @@
+{
+  "batch": "22-webservers",
+  "platform_focus": "macos",
+  "notes": "Local web/dev servers: logs and regenerable caches under $HOME or user-writable Homebrew prefixes. TLS/CA material (mkcert CAROOT, Caddy data certs, Valet Certificates, Traefik/ACME, MinIO certs) is report-only and never default-delete. Document roots (htdocs, MAMP/XAMPP site trees, MinIO object data) are report-only. Prefer contents-only deletes with age floors. System /Library and bare /Applications package roots may be filtered by merge never-touch; still listed for inventory. Excludes project source trees, Docker image layers (separate virt batch), and full DB data dirs.",
+  "path_count": 151,
+  "risk_policy": {
+    "access_error_logs": "low with min_age_days",
+    "proxy_temp_http_cache": "low",
+    "tls_ca_certs_acme": "report-only (never default delete)",
+    "document_roots_htdocs": "report-only",
+    "object_storage_data": "report-only",
+    "mutagen_sync_volumes": "medium",
+    "installed_runtimes_binaries": "report-only"
+  },
+  "rules": [
+    {
+      "id": "web-nginx-homebrew-logs",
+      "name": "Nginx Homebrew access/error logs",
+      "description": "Access and error logs for Homebrew nginx (Apple Silicon and Intel prefixes).",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "/opt/homebrew/var/log/nginx",
+        "/usr/local/var/log/nginx",
+        "$HOME/Library/Logs/nginx"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Default brew nginx log dir. Regenerable; rotate/age before wipe if debugging."
+    },
+    {
+      "id": "web-nginx-homebrew-temp-cache",
+      "name": "Nginx proxy/client temp and cache dirs",
+      "description": "proxy_temp, client_body_temp, fastcgi_temp, scgi_temp, uwsgi_temp and optional proxy_cache_path under Homebrew var or user cache.",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 3,
+      "paths": [
+        "/opt/homebrew/var/run/nginx",
+        "/usr/local/var/run/nginx",
+        "/opt/homebrew/var/cache/nginx",
+        "/usr/local/var/cache/nginx",
+        "$HOME/Library/Caches/nginx",
+        "$HOME/.cache/nginx"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Ephemeral body/proxy temps and disk caches. Safe while nginx is stopped or with age filter."
+    },
+    {
+      "id": "web-httpd-homebrew-logs",
+      "name": "Apache httpd Homebrew logs",
+      "description": "Homebrew apache2/httpd error and access logs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "/opt/homebrew/var/log/httpd",
+        "/usr/local/var/log/httpd",
+        "$HOME/Library/Logs/httpd",
+        "$HOME/Library/Logs/apache2"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "ErrorLog/CustomLog targets for brew httpd. Not system /var/log/apache2."
+    },
+    {
+      "id": "web-openresty-homebrew-logs",
+      "name": "OpenResty Homebrew logs",
+      "description": "OpenResty/nginx-style logs under Homebrew var (often shared nginx log path or dedicated openresty).",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "/opt/homebrew/var/log/openresty",
+        "/usr/local/var/log/openresty",
+        "/opt/homebrew/var/run/openresty",
+        "/usr/local/var/run/openresty"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "openresty/brew formula; may also write to var/log/nginx depending on conf."
+    },
+    {
+      "id": "web-php-fpm-homebrew-logs",
+      "name": "PHP-FPM Homebrew logs",
+      "description": "php-fpm master/pool logs from Homebrew PHP (Valet-compatible paths included).",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "/opt/homebrew/var/log",
+        "/usr/local/var/log"
+      ],
+      "include_globs": [
+        "**/php-fpm*.log",
+        "**/php-fpm.log",
+        "**/php@*/*.log"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Only php-fpm log globs; do not wipe entire var/log. Known disk hogs on Mac brew PHP."
+    },
+    {
+      "id": "web-caddy-data-report",
+      "name": "Caddy data directory (certs, report-only)",
+      "description": "Caddy storage for TLS certs, keys, OCSP staples. Not a cache.",
+      "category": "certs",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/Caddy",
+        "$HOME/.local/share/caddy",
+        "$XDG_DATA_HOME/caddy",
+        "$HOME/.caddy"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Official docs: data dir must not be treated as cache. Purge forces re-issuance and downtime risk."
+    },
+    {
+      "id": "web-caddy-config-autosave-report",
+      "name": "Caddy config autosave (report-only)",
+      "description": "Last active Caddy config (autosave.json) and config dir for --resume.",
+      "category": "config",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.config/caddy",
+        "$XDG_CONFIG_HOME/caddy"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "macOS often co-locates config under Application Support/Caddy; Linux uses ~/.config/caddy."
+    },
+    {
+      "id": "web-caddy-http-cache",
+      "name": "Caddy HTTP/asset cache dirs",
+      "description": "Optional user-level Caddy or reverse-proxy disk caches outside the official data store.",
+      "category": "cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Caches/Caddy",
+        "$HOME/Library/Caches/caddy",
+        "$HOME/.cache/caddy",
+        "$XDG_CACHE_HOME/caddy"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Only true cache roots. Never point at Application Support/Caddy data (certs)."
+    },
+    {
+      "id": "web-traefik-acme-report",
+      "name": "Traefik ACME/certs storage (report-only)",
+      "description": "Local Traefik acme.json and certificate storage under user config homes.",
+      "category": "certs",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.traefik",
+        "$HOME/.config/traefik",
+        "$XDG_CONFIG_HOME/traefik",
+        "$HOME/Library/Application Support/traefik"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "ACME account keys and issued certs. Path is user-configured; inventory only."
+    },
+    {
+      "id": "web-traefik-logs-cache",
+      "name": "Traefik logs and access logs",
+      "description": "Traefik access/error logs when written under user log/cache dirs.",
+      "category": "logs",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/traefik",
+        "$HOME/.cache/traefik",
+        "$XDG_CACHE_HOME/traefik",
+        "$HOME/Library/Caches/traefik"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Do not include acme.json paths here."
+    },
+    {
+      "id": "web-valet-logs",
+      "name": "Laravel Valet nginx/php-fpm logs",
+      "description": "Valet user logs for nginx and PHP-FPM under ~/.config/valet/Log.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.config/valet/Log",
+        "$HOME/.valet/Log"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Docs: fpm-php.www.log and nginx-error.log. Legacy ~/.valet still seen on old installs."
+    },
+    {
+      "id": "web-valet-certs-report",
+      "name": "Laravel Valet TLS certificates (report-only)",
+      "description": "Per-site certificates generated by valet secure (mkcert-backed).",
+      "category": "certs",
+      "platform": "macos",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.config/valet/Certificates",
+        "$HOME/.valet/Certificates"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Not logs. Re-run valet secure after intentional wipe. Do not default-delete."
+    },
+    {
+      "id": "web-herd-logs",
+      "name": "Laravel Herd nginx/php-fpm/mail logs",
+      "description": "Herd service logs (nginx, php-fpm, optional Herd Pro mail).",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Application Support/Herd/Log",
+        "$HOME/Library/Logs/Herd",
+        "$HOME/Library/Logs/herd"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Official: ~/Library/Application Support/Herd/Log. Debug: Herd_Debug.log when launched with --enable-logfile."
+    },
+    {
+      "id": "web-herd-caches",
+      "name": "Laravel Herd caches and temp",
+      "description": "Herd-related caches under Library/Caches and Application Support temp trees.",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/Herd",
+        "$HOME/Library/Caches/de.beyondco.herd",
+        "$HOME/Library/Application Support/Herd/Cache"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Do not delete Herd/bin (PHP/composer binaries) or Herd/config."
+    },
+    {
+      "id": "web-herd-bin-report",
+      "name": "Laravel Herd binaries (report-only)",
+      "description": "Downloaded PHP versions and tool binaries shipped with Herd.",
+      "category": "dev-tool",
+      "platform": "macos",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/Herd/bin"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Large re-download; not a disposable cache."
+    },
+    {
+      "id": "web-mamp-logs",
+      "name": "MAMP/MAMP PRO logs",
+      "description": "Apache, nginx, MySQL, PHP logs for MAMP stack.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 7,
+      "paths": [
+        "/Applications/MAMP/logs",
+        "/Applications/MAMP PRO/logs",
+        "$HOME/Library/Logs/MAMP",
+        "$HOME/Library/Logs/appsolute",
+        "$HOME/Library/Application Support/appsolute/MAMP PRO/logs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Default MAMP logs under /Applications/MAMP/logs. Merge may drop /Applications roots; user Library paths remain."
+    },
+    {
+      "id": "web-mamp-tmp-cache",
+      "name": "MAMP tmp and cache",
+      "description": "MAMP temp, opcache, and Application Support caches (not databases).",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 7,
+      "paths": [
+        "/Applications/MAMP/tmp",
+        "/Applications/MAMP/cache",
+        "$HOME/Library/Caches/MAMP",
+        "$HOME/Library/Caches/de.appsolute.mamppro",
+        "$HOME/Library/Application Support/appsolute/MAMP PRO/tmp"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Exclude db/mysql* data directories."
+    },
+    {
+      "id": "web-mamp-htdocs-report",
+      "name": "MAMP htdocs document root (report-only)",
+      "description": "User site files under MAMP htdocs. Never auto-delete.",
+      "category": "document-root",
+      "platform": "macos",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "/Applications/MAMP/htdocs",
+        "/Applications/MAMP PRO/htdocs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 2,
+      "notes": "User content, not cache. Inventory size only."
+    },
+    {
+      "id": "web-xampp-logs-temp",
+      "name": "XAMPP logs and temp",
+      "description": "XAMPP for macOS logs and temp under xamppfiles.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": false,
+      "min_age_days": 7,
+      "paths": [
+        "/Applications/XAMPP/xamppfiles/logs",
+        "/Applications/XAMPP/logs",
+        "/Applications/XAMPP/xamppfiles/temp",
+        "$HOME/Library/Logs/XAMPP"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "ApacheFriends XAMPP macOS layout. Stop services before wipe."
+    },
+    {
+      "id": "web-xampp-htdocs-report",
+      "name": "XAMPP htdocs document root (report-only)",
+      "description": "Default XAMPP DocumentRoot with user sites.",
+      "category": "document-root",
+      "platform": "macos",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "/Applications/XAMPP/xamppfiles/htdocs",
+        "/Applications/XAMPP/htdocs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 2,
+      "notes": "User content. Report-only."
+    },
+    {
+      "id": "web-localwp-logs",
+      "name": "Local WP (Flywheel) app logs",
+      "description": "Local by Flywheel / Local WP application and lightning logs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Logs/local-by-flywheel.log",
+        "$HOME/Library/Logs/local-lightning.log",
+        "$HOME/Library/Logs/Local",
+        "$HOME/Library/Logs/local-wp",
+        "$HOME/Library/Application Support/Local/logs",
+        "$HOME/Library/Application Support/Local by Flywheel/logs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "App diagnostics; site-level logs may also live under per-site folders outside this rule."
+    },
+    {
+      "id": "web-localwp-cached-wordpress",
+      "name": "Local WP cached WordPress zips",
+      "description": "Downloaded WordPress core archives cached by Local for new sites.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/Library/Application Support/Local/cached-wordpress",
+        "$HOME/Library/Application Support/Local by Flywheel/cached-wordpress"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Regenerable on next site create. Not live site files."
+    },
+    {
+      "id": "web-localwp-run-temps",
+      "name": "Local WP run nginx temps and aged logs",
+      "description": "Router/run tree temps and log files under Local/run (not mysql data or sockets).",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Application Support/Local/run",
+        "$HOME/Library/Application Support/Local by Flywheel/run"
+      ],
+      "include_globs": [
+        "**/logs/**",
+        "**/*_temp/**",
+        "**/client_body_temp/**",
+        "**/proxy_temp/**",
+        "**/fastcgi_temp/**",
+        "**/*.log"
+      ],
+      "exclude_globs": [
+        "**/mysql/**",
+        "**/*.sock",
+        "**/mysqld.sock",
+        "**/php-fpm.socket"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "notes": "Live run dir holds sockets/DB; only log/temp globs. Prefer sites stopped."
+    },
+    {
+      "id": "web-localwp-lightning-report",
+      "name": "Local WP lightning-services runtimes (report-only)",
+      "description": "Bundled PHP/MySQL/nginx service builds for Local sites.",
+      "category": "dev-tool",
+      "platform": "macos",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/Local/lightning-services",
+        "$HOME/Library/Application Support/Local by Flywheel/lightning-services"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Installed runtimes; large re-download. Not safe default clean."
+    },
+    {
+      "id": "web-ddev-mutagen-data",
+      "name": "DDEV Mutagen sync data directory",
+      "description": "Global Mutagen data for DDEV file sync on macOS.",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.ddev_mutagen_data_directory"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "Docs: MUTAGEN_DATA_DIRECTORY. Prefer ddev mutagen reset / ddev poweroff first. Rebuilds sync state."
+    },
+    {
+      "id": "web-ddev-global-cache-logs",
+      "name": "DDEV global test/cache leftovers",
+      "description": "Regenerable global DDEV cache-like trees excluding config and project list.",
+      "category": "cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.ddev/.testcache",
+        "$HOME/.ddev/testcache",
+        "$HOME/.ddev/.cache",
+        "$HOME/.ddev/cache",
+        "$HOME/.cache/ddev",
+        "$XDG_CACHE_HOME/ddev",
+        "$HOME/Library/Caches/ddev"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Do not delete global_config.yaml, project_list.yaml, or commands/homeadditions."
+    },
+    {
+      "id": "web-ddev-traefik-certs-report",
+      "name": "DDEV Traefik/mkcert router certs (report-only)",
+      "description": "Router certificates under global DDEV traefik certs (mkcert-generated).",
+      "category": "certs",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.ddev/traefik/certs",
+        "$HOME/.config/ddev/traefik/certs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Regenerated on ddev start but TLS trust breaks until then. Report-only."
+    },
+    {
+      "id": "web-ddev-bin-report",
+      "name": "DDEV private binaries (report-only)",
+      "description": "Private mutagen/docker-buildx binaries under ~/.ddev/bin.",
+      "category": "dev-tool",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.ddev/bin"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Re-downloaded by DDEV as needed; not junk by default."
+    },
+    {
+      "id": "web-lando-cache",
+      "name": "Lando cache and logs",
+      "description": "Lando userConfRoot cache, logs, and plugin install cache under ~/.lando.",
+      "category": "cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.lando/cache",
+        "$HOME/.lando/logs",
+        "$HOME/.lando/.cache",
+        "$HOME/Library/Caches/lando",
+        "$HOME/Library/Logs/lando"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "lando config | grep userConfRoot for custom root. Plugins dir is medium/report if large."
+    },
+    {
+      "id": "web-lando-plugins-report",
+      "name": "Lando global plugins (report-only)",
+      "description": "Globally installed Lando plugins under ~/.lando/plugins.",
+      "category": "dev-tool",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.lando/plugins"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "User-installed plugins; reinstall required after wipe."
+    },
+    {
+      "id": "web-docksal-cache-logs",
+      "name": "Docksal cache and logs",
+      "description": "Docksal global home cache/logs under ~/.docksal.",
+      "category": "cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.docksal/cache",
+        "$HOME/.docksal/logs",
+        "$HOME/.docksal/.cache",
+        "$HOME/Library/Caches/docksal",
+        "$HOME/Library/Logs/docksal"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Project stacks live in Docker; this is host-side Docksal state only."
+    },
+    {
+      "id": "web-tilt-caches",
+      "name": "Tilt dev caches and modules cache",
+      "description": "Tilt analytics, certs cache, and cached extension modules under macOS Application Support / Caches.",
+      "category": "cache",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/Library/Caches/tilt-dev",
+        "$HOME/.cache/tilt-dev",
+        "$XDG_CACHE_HOME/tilt-dev",
+        "$HOME/.tilt-dev"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "GitHub issues: rm Library/Caches/tilt-dev/certs for bad certs. Extensions also under Application Support."
+    },
+    {
+      "id": "web-tilt-modules-helm-cache",
+      "name": "Tilt extension modules and helm cache",
+      "description": "Cached tilt_modules and .helm downloads under Application Support/tilt-dev.",
+      "category": "package-cache",
+      "platform": "macos",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 21,
+      "paths": [
+        "$HOME/Library/Application Support/tilt-dev/tilt_modules",
+        "$HOME/Library/Application Support/tilt-dev/.helm",
+        "$HOME/Library/Application Support/tilt-dev"
+      ],
+      "include_globs": [
+        "**/tilt_modules/**",
+        "**/.helm/**",
+        "**/cache/**"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 8,
+      "notes": "Re-cloned on next tilt up. Keep config/api certs if present."
+    },
+    {
+      "id": "web-skaffold-cache",
+      "name": "Skaffold build and remote cache",
+      "description": "Default Skaffold artifact cache file dir and remote dependency cache.",
+      "category": "cache",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "$HOME/.skaffold/cache",
+        "$HOME/.skaffold/remote-cache",
+        "$HOME/.skaffold"
+      ],
+      "include_globs": [
+        "**/cache/**",
+        "**/remote-cache/**",
+        "**/cache",
+        "**/remote-cache"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "CLI defaults: --cache-file $HOME/.skaffold/cache, --remote-cache-dir $HOME/.skaffold/remote-cache. Avoid wiping config.yaml if co-located without globs."
+    },
+    {
+      "id": "web-telepresence-cache-logs",
+      "name": "Telepresence cache and daemon logs",
+      "description": "Telepresence user cache, daemon logs under ~/.cache/telepresence.",
+      "category": "logs",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.cache/telepresence",
+        "$XDG_CACHE_HOME/telepresence",
+        "$HOME/Library/Caches/telepresence",
+        "$HOME/Library/Logs/telepresence"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 6,
+      "notes": "logs/connector.log etc. Version bumps may auto-clear stale cache entries."
+    },
+    {
+      "id": "web-telepresence-config-report",
+      "name": "Telepresence config (report-only)",
+      "description": "Telepresence user configuration and connection state.",
+      "category": "config",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.config/telepresence",
+        "$XDG_CONFIG_HOME/telepresence",
+        "$HOME/Library/Application Support/telepresence"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Config/identity; not disposable cache."
+    },
+    {
+      "id": "web-envoy-local-logs",
+      "name": "Envoy local access/admin logs",
+      "description": "User-level Envoy log and hot-restart dirs when run outside containers.",
+      "category": "logs",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/envoy",
+        "$HOME/.cache/envoy",
+        "$XDG_CACHE_HOME/envoy",
+        "$HOME/Library/Caches/envoy",
+        "$HOME/.envoy"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "Most Envoy usage is in-cluster; host paths only if local binary/dev sandbox used."
+    },
+    {
+      "id": "web-istioctl-local",
+      "name": "istioctl local install leftovers",
+      "description": "istioctl client install tree and local debug dumps under home.",
+      "category": "cache",
+      "platform": "any",
+      "risk": "medium",
+      "default_enabled": false,
+      "min_age_days": 30,
+      "paths": [
+        "$HOME/.istioctl",
+        "$HOME/Library/Caches/istioctl",
+        "$HOME/.cache/istioctl",
+        "$XDG_CACHE_HOME/istioctl",
+        "$HOME/Library/Logs/istio",
+        "$HOME/Library/Logs/istioctl"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "Docs put client at ~/.istioctl/bin. Mesh state is cluster-side; this is host CLI only."
+    },
+    {
+      "id": "web-minio-data-report",
+      "name": "MinIO object data (report-only)",
+      "description": "Common local MinIO data directories and default config home. Object storage is user data.",
+      "category": "object-storage",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/minio/data",
+        "$HOME/.minio/data",
+        "$HOME/data/minio",
+        "$HOME/Library/Application Support/minio"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 4,
+      "notes": "minio server PATH is user-chosen; these are common local defaults only. Never auto-delete buckets."
+    },
+    {
+      "id": "web-minio-certs-report",
+      "name": "MinIO TLS certs dir (report-only)",
+      "description": "Default MinIO certs under ~/.minio/certs.",
+      "category": "certs",
+      "platform": "any",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/.minio/certs",
+        "$HOME/.minio"
+      ],
+      "include_globs": [
+        "**/certs/**",
+        "**/certs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 5,
+      "notes": "TLS material only. Do not treat as cache."
+    },
+    {
+      "id": "web-mkcert-caroot-report",
+      "name": "mkcert CAROOT (report-only, never delete)",
+      "description": "mkcert local CA and issued certs. Explicitly not for deletion.",
+      "category": "certs",
+      "platform": "macos",
+      "risk": "report-only",
+      "report_only": true,
+      "default_enabled": false,
+      "min_age_days": 0,
+      "paths": [
+        "$HOME/Library/Application Support/mkcert",
+        "$HOME/.local/share/mkcert",
+        "$XDG_DATA_HOME/mkcert"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "CAROOT holds rootCA.pem and keys. Deleting breaks local HTTPS trust for Valet/DDEV/Herd. Inventory only; never default clean."
+    },
+    {
+      "id": "web-dnsmasq-homebrew-logs",
+      "name": "dnsmasq Homebrew logs (Valet/Herd adjacent)",
+      "description": "dnsmasq logs when installed via Homebrew for local *.test routing.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 14,
+      "paths": [
+        "/opt/homebrew/var/log/dnsmasq.log",
+        "/usr/local/var/log/dnsmasq.log",
+        "$HOME/Library/Logs/dnsmasq.log",
+        "$HOME/Library/Logs/dnsmasq"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 2,
+      "notes": "Often a single log file path; contents mode on parent if directory."
+    },
+    {
+      "id": "web-caddy-library-logs",
+      "name": "Caddy process logs under Library/Logs",
+      "description": "Optional Caddy log files when log directive targets user Library/Logs.",
+      "category": "logs",
+      "platform": "macos",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/Library/Logs/Caddy",
+        "$HOME/Library/Logs/caddy"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Separate from data/config cert stores."
+    },
+    {
+      "id": "web-nginx-user-prefix-logs",
+      "name": "User-prefix nginx logs under home",
+      "description": "Custom nginx builds or brew --prefix under home exporting logs.",
+      "category": "logs",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.nginx/logs",
+        "$HOME/nginx/logs",
+        "$HOME/.local/var/log/nginx",
+        "$HOME/.local/share/nginx/logs"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Non-standard home installs."
+    },
+    {
+      "id": "web-apache-user-prefix-logs",
+      "name": "User-prefix Apache logs under home",
+      "description": "httpd logs for user-built or home-prefixed Apache.",
+      "category": "logs",
+      "platform": "any",
+      "risk": "low",
+      "default_enabled": true,
+      "min_age_days": 7,
+      "paths": [
+        "$HOME/.httpd/logs",
+        "$HOME/apache2/logs",
+        "$HOME/.local/var/log/httpd",
+        "$HOME/.local/var/log/apache2"
+      ],
+      "delete_mode": "contents",
+      "max_depth": 3,
+      "notes": "Complements brew /opt paths for fully user-local stacks."
+    }
+  ]
+}

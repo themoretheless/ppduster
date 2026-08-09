@@ -1,0 +1,312 @@
+pack: macos-homebrew-deep
+rules:
+
+  - id: hb-deep-api-json-cache
+    name: Homebrew formula/cask API JSON cache
+    description: Cached formula.jws.json, cask.jws.json, names/aliases lists, and internal packages envelopes used by API mode.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 3
+    paths:
+      - $HOME/Library/Caches/Homebrew/api
+      - $HOME/Library/Caches/Homebrew/api/internal
+      - $HOME/.cache/Homebrew/api
+      - $HOME/.cache/Homebrew/api/internal
+      - $XDG_CACHE_HOME/Homebrew/api
+      - $XDG_CACHE_HOME/Homebrew/api/internal
+    delete_mode: contents
+    max_depth: 5
+
+  - id: hb-deep-api-source-cache
+    name: Homebrew API source formula cache
+    description: api-source tree caching formula.rb and patches fetched via the formulae API.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/Homebrew/api-source
+      - $HOME/.cache/Homebrew/api-source
+      - $XDG_CACHE_HOME/Homebrew/api-source
+    delete_mode: contents
+    max_depth: 8
+
+  - id: hb-deep-bootsnap
+    name: Homebrew Bootsnap Ruby compile cache
+    description: Bootsnap cache for Homebrew Ruby when HOMEBREW_BOOTSNAP is enabled.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 3
+    paths:
+      - $HOME/Library/Caches/Homebrew/bootsnap
+      - $HOME/.cache/Homebrew/bootsnap
+      - $XDG_CACHE_HOME/Homebrew/bootsnap
+    delete_mode: contents
+    max_depth: 5
+
+  - id: hb-deep-bundle-dumps-report
+    name: brew bundle Brewfile dumps (report-only)
+    description: User Brewfile snapshots from brew bundle dump; intentional state, not caches.
+    category: leftovers
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.Brewfile
+      - $HOME/Brewfile
+      - $HOME/Brewfile.lock.json
+      - $HOME/.homebrew/Brewfile
+      - $HOME/.config/homebrew/Brewfile
+      - $XDG_CONFIG_HOME/homebrew/Brewfile
+    delete_mode: path
+    max_depth: 2
+
+  - id: hb-deep-cache-variants
+    name: Homebrew HOMEBREW_CACHE alternate roots
+    description: Non-default or Linux-style Homebrew download cache roots when HOMEBREW_CACHE or XDG layout is used.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/.cache/Homebrew
+      - $XDG_CACHE_HOME/Homebrew
+    delete_mode: contents
+    max_depth: 6
+
+  - id: hb-deep-cask-zap-residuals-report
+    name: Cask zap residual user patterns (report-only)
+    description: Document common user-Library residual roots left after brew uninstall --cask without --zap. Inventory guidance only; no bulk wipe.
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - $HOME/Library/Application Support
+      - $HOME/Library/Cookies
+    delete_mode: contents
+    max_depth: 3
+
+  - id: hb-deep-cellar-opt-caskroom-report
+    name: Homebrew Cellar opt Caskroom (report-only)
+    description: Installed formula kegs, opt symlinks, and Caskroom versions under default Apple Silicon prefix.
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - /opt/homebrew/Cellar
+      - /opt/homebrew/opt
+      - /opt/homebrew/Caskroom
+      - /opt/homebrew/var/homebrew/linked
+    delete_mode: contents
+    max_depth: 3
+
+  - id: hb-deep-downloads-cask
+    name: Homebrew downloads and Cask subcache
+    description: Nested bottle/source downloads and Cask artifact cache under Homebrew cache (symlinks at cache root point into downloads/).
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/.cache/Homebrew/downloads
+      - $HOME/.cache/Homebrew/Cask
+      - $XDG_CACHE_HOME/Homebrew/downloads
+      - $XDG_CACHE_HOME/Homebrew/Cask
+    delete_mode: contents
+    max_depth: 4
+
+  - id: hb-deep-formula-nested-build-caches
+    name: Homebrew nested formula build tool caches
+    description: Per-build caches Homebrew places under HOMEBREW_CACHE for formula builds (cargo, go, java, npm, pip, glide, gclient).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/Homebrew/cargo_cache
+      - $HOME/Library/Caches/Homebrew/go_cache
+      - $HOME/Library/Caches/Homebrew/go_mod_cache
+      - $HOME/Library/Caches/Homebrew/java_cache
+      - $HOME/Library/Caches/Homebrew/npm_cache
+      - $HOME/Library/Caches/Homebrew/pip_cache
+      - $HOME/Library/Caches/Homebrew/glide_home
+      - $HOME/Library/Caches/Homebrew/gclient_cache
+      - $HOME/.cache/Homebrew/cargo_cache
+      - $HOME/.cache/Homebrew/go_cache
+      - $HOME/.cache/Homebrew/go_mod_cache
+      - $HOME/.cache/Homebrew/java_cache
+      - $HOME/.cache/Homebrew/npm_cache
+      - $HOME/.cache/Homebrew/pip_cache
+      - $HOME/.cache/Homebrew/glide_home
+      - $HOME/.cache/Homebrew/gclient_cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: hb-deep-gh-actions-artifact-cache
+    name: Homebrew gh-actions-artifact cache
+    description: Cached GitHub Actions artifacts under Homebrew cache (CI bottle/source staging).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Homebrew/gh-actions-artifact
+      - $HOME/.cache/Homebrew/gh-actions-artifact
+      - $XDG_CACHE_HOME/Homebrew/gh-actions-artifact
+    delete_mode: contents
+    max_depth: 5
+
+  - id: hb-deep-linuxbrew-cellar-report
+    name: Linuxbrew home Cellar/opt (report-only)
+    description: Installed formulae under user linuxbrew/homebrew prefixes; inventory only.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.linuxbrew/Cellar
+      - $HOME/.linuxbrew/opt
+      - $HOME/linuxbrew/.linuxbrew/Cellar
+      - $HOME/homebrew/Cellar
+    delete_mode: contents
+    max_depth: 3
+
+  - id: hb-deep-linuxbrew-home-cache
+    name: Linuxbrew/Homebrew under $HOME caches
+    description: User-tree Homebrew/Linuxbrew prefix caches and tmp (not Cellar).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.linuxbrew/var/homebrew/tmp
+      - $HOME/.linuxbrew/var/homebrew/cache
+      - $HOME/.linuxbrew/var/cache
+      - $HOME/homebrew/var/homebrew/tmp
+      - $HOME/homebrew/var/homebrew/cache
+      - $HOME/linuxbrew/.linuxbrew/var/homebrew/tmp
+      - $HOME/linuxbrew/.linuxbrew/var/cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: hb-deep-logs-deeper
+    name: Homebrew logs deeper and Linux log layout
+    description: Per-formula log directories under Homebrew logs plus Linux XDG log layout variants.
+    category: logs
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/Homebrew/Logs
+      - $XDG_CACHE_HOME/Homebrew/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: hb-deep-mas-appstore-caches
+    name: mas / Mac App Store user caches
+    description: User Library caches used by Mac App Store and related agents (mas CLI drives MAS installs; no large private mas cache).
+    category: caches
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.apple.appstore
+      - $HOME/Library/Caches/com.apple.AppStore
+    delete_mode: contents
+    max_depth: 5
+
+  - id: hb-deep-portable-ruby-download
+    name: Homebrew portable-ruby download cache
+    description: Downloaded portable-ruby tarballs/directories under HOMEBREW_CACHE (not the active vendor install).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/Homebrew
+      - $XDG_CACHE_HOME/Homebrew
+    include_globs:
+      - "portable-ruby*"
+      - "portable-ruby-*/**"
+      - "downloads/*portable-ruby*"
+    delete_mode: contents
+    max_depth: 3
+
+  - id: hb-deep-portable-ruby-vendor-report
+    name: Homebrew portable-ruby vendor install (report-only)
+    description: Installed portable-ruby under Homebrew vendor; brew cleanup removes non-current versions only.
+    category: package-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - /opt/homebrew/Library/Homebrew/vendor/portable-ruby
+      - /opt/homebrew/Library/Homebrew/vendor/bundle
+    delete_mode: contents
+    max_depth: 4
+
+  - id: hb-deep-stale-locks
+    name: Homebrew stale formula/cask lock files
+    description: Aged lock files under prefix var/homebrew/locks left after interrupted brew operations.
+    category: temp
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 2
+    paths:
+      - /opt/homebrew/var/homebrew/locks
+    delete_mode: contents
+    max_depth: 2
+
+  - id: hb-deep-taps-git-report
+    name: Homebrew taps git repos (report-only)
+    description: Tapped formula/cask git repositories; git object bloat after many updates is reclaimable only via git gc, not rm.
+    category: leftovers
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - /opt/homebrew/Library/Taps
+    delete_mode: contents
+    max_depth: 5
+
+  - id: hb-deep-temp-cellar-bottles
+    name: Homebrew bottle temp cellar and prefix tmp
+    description: Temporary bottle extract staging under prefix var/homebrew/tmp (.cellar) and build temp.
+    category: temp
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 1
+    paths:
+      - /opt/homebrew/var/homebrew/tmp
+      - /opt/homebrew/var/homebrew/tmp/.cellar
+    delete_mode: contents
+    max_depth: 5

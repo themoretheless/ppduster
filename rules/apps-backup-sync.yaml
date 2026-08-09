@@ -1,0 +1,700 @@
+pack: apps-backup-sync
+rules:
+
+  - id: backup-arq-cache
+    name: Arq backup metadata cache
+    description: Arq local object/metadata cache (Cache.noindex). Regenerable from storage; next backup rebuilds slowly.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Arq/Cache.noindex
+      - $HOME/Library/Application Support/ArqAgent/cache.noindex
+      - $HOME/Library/Caches/com.haystacksoftware.Arq
+      - $HOME/Library/Caches/com.haystacksoftware.ArqAgent
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-arq-logs
+    name: Arq agent and app logs
+    description: ArqAgent and Arq UI log directories only.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Arq
+      - $HOME/Library/Logs/ArqAgent
+      - $HOME/Library/Logs/com.haystacksoftware.Arq
+      - $HOME/Library/Logs/com.haystacksoftware.ArqAgent
+    delete_mode: contents
+    max_depth: 4
+
+  - id: backup-backblaze-cache
+    name: Backblaze client cache
+    description: Backblaze transient cache folders under bzdata/cache-style trees and user Caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.backblaze.BackblazeDownloader
+      - $HOME/Library/Caches/com.backblaze.B2Downloader
+      - $HOME/Library/Caches/Backblaze
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-backblaze-logs
+    name: Backblaze client logs
+    description: Backblaze bzlogs (known multi-GB growth). Safe to clear log files; not backup queues of user data.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/Backblaze
+      - $HOME/Library/Logs/com.backblaze
+      - $HOME/Library/Logs/com.backblaze.BackblazeDownloader
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-borg-cache
+    name: borg backup cache
+    description: borg local chunk cache under ~/.cache/borg (and Library mirror if present).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/borg
+      - $HOME/Library/Caches/borg
+    delete_mode: contents
+    max_depth: 5
+
+  - id: backup-ccc-logs-cache
+    name: Carbon Copy Cloner logs and caches
+    description: CCC task logs and app caches. Not clone destinations or _CCC SafetyNet folders.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/ccc.log
+      - $HOME/Library/Logs/com.bombich.ccc
+      - $HOME/Library/Logs/com.bombich.ccc.useragent
+      - $HOME/Library/Caches/com.bombich.ccc
+      - $HOME/Library/Caches/com.bombich.ccc.useragent
+      - $HOME/Library/Caches/com.bombich.ccc.helper
+    delete_mode: contents
+    max_depth: 5
+
+  - id: backup-ccc-task-history-logs
+    name: Carbon Copy Cloner Application Support logs
+    description: User-scoped CCC Application Support log/task history text only via globs.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/Library/Application Support/com.bombich.ccc
+      - $HOME/Library/Application Support/CCC
+    include_globs:
+      - "**/Logs/**"
+      - "**/*.log"
+      - "**/*log*"
+    exclude_globs:
+      - "**/Scripts/**"
+      - "**/Tasks/**"
+      - "**/*.plist"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: backup-crashplan-cache
+    name: CrashPlan transient cache
+    description: CrashPlan regenerable cache directories (version-dependent).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/CrashPlan
+      - $HOME/Library/Application Support/CrashPlan/cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-crashplan-logs
+    name: CrashPlan app logs
+    description: CrashPlan UI and service logs (version-dependent locations).
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/CrashPlan
+      - $HOME/Library/Application Support/CrashPlan/log
+    delete_mode: contents
+    max_depth: 5
+
+  - id: backup-cyberduck-cache
+    name: Cyberduck cache
+    description: Cyberduck transfer and browser caches under Application Support and Caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Cyberduck
+      - $HOME/Library/Caches/ch.sudo.cyberduck
+      - $HOME/Library/Group Containers/G69SCX94XU.duck/Library/Application Support/Cyberduck/Cache
+      - $HOME/Library/Application Support/Cyberduck/Cache
+      - $HOME/Library/Application Support/Cyberduck/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-cyberduck-logs
+    name: Cyberduck logs
+    description: Cyberduck log directories.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Cyberduck
+      - $HOME/Library/Logs/ch.sudo.cyberduck
+      - $HOME/Library/Group Containers/G69SCX94XU.duck/Library/Logs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: backup-destinations-never-report
+    name: Backup destinations and SafetyNet (report-only guard)
+    description: Explicit report-only markers so scanners never treat common destination patterns as cleanable junk.
+    category: system-data
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - /Volumes
+    include_globs:
+      - "**/_CCC SafetyNet/**"
+      - "**/_CCC Archives/**"
+      - "**/Backups.backupdb/**"
+      - "**/.SparseBundle/**"
+      - "**/*.sparsebundle/**"
+      - "**/*.backupbundle/**"
+    delete_mode: contents
+    max_depth: 4
+
+  - id: backup-duplicacy-cache-logs
+    name: Duplicacy cache and logs
+    description: Duplicacy Web and CLI cache/log locations (home and Library variants).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.duplicacy-web/cache
+      - $HOME/.duplicacy-web/logs
+      - $HOME/.duplicacy_web/cache
+      - $HOME/.duplicacy_web/logs
+      - $HOME/Library/Caches/Duplicacy
+      - $HOME/Library/Caches/duplicacy
+      - $HOME/Library/Logs/Duplicacy
+      - $HOME/Library/Logs/duplicacy
+      - $HOME/Library/Application Support/Duplicacy/cache
+      - $HOME/Library/Application Support/Duplicacy/logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-duplicacy-repo-cache-report
+    name: Duplicacy per-repository cache (report-only)
+    description: Common per-repo .duplicacy/cache under home projects; inventory only to avoid wiping active jobs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 30
+    paths:
+      - $HOME/.duplicacy/cache
+    delete_mode: contents
+    max_depth: 4
+
+  - id: backup-expandrive-cache-logs
+    name: ExpanDrive cache and logs
+    description: ExpanDrive mount caches and client logs. Not CloudStorage provider trees.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.expandrive.ExpanDrive3
+      - $HOME/Library/Caches/com.expandrive.ExpanDrive
+      - $HOME/Library/Caches/ExpanDrive
+      - $HOME/Library/Application Support/ExpanDrive/cache
+      - $HOME/Library/Application Support/ExpanDrive/Cache
+      - $HOME/Library/Application Support/ExpanDrive/Caches
+      - $HOME/Library/Logs/ExpanDrive
+      - $HOME/Library/Logs/com.expandrive.ExpanDrive
+      - $HOME/Library/Application Support/ExpanDrive/logs
+      - $HOME/Library/Application Support/ExpanDrive/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-filezilla-cache-logs
+    name: FileZilla cache and logs
+    description: FileZilla / FileZilla Pro caches, temp, and logs. Not site manager credentials file wipe.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/org.filezilla-project.filezilla
+      - $HOME/Library/Caches/org.filezilla-project.filezilla.pro
+      - $HOME/Library/Caches/FileZilla
+      - $HOME/.config/filezilla/Cache
+      - $HOME/.filezilla/Cache
+      - $HOME/Library/Application Support/FileZilla/Cache
+      - $HOME/Library/Logs/FileZilla
+      - $HOME/Library/Logs/org.filezilla-project.filezilla
+      - $HOME/Library/Containers/org.filezilla-project.filezilla.pro/Data/Library/Caches
+      - $HOME/Library/Containers/org.filezilla-project.filezilla.pro/Data/Library/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-forklift-cache-logs
+    name: ForkLift caches and logs
+    description: BinaryNights ForkLift file manager remote transfer caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.binarynights.ForkLift
+      - $HOME/Library/Caches/com.binarynights.ForkLift-3
+      - $HOME/Library/Caches/com.binarynights.ForkLiftHelper
+      - $HOME/Library/Caches/com.binarynights.ForkLift2
+      - $HOME/Library/Logs/ForkLift
+      - $HOME/Library/Logs/com.binarynights.ForkLift
+      - $HOME/Library/Application Support/ForkLift/Cache
+      - $HOME/Library/Application Support/ForkLift/Caches
+      - $HOME/Library/Application Support/ForkLift/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-kopia-cache
+    name: Kopia content cache
+    description: "Kopia default cache under ~/Library/Caches/kopia/{repo-id}."
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/kopia
+      - $HOME/.cache/kopia
+    delete_mode: contents
+    max_depth: 5
+
+  - id: backup-kopia-logs
+    name: Kopia UI and CLI logs
+    description: Kopia logs under Library/Logs and Application Support.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/kopia
+      - $HOME/Library/Logs/kopia-ui
+      - $HOME/Library/Application Support/kopia/logs
+      - $HOME/Library/Application Support/kopia-ui/logs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: backup-mountainduck-cache
+    name: Mountain Duck offline/buffer cache
+    description: Mountain Duck Cache under duck Group Container; can be hundreds of GB with buffering.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Group Containers/G69SCX94XU.duck/Library/Application Support/duck/Cache
+      - $HOME/Library/Group Containers/G69SCX94XU.duck/Library/Caches
+      - $HOME/Library/Caches/io.mountainduck
+      - $HOME/Library/Caches/ch.sudo.mountainduck
+      - $HOME/Library/Application Support/Mountain Duck/Cache
+    delete_mode: contents
+    max_depth: 8
+
+  - id: backup-mountainduck-logs
+    name: Mountain Duck logs
+    description: Mountain Duck log trees.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Mountain Duck
+      - $HOME/Library/Logs/io.mountainduck
+      - $HOME/Library/Group Containers/G69SCX94XU.duck/Library/Logs
+      - $HOME/Library/Application Support/Mountain Duck/Logs
+    delete_mode: contents
+    max_depth: 5
+
+  - id: backup-nextcloud-cache-logs
+    name: Nextcloud desktop client cache and logs
+    description: Nextcloud client Caches and Logs; not synced folders or File Provider content.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Nextcloud
+      - $HOME/Library/Caches/com.nextcloud.desktopclient
+      - $HOME/Library/Logs/Nextcloud
+      - $HOME/Library/Logs/com.nextcloud.desktopclient
+      - $HOME/Library/Application Support/Nextcloud/logs
+      - $HOME/Library/Application Support/Nextcloud/cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-nova-residual-cache
+    name: Panic Nova residual caches
+    description: Nova editor residual caches and logs (transfer/preview leftovers often paired with Transmit installs).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.panic.Nova
+      - $HOME/Library/Caches/com.panic.nova.mas
+      - $HOME/Library/Caches/Nova
+      - $HOME/Library/Logs/com.panic.Nova
+      - $HOME/Library/Logs/Nova
+      - $HOME/Library/Application Support/Nova/Cache
+      - $HOME/Library/Application Support/Nova/Caches
+      - $HOME/Library/Application Support/Nova/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-owncloud-cache-logs
+    name: ownCloud desktop client cache and logs
+    description: ownCloud client caches/logs (fork of Nextcloud lineage paths).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/ownCloud
+      - $HOME/Library/Caches/com.owncloud.desktopclient
+      - $HOME/Library/Logs/ownCloud
+      - $HOME/Library/Logs/com.owncloud.desktopclient
+      - $HOME/Library/Application Support/ownCloud/logs
+      - $HOME/Library/Application Support/ownCloud/cache
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-pathfinder-cache-logs
+    name: Path Finder caches and logs
+    description: Cocoatech Path Finder caches and logs.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.cocoatech.PathFinder
+      - $HOME/Library/Caches/com.cocoatech.PathFinder.PathFinderSync
+      - $HOME/Library/Caches/Path Finder
+      - $HOME/Library/Logs/Path Finder
+      - $HOME/Library/Logs/com.cocoatech.PathFinder
+      - $HOME/Library/Application Support/Path Finder/Cache
+      - $HOME/Library/Application Support/Path Finder/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-rclone-cache
+    name: rclone VFS and backend cache
+    description: rclone default cache-dir (macOS Library/Caches/rclone and ~/.cache/rclone).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 3
+    paths:
+      - $HOME/Library/Caches/rclone
+      - $HOME/.cache/rclone
+      - $HOME/Library/Caches/rclone/vfs
+      - $HOME/Library/Caches/rclone/vfsMeta
+      - $HOME/.cache/rclone/vfs
+      - $HOME/.cache/rclone/cache-backend
+    delete_mode: contents
+    max_depth: 8
+
+  - id: backup-rclone-logs
+    name: rclone log leftovers under common paths
+    description: Common rclone log drop locations when users redirect --log-file under Library/Logs.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/rclone
+      - $HOME/Library/Logs/rclone.log
+    include_globs:
+      - "**/*.log"
+      - "**/*rclone*"
+    delete_mode: contents
+    max_depth: 3
+
+  - id: backup-resilio-cache
+    name: Resilio Sync caches
+    description: Resilio Sync Library Caches bundle identifiers.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/com.resilio.Sync
+      - $HOME/Library/Caches/Resilio Sync
+      - $HOME/Library/Caches/com.getsync.desktop
+    delete_mode: contents
+    max_depth: 5
+
+  - id: backup-resilio-logs
+    name: Resilio Sync logs
+    description: Resilio Sync debug/sync log files inside Application Support storage folder.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Resilio Sync
+      - $HOME/Library/Application Support/BitTorrent Sync
+      - $HOME/Library/Logs/Resilio Sync
+      - $HOME/Library/Logs/com.resilio.Sync
+    include_globs:
+      - "**/sync.log*"
+      - "**/*.log"
+      - "**/*.log.*.zip"
+      - "**/Logs/**"
+    exclude_globs:
+      - "**/sync.dat"
+      - "**/settings.dat"
+      - "**/*.db"
+      - "**/storage/**"
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-restic-cache
+    name: restic repository cache
+    description: restic local pack/index cache (macOS ~/Library/Caches/restic).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/restic
+      - $HOME/.cache/restic
+    delete_mode: contents
+    max_depth: 4
+
+  - id: backup-seafile-cache-logs
+    name: Seafile / SeaDrive client cache and logs
+    description: Seafile and SeaDrive logs and client caches; not full seafile-data library stores as default wipe.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/Seafile
+      - $HOME/Library/Caches/com.seafile.SeafileClient
+      - $HOME/Library/Caches/com.seafile.seadrive
+      - $HOME/Library/Logs/Seafile
+      - $HOME/Library/Logs/SeaDrive
+      - $HOME/Library/Logs/com.seafile.SeafileClient
+      - $HOME/Library/Application Support/Seafile/logs
+      - $HOME/Library/Application Support/SeaDrive/logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-seafile-data-cache-report
+    name: Seafile-data block/index cache (medium)
+    description: Seafile client seafile-data internal block cache and logs; rebuild cost can be high.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.seafile-data
+      - $HOME/Seafile/.seafile-data
+    include_globs:
+      - "**/cache/**"
+      - "**/tmpfiles/**"
+      - "**/logs/**"
+      - "**/*.log"
+    exclude_globs:
+      - "**/accounts.db"
+      - "**/repo.db"
+      - "**/ccnet/**"
+    delete_mode: contents
+    max_depth: 8
+
+  - id: backup-superduper-logs
+    name: "SuperDuper! copy logs"
+    description: Scheduled Copies and Saved Settings log trees under SuperDuper Application Support.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - "$HOME/Library/Application Support/SuperDuper!"
+      - "$HOME/Library/Logs/SuperDuper!"
+      - $HOME/Library/Logs/com.blacey.SuperDuper
+    include_globs:
+      - "**/Logs/**"
+      - "**/*.sdlog"
+      - "**/*.log"
+    exclude_globs:
+      - "**/*.sdsp"
+      - "**/Copy Scripts/**"
+    delete_mode: contents
+    max_depth: 10
+
+  - id: backup-syncthing-cache
+    name: Syncthing caches
+    description: Syncthing Library Caches and temporary index helper caches.
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/syncthing
+      - $HOME/Library/Caches/com.github.syncthing.syncthing
+      - $HOME/Library/Caches/com.github.srad.syncthing
+    delete_mode: contents
+    max_depth: 5
+
+  - id: backup-syncthing-logs
+    name: Syncthing logs
+    description: Syncthing macOS app and daemon log files.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Application Support/Syncthing
+      - $HOME/Library/Logs/Syncthing
+      - $HOME/Library/Logs/syncthing.log
+      - $HOME/.local/state/syncthing
+      - $HOME/.config/syncthing
+    include_globs:
+      - "**/syncthing.log*"
+      - "**/audit-*.log"
+      - "**/*.log"
+    exclude_globs:
+      - "**/config.xml"
+      - "**/cert.pem"
+      - "**/key.pem"
+      - "**/https-*.pem"
+      - "**/index-v*.db*"
+      - "**/csrftokens.txt"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: backup-timemachine-destination-report
+    name: Time Machine destination and MobileBackups (report-only)
+    description: Legacy MobileBackups and TM-related local hold areas; inventory only.
+    category: system-data
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - /Volumes/MobileBackups
+      - /.MobileBackups
+    delete_mode: contents
+    max_depth: 3
+
+  - id: backup-transmit-cache
+    name: Panic Transmit transfer cache
+    description: Transmit download/edit temp and Caches (often multi-GB).
+    category: app-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Transmit
+      - $HOME/Library/Caches/com.panic.Transmit
+      - $HOME/Library/Caches/com.panic.transmit.mas
+      - $HOME/Library/Application Support/Transmit/Cache
+      - $HOME/Library/Application Support/Transmit/Caches
+    delete_mode: contents
+    max_depth: 6
+
+  - id: backup-transmit-logs
+    name: Panic Transmit logs
+    description: Transmit log directories.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Logs/Transmit
+      - $HOME/Library/Logs/com.panic.Transmit
+    delete_mode: contents
+    max_depth: 4
+
+  - id: backup-vorta-logs-cache
+    name: Vorta (borg GUI) logs and caches
+    description: Vorta macOS app logs/caches wrapping borg.
+    category: logs
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/borg.vorta
+      - $HOME/Library/Caches/com.borgbase.client.macos
+      - $HOME/Library/Logs/Vorta
+      - $HOME/Library/Logs/borg.vorta
+      - $HOME/Library/Application Support/Vorta/logs
+      - $HOME/Library/Application Support/Vorta/Logs
+    delete_mode: contents
+    max_depth: 5

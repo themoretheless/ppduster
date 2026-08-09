@@ -1,0 +1,502 @@
+pack: dev-virt
+rules:
+
+  - id: virt-helm-charts-cache
+    name: Helm chart cache
+    description: Helm repository and chart cache commonly paired with local k8s (kind/k3d/minikube/Rancher).
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.cache/helm/repository
+    delete_mode: contents
+    max_depth: 6
+
+  - id: virt-k3d-state-caches
+    name: k3d state and caches
+    description: k3d config/state directories when present. Clusters are Docker containers; host metadata only here.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.k3d
+      - $HOME/.config/k3d
+      - $HOME/Library/Caches/k3d
+      - $HOME/.cache/k3d
+    delete_mode: contents
+    max_depth: 5
+
+  - id: virt-kind-state
+    name: kind cluster state
+    description: kind local cluster metadata under ~/.kind. Node images live in container runtime.
+    category: dev
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.local/share/kind
+    delete_mode: contents
+    max_depth: 5
+
+  - id: virt-kube-client-caches
+    name: kubectl and related client caches
+    description: Client-side kubectl discovery/HTTP caches often used with local virt k8s stacks.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/.kube/http-cache
+    delete_mode: contents
+    max_depth: 5
+
+  - id: virt-lima-download-cache
+    name: Lima download cache (not instances)
+    description: Standalone Lima image download cache at Library/Caches/lima. Safe to clear; re-downloads on next limactl start.
+    category: vm-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.cache/lima
+    delete_mode: contents
+    max_depth: 8
+
+  - id: virt-lima-instances-disks-report
+    name: Lima instances and additional disks (report-only)
+    description: Full Lima home including instance disks and _disk datadisks; report only.
+    category: vm-disk
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.lima/_disk
+    delete_mode: path
+    max_depth: 3
+
+  - id: virt-minikube-cache-logs
+    name: minikube cache and logs (deeper)
+    description: minikube ISO/image/preload caches and logs. Machines stay report-only elsewhere.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 21
+    paths:
+      - $HOME/.minikube/cache/iso
+      - $HOME/.minikube/cache/images
+      - $HOME/.minikube/cache/preloaded
+      - $HOME/.minikube/logs
+      - $MINIKUBE_HOME/cache
+      - $MINIKUBE_HOME/logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: virt-minikube-machines-report
+    name: minikube machines and profiles (report-only)
+    description: minikube VM disks and profile state; report only.
+    category: vm-disk
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.minikube/profiles
+      - $HOME/.minikube
+    delete_mode: path
+    max_depth: 3
+
+  - id: virt-multipass-caches
+    name: Multipass image and network caches
+    description: Multipass download/network caches. On macOS daemon often stores under root Library; user-level caches if present.
+    category: vm-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/multipass
+      - $HOME/Library/Caches/multipassd
+      - $HOME/.cache/multipass
+      - $HOME/Library/Logs/Multipass
+      - $HOME/Library/Logs/multipass
+      - /private/var/root/Library/Caches/multipassd
+      - /var/root/Library/Caches/multipassd
+    delete_mode: contents
+    max_depth: 6
+
+  - id: virt-multipass-data-report
+    name: Multipass instance data (report-only)
+    description: Multipass vault/instance disks under multipassd data; report only.
+    category: vm-disk
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/multipass
+      - $HOME/Library/Application Support/multipassd
+      - /private/var/root/Library/Application Support/multipassd
+      - /var/root/Library/Application Support/multipassd
+      - $HOME/.multipass
+    delete_mode: path
+    max_depth: 4
+
+  - id: virt-orbstack-disks-report
+    name: OrbStack data and disks (report-only)
+    description: OrbStack VM/container data store including large data.img; report only.
+    category: vm-disk
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/OrbStack
+      - $HOME/Library/Group Containers/HUAQ24HBR6.dev.orbstack
+      - $HOME/Library/Group Containers/HUAQ24HBR6.dev.orbstack/data
+    delete_mode: path
+    max_depth: 4
+
+  - id: virt-orbstack-logs-caches
+    name: OrbStack logs and app caches
+    description: OrbStack host logs under ~/.orbstack/log and standard macOS app cache/log locations. Not data disks.
+    category: vm-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/.orbstack/log
+      - $HOME/Library/Caches/dev.orbstack.OrbStack
+      - $HOME/Library/Caches/dev.orbstack.OrbStack.ShipIt
+      - $HOME/Library/Logs/OrbStack
+      - $HOME/Library/Logs/dev.orbstack.OrbStack
+      - $HOME/Library/Application Support/OrbStack/logs
+      - $HOME/Library/HTTPStorages/dev.orbstack.OrbStack
+    delete_mode: contents
+    max_depth: 5
+
+  - id: virt-packer-cache
+    name: Packer ISO and plugin caches
+    description: Common PACKER_CACHE_DIR locations and plugin dir. Default packer_cache is cwd-relative and not listed.
+    category: package-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 30
+    paths:
+      - $HOME/.cache/packer
+      - $HOME/Library/Caches/packer
+      - $HOME/.packer.d/plugins
+      - $HOME/.packer.d/tmp
+      - $PACKER_CACHE_DIR
+    delete_mode: contents
+    max_depth: 6
+
+  - id: virt-parallels-caches-logs
+    name: Parallels Desktop caches and logs (deeper)
+    description: Parallels host caches, ShipIt, software caches, application menus, logs. Not .pvm VMs.
+    category: vm-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/Parallels Software
+      - $HOME/Library/Caches/com.parallels.desktop
+      - $HOME/Library/Logs/parallels-desktop.log
+      - $HOME/Library/Parallels/Applications Menus
+      - $HOME/Library/Parallels/Updates
+    delete_mode: contents
+    max_depth: 6
+
+  - id: virt-parallels-vms-report
+    name: Parallels VM directories (report-only)
+    description: Default Parallels VM store locations; report only.
+    category: vm-disk
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Parallels
+    delete_mode: path
+    max_depth: 3
+
+  - id: virt-podman-desktop-caches-logs
+    name: Podman Desktop Electron caches and logs
+    description: Podman Desktop GUI logs and Chromium-style caches under Application Support. Not podman machine disks.
+    category: vm-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Logs/Podman Desktop
+      - $HOME/Library/Application Support/Podman Desktop/Cache
+      - $HOME/Library/Application Support/Podman Desktop/Code Cache
+      - $HOME/Library/Application Support/Podman Desktop/GPUCache
+      - $HOME/Library/Application Support/Podman Desktop/DawnGraphiteCache
+      - $HOME/Library/Application Support/Podman Desktop/DawnWebGPUCache
+      - $HOME/Library/Application Support/Podman Desktop/blob_storage
+      - $HOME/Library/Caches/Podman Desktop
+      - $HOME/Library/Caches/io.podman_desktop.PodmanDesktop
+    delete_mode: contents
+    max_depth: 6
+
+  - id: virt-podman-machine-report
+    name: Podman machine and container storage (report-only)
+    description: Podman machine images, storage, and container graph under home; report only.
+    category: vm-disk
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.config/containers
+      - $HOME/.local/share/containers/podman/machine
+    delete_mode: path
+    max_depth: 4
+
+  - id: virt-qemu-caches
+    name: QEMU host caches
+    description: User-level QEMU cache directories when present (Homebrew/standalone). Not guest disk files.
+    category: vm-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/qemu
+      - $HOME/.cache/qemu
+      - $HOME/Library/Caches/libvirt
+      - $HOME/.cache/libvirt
+    delete_mode: contents
+    max_depth: 5
+
+  - id: virt-qemu-disk-images-report
+    name: Common QEMU disk image locations (report-only)
+    description: Inventory-only common user folders that may hold qcow2/raw; never default wipe extensions.
+    category: vm-disk
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/QEMU
+      - $HOME/VMs
+      - $HOME/.local/share/libvirt/images
+    include_globs:
+      - "**/*.qcow2"
+      - "**/*.raw"
+      - "**/*.img"
+    delete_mode: path
+    max_depth: 4
+
+  - id: virt-rancher-desktop-caches-logs
+    name: Rancher Desktop caches and logs
+    description: K3s image cache and Rancher Desktop logs. Factory reset keeps cache unless --cache; this targets caches/logs only.
+    category: vm-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/Library/Caches/rancher-desktop
+      - $HOME/Library/Logs/rancher-desktop
+      - $HOME/Library/Caches/rancher-desktop/k3s
+      - $HOME/.rd/bin
+    delete_mode: contents
+    max_depth: 6
+
+  - id: virt-rancher-desktop-data-report
+    name: Rancher Desktop data and Lima VM (report-only)
+    description: Rancher Desktop application support, snapshots, and lima-backed VM state; report only.
+    category: vm-disk
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Application Support/rancher-desktop
+      - $HOME/Library/Application Support/Rancher Desktop
+      - $HOME/Library/State/rancher-desktop
+      - $HOME/.rd
+    delete_mode: path
+    max_depth: 4
+
+  - id: virt-tart-oci-ipsw-cache
+    name: Tart OCI and IPSW cache
+    description: Tart remote image cache under ~/.tart/cache (OCIs, IPSWs). VMs under vms/ stay report-only.
+    category: vm-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.tart/cache
+      - $HOME/.tart/cache/OCIs
+      - $HOME/.tart/cache/IPSWs
+    delete_mode: contents
+    max_depth: 8
+
+  - id: virt-tart-vms-report
+    name: Tart local VMs (report-only)
+    description: Local Tart VM images under ~/.tart/vms; report only.
+    category: vm-disk
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.tart/vms
+      - $HOME/.tart
+    delete_mode: path
+    max_depth: 3
+
+  - id: virt-utm-caches-logs
+    name: UTM caches and logs (not VM images)
+    description: UTM app caches including downloaded IPSW restore images under container Caches, plus logs.
+    category: vm-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Containers/com.utmapp.UTM/Data/Library/Logs
+    delete_mode: contents
+    max_depth: 6
+
+  - id: virt-utm-vms-report
+    name: UTM VM documents (report-only)
+    description: Sandboxed UTM Documents tree with .utm VM packages; report only.
+    category: vm-disk
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Library/Containers/com.utmapp.UTM/Data/Documents
+    delete_mode: path
+    max_depth: 3
+
+  - id: virt-vagrant-boxes-report
+    name: Vagrant boxes (report-only)
+    description: Downloaded Vagrant boxes under ~/.vagrant.d/boxes; large and user-managed.
+    category: vm-disk
+    platform: any
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/.vagrant.d/boxes
+      - $HOME/.vagrant.d
+    delete_mode: path
+    max_depth: 3
+
+  - id: virt-vagrant-tmp-logs
+    name: Vagrant tmp and logs
+    description: Vagrant temporary downloads and logs under ~/.vagrant.d. Not boxes.
+    category: vm-cache
+    platform: any
+    risk: report-only
+    default_enabled: false
+    min_age_days: 14
+    paths:
+      - $HOME/.vagrant.d/tmp
+      - $HOME/.vagrant.d/logs
+      - $HOME/.vagrant.d/data
+    delete_mode: contents
+    max_depth: 5
+
+  - id: virt-virtualbox-logs-caches
+    name: VirtualBox host logs and app caches
+    description: VirtualBox service/selector logs and macOS app caches. Regenerable; close VirtualBox first.
+    category: vm-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/VirtualBox
+      - $HOME/Library/Logs/VirtualBox
+      - $HOME/Library/Caches/org.virtualbox.app.VirtualBox
+      - $HOME/Library/Caches/com.oracle.virtualbox
+      - $HOME/Library/Caches/VirtualBox
+      - $HOME/.config/VirtualBox
+    include_globs:
+      - "**/*.log"
+      - "**/*.log.*"
+      - "**/VBoxSVC.log*"
+      - "**/selectorwindow.log*"
+      - "**/VBoxHeadless.log*"
+      - "**/Caches/**"
+    delete_mode: contents
+    max_depth: 5
+
+  - id: virt-virtualbox-vms-report
+    name: VirtualBox VMs and hard disks (report-only)
+    description: Default VM folder and HardDisks registry; report size only, never default wipe.
+    category: vm-disk
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/VirtualBox VMs
+      - $HOME/Library/VirtualBox/HardDisks
+      - $HOME/Library/VirtualBox/Machines
+    delete_mode: path
+    max_depth: 3
+
+  - id: virt-vmware-fusion-caches-logs
+    name: VMware Fusion caches and logs
+    description: Fusion app caches, ShipIt update cache, host logs, Applications Menu cache, license backups.
+    category: vm-cache
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    min_age_days: 7
+    paths:
+      - $HOME/Library/Caches/com.vmware.fusionServices
+      - $HOME/Library/Logs/VMware Fusion.log
+      - $HOME/Library/Logs/VMware Fusion
+      - $HOME/Library/Application Support/VMware Fusion/License Backups
+      - $HOME/Library/Application Support/VMware Fusion Applications Menu
+    delete_mode: contents
+    max_depth: 6
+
+  - id: virt-vmware-fusion-vms-report
+    name: VMware Fusion VM locations (report-only)
+    description: Common default/custom locations for .vmwarevm packages; inventory only.
+    category: vm-disk
+    platform: macos
+    risk: report-only
+    default_enabled: false
+    report_only: true
+    min_age_days: 0
+    paths:
+      - $HOME/Virtual Machines.localized
+      - $HOME/VMware Fusion VMs
+    delete_mode: path
+    max_depth: 3
