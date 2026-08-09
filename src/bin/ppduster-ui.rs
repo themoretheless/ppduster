@@ -7,9 +7,7 @@ use ppduster::automation::{
     describe_step, run_task, Action, AuthPolicy, ReleaseChannel, RunOptions, RunReport,
     ScriptInterpreter, Step, StepStatus, Task, TaskPack, TaskSource,
 };
-use ppduster::github::{
-    list_accessible_repositories, open_github_login_terminal, GithubRepository,
-};
+use ppduster::github::{list_accessible_repositories, login_via_web, GithubRepository};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -44,9 +42,10 @@ struct GithubPickerState {
     selected_ids: BTreeSet<String>,
     loaded_once: bool,
     loading: bool,
+    authorizing: bool,
     error: Option<String>,
-    login_started: bool,
     receiver: Option<Receiver<Result<Vec<GithubRepository>, String>>>,
+    auth_receiver: Option<Receiver<Result<(), String>>>,
 }
 
 impl Default for GithubPickerState {
@@ -59,9 +58,10 @@ impl Default for GithubPickerState {
             selected_ids: BTreeSet::new(),
             loaded_once: false,
             loading: false,
+            authorizing: false,
             error: None,
-            login_started: false,
             receiver: None,
+            auth_receiver: None,
         }
     }
 }
@@ -215,6 +215,49 @@ impl ScenarioApp {
         }
     }
 
+    fn start_github_authorization(&mut self, ctx: &egui::Context) {
+        if self.github_picker.authorizing || self.github_picker.loading {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let result = login_via_web().map_err(|error| format!("{error:#}"));
+            let _ = sender.send(result);
+            repaint.request_repaint();
+        });
+        self.github_picker.auth_receiver = Some(receiver);
+        self.github_picker.authorizing = true;
+        self.github_picker.error = None;
+    }
+
+    fn poll_github_authorization(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = &self.github_picker.auth_receiver else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(())) => {
+                self.github_picker.authorizing = false;
+                self.github_picker.auth_receiver = None;
+                self.start_github_repository_load(ctx);
+            }
+            Ok(Err(error)) => {
+                self.github_picker.error = Some(error);
+                self.github_picker.authorizing = false;
+                self.github_picker.auth_receiver = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.github_picker.error =
+                    Some("Фоновая авторизация GitHub неожиданно завершилась".into());
+                self.github_picker.authorizing = false;
+                self.github_picker.auth_receiver = None;
+            }
+        }
+    }
+
     fn build_plan(&mut self) {
         self.report_applied = false;
         let task = match self.resolved_selected_task() {
@@ -343,6 +386,7 @@ impl ScenarioApp {
 impl eframe::App for ScenarioApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_run(ui.ctx());
+        self.poll_github_authorization(ui.ctx());
         self.poll_github_repository_load(ui.ctx());
         self.top_bar(ui);
         self.left_library(ui);
@@ -1252,7 +1296,7 @@ impl ScenarioApp {
             .count();
         let mut configuration_changed = false;
         let mut request_refresh = false;
-        let mut request_login = false;
+        let mut request_authorization = false;
         let mut close = false;
 
         egui::Modal::new(Id::new("github-repository-picker"))
@@ -1283,7 +1327,7 @@ impl ScenarioApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
                             .add_enabled(
-                                !self.github_picker.loading,
+                                !self.github_picker.loading && !self.github_picker.authorizing,
                                 egui::Button::new(if self.github_picker.loaded_once {
                                     "Обновить"
                                 } else {
@@ -1294,7 +1338,7 @@ impl ScenarioApp {
                         {
                             request_refresh = true;
                         }
-                        if self.github_picker.loading {
+                        if self.github_picker.loading || self.github_picker.authorizing {
                             ui.spinner();
                         }
                     });
@@ -1348,34 +1392,44 @@ impl ScenarioApp {
                 if let Some(error) = &self.github_picker.error {
                     ui.add_space(10.0);
                     error_box(ui, error, self.dark);
-                }
-
-                if self.github_picker.repositories.is_empty() {
-                    ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ui
                             .add_enabled(
-                                !self.github_picker.loading,
-                                egui::Button::new("Войти через GitHub…"),
+                                !self.github_picker.authorizing && !self.github_picker.loading,
+                                egui::Button::new("Войти через GitHub"),
                             )
                             .clicked()
                         {
-                            request_login = true;
+                            request_authorization = true;
                         }
-                        if self.github_picker.login_started {
-                            ui.label(
-                                RichText::new(
-                                    "Завершите вход в Terminal, затем нажмите «Обновить».",
-                                )
-                                .size(9.0)
-                                .color(PURPLE),
+                        if ui.button("Скопировать команду входа").clicked() {
+                            ui.ctx().copy_text(
+                                "gh auth login --hostname github.com --git-protocol https --web --clipboard"
+                                    .into(),
                             );
                         }
                     });
                 }
 
                 ui.add_space(10.0);
-                if self.github_picker.loading && self.github_picker.repositories.is_empty() {
+                if self.github_picker.authorizing {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(30.0);
+                        ui.spinner();
+                        ui.label(
+                            RichText::new("Ожидаю завершения входа в браузере…")
+                                .color(MUTED),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Одноразовый код скопирован в буфер обмена. После входа список обновится автоматически.",
+                            )
+                            .size(9.0)
+                            .color(MUTED),
+                        );
+                        ui.add_space(30.0);
+                    });
+                } else if self.github_picker.loading && self.github_picker.repositories.is_empty() {
                     ui.vertical_centered(|ui| {
                         ui.add_space(30.0);
                         ui.spinner();
@@ -1398,7 +1452,7 @@ impl ScenarioApp {
                             RichText::new(if self.github_picker.loaded_once {
                                 "GitHub вернул пустой список для текущего аккаунта."
                             } else {
-                                "Нужны установленный gh и выполненный gh auth login."
+                                "Нужен установленный GitHub CLI. Войти можно прямо здесь."
                             })
                                 .size(9.0)
                                 .color(MUTED),
@@ -1551,17 +1605,8 @@ impl ScenarioApp {
         if request_refresh {
             self.start_github_repository_load(ctx);
         }
-        if request_login {
-            match open_github_login_terminal() {
-                Ok(()) => {
-                    self.github_picker.login_started = true;
-                    self.github_picker.error = None;
-                }
-                Err(error) => {
-                    self.github_picker.login_started = false;
-                    self.github_picker.error = Some(format!("{error:#}"));
-                }
-            }
+        if request_authorization {
+            self.start_github_authorization(ctx);
         }
         if configuration_changed {
             self.selected_step = Some(0);

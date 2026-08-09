@@ -59,13 +59,13 @@ with downstream steps is deliberately ineligible: replacing its clone could othe
 silently disconnect those steps from their original checkout. Private, archived,
 empty, and no-`main` repositories cannot be selected; SSH is not offered in the GUI.
 
-ppduster does not request or store a GitHub token. Install `gh`; when no authenticated
-session exists, the repository picker can open `gh auth login` in macOS Terminal. Finish
-the browser-assisted login there, then refresh the list in the picker. GitHub CLI can also
-use an existing authenticated session or inherit supported authentication environment
-variables from the ppduster process. The picker resolves `gh` only from absolute
-executable paths, runs repository discovery noninteractively with bounded output and a
-timeout, and redacts diagnostics before showing them in the UI.
+ppduster does not request or store a GitHub token. If `gh` is not authenticated, the
+picker offers **Sign in with GitHub** and starts `gh auth login --web --clipboard` in the
+background. GitHub CLI opens the browser, copies its one-time device code to the
+clipboard, owns the OAuth exchange and credential storage, and then ppduster reloads the
+repository list automatically. A copyable terminal command remains available as a
+fallback. The picker resolves `gh` only from absolute executable paths, bounds process
+runtime and output, and redacts diagnostics before showing them in the UI.
 
 ```bash
 cargo run --bin ppduster-ui

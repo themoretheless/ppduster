@@ -1,5 +1,4 @@
-//! Discovery of repositories available to the authenticated GitHub user and an
-//! explicit, user-initiated GitHub CLI login handoff for the desktop UI.
+//! Read-only discovery of repositories available to the authenticated GitHub user.
 //!
 //! Authentication is delegated entirely to GitHub CLI. This module never reads,
 //! accepts, or persists a GitHub token.
@@ -25,6 +24,7 @@ const GH_STDOUT_LIMIT: usize = 8 * 1024 * 1024;
 const GH_STDERR_LIMIT: usize = 64 * 1024;
 const GH_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GH_DISPLAY_ERROR_LIMIT: usize = 640;
+const GH_LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 const ACCESSIBLE_REPOSITORIES_QUERY: &str = r#"
 query($endCursor: String) {
@@ -102,50 +102,56 @@ pub fn list_accessible_repositories() -> Result<Vec<GithubRepository>> {
     })
 }
 
-/// Open an interactive `gh auth login` in macOS Terminal.
+/// Authenticate GitHub CLI through its browser/device flow.
 ///
-/// The desktop application does not read credentials or capture the login
-/// process. Terminal owns the interactive session and GitHub CLI stores its
-/// credentials in its normal credential store. The caller must only invoke
-/// this after an explicit user action.
-pub fn open_github_login_terminal() -> Result<()> {
+/// `gh` owns the OAuth exchange and credential storage. The one-time code is
+/// copied to the clipboard before the browser opens, so the desktop UI never
+/// needs to read or display credentials.
+pub fn login_via_web() -> Result<()> {
     let gh = discover_gh().ok_or_else(|| {
         anyhow::anyhow!(
-            "GitHub CLI (`gh`) was not found in PATH, /opt/homebrew/bin, or /usr/local/bin. Install it before signing in."
+            "GitHub CLI (`gh`) was not found in PATH, /opt/homebrew/bin, or /usr/local/bin. Install it and try again."
         )
     })?;
-
-    #[cfg(target_os = "macos")]
-    {
-        let status = Command::new("/usr/bin/osascript")
-            .args([
-                "-e",
-                "on run argv",
-                "-e",
-                "tell application \"Terminal\"",
-                "-e",
-                "activate",
-                "-e",
-                "do script (quoted form of (item 1 of argv)) & \" auth login --hostname github.com --git-protocol https --web\"",
-                "-e",
-                "end tell",
-                "-e",
-                "end run",
-                "--",
-            ])
-            .arg(&gh)
-            .status()
-            .context("open GitHub CLI login in Terminal")?;
-        if !status.success() {
-            bail!("Terminal could not start GitHub CLI login (status {status})");
-        }
-        return Ok(());
+    let output = run_login_via_web_command(
+        &gh,
+        CommandLimits {
+            timeout: GH_LOGIN_TIMEOUT,
+            stdout_bytes: GH_STDERR_LIMIT,
+            stderr_bytes: GH_STDERR_LIMIT,
+        },
+    )?;
+    if output.stdout_truncated || output.stderr_truncated {
+        bail!("GitHub authorization produced too much diagnostic output");
     }
+    if !output.status.success() {
+        let detail = classify_gh_failure(output.status, &output.stderr);
+        bail!("GitHub authorization failed: {detail}");
+    }
+    Ok(())
+}
 
-    #[cfg(not(target_os = "macos"))]
-    bail!(
-        "interactive GitHub login from the desktop UI is currently supported only on macOS; run `gh auth login --hostname github.com --git-protocol https --web` in a terminal"
-    )
+fn run_login_via_web_command(gh: &Path, limits: CommandLimits) -> Result<BoundedOutput> {
+    if !gh.is_absolute() {
+        bail!("refusing to run GitHub CLI from a non-absolute path");
+    }
+    let mut command = Command::new(gh);
+    command
+        .args([
+            "auth",
+            "login",
+            "--hostname",
+            "github.com",
+            "--git-protocol",
+            "https",
+            "--web",
+            "--clipboard",
+        ])
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    run_bounded_command(command, limits, "GitHub authorization")
 }
 
 fn list_accessible_repositories_inner() -> Result<Vec<GithubRepository>> {
@@ -230,12 +236,20 @@ fn run_gh_command(gh: &Path, limits: CommandLimits) -> Result<BoundedOutput> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    run_bounded_command(command, limits, "GitHub repository discovery")
+}
+
+fn run_bounded_command(
+    mut command: Command,
+    limits: CommandLimits,
+    operation: &str,
+) -> Result<BoundedOutput> {
     #[cfg(unix)]
     command.process_group(0);
 
     let mut child = command
         .spawn()
-        .with_context(|| format!("start GitHub CLI at {}", gh.display()))?;
+        .with_context(|| format!("start {operation}"))?;
     let stdout = child
         .stdout
         .take()
@@ -267,7 +281,7 @@ fn run_gh_command(gh: &Path, limits: CommandLimits) -> Result<BoundedOutput> {
             terminate_process_tree(&mut child);
             let _ = child.wait();
             bail!(
-                "GitHub repository discovery exceeded its {} second time limit",
+                "{operation} exceeded its {} second time limit",
                 limits.timeout.as_secs_f32()
             );
         }
@@ -906,6 +920,40 @@ mod tests {
         .to_string();
 
         assert!(error.contains("non-absolute"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn web_login_uses_explicit_non_token_browser_flow() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake_gh = temp.path().join("gh");
+        write_executable(&fake_gh, b"#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
+
+        let output = run_login_via_web_command(
+            &fs::canonicalize(fake_gh).unwrap(),
+            CommandLimits {
+                timeout: Duration::from_secs(1),
+                stdout_bytes: 1024,
+                stderr_bytes: 1024,
+            },
+        )
+        .unwrap();
+        let arguments = String::from_utf8(output.stdout).unwrap();
+
+        assert_eq!(
+            arguments.lines().collect::<Vec<_>>(),
+            [
+                "auth",
+                "login",
+                "--hostname",
+                "github.com",
+                "--git-protocol",
+                "https",
+                "--web",
+                "--clipboard",
+            ]
+        );
+        assert!(!arguments.contains("--with-token"));
     }
 
     fn make_executable(path: &Path) {
