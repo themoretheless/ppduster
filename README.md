@@ -58,9 +58,11 @@ the project tree; atomic Git, filesystem, and Homebrew blocks are added from the
 picker opened by a plus button on the canvas and edited on the right. Every scenario canvas
 starts with a permanent Start block. Its plus button, and the plus button on every following
 block, opens a block picker that displays the planned typed
-output contract for downstream graph bindings. The current executable form remains an
-ordered task while graph execution is developed. The constructor saves the whole project
-as portable YAML. Loading a legacy standalone task
+output contract for downstream graph bindings. Blocks can be dragged freely around the
+canvas. Adding from the same plus button more than once creates multiple outgoing branches;
+their connections and canvas positions are saved with the project. The current executable
+form remains an ordered task while graph execution is developed. The constructor saves the
+whole project as portable YAML. Loading a legacy standalone task
 YAML wraps it in an imported project group, so existing files remain usable. Loaded and
 saved files retain external-pack trust and never weaken normal permission gates.
 
