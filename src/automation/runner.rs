@@ -1,12 +1,13 @@
 use crate::automation::task::{
     Action, AppBundleIdentity, AppStoreOperation, AuthPolicy, ElevationPolicy, LicenseMethod,
-    LicenseProvider, ShellMode, Step, Task,
+    LicenseProvider, ReleaseChannel, ShellMode, Step, Task,
 };
 use crate::rules::expand_path_template;
 use crate::safety::{is_safe_rule_root, stays_under_root};
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -27,6 +28,7 @@ pub struct RunOptions {
     pub apply: bool,
     pub allow_shell: bool,
     pub allow_elevation: bool,
+    pub release_channel: Option<ReleaseChannel>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +104,14 @@ fn run_task_with_interactivity(
     opts: &RunOptions,
     terminal_interactive: bool,
 ) -> Result<RunReport> {
+    if opts.release_channel.is_some()
+        && !task
+            .steps
+            .iter()
+            .any(|step| matches!(step.action, Action::BambuStudioRelease(_)))
+    {
+        bail!("--channel is only supported by tasks with a bambu-studio-release step");
+    }
     // Validate every policy gate before the first applied step so a missing
     // acknowledgement cannot leave a task partially applied.
     for step in &task.steps {
@@ -117,7 +127,7 @@ fn run_task_with_interactivity(
 
     for step in &task.steps {
         if halted {
-            let plan = plan_step(step)?;
+            let plan = plan_step(step, opts)?;
             plans.push(plan.clone());
             outcomes.push(ActionOutcome::Blocked);
             steps.push(StepReport {
@@ -138,7 +148,7 @@ fn run_task_with_interactivity(
             steps.push(StepReport {
                 step_id: step.id.clone(),
                 step_name: step_name(step),
-                summary: plan_summary(step)?,
+                summary: plan_summary(step, opts)?,
                 status: StepStatus::Satisfied,
                 prerequisites: prerequisites_for_step(step),
                 logs: vec![StepLogEntry {
@@ -149,7 +159,7 @@ fn run_task_with_interactivity(
             outcomes.push(ActionOutcome::AlreadySatisfied { reason });
             continue;
         }
-        let plan = plan_step(step)?;
+        let plan = plan_step(step, opts)?;
         plans.push(plan.clone());
         let step_idx = steps.len();
         steps.push(StepReport {
@@ -211,7 +221,7 @@ fn run_task_with_interactivity(
                 step_id: step.id.clone(),
                 message: "running".into(),
             });
-            let summary = match apply_step(step) {
+            let summary = match apply_step(step, opts) {
                 Ok(summary) => summary,
                 Err(err) => {
                     let message = err.to_string();
@@ -354,9 +364,9 @@ fn parent_or_self(path: &Path) -> &Path {
     path.parent().unwrap_or(path)
 }
 
-fn plan_step(step: &Step) -> Result<ActionPlan> {
+fn plan_step(step: &Step, opts: &RunOptions) -> Result<ActionPlan> {
     let prerequisites = prerequisites_for_step(step);
-    let summary = plan_summary(step)?;
+    let summary = plan_summary(step, opts)?;
     Ok(ActionPlan {
         step_id: step.id.clone(),
         step_name: step_name(step),
@@ -365,7 +375,7 @@ fn plan_step(step: &Step) -> Result<ActionPlan> {
     })
 }
 
-fn plan_summary(step: &Step) -> Result<String> {
+fn plan_summary(step: &Step, opts: &RunOptions) -> Result<String> {
     Ok(match &step.action {
         Action::GitClone { repo, dest, branch } => format!(
             "git clone {} {}{} with hooks disabled and no submodules",
@@ -452,6 +462,10 @@ fn plan_summary(step: &Step) -> Result<String> {
             "mas {} Mac App Store application {}",
             app_store_operation_name(action.operation),
             action.app_id
+        ),
+        Action::BambuStudioRelease(action) => format!(
+            "resolve the latest Bambu Studio {} from the official GitHub releases, compare its version with the signed installed app, and install only when newer",
+            release_channel_name(opts.release_channel.unwrap_or(action.channel))
         ),
         Action::ActivateLicense(action) => match (&action.provider, &action.method) {
             (LicenseProvider::LightBurn, LicenseMethod::VendorUi) =>
@@ -581,7 +595,7 @@ fn prompt_once(message: &str) -> Result<()> {
     Ok(())
 }
 
-fn apply_step(step: &Step) -> Result<String> {
+fn apply_step(step: &Step, opts: &RunOptions) -> Result<String> {
     match &step.action {
         Action::GitClone { repo, dest, branch } => apply_git_clone(repo, dest, branch.as_deref()),
         Action::BrewInstall { package, cask } => apply_brew_install(package, *cask),
@@ -608,6 +622,7 @@ fn apply_step(step: &Step) -> Result<String> {
             app_name.as_deref(),
             target.as_deref(),
             identity.as_ref(),
+            false,
         ),
         Action::InstallPkg { pkg, target } => apply_install_pkg(pkg, target.as_deref()),
         Action::MacosRequirements {
@@ -615,6 +630,9 @@ fn apply_step(step: &Step) -> Result<String> {
             require_rosetta_on_apple_silicon,
         } => apply_macos_requirements(minimum_version, *require_rosetta_on_apple_silicon),
         Action::AppStoreInstall(action) => apply_app_store_install(action.app_id, action.operation),
+        Action::BambuStudioRelease(action) => {
+            apply_bambu_studio_release(opts.release_channel.unwrap_or(action.channel))
+        }
         Action::ActivateLicense(action) => apply_activate_license(action.provider, action.method),
     }
 }
@@ -726,6 +744,208 @@ fn apply_download_file(
     Ok(format!("downloaded {} to {}", url, dest_path.display()))
 }
 
+const BAMBU_RELEASES_API: &str =
+    "https://api.github.com/repos/bambulab/BambuStudio/releases?per_page=30";
+const BAMBU_DOWNLOAD_PREFIX: &str = "https://github.com/bambulab/BambuStudio/releases/download/";
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+    published_at: String,
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+    digest: Option<String>,
+}
+
+struct ResolvedBambuRelease {
+    tag: String,
+    version: String,
+    asset_name: String,
+    download_url: String,
+    sha256: String,
+}
+
+fn release_channel_name(channel: ReleaseChannel) -> &'static str {
+    match channel {
+        ReleaseChannel::Release => "release",
+        ReleaseChannel::Beta => "beta",
+    }
+}
+
+fn fetch_bambu_releases() -> Result<Vec<GithubRelease>> {
+    let curl_program = if cfg!(target_os = "macos") {
+        "/usr/bin/curl"
+    } else {
+        "curl"
+    };
+    let output = Command::new(curl_program)
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--max-filesize",
+            "5242880",
+            "--header",
+            "Accept: application/vnd.github+json",
+            "--header",
+            "X-GitHub-Api-Version: 2022-11-28",
+            BAMBU_RELEASES_API,
+        ])
+        .output()
+        .context("fetch official Bambu Studio release metadata")?;
+    if !output.status.success() {
+        bail!(
+            "fetch official Bambu Studio release metadata failed: {}",
+            command_error_detail(&output)
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("parse Bambu Studio release metadata")
+}
+
+fn resolve_bambu_release(
+    releases: &[GithubRelease],
+    channel: ReleaseChannel,
+) -> Result<ResolvedBambuRelease> {
+    let release = releases
+        .iter()
+        .filter(|release| {
+            !release.draft
+                && match channel {
+                    ReleaseChannel::Release => !release.prerelease,
+                    ReleaseChannel::Beta => release.prerelease,
+                }
+        })
+        .max_by(|left, right| left.published_at.cmp(&right.published_at))
+        .ok_or_else(|| {
+            anyhow!(
+                "official Bambu Studio repository has no {} release",
+                release_channel_name(channel)
+            )
+        })?;
+
+    let mut assets = release.assets.iter().filter(|asset| {
+        asset.name.starts_with("Bambu_Studio_mac-v")
+            && asset.name.ends_with(".dmg")
+            && !asset.name.contains("pre_release")
+    });
+    let asset = assets.next().ok_or_else(|| {
+        anyhow!(
+            "Bambu Studio {} has no unambiguous macOS DMG",
+            release.tag_name
+        )
+    })?;
+    if assets.next().is_some() {
+        bail!(
+            "Bambu Studio {} has multiple matching macOS DMGs; refusing an ambiguous download",
+            release.tag_name
+        );
+    }
+    if Path::new(&asset.name).components().count() != 1 {
+        bail!("Bambu Studio release contains an unsafe asset name");
+    }
+    if !asset
+        .browser_download_url
+        .starts_with(BAMBU_DOWNLOAD_PREFIX)
+    {
+        bail!("Bambu Studio asset URL is outside the official GitHub repository");
+    }
+    let digest = asset
+        .digest
+        .as_deref()
+        .and_then(|value| value.strip_prefix("sha256:"))
+        .ok_or_else(|| anyhow!("Bambu Studio macOS asset has no official SHA-256 digest"))?;
+    if digest.len() != 64 || !digest.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        bail!("Bambu Studio macOS asset has an invalid SHA-256 digest");
+    }
+    let version = asset
+        .name
+        .strip_prefix("Bambu_Studio_mac-v")
+        .and_then(|rest| rest.split_once('-').map(|(version, _)| version))
+        .ok_or_else(|| anyhow!("cannot derive Bambu Studio version from asset name"))?;
+    parse_version(version)?;
+
+    Ok(ResolvedBambuRelease {
+        tag: release.tag_name.clone(),
+        version: version.to_string(),
+        asset_name: asset.name.clone(),
+        download_url: asset.browser_download_url.clone(),
+        sha256: digest.to_ascii_lowercase(),
+    })
+}
+
+fn apply_bambu_studio_release(channel: ReleaseChannel) -> Result<String> {
+    if !cfg!(target_os = "macos") {
+        bail!("bambu-studio-release is only supported on macOS");
+    }
+    let resolved = resolve_bambu_release(&fetch_bambu_releases()?, channel)?;
+    let install_root = expand_required_path("$HOME/Applications")?;
+    let destination = install_root.join("BambuStudio.app");
+
+    if path_entry_exists(&destination)? {
+        let installed_version = verify_bambu_app_and_read_version(&destination)?;
+        if compare_versions(&installed_version, &resolved.version)? != Ordering::Less {
+            return Ok(format!(
+                "Bambu Studio {} is already installed; latest {} is {} ({})",
+                installed_version,
+                release_channel_name(channel),
+                resolved.version,
+                resolved.tag
+            ));
+        }
+        let running = Command::new("/usr/bin/pgrep")
+            .args(["-x", "BambuStudio"])
+            .status()
+            .context("check whether Bambu Studio is running")?;
+        if running.success() {
+            bail!("Bambu Studio is running; quit it before updating");
+        }
+        if running.code() != Some(1) {
+            bail!("could not determine whether Bambu Studio is running");
+        }
+    }
+
+    let cache_path = dirs::home_dir()
+        .ok_or_else(|| anyhow!("home directory unavailable"))?
+        .join("Library/Caches/ppduster/downloads")
+        .join(&resolved.asset_name);
+    let cache = cache_path.to_string_lossy().into_owned();
+    apply_download_file(
+        &resolved.download_url,
+        &cache,
+        &crate::automation::task::Checksum {
+            sha256: resolved.sha256.clone(),
+        },
+    )?;
+    let identity = AppBundleIdentity {
+        bundle_identifier: "com.bambulab.bambu-studio".into(),
+        team_identifier: "T3UBR9Y3B2".into(),
+        version: resolved.version.clone(),
+    };
+    apply_install_dmg(
+        &cache,
+        Some("BambuStudio.app"),
+        Some("$HOME/Applications"),
+        Some(&identity),
+        true,
+    )?;
+    Ok(format!(
+        "installed Bambu Studio {} from latest {} ({})",
+        resolved.version,
+        release_channel_name(channel),
+        resolved.tag
+    ))
+}
+
 fn apply_extract_archive(src: &str, dest: &str) -> Result<String> {
     let src_path = expand_required_path(src)?;
     let dest_path = expand_required_path(dest)?;
@@ -782,6 +1002,7 @@ fn apply_install_dmg(
     app_name: Option<&str>,
     target: Option<&str>,
     identity: Option<&AppBundleIdentity>,
+    replace_existing: bool,
 ) -> Result<String> {
     if !cfg!(target_os = "macos") {
         bail!("install-dmg is only supported on macOS");
@@ -806,11 +1027,23 @@ fn apply_install_dmg(
             .file_name()
             .ok_or_else(|| anyhow!("mounted app has no bundle name"))?;
         let destination = install_root.join(bundle_name);
-        if path_entry_exists(&destination)? {
+        let destination_exists = path_entry_exists(&destination)?;
+        if destination_exists && !replace_existing {
             bail!(
                 "application already exists: {}; remove it explicitly before reinstalling",
                 destination.display()
             );
+        }
+        if destination_exists {
+            let expected = identity.ok_or_else(|| {
+                anyhow!("replacing an application requires an exact signed identity")
+            })?;
+            verify_app_publisher(&destination, expected).with_context(|| {
+                format!(
+                    "refuse to replace an application from a different publisher: {}",
+                    destination.display()
+                )
+            })?;
         }
 
         let staging = unique_app_staging_path(&install_root, bundle_name)?;
@@ -830,7 +1063,12 @@ fn apply_install_dmg(
             }
             return Err(verify_err.context(format!("verify staged app {}", staging.display())));
         }
-        if let Err(commit_err) = commit_staged_app(&staging, &destination) {
+        let commit_result = if destination_exists {
+            replace_with_staged_app(&install_root, &staging, &destination, identity)
+        } else {
+            commit_staged_app(&staging, &destination)
+        };
+        if let Err(commit_err) = commit_result {
             if let Err(cleanup_err) = remove_staged_app(&install_root, &staging) {
                 return Err(commit_err.context(format!(
                     "also failed to remove staging app: {cleanup_err:#}"
@@ -1078,6 +1316,62 @@ fn verify_app_identity(app_path: &Path, identity: &AppBundleIdentity) -> Result<
     Ok(())
 }
 
+fn app_publisher_requirement(identity: &AppBundleIdentity) -> String {
+    format!(
+        "=identifier \"{}\" and anchor apple generic and certificate leaf[subject.OU] = \"{}\"",
+        identity.bundle_identifier, identity.team_identifier
+    )
+}
+
+fn verify_app_publisher(app_path: &Path, identity: &AppBundleIdentity) -> Result<()> {
+    verify_app_signature(app_path)?;
+    let output = Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict", "--test-requirement"])
+        .arg(app_publisher_requirement(identity))
+        .arg(app_path)
+        .output()
+        .with_context(|| format!("verify app publisher for {}", app_path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "app publisher verification failed for {}: {}",
+            app_path.display(),
+            command_error_detail(&output)
+        );
+    }
+    Ok(())
+}
+
+fn read_app_version(app_path: &Path) -> Result<String> {
+    let info_plist = app_path.join("Contents/Info.plist");
+    let output = Command::new("/usr/bin/plutil")
+        .args(["-extract", "CFBundleShortVersionString", "raw", "-o", "-"])
+        .arg(&info_plist)
+        .output()
+        .with_context(|| format!("read app version from {}", info_plist.display()))?;
+    if !output.status.success() {
+        bail!(
+            "read app version from {} failed: {}",
+            info_plist.display(),
+            command_error_detail(&output)
+        );
+    }
+    let version = String::from_utf8(output.stdout).context("app version is not UTF-8")?;
+    let version = version.trim().to_string();
+    parse_version(&version)?;
+    Ok(version)
+}
+
+fn verify_bambu_app_and_read_version(app_path: &Path) -> Result<String> {
+    let version = read_app_version(app_path)?;
+    let identity = AppBundleIdentity {
+        bundle_identifier: "com.bambulab.bambu-studio".into(),
+        team_identifier: "T3UBR9Y3B2".into(),
+        version: version.clone(),
+    };
+    verify_app_identity(app_path, &identity)?;
+    Ok(version)
+}
+
 fn copy_app_bundle(source: &Path, destination: &Path) -> Result<()> {
     let output = Command::new("/usr/bin/ditto")
         .arg(source)
@@ -1124,6 +1418,90 @@ fn commit_staged_app(staging: &Path, destination: &Path) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+fn replace_with_staged_app(
+    install_root: &Path,
+    staging: &Path,
+    destination: &Path,
+    identity: Option<&AppBundleIdentity>,
+) -> Result<()> {
+    let bundle_name = destination
+        .file_name()
+        .ok_or_else(|| anyhow!("application destination has no bundle name"))?;
+    let backup = unique_app_backup_path(install_root, bundle_name)?;
+    fs::rename(destination, &backup).with_context(|| {
+        format!(
+            "move existing app {} to rollback location",
+            destination.display()
+        )
+    })?;
+    if let Err(commit_err) = fs::rename(staging, destination) {
+        fs::rename(&backup, destination).with_context(|| {
+            format!(
+                "restore {} after update commit failed: {commit_err}",
+                destination.display()
+            )
+        })?;
+        return Err(commit_err).with_context(|| format!("replace app {}", destination.display()));
+    }
+    if let Err(verify_err) = verify_installable_app(destination, identity) {
+        remove_replacement_app(install_root, destination)?;
+        fs::rename(&backup, destination).with_context(|| {
+            format!(
+                "restore {} after installed app verification failed",
+                destination.display()
+            )
+        })?;
+        return Err(verify_err).context("verify replacement app");
+    }
+    remove_backup_app(install_root, &backup)?;
+    Ok(())
+}
+
+fn unique_app_backup_path(install_root: &Path, bundle_name: &std::ffi::OsStr) -> Result<PathBuf> {
+    let bundle_name = bundle_name.to_string_lossy();
+    for index in 0..1_000u32 {
+        let candidate = install_root.join(format!(
+            ".{bundle_name}.ppduster-backup-{}-{index}.app",
+            std::process::id()
+        ));
+        if !path_entry_exists(&candidate)? {
+            return Ok(candidate);
+        }
+    }
+    bail!("could not allocate an application rollback path")
+}
+
+fn remove_backup_app(install_root: &Path, backup: &Path) -> Result<()> {
+    let file_name = backup
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("invalid backup app path {}", backup.display()))?;
+    if backup.parent() != Some(install_root)
+        || !file_name.starts_with('.')
+        || !file_name.contains(".app.ppduster-backup-")
+        || !file_name.ends_with(".app")
+    {
+        bail!(
+            "refusing to remove unexpected backup path {}",
+            backup.display()
+        );
+    }
+    fs::remove_dir_all(backup).with_context(|| format!("remove rollback app {}", backup.display()))
+}
+
+fn remove_replacement_app(install_root: &Path, destination: &Path) -> Result<()> {
+    if destination.parent() != Some(install_root)
+        || destination.file_name().and_then(|name| name.to_str()) != Some("BambuStudio.app")
+    {
+        bail!(
+            "refusing to remove unexpected replacement path {}",
+            destination.display()
+        );
+    }
+    fs::remove_dir_all(destination)
+        .with_context(|| format!("remove failed replacement {}", destination.display()))
 }
 
 fn remove_staged_app(install_root: &Path, staging: &Path) -> Result<()> {
@@ -1250,17 +1628,22 @@ fn apply_macos_requirements(
 }
 
 fn version_at_least(current: &str, minimum: &str) -> Result<bool> {
-    let current = parse_version(current)?;
-    let minimum = parse_version(minimum)?;
-    let component_count = current.len().max(minimum.len());
+    Ok(compare_versions(current, minimum)? != Ordering::Less)
+}
+
+fn compare_versions(left: &str, right: &str) -> Result<Ordering> {
+    let left = parse_version(left)?;
+    let right = parse_version(right)?;
+    let component_count = left.len().max(right.len());
     for index in 0..component_count {
-        let current_component = *current.get(index).unwrap_or(&0);
-        let minimum_component = *minimum.get(index).unwrap_or(&0);
-        if current_component != minimum_component {
-            return Ok(current_component > minimum_component);
+        let left_component = *left.get(index).unwrap_or(&0);
+        let right_component = *right.get(index).unwrap_or(&0);
+        match left_component.cmp(&right_component) {
+            Ordering::Equal => {}
+            ordering => return Ok(ordering),
         }
     }
-    Ok(true)
+    Ok(Ordering::Equal)
 }
 
 fn parse_version(value: &str) -> Result<Vec<u64>> {
@@ -2445,5 +2828,86 @@ mod tests {
         assert!(matches!(report.outcomes[0], ActionOutcome::Planned { .. }));
         assert!(report.plans[0].summary.contains("$HOME/Applications"));
         assert!(report.plans[0].prerequisites.is_empty());
+    }
+
+    fn github_release(
+        tag: &str,
+        prerelease: bool,
+        published_at: &str,
+        asset_name: &str,
+        digest: &str,
+    ) -> GithubRelease {
+        GithubRelease {
+            tag_name: tag.into(),
+            draft: false,
+            prerelease,
+            published_at: published_at.into(),
+            assets: vec![GithubAsset {
+                name: asset_name.into(),
+                browser_download_url: format!("{BAMBU_DOWNLOAD_PREFIX}{tag}/{asset_name}"),
+                digest: Some(format!("sha256:{digest}")),
+            }],
+        }
+    }
+
+    #[test]
+    fn bambu_release_resolver_selects_stable_or_beta_and_asset_version() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let stable = github_release(
+            "v02.07.01.62",
+            false,
+            "2026-06-16T00:00:00Z",
+            "Bambu_Studio_mac-v02.07.01.62-20260616.dmg",
+            digest,
+        );
+        let beta = github_release(
+            "v02.08.01.55",
+            true,
+            "2026-07-14T00:00:00Z",
+            "Bambu_Studio_mac-v02.08.01.55-20260714.dmg",
+            digest,
+        );
+        let releases = vec![stable, beta];
+
+        let resolved_stable = resolve_bambu_release(&releases, ReleaseChannel::Release).unwrap();
+        let resolved_beta = resolve_bambu_release(&releases, ReleaseChannel::Beta).unwrap();
+        assert_eq!(resolved_stable.version, "02.07.01.62");
+        assert_eq!(resolved_beta.version, "02.08.01.55");
+    }
+
+    #[test]
+    fn bambu_plan_honors_channel_override_without_network() {
+        let task = base_task(Step {
+            id: "bambu".into(),
+            name: String::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            action: Action::BambuStudioRelease(crate::automation::task::BambuStudioReleaseAction {
+                channel: ReleaseChannel::Release,
+            }),
+        });
+        let report = run_task(
+            &task,
+            &RunOptions {
+                release_channel: Some(ReleaseChannel::Beta),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(report.plans[0].summary.contains("latest Bambu Studio beta"));
+    }
+
+    #[test]
+    fn numeric_version_comparison_prevents_downgrades() {
+        assert_eq!(
+            compare_versions("02.08.01.55", "02.07.01.62").unwrap(),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("02.07.01.62", "2.7.1.62").unwrap(),
+            Ordering::Equal
+        );
     }
 }

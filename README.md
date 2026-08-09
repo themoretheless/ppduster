@@ -94,9 +94,11 @@ ppduster setup run macos-top-08-security-baseline --allow-elevation
 ppduster setup run lightburn-install-activate
 ppduster setup run lightburn-install-activate --yes
 
-# Bambu Studio 2.7.1.62: inspect the plan, then download/install
-ppduster setup run bambu-studio-install
-ppduster setup run bambu-studio-install --yes
+# Bambu Studio: choose latest stable release or latest beta
+ppduster setup run bambu-studio-install --channel release
+ppduster setup run bambu-studio-install --channel release --yes
+ppduster setup run bambu-studio-install --channel beta
+ppduster setup run bambu-studio-install --channel beta --yes
 
 # Install/refresh the mas CLI used by app-store-install actions
 ppduster setup run app-store-bootstrap
@@ -151,10 +153,11 @@ LightBurn's documented `-l` command is intentionally not used: after normal acti
 it converts a closed installation to System Locked mode (and is also the first step for
 a specially tagged Floating key), while exposing the key in the process argument list.
 
-The bundled Bambu Studio task pins the official GitHub release DMG and its
-publisher-provided SHA-256. It requires macOS 10.15 or newer and verifies the exact
-`com.bambulab.bambu-studio` bundle, signing team, and version before installing it in
-`~/Applications`.
+The bundled Bambu Studio task resolves the latest stable release by default; pass
+`--channel beta` to select the newest prerelease. On apply it reads the official GitHub
+asset SHA-256, verifies the exact `com.bambulab.bambu-studio` bundle and signing team,
+and compares the signed installed version before updating `~/Applications`. Equal or
+newer installed versions are left untouched.
 
 Bundled macOS setup starters currently cover the top 50 bootstrap areas, starting with:
 

@@ -1,7 +1,7 @@
 task:
   id: bambu-studio-install
-  name: Install Bambu Studio 2.7.1.62
-  description: Download the pinned official Bambu Studio DMG and install its signed app bundle for the current user. Requires macOS 10.15 or newer.
+  name: Install or update Bambu Studio
+  description: Resolve the latest official Bambu Studio release or beta, compare it with the signed installed version, and install only when newer. Requires macOS 10.15 or newer.
   platform: macos
   trust: bundled-only
   steps:
@@ -9,20 +9,7 @@ task:
       name: Verify Bambu Studio macOS requirements
       type: macos-requirements
       minimum_version: "10.15"
-    - id: download-bambu-studio
-      name: Download Bambu Studio 2.7.1.62
-      type: download-file
-      url: https://github.com/bambulab/BambuStudio/releases/download/v02.07.01.62/Bambu_Studio_mac-v02.07.01.62-20260616174358.dmg
-      dest: $HOME/Library/Caches/ppduster/downloads/Bambu_Studio_mac-v02.07.01.62-20260616174358.dmg
-      checksum:
-        sha256: 1e54c25aefc5249d56b63711cf773bed56f14430aafcc34340cd4894aef15896
     - id: install-bambu-studio
-      name: Install signed Bambu Studio app
-      type: install-dmg
-      dmg: $HOME/Library/Caches/ppduster/downloads/Bambu_Studio_mac-v02.07.01.62-20260616174358.dmg
-      app_name: BambuStudio.app
-      target: $HOME/Applications
-      identity:
-        bundle_identifier: com.bambulab.bambu-studio
-        team_identifier: T3UBR9Y3B2
-        version: "02.07.01.62"
+      name: Install latest signed Bambu Studio app
+      type: bambu-studio-release
+      channel: release

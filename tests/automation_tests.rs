@@ -130,7 +130,7 @@ fn bundled_dev_setup_includes_macos_top_fifty_tasks() {
 }
 
 #[test]
-fn bambu_studio_task_pins_official_dmg_and_identity() {
+fn bambu_studio_task_uses_dynamic_release_channel() {
     let pack = TaskPack::load_many(
         &[TaskSource {
             path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
@@ -141,26 +141,15 @@ fn bambu_studio_task_pins_official_dmg_and_identity() {
     .unwrap();
     let task = pack.get("bambu-studio-install").unwrap();
 
-    assert_eq!(task.steps.len(), 3);
+    assert_eq!(task.steps.len(), 2);
     assert!(matches!(
         &task.steps[0].action,
         Action::MacosRequirements { minimum_version, .. } if minimum_version == "10.15"
     ));
     assert!(matches!(
         &task.steps[1].action,
-        Action::DownloadFile { checksum, .. }
-            if checksum.sha256 == "1e54c25aefc5249d56b63711cf773bed56f14430aafcc34340cd4894aef15896"
-    ));
-    assert!(matches!(
-        &task.steps[2].action,
-        Action::InstallDmg {
-            app_name: Some(app_name),
-            identity: Some(identity),
-            ..
-        } if app_name == "BambuStudio.app"
-            && identity.bundle_identifier == "com.bambulab.bambu-studio"
-            && identity.team_identifier == "T3UBR9Y3B2"
-            && identity.version == "02.07.01.62"
+        Action::BambuStudioRelease(action)
+            if action.channel == ppduster::automation::ReleaseChannel::Release
     ));
 }
 

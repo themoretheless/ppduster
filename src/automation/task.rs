@@ -149,6 +149,21 @@ pub struct AppStoreInstallAction {
     pub operation: AppStoreOperation,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReleaseChannel {
+    #[default]
+    Release,
+    Beta,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BambuStudioReleaseAction {
+    #[serde(default)]
+    pub channel: ReleaseChannel,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Action {
@@ -203,6 +218,7 @@ pub enum Action {
         require_rosetta_on_apple_silicon: bool,
     },
     AppStoreInstall(AppStoreInstallAction),
+    BambuStudioRelease(BambuStudioReleaseAction),
     ActivateLicense(ActivateLicenseAction),
 }
 
@@ -329,6 +345,7 @@ impl Step {
                     return Err(format!("step {} requires pkg", self.id));
                 }
             }
+            Action::BambuStudioRelease(_) => {}
             Action::MacosRequirements {
                 minimum_version, ..
             } => {
