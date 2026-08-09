@@ -13,7 +13,7 @@ use ppduster::automation::{
 use ppduster::github::{list_accessible_repositories, login_via_web, GithubRepository};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -52,6 +52,22 @@ struct ScenarioProject {
     description: String,
     #[serde(default)]
     entries: Vec<ProjectEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    canvases: BTreeMap<String, ComposerCanvas>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct CanvasPoint {
+    x: f32,
+    y: f32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ComposerCanvas {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    positions: BTreeMap<String, CanvasPoint>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    parents: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,6 +349,7 @@ impl ScenarioApp {
             id: "scenario-project".into(),
             name: "Новый проект".into(),
             description: "Проект сценариев ppduster.".into(),
+            canvases: BTreeMap::new(),
             entries: vec![ProjectEntry::Group {
                 id: "main".into(),
                 name: "Основные сценарии".into(),
@@ -348,6 +365,10 @@ impl ScenarioApp {
     }
 
     fn add_composer_block(&mut self, kind: ComposerBlockKind) {
+        let parent = self
+            .block_picker_parent
+            .clone()
+            .unwrap_or_else(|| "start".into());
         let Some(task) = self
             .custom_project
             .as_mut()
@@ -364,8 +385,31 @@ impl ScenarioApp {
             }
             suffix += 1;
         };
-        task.steps.push(composer_step(kind, id));
+        task.steps.push(composer_step(kind, id.clone()));
+        let task_id = task.id.clone();
         self.selected_step = Some(task.steps.len() - 1);
+        if let Some(project) = self.custom_project.as_mut() {
+            let canvas = project.canvases.entry(task_id).or_default();
+            canvas.parents.insert(id.clone(), parent.clone());
+            let parent_position = canvas
+                .positions
+                .get(&parent)
+                .copied()
+                .unwrap_or(CanvasPoint { x: 80.0, y: 250.0 });
+            let sibling_index = canvas
+                .parents
+                .iter()
+                .filter(|(child, candidate)| child.as_str() != id && *candidate == &parent)
+                .count();
+            let branch = branch_offset(sibling_index);
+            canvas.positions.insert(
+                id,
+                CanvasPoint {
+                    x: parent_position.x + 286.0,
+                    y: (parent_position.y + branch).max(40.0),
+                },
+            );
+        }
         self.block_picker_parent = None;
         self.block_picker_search.clear();
         self.invalidate_plan();
@@ -377,6 +421,79 @@ impl ScenarioApp {
         }
         self.block_picker_parent = Some(parent.into());
         self.block_picker_search.clear();
+    }
+
+    fn ensure_composer_canvas(&mut self, task: &Task) {
+        let Some(project) = self.custom_project.as_mut() else {
+            return;
+        };
+        let canvas = project.canvases.entry(task.id.clone()).or_default();
+        canvas
+            .positions
+            .entry("start".into())
+            .or_insert(CanvasPoint { x: 80.0, y: 250.0 });
+
+        let valid_ids = task
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect::<BTreeSet<_>>();
+        canvas
+            .positions
+            .retain(|id, _| id == "start" || valid_ids.contains(id.as_str()));
+        canvas.parents.retain(|child, parent| {
+            valid_ids.contains(child.as_str())
+                && (parent == "start" || valid_ids.contains(parent.as_str()))
+        });
+
+        let mut previous = "start".to_owned();
+        for step in &task.steps {
+            canvas
+                .parents
+                .entry(step.id.clone())
+                .or_insert_with(|| previous.clone());
+            if !canvas.positions.contains_key(&step.id) {
+                let parent = canvas
+                    .parents
+                    .get(&step.id)
+                    .cloned()
+                    .unwrap_or_else(|| previous.clone());
+                let parent_position = canvas
+                    .positions
+                    .get(&parent)
+                    .copied()
+                    .unwrap_or(CanvasPoint { x: 80.0, y: 250.0 });
+                let sibling_index = canvas
+                    .parents
+                    .iter()
+                    .filter(|(child, candidate)| child.as_str() != step.id && **candidate == parent)
+                    .count();
+                canvas.positions.insert(
+                    step.id.clone(),
+                    CanvasPoint {
+                        x: parent_position.x + 286.0,
+                        y: (parent_position.y + branch_offset(sibling_index)).max(40.0),
+                    },
+                );
+            }
+            previous = step.id.clone();
+        }
+    }
+
+    fn drag_composer_node(&mut self, task_id: &str, node_id: &str, delta: Vec2) {
+        if delta == Vec2::ZERO {
+            return;
+        }
+        let Some(position) = self
+            .custom_project
+            .as_mut()
+            .and_then(|project| project.canvases.get_mut(task_id))
+            .and_then(|canvas| canvas.positions.get_mut(node_id))
+        else {
+            return;
+        };
+        position.x = (position.x + delta.x).max(24.0);
+        position.y = (position.y + delta.y).max(210.0);
     }
 
     fn move_composer_step(&mut self, from: usize, to: usize) {
@@ -407,12 +524,30 @@ impl ScenarioApp {
         if index >= task.steps.len() {
             return;
         }
+        let removed_id = task.steps[index].id.clone();
+        let task_id = task.id.clone();
         task.steps.remove(index);
         self.selected_step = if task.steps.is_empty() {
             None
         } else {
             Some(index.min(task.steps.len() - 1))
         };
+        if let Some(canvas) = self
+            .custom_project
+            .as_mut()
+            .and_then(|project| project.canvases.get_mut(&task_id))
+        {
+            let parent = canvas
+                .parents
+                .remove(&removed_id)
+                .unwrap_or_else(|| "start".into());
+            canvas.positions.remove(&removed_id);
+            for child_parent in canvas.parents.values_mut() {
+                if *child_parent == removed_id {
+                    *child_parent = parent.clone();
+                }
+            }
+        }
         self.invalidate_plan();
     }
 
@@ -1013,6 +1148,7 @@ fn load_project_yaml(yaml: &str) -> anyhow::Result<ScenarioProject> {
         id,
         name,
         description: "Импортирован из одиночного сценария ppduster.".into(),
+        canvases: BTreeMap::new(),
         entries: vec![ProjectEntry::Group {
             id: "imported".into(),
             name: "Импортированные сценарии".into(),
@@ -1959,6 +2095,14 @@ impl ScenarioApp {
                     Vec::new()
                 };
                 let is_composer = self.custom_project.is_some();
+                if is_composer {
+                    self.ensure_composer_canvas(&task);
+                }
+                let composer_canvas = self
+                    .custom_project
+                    .as_ref()
+                    .and_then(|project| project.canvases.get(&task.id))
+                    .cloned();
                 let node_count = if task.is_template() {
                     groups.len()
                 } else {
@@ -1973,23 +2117,59 @@ impl ScenarioApp {
                             Vec2::new(232.0, 116.0)
                         };
                         let node_stride = if task.is_template() { 318.0 } else { 286.0 };
-                        let width =
-                            (node_count as f32 * node_stride + 180.0).max(ui.available_width());
-                        let height = 690.0_f32.max(ui.available_height());
+                        let canvas_extent = composer_canvas.as_ref().map(|canvas| {
+                            canvas
+                                .positions
+                                .values()
+                                .fold(Vec2::new(0.0, 0.0), |extent, point| {
+                                    Vec2::new(extent.x.max(point.x), extent.y.max(point.y))
+                                })
+                        });
+                        let width = canvas_extent
+                            .map(|extent| extent.x + node_size.x + 180.0)
+                            .unwrap_or(node_count as f32 * node_stride + 180.0)
+                            .max(ui.available_width());
+                        let height = canvas_extent
+                            .map(|extent| extent.y + node_size.y + 140.0)
+                            .unwrap_or(690.0)
+                            .max(690.0_f32.max(ui.available_height()));
                         let (response, painter) =
                             ui.allocate_painter(Vec2::new(width, height), Sense::drag());
                         let bounds = response.rect;
                         paint_grid(&painter, bounds, self.dark);
 
-                        let positions = (0..node_count)
-                            .map(|index| {
-                                let x = bounds.left() + 80.0 + index as f32 * node_stride;
-                                let y = bounds.top() + 250.0 + ((index as f32 * 1.15).sin() * 78.0);
-                                Pos2::new(x, y)
-                            })
-                            .collect::<Vec<_>>();
+                        let positions = if let Some(canvas) = &composer_canvas {
+                            std::iter::once("start")
+                                .chain(resolved.steps.iter().map(|step| step.id.as_str()))
+                                .filter_map(|id| canvas.positions.get(id))
+                                .map(|point| bounds.min + Vec2::new(point.x, point.y))
+                                .collect::<Vec<_>>()
+                        } else {
+                            (0..node_count)
+                                .map(|index| {
+                                    let x = bounds.left() + 80.0 + index as f32 * node_stride;
+                                    let y =
+                                        bounds.top() + 250.0 + ((index as f32 * 1.15).sin() * 78.0);
+                                    Pos2::new(x, y)
+                                })
+                                .collect::<Vec<_>>()
+                        };
 
-                        paint_connectors(&painter, &positions, node_size);
+                        if let Some(canvas) = &composer_canvas {
+                            let position_map = std::iter::once("start")
+                                .chain(resolved.steps.iter().map(|step| step.id.as_str()))
+                                .zip(positions.iter().copied())
+                                .map(|(id, position)| (id.to_owned(), position))
+                                .collect::<BTreeMap<_, _>>();
+                            paint_composer_connectors(
+                                &painter,
+                                &position_map,
+                                &canvas.parents,
+                                node_size,
+                            );
+                        } else {
+                            paint_connectors(&painter, &positions, node_size);
+                        }
 
                         if task.is_template() {
                             let mut report_offset = 0;
@@ -2023,6 +2203,15 @@ impl ScenarioApp {
                             let step_positions = if is_composer {
                                 if let Some(position) = positions.first() {
                                     let rect = Rect::from_min_size(*position, node_size);
+                                    let drag = ui.interact(
+                                        rect,
+                                        Id::new(("scenario-start", task.id.as_str())),
+                                        Sense::click_and_drag(),
+                                    );
+                                    if drag.dragged() {
+                                        let delta = ui.ctx().input(|input| input.pointer.delta());
+                                        self.drag_composer_node(&task.id, "start", delta);
+                                    }
                                     painter.rect_filled(rect, 13.0, panel(self.dark));
                                     painter.rect_stroke(
                                         rect,
@@ -2086,10 +2275,18 @@ impl ScenarioApp {
                                 let interaction = ui.interact(
                                     rect,
                                     Id::new(("scenario-step", task.id.as_str(), index)),
-                                    Sense::click(),
+                                    if is_composer {
+                                        Sense::click_and_drag()
+                                    } else {
+                                        Sense::click()
+                                    },
                                 );
                                 if interaction.clicked() {
                                     self.selected_step = Some(index);
+                                }
+                                if is_composer && interaction.dragged() {
+                                    let delta = ui.ctx().input(|input| input.pointer.delta());
+                                    self.drag_composer_node(&task.id, &step.id, delta);
                                 }
                                 paint_step_node(
                                     &painter,
@@ -3172,26 +3369,61 @@ fn composer_git_auth(ui: &mut egui::Ui, auth: &mut AuthPolicy) -> bool {
     }
 }
 
+fn branch_offset(sibling_index: usize) -> f32 {
+    if sibling_index == 0 {
+        return 0.0;
+    }
+    let distance = sibling_index.div_ceil(2) as f32 * 158.0;
+    if sibling_index % 2 == 1 {
+        distance
+    } else {
+        -distance
+    }
+}
+
+fn paint_connector(painter: &egui::Painter, from: Pos2, to: Pos2) {
+    let bend = ((to.x - from.x).abs() * 0.46).max(34.0);
+    let direction = if to.x >= from.x { 1.0 } else { -1.0 };
+    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+        [
+            from,
+            from + Vec2::new(bend * direction, 0.0),
+            to - Vec2::new(bend * direction, 0.0),
+            to,
+        ],
+        false,
+        Color32::TRANSPARENT,
+        Stroke::new(4.0, translucent(PURPLE, 115)),
+    ));
+    painter.circle_filled(from, 7.0, PURPLE);
+    painter.circle_filled(to, 7.0, PURPLE);
+    painter.circle_stroke(from, 11.0, Stroke::new(2.0, translucent(PURPLE, 80)));
+    painter.circle_stroke(to, 11.0, Stroke::new(2.0, translucent(PURPLE, 80)));
+}
+
 fn paint_connectors(painter: &egui::Painter, positions: &[Pos2], node_size: Vec2) {
     for pair in positions.windows(2) {
         let from = pair[0] + Vec2::new(node_size.x, node_size.y * 0.5);
         let to = pair[1] + Vec2::new(0.0, node_size.y * 0.5);
-        let bend = ((to.x - from.x) * 0.46).max(34.0);
-        painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-            [
-                from,
-                from + Vec2::new(bend, 0.0),
-                to - Vec2::new(bend, 0.0),
-                to,
-            ],
-            false,
-            Color32::TRANSPARENT,
-            Stroke::new(4.0, translucent(PURPLE, 115)),
-        ));
-        painter.circle_filled(from, 7.0, PURPLE);
-        painter.circle_filled(to, 7.0, PURPLE);
-        painter.circle_stroke(from, 11.0, Stroke::new(2.0, translucent(PURPLE, 80)));
-        painter.circle_stroke(to, 11.0, Stroke::new(2.0, translucent(PURPLE, 80)));
+        paint_connector(painter, from, to);
+    }
+}
+
+fn paint_composer_connectors(
+    painter: &egui::Painter,
+    positions: &BTreeMap<String, Pos2>,
+    parents: &BTreeMap<String, String>,
+    node_size: Vec2,
+) {
+    for (child, parent) in parents {
+        let (Some(from), Some(to)) = (positions.get(parent), positions.get(child)) else {
+            continue;
+        };
+        paint_connector(
+            painter,
+            *from + Vec2::new(node_size.x, node_size.y * 0.5),
+            *to + Vec2::new(0.0, node_size.y * 0.5),
+        );
     }
 }
 
@@ -4050,6 +4282,7 @@ mod tests {
             id: "workstation".into(),
             name: "Workstation".into(),
             description: "Developer workstation project.".into(),
+            canvases: BTreeMap::new(),
             entries: vec![ProjectEntry::Group {
                 id: "git".into(),
                 name: "Git".into(),
@@ -4068,6 +4301,51 @@ mod tests {
 
         assert_eq!(path, vec![0, 0, 0]);
         assert_eq!(reparsed.scenario(&path).unwrap().id, "nested-scenario");
+    }
+
+    #[test]
+    fn project_round_trips_canvas_positions_and_multiple_children() {
+        let task = Task {
+            id: "branched-scenario".into(),
+            name: "Branched scenario".into(),
+            description: "Two blocks attached to Start.".into(),
+            platform: ppduster::rules::Platform::Macos,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            steps: vec![
+                composer_step(ComposerBlockKind::InspectPath, "inspect-a".into()),
+                composer_step(ComposerBlockKind::InspectPath, "inspect-b".into()),
+            ],
+        };
+        let project = ScenarioProject {
+            id: "branched-project".into(),
+            name: "Branched project".into(),
+            description: String::new(),
+            entries: vec![ProjectEntry::Scenario { task }],
+            canvases: BTreeMap::from([(
+                "branched-scenario".into(),
+                ComposerCanvas {
+                    positions: BTreeMap::from([
+                        ("start".into(), CanvasPoint { x: 80.0, y: 250.0 }),
+                        ("inspect-a".into(), CanvasPoint { x: 366.0, y: 170.0 }),
+                        ("inspect-b".into(), CanvasPoint { x: 366.0, y: 330.0 }),
+                    ]),
+                    parents: BTreeMap::from([
+                        ("inspect-a".into(), "start".into()),
+                        ("inspect-b".into(), "start".into()),
+                    ]),
+                },
+            )]),
+        };
+
+        let yaml = serde_yaml::to_string(&ScenarioProjectFile { project }).unwrap();
+        let reparsed = load_project_yaml(&yaml).unwrap();
+        let canvas = &reparsed.canvases["branched-scenario"];
+
+        assert_eq!(canvas.parents["inspect-a"], "start");
+        assert_eq!(canvas.parents["inspect-b"], "start");
+        assert_eq!(canvas.positions["inspect-b"].y, 330.0);
     }
 
     #[test]
