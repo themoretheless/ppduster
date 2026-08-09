@@ -96,7 +96,18 @@ pub struct Task {
     pub platform: Platform,
     #[serde(default)]
     pub trust: TrustRequirement,
-    #[serde(default)]
+    /// Other scenarios included by this reusable template, in execution order.
+    ///
+    /// A task definition contains either `scenarios` or `steps`. `TaskPack::resolve`
+    /// recursively expands scenario references into a flat, policy-checkable task
+    /// immediately before execution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "includes")]
+    pub scenarios: Vec<String>,
+    /// Root scenario references retained after `TaskPack::resolve` flattens a
+    /// template. This is runtime provenance only and is never written to YAML.
+    #[serde(skip)]
+    pub resolved_scenarios: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
 }
 
@@ -277,13 +288,70 @@ impl Task {
         if self.id.trim().is_empty() {
             return Err("task id must not be empty".into());
         }
-        if self.steps.is_empty() {
-            return Err(format!("task {} has no steps", self.id));
+        if self.id.contains('/') {
+            return Err(format!("task {} id must not contain '/'", self.id));
         }
+        if self.name.trim().is_empty() {
+            return Err(format!("task {} name must not be empty", self.id));
+        }
+        if self.description.trim().is_empty() {
+            return Err(format!("task {} description must not be empty", self.id));
+        }
+        if self.steps.is_empty() && self.scenarios.is_empty() {
+            return Err(format!("task {} has no steps or scenarios", self.id));
+        }
+        if !self.steps.is_empty() && !self.scenarios.is_empty() {
+            return Err(format!(
+                "task {} must define either steps or scenarios, not both",
+                self.id
+            ));
+        }
+
+        let mut scenario_ids = std::collections::BTreeSet::new();
+        for scenario_id in &self.scenarios {
+            if scenario_id.trim().is_empty() {
+                return Err(format!(
+                    "task {} contains an empty scenario reference",
+                    self.id
+                ));
+            }
+            if scenario_id.contains('/') {
+                return Err(format!(
+                    "task {} scenario reference {} must not contain '/'",
+                    self.id, scenario_id
+                ));
+            }
+            if !scenario_ids.insert(scenario_id) {
+                return Err(format!(
+                    "task {} includes scenario {} more than once",
+                    self.id, scenario_id
+                ));
+            }
+        }
+
+        let mut step_ids = std::collections::BTreeSet::new();
         for step in &self.steps {
             step.validate()?;
+            if !step_ids.insert(&step.id) {
+                return Err(format!(
+                    "task {} contains duplicate step id {}",
+                    self.id, step.id
+                ));
+            }
         }
         Ok(())
+    }
+
+    pub fn is_template(&self) -> bool {
+        !self.scenarios.is_empty() || !self.resolved_scenarios.is_empty()
+    }
+
+    pub fn included_scenarios(&self) -> &[String] {
+        if self.scenarios.is_empty() {
+            &self.resolved_scenarios
+        } else {
+            &self.scenarios
+        }
     }
 }
 

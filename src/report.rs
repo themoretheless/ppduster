@@ -366,7 +366,24 @@ pub fn print_setup(report: &RunReport, output: OutputFormat) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(report)?);
         }
         OutputFormat::Table => {
-            println!("{} {}", "setup task:".bold(), report.task_id);
+            println!(
+                "{} {} ({})",
+                if report.scenarios.is_empty() {
+                    "setup scenario:"
+                } else {
+                    "setup template:"
+                }
+                .bold(),
+                report.task_name,
+                report.task_id
+            );
+            println!("{}", report.task_description);
+            if !report.scenarios.is_empty() {
+                println!("{}", "Included scenarios:".bold());
+                for scenario in &report.scenarios {
+                    println!("  - {scenario}");
+                }
+            }
             #[derive(Tabled)]
             struct Row {
                 step: String,
