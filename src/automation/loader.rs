@@ -131,6 +131,10 @@ impl TaskPack {
         let mut resolved = self.tasks[index].clone();
         resolved.resolved_scenarios = std::mem::take(&mut resolved.scenarios);
         resolved.steps = steps;
+        resolved
+            .validate_executable()
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("validate resolved scenario {}", resolved.id))?;
         Ok(resolved)
     }
 
@@ -246,6 +250,7 @@ impl TaskPack {
                 );
             }
             resolved.extend(child_steps.into_iter().map(|mut step| {
+                step.prefix_condition_step(scenario_id);
                 step.id = format!("{}/{}", scenario_id, step.id);
                 step
             }));

@@ -1,7 +1,8 @@
+use crate::automation::package_registry;
 use crate::automation::task::{
     Action, AppBundleIdentity, AppStoreOperation, ArchiveFormat, AuthPolicy, ElevationPolicy,
     InspectPathAction, LicenseMethod, LicenseProvider, PathExpectation, PathKind, ReleaseChannel,
-    ScriptInterpreter, ShellMode, Step, Task,
+    ScriptInterpreter, ShellMode, Step, StepCondition, Task, WriteConflictPolicy,
 };
 use crate::rules::expand_path_template;
 use crate::safety::{is_safe_rule_root, stays_under_root};
@@ -81,6 +82,7 @@ pub struct StepReport {
 #[serde(tag = "type", content = "value", rename_all = "kebab-case")]
 pub enum StepOutput {
     PathMetadata(PathMetadataOutput),
+    ProcessExit(ProcessExitOutput),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +101,19 @@ pub struct PathMetadataOutput {
     pub modified_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessExitOutput {
+    /// The interpreter's normal process exit code. On Windows this preserves
+    /// the full unsigned DWORD value exposed by ExitStatus as a signed i32.
+    pub exit_code: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub termination_signal: Option<i32>,
+    pub accepted: bool,
+    pub success_exit_codes: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,6 +123,7 @@ pub enum ActionOutcome {
     AlreadySatisfied { reason: String },
     Observed { summary: String },
     Applied { summary: String },
+    Skipped { reason: String },
     Blocked,
 }
 
@@ -134,7 +150,16 @@ struct AuthState {
 #[derive(Debug)]
 enum ApplyStepResult {
     Applied(String),
+    AppliedWithOutput {
+        summary: String,
+        output: StepOutput,
+    },
     AlreadySatisfied(String),
+    Failed {
+        summary: String,
+        error: String,
+        output: Option<StepOutput>,
+    },
 }
 
 pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
@@ -146,7 +171,6 @@ fn run_task_with_interactivity(
     opts: &RunOptions,
     terminal_interactive: bool,
 ) -> Result<RunReport> {
-    task.validate().map_err(anyhow::Error::msg)?;
     if task.steps.is_empty() {
         if task.is_template() {
             bail!(
@@ -156,6 +180,8 @@ fn run_task_with_interactivity(
         }
         bail!("task {} has no executable steps", task.id);
     }
+    task.validate_executable()
+        .map_err(AutomationError::Message)?;
     if opts.release_channel.is_some()
         && !task
             .steps
@@ -196,78 +222,186 @@ fn run_task_with_interactivity(
             });
             continue;
         }
-        // Path inspection is deliberately read-only, so it runs during both a
-        // normal dry-run and an applied run. This makes existence, size, and
-        // timestamps observable without requiring `--yes`.
-        if let Action::InspectPath(action) = &step.action {
-            let prerequisites = prerequisites_for_step(step);
-            let planned_summary = describe_step(step, opts)?;
-            match inspect_path(action) {
-                Ok(metadata) => {
-                    let summary = summarize_path_metadata(&metadata);
-                    let output = Some(StepOutput::PathMetadata(metadata.clone()));
-                    let expectation = action
-                        .expect
-                        .as_ref()
-                        .map(|expectation| verify_path_expectation(expectation, &metadata))
-                        .transpose();
-                    match expectation {
-                        Ok(_) => {
-                            steps.push(StepReport {
+        if opts.apply {
+            if let Some(condition) = &step.when {
+                match evaluate_condition(condition, &steps) {
+                    Ok(ConditionEvaluation::Matched(_)) => {}
+                    Ok(ConditionEvaluation::NotMatched(reason))
+                    | Ok(ConditionEvaluation::Unavailable(reason)) => {
+                        let plan = plan_step(step, opts)?;
+                        plans.push(plan.clone());
+                        outcomes.push(ActionOutcome::Skipped {
+                            reason: reason.clone(),
+                        });
+                        steps.push(StepReport {
+                            step_id: step.id.clone(),
+                            step_name: step_name(step),
+                            summary: plan.summary,
+                            status: StepStatus::Skipped,
+                            prerequisites: plan.prerequisites,
+                            logs: vec![StepLogEntry {
                                 step_id: step.id.clone(),
-                                step_name: step_name(step),
-                                summary: summary.clone(),
-                                status: StepStatus::Satisfied,
-                                prerequisites,
-                                logs: vec![StepLogEntry {
-                                    step_id: step.id.clone(),
-                                    message: summary.clone(),
-                                }],
-                                output,
-                            });
-                            outcomes.push(ActionOutcome::Observed { summary });
-                        }
-                        Err(error) => {
-                            let message =
-                                format!("step {} path expectation failed: {error}", step.id);
-                            steps.push(StepReport {
+                                message: format!("when condition not met: {reason}"),
+                            }],
+                            output: None,
+                        });
+                        continue;
+                    }
+                    Err(error) => {
+                        let plan = plan_step(step, opts)?;
+                        let message = format!(
+                            "step {} when condition failed to evaluate: {error:#}",
+                            step.id
+                        );
+                        plans.push(plan.clone());
+                        outcomes.push(ActionOutcome::Blocked);
+                        steps.push(StepReport {
+                            step_id: step.id.clone(),
+                            step_name: step_name(step),
+                            summary: plan.summary,
+                            status: StepStatus::Failed,
+                            prerequisites: plan.prerequisites,
+                            logs: vec![StepLogEntry {
                                 step_id: step.id.clone(),
-                                step_name: step_name(step),
-                                summary,
-                                status: StepStatus::Failed,
-                                prerequisites,
-                                logs: vec![StepLogEntry {
-                                    step_id: step.id.clone(),
-                                    message: format!("failed: {message}"),
-                                }],
-                                output,
-                            });
-                            errors.push(message);
-                            outcomes.push(ActionOutcome::Blocked);
-                            halted = true;
-                        }
+                                message: format!("failed: {message}"),
+                            }],
+                            output: None,
+                        });
+                        errors.push(message);
+                        halted = true;
+                        continue;
                     }
                 }
-                Err(error) => {
-                    let message = format!("step {} path inspection failed: {error:#}", step.id);
-                    steps.push(StepReport {
-                        step_id: step.id.clone(),
-                        step_name: step_name(step),
-                        summary: planned_summary,
-                        status: StepStatus::Failed,
-                        prerequisites,
-                        logs: vec![StepLogEntry {
+            }
+            if let Some(condition) = &step.require {
+                match evaluate_condition(condition, &steps) {
+                    Ok(ConditionEvaluation::Matched(_)) => {}
+                    Ok(ConditionEvaluation::NotMatched(reason))
+                    | Ok(ConditionEvaluation::Unavailable(reason)) => {
+                        let plan = plan_step(step, opts)?;
+                        let message =
+                            format!("step {} required condition was not met: {reason}", step.id);
+                        plans.push(plan.clone());
+                        outcomes.push(ActionOutcome::Blocked);
+                        steps.push(StepReport {
                             step_id: step.id.clone(),
-                            message: format!("failed: {message}"),
-                        }],
-                        output: None,
-                    });
-                    errors.push(message);
-                    outcomes.push(ActionOutcome::Blocked);
-                    halted = true;
+                            step_name: step_name(step),
+                            summary: plan.summary,
+                            status: StepStatus::Failed,
+                            prerequisites: plan.prerequisites,
+                            logs: vec![StepLogEntry {
+                                step_id: step.id.clone(),
+                                message: format!("failed: {message}"),
+                            }],
+                            output: None,
+                        });
+                        errors.push(message);
+                        halted = true;
+                        continue;
+                    }
+                    Err(error) => {
+                        let plan = plan_step(step, opts)?;
+                        let message = format!(
+                            "step {} required condition failed to evaluate: {error:#}",
+                            step.id
+                        );
+                        plans.push(plan.clone());
+                        outcomes.push(ActionOutcome::Blocked);
+                        steps.push(StepReport {
+                            step_id: step.id.clone(),
+                            step_name: step_name(step),
+                            summary: plan.summary,
+                            status: StepStatus::Failed,
+                            prerequisites: plan.prerequisites,
+                            logs: vec![StepLogEntry {
+                                step_id: step.id.clone(),
+                                message: format!("failed: {message}"),
+                            }],
+                            output: None,
+                        });
+                        errors.push(message);
+                        halted = true;
+                        continue;
+                    }
                 }
             }
-            continue;
+        }
+        // An unconditional path inspection is deliberately read-only, so it
+        // runs during both a normal dry-run and an applied run. Conditional
+        // inspections remain planned during dry-run because their prerequisite
+        // process output does not exist until apply time.
+        let should_observe_inspect = opts.apply || (step.when.is_none() && step.require.is_none());
+        if should_observe_inspect {
+            if let Action::InspectPath(action) = &step.action {
+                let prerequisites = prerequisites_for_step(step);
+                let planned_summary = describe_step(step, opts)?;
+                match inspect_path(action) {
+                    Ok(metadata) => {
+                        let summary = summarize_path_metadata(&metadata);
+                        let output = Some(StepOutput::PathMetadata(metadata.clone()));
+                        let expectation = action
+                            .expect
+                            .as_ref()
+                            .map(|expectation| verify_path_expectation(expectation, &metadata))
+                            .transpose();
+                        match expectation {
+                            Ok(_) => {
+                                steps.push(StepReport {
+                                    step_id: step.id.clone(),
+                                    step_name: step_name(step),
+                                    summary: summary.clone(),
+                                    status: StepStatus::Satisfied,
+                                    prerequisites,
+                                    logs: vec![StepLogEntry {
+                                        step_id: step.id.clone(),
+                                        message: summary.clone(),
+                                    }],
+                                    output,
+                                });
+                                outcomes.push(ActionOutcome::Observed { summary });
+                            }
+                            Err(error) => {
+                                let message =
+                                    format!("step {} path expectation failed: {error}", step.id);
+                                steps.push(StepReport {
+                                    step_id: step.id.clone(),
+                                    step_name: step_name(step),
+                                    summary,
+                                    status: StepStatus::Failed,
+                                    prerequisites,
+                                    logs: vec![StepLogEntry {
+                                        step_id: step.id.clone(),
+                                        message: format!("failed: {message}"),
+                                    }],
+                                    output,
+                                });
+                                errors.push(message);
+                                outcomes.push(ActionOutcome::Blocked);
+                                halted = true;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let message = format!("step {} path inspection failed: {error:#}", step.id);
+                        steps.push(StepReport {
+                            step_id: step.id.clone(),
+                            step_name: step_name(step),
+                            summary: planned_summary,
+                            status: StepStatus::Failed,
+                            prerequisites,
+                            logs: vec![StepLogEntry {
+                                step_id: step.id.clone(),
+                                message: format!("failed: {message}"),
+                            }],
+                            output: None,
+                        });
+                        errors.push(message);
+                        outcomes.push(ActionOutcome::Blocked);
+                        halted = true;
+                    }
+                }
+                continue;
+            }
         }
         let satisfaction = is_satisfied(step, opts.apply)?;
         if let Some(reason) = satisfaction {
@@ -364,14 +498,39 @@ fn run_task_with_interactivity(
                     continue;
                 }
             };
-            let (status, summary, applied) = match result {
-                ApplyStepResult::Applied(summary) => (StepStatus::Applied, summary, true),
-                ApplyStepResult::AlreadySatisfied(summary) => {
-                    (StepStatus::Satisfied, summary, false)
+            let result = match result {
+                ApplyStepResult::Failed {
+                    summary,
+                    error,
+                    output,
+                } => {
+                    steps[step_idx].status = StepStatus::Failed;
+                    steps[step_idx].summary = summary;
+                    steps[step_idx].output = output;
+                    steps[step_idx].logs.push(StepLogEntry {
+                        step_id: step.id.clone(),
+                        message: format!("failed: {error}"),
+                    });
+                    errors.push(error);
+                    outcomes.push(ActionOutcome::Blocked);
+                    halted = true;
+                    continue;
                 }
+                result => result,
+            };
+            let (status, summary, applied, output) = match result {
+                ApplyStepResult::Applied(summary) => (StepStatus::Applied, summary, true, None),
+                ApplyStepResult::AppliedWithOutput { summary, output } => {
+                    (StepStatus::Applied, summary, true, Some(output))
+                }
+                ApplyStepResult::AlreadySatisfied(summary) => {
+                    (StepStatus::Satisfied, summary, false, None)
+                }
+                ApplyStepResult::Failed { .. } => unreachable!(),
             };
             steps[step_idx].status = status;
             steps[step_idx].summary = summary.clone();
+            steps[step_idx].output = output;
             steps[step_idx].logs.push(StepLogEntry {
                 step_id: step.id.clone(),
                 message: summary.clone(),
@@ -469,6 +628,33 @@ fn validate_destinations(step: &Step) -> Result<()> {
                 format!("step {} inspect path {} is invalid", step.id, action.path)
             })?;
         }
+        Action::CopyPath(action) => {
+            validate_declared_path(&action.src).with_context(|| {
+                format!("step {} copy source {} is invalid", step.id, action.src)
+            })?;
+            validate_safe_mutation_path(&action.dest, "copy-path").with_context(|| {
+                format!(
+                    "step {} copy destination {} blocked by safety",
+                    step.id, action.dest
+                )
+            })?;
+        }
+        Action::WriteFile(action) => {
+            validate_safe_mutation_path(&action.path, "write-file").with_context(|| {
+                format!(
+                    "step {} write destination {} blocked by safety",
+                    step.id, action.path
+                )
+            })?;
+        }
+        Action::RemovePath(action) => {
+            validate_safe_mutation_path(&action.path, "remove-path").with_context(|| {
+                format!(
+                    "step {} removal target {} blocked by safety",
+                    step.id, action.path
+                )
+            })?;
+        }
         Action::GitClone { dest, .. } => {
             let Some(path) = expand_path_template(dest) else {
                 bail!("step {} has unexpanded destination {}", step.id, dest);
@@ -495,6 +681,29 @@ fn validate_destinations(step: &Step) -> Result<()> {
         }
         Action::InstallDmg { target, .. } => validate_dmg_target(step, target.as_deref())?,
         _ => {}
+    }
+    for condition in [step.when.as_ref(), step.require.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        validate_condition_paths(condition)
+            .with_context(|| format!("step {} condition contains an invalid path", step.id))?;
+    }
+    Ok(())
+}
+
+fn validate_condition_paths(condition: &StepCondition) -> Result<()> {
+    match condition {
+        StepCondition::Path { path, .. } => {
+            validate_declared_path(path)?;
+        }
+        StepCondition::All { conditions } | StepCondition::Any { conditions } => {
+            for child in conditions {
+                validate_condition_paths(child)?;
+            }
+        }
+        StepCondition::Not { condition } => validate_condition_paths(condition)?,
+        StepCondition::ExitCode { .. } => {}
     }
     Ok(())
 }
@@ -713,7 +922,7 @@ fn plan_step(step: &Step, opts: &RunOptions) -> Result<ActionPlan> {
 /// This is shared by plans, reports, and the scenario inspector so the user
 /// sees the same technical description before and during execution.
 pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
-    Ok(match &step.action {
+    let summary = match &step.action {
         Action::CreateDirectory(action) => format!(
             "create directory {} and missing parents; leave an existing real directory unchanged and never replace a file or symlink",
             action.path
@@ -724,16 +933,43 @@ pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
             } else {
                 ""
             };
+            let checksum = if action.sha256
+                || action
+                    .expect
+                    .as_ref()
+                    .is_some_and(|expectation| expectation.sha256.is_some())
+            {
+                ", compute SHA-256 for a regular file"
+            } else {
+                ""
+            };
             let expectation = action
                 .expect
                 .as_ref()
                 .map(describe_path_expectation)
                 .unwrap_or_default();
             format!(
-                "inspect {} for existence, type, emptiness, and timestamps{}{}",
-                action.path, measurement, expectation
+                "inspect {} for existence, type, emptiness, and timestamps{}{}{}",
+                action.path, measurement, checksum, expectation
             )
         }
+        Action::CopyPath(action) => format!(
+            "copy {} to {} without following symlinks; leave an identical file or tree unchanged and never replace different content",
+            action.src, action.dest
+        ),
+        Action::WriteFile(action) => format!(
+            "atomically write {} exact UTF-8 bytes to {} with conflict policy {}",
+            action.content.len(),
+            action.path,
+            match action.on_conflict {
+                WriteConflictPolicy::Fail => "fail",
+                WriteConflictPolicy::Replace => "replace",
+            }
+        ),
+        Action::RemovePath(action) => format!(
+            "move {} to the system Trash/Recycle Bin; never fall back to permanent deletion",
+            action.path
+        ),
         Action::GitClone { repo, dest, branch } => format!(
             "ensure git repository {} at {}: clone when absent; otherwise fetch origin and fast-forward {} when safe (hooks and submodules disabled)",
             repo,
@@ -774,9 +1010,10 @@ pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
             script,
             args,
             cwd,
+            success_exit_codes,
             ..
         } => format!(
-            "run {} script {}{}{}",
+            "run {} script {}{}{}; treat exit codes [{}] as success",
             script_interpreter_name(*interpreter),
             script,
             if args.is_empty() {
@@ -786,8 +1023,14 @@ pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
             },
             cwd.as_ref()
                 .map(|directory| format!(" in {}", directory))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            format_exit_codes(success_exit_codes)
         ),
+        Action::ConfigurePackageRegistryFiles {
+            secrets,
+            npm,
+            nuget,
+        } => package_registry::plan_summary(secrets, npm, nuget)?,
         Action::DownloadFile { url, dest, .. } => {
             format!("download {} to {} with sha256 verification", url, dest)
         }
@@ -859,6 +1102,10 @@ pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
                 "launch LightBurn and wait for user-confirmed activation in its License Page; the license key is entered only in LightBurn"
                     .into(),
         },
+    };
+    Ok(match &step.when {
+        Some(condition) => format!("{}: {}", describe_condition(condition), summary),
+        None => summary,
     })
 }
 
@@ -899,7 +1146,43 @@ fn prerequisites_for_step(step: &Step) -> Vec<String> {
             script_interpreter_requirement(*interpreter)
         ));
     }
+    if let Some(condition) = &step.when {
+        prerequisites.push(format!("when: {}", describe_condition(condition)));
+    }
+    if let Some(condition) = &step.require {
+        prerequisites.push(format!("require: {}", describe_condition(condition)));
+    }
     prerequisites
+}
+
+fn describe_condition(condition: &StepCondition) -> String {
+    match condition {
+        StepCondition::ExitCode { step, codes } => format!(
+            "step {} returns one of [{}]",
+            step,
+            format_exit_codes(codes)
+        ),
+        StepCondition::Path { path, expect } => {
+            format!("path {} matches{}", path, describe_path_expectation(expect))
+        }
+        StepCondition::All { conditions } => format!(
+            "all ({})",
+            conditions
+                .iter()
+                .map(describe_condition)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        StepCondition::Any { conditions } => format!(
+            "any ({})",
+            conditions
+                .iter()
+                .map(describe_condition)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        StepCondition::Not { condition } => format!("not ({})", describe_condition(condition)),
+    }
 }
 
 fn step_name(step: &Step) -> String {
@@ -907,6 +1190,134 @@ fn step_name(step: &Step) -> String {
         step.id.clone()
     } else {
         step.name.clone()
+    }
+}
+
+#[derive(Debug)]
+enum ConditionEvaluation {
+    Matched(String),
+    NotMatched(String),
+    Unavailable(String),
+}
+
+fn evaluate_condition(
+    condition: &StepCondition,
+    completed_steps: &[StepReport],
+) -> Result<ConditionEvaluation> {
+    match condition {
+        StepCondition::ExitCode { step, codes } => {
+            let source = completed_steps
+                .iter()
+                .find(|report| report.step_id == *step)
+                .ok_or_else(|| anyhow!("condition source step {} has not run", step))?;
+            let Some(output) = &source.output else {
+                return Ok(ConditionEvaluation::Unavailable(format!(
+                    "step {} produced no exit code",
+                    step
+                )));
+            };
+            let StepOutput::ProcessExit(process) = output else {
+                bail!(
+                    "condition source step {} did not produce process exit output",
+                    step
+                );
+            };
+            let Some(exit_code) = process.exit_code else {
+                return Ok(ConditionEvaluation::Unavailable(format!(
+                    "step {} did not exit normally",
+                    step
+                )));
+            };
+            if codes.contains(&exit_code) {
+                Ok(ConditionEvaluation::Matched(format!(
+                    "step {} returned accepted branch code {}",
+                    step, exit_code
+                )))
+            } else {
+                Ok(ConditionEvaluation::NotMatched(format!(
+                    "step {} returned exit code {}; expected one of [{}]",
+                    step,
+                    exit_code,
+                    format_exit_codes(codes)
+                )))
+            }
+        }
+        StepCondition::Path { path, expect } => {
+            let action = InspectPathAction {
+                path: path.clone(),
+                recursive_size: expect.min_size_bytes.is_some() || expect.max_size_bytes.is_some(),
+                sha256: expect.sha256.is_some(),
+                expect: Some(expect.clone()),
+            };
+            let metadata = inspect_path(&action)?;
+            match verify_path_expectation(expect, &metadata) {
+                Ok(()) => Ok(ConditionEvaluation::Matched(summarize_path_metadata(
+                    &metadata,
+                ))),
+                Err(error) => Ok(ConditionEvaluation::NotMatched(error.to_string())),
+            }
+        }
+        StepCondition::All { conditions } => {
+            let mut matched = Vec::with_capacity(conditions.len());
+            let mut unavailable = Vec::new();
+            for child in conditions {
+                match evaluate_condition(child, completed_steps)? {
+                    ConditionEvaluation::Matched(reason) => matched.push(reason),
+                    ConditionEvaluation::NotMatched(reason) => {
+                        return Ok(ConditionEvaluation::NotMatched(format!(
+                            "all condition failed: {reason}"
+                        )))
+                    }
+                    ConditionEvaluation::Unavailable(reason) => unavailable.push(reason),
+                }
+            }
+            if !unavailable.is_empty() {
+                return Ok(ConditionEvaluation::Unavailable(format!(
+                    "all condition is unavailable: {}",
+                    unavailable.join("; ")
+                )));
+            }
+            Ok(ConditionEvaluation::Matched(format!(
+                "all conditions matched: {}",
+                matched.join("; ")
+            )))
+        }
+        StepCondition::Any { conditions } => {
+            let mut unmatched = Vec::with_capacity(conditions.len());
+            let mut unavailable = Vec::new();
+            for child in conditions {
+                match evaluate_condition(child, completed_steps)? {
+                    ConditionEvaluation::Matched(reason) => {
+                        return Ok(ConditionEvaluation::Matched(format!(
+                            "any condition matched: {reason}"
+                        )))
+                    }
+                    ConditionEvaluation::NotMatched(reason) => unmatched.push(reason),
+                    ConditionEvaluation::Unavailable(reason) => unavailable.push(reason),
+                }
+            }
+            if !unavailable.is_empty() {
+                return Ok(ConditionEvaluation::Unavailable(format!(
+                    "any condition is unavailable: {}",
+                    unavailable.join("; ")
+                )));
+            }
+            Ok(ConditionEvaluation::NotMatched(format!(
+                "no any branch matched: {}",
+                unmatched.join("; ")
+            )))
+        }
+        StepCondition::Not { condition } => match evaluate_condition(condition, completed_steps)? {
+            ConditionEvaluation::Matched(reason) => Ok(ConditionEvaluation::NotMatched(format!(
+                "negated condition matched: {reason}"
+            ))),
+            ConditionEvaluation::NotMatched(reason) => Ok(ConditionEvaluation::Matched(format!(
+                "negated condition did not match: {reason}"
+            ))),
+            ConditionEvaluation::Unavailable(reason) => Ok(ConditionEvaluation::Unavailable(
+                format!("negated condition is unavailable: {reason}"),
+            )),
+        },
     }
 }
 
@@ -1000,6 +1411,11 @@ fn apply_step(step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
                 &metadata,
             )))
         }
+        Action::CopyPath(action) => apply_copy_path(&action.src, &action.dest),
+        Action::WriteFile(action) => {
+            apply_write_file(&action.path, &action.content, action.on_conflict)
+        }
+        Action::RemovePath(action) => apply_remove_path(&action.path),
         Action::GitClone { repo, dest, branch } => {
             apply_git_clone_or_update(repo, dest, branch.as_deref())
         }
@@ -1020,8 +1436,20 @@ fn apply_step(step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
             args,
             cwd,
             env,
-        } => apply_run_script(*interpreter, script, args, cwd.as_deref(), env)
-            .map(ApplyStepResult::Applied),
+            success_exit_codes,
+        } => apply_run_script(
+            *interpreter,
+            script,
+            args,
+            cwd.as_deref(),
+            env,
+            success_exit_codes,
+        ),
+        Action::ConfigurePackageRegistryFiles {
+            secrets,
+            npm,
+            nuget,
+        } => package_registry::apply(secrets, npm, nuget).map(ApplyStepResult::Applied),
         Action::DownloadFile {
             url,
             dest,
@@ -1109,6 +1537,505 @@ fn apply_create_directory(raw_path: &str) -> Result<ApplyStepResult> {
     )))
 }
 
+fn validate_safe_mutation_path(raw_path: &str, operation: &str) -> Result<PathBuf> {
+    let path = validate_declared_path(raw_path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("{} path has no parent: {}", operation, path.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("{} must not target a filesystem root", operation))?;
+    // Canonicalize only the parent. Canonicalizing the final component would
+    // turn a symlink deletion into a safety decision about its target rather
+    // than about the link's own location.
+    let resolved_parent = resolve_through_existing_ancestor(parent)?;
+    let effective_location = resolved_parent.join(file_name);
+    if !is_safe_rule_root(&effective_location) {
+        bail!(
+            "{} path is protected or too broad: {}",
+            operation,
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+fn ensure_destination_parent(path: &Path) -> Result<&Path> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("destination has no parent: {}", path.display()))?;
+    match fs::symlink_metadata(parent) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "destination parent must not be a symlink: {}",
+                parent.display()
+            )
+        }
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => bail!(
+            "destination parent is not a directory: {}",
+            parent.display()
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => bail!(
+            "destination parent does not exist; add a create-directory step first: {}",
+            parent.display()
+        ),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect destination parent {}", parent.display()))
+        }
+    }
+    let metadata = fs::symlink_metadata(parent)
+        .with_context(|| format!("verify destination parent {}", parent.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!(
+            "destination parent is not a real directory: {}",
+            parent.display()
+        );
+    }
+    Ok(parent)
+}
+
+fn apply_write_file(
+    raw_path: &str,
+    content: &str,
+    on_conflict: WriteConflictPolicy,
+) -> Result<ApplyStepResult> {
+    let path = validate_safe_mutation_path(raw_path, "write-file")?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!(
+                "write-file destination is not a regular file: {}",
+                path.display()
+            )
+        }
+        Ok(_) if file_matches_bytes(&path, content.as_bytes())? => {
+            return Ok(ApplyStepResult::AlreadySatisfied(format!(
+                "file already has the requested content: {}",
+                path.display()
+            )))
+        }
+        Ok(_) if matches!(on_conflict, WriteConflictPolicy::Fail) => {
+            bail!(
+                "write-file destination has different content (set on_conflict: replace to replace it): {}",
+                path.display()
+            )
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect write destination {}", path.display()))
+        }
+    }
+
+    let parent = ensure_destination_parent(&path)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create staged file in {}", parent.display()))?;
+    staged
+        .write_all(content.as_bytes())
+        .with_context(|| format!("write staged content for {}", path.display()))?;
+    staged
+        .as_file_mut()
+        .sync_all()
+        .with_context(|| format!("sync staged content for {}", path.display()))?;
+
+    match on_conflict {
+        WriteConflictPolicy::Fail => staged.persist_noclobber(&path).map_err(|error| {
+            anyhow!(error.error)
+                .context(format!("commit file without replacing {}", path.display()))
+        })?,
+        WriteConflictPolicy::Replace => staged.persist(&path).map_err(|error| {
+            anyhow!(error.error).context(format!("atomically replace {}", path.display()))
+        })?,
+    };
+    if !file_matches_bytes(&path, content.as_bytes())? {
+        bail!(
+            "written file failed content verification: {}",
+            path.display()
+        );
+    }
+    Ok(ApplyStepResult::Applied(format!(
+        "wrote {} bytes atomically to {}",
+        content.len(),
+        path.display()
+    )))
+}
+
+fn apply_copy_path(raw_src: &str, raw_dest: &str) -> Result<ApplyStepResult> {
+    let src = validate_copy_source(raw_src)?;
+    let dest = validate_safe_mutation_path(raw_dest, "copy-path")?;
+    validate_copy_relationship(&src, &dest)?;
+    if path_entry_exists(&dest)? {
+        if paths_have_equal_content(&src, &dest)? {
+            return Ok(ApplyStepResult::AlreadySatisfied(format!(
+                "destination already matches source: {}",
+                dest.display()
+            )));
+        }
+        bail!(
+            "copy-path destination exists with different content: {}",
+            dest.display()
+        );
+    }
+    let parent = ensure_destination_parent(&dest)?;
+    let source_metadata = fs::symlink_metadata(&src)
+        .with_context(|| format!("inspect copy source {}", src.display()))?;
+    if source_metadata.is_file() {
+        copy_file_noclobber(&src, &dest, parent)?;
+    } else {
+        copy_directory_noclobber(&src, &dest, parent)?;
+    }
+    if !paths_have_equal_content(&src, &dest)? {
+        bail!("copied path failed verification: {}", dest.display());
+    }
+    Ok(ApplyStepResult::Applied(format!(
+        "copied {} to {}",
+        src.display(),
+        dest.display()
+    )))
+}
+
+fn apply_remove_path(raw_path: &str) -> Result<ApplyStepResult> {
+    let path = validate_safe_mutation_path(raw_path, "remove-path")?;
+    if !path_entry_exists(&path)? {
+        return Ok(ApplyStepResult::AlreadySatisfied(format!(
+            "path is already absent: {}",
+            path.display()
+        )));
+    }
+    // `trash` canonicalizes the parent but deliberately retains the final file
+    // name, so a final symlink is moved as a link rather than followed.
+    move_to_system_trash(&path)
+        .with_context(|| format!("move {} to the system Trash", path.display()))?;
+    if path_entry_exists(&path)? {
+        bail!(
+            "path still exists after moving it to Trash: {}",
+            path.display()
+        );
+    }
+    Ok(ApplyStepResult::Applied(format!(
+        "moved path to the system Trash: {}",
+        path.display()
+    )))
+}
+
+#[cfg(target_os = "macos")]
+fn move_to_system_trash(path: &Path) -> Result<()> {
+    use trash::macos::{DeleteMethod, TrashContextExtMacos};
+
+    let mut context = trash::TrashContext::new();
+    context.set_delete_method(DeleteMethod::NsFileManager);
+    context.delete(path).map_err(anyhow::Error::msg)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn move_to_system_trash(path: &Path) -> Result<()> {
+    trash::delete(path).map_err(anyhow::Error::msg)
+}
+
+fn validate_copy_source(raw_src: &str) -> Result<PathBuf> {
+    let src = validate_declared_path(raw_src)?;
+    if src.parent().is_none() {
+        bail!(
+            "copy-path source must not be a filesystem root: {}",
+            src.display()
+        );
+    }
+    let metadata = fs::symlink_metadata(&src)
+        .with_context(|| format!("inspect copy source {}", src.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!("copy-path source must not be a symlink: {}", src.display());
+    }
+    if !metadata.is_file() && !metadata.is_dir() {
+        bail!(
+            "copy-path source must be a regular file or directory: {}",
+            src.display()
+        );
+    }
+    if metadata.is_dir() {
+        validate_copy_tree(&src)?;
+    }
+    Ok(src)
+}
+
+fn validate_copy_tree(root: &Path) -> Result<()> {
+    const MAX_COPY_ENTRIES: u64 = 100_000;
+    const MAX_COPY_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+    const MAX_COPY_DEPTH: usize = 128;
+
+    let mut entries = 0u64;
+    let mut bytes = 0u64;
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = entry.with_context(|| format!("walk copy source {}", root.display()))?;
+        if entry.depth() > MAX_COPY_DEPTH {
+            bail!(
+                "copy-path source exceeds maximum depth {}: {}",
+                MAX_COPY_DEPTH,
+                entry.path().display()
+            );
+        }
+        entries = entries
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("copy-path entry count overflow for {}", root.display()))?;
+        if entries > MAX_COPY_ENTRIES {
+            bail!(
+                "copy-path source exceeds maximum of {} entries: {}",
+                MAX_COPY_ENTRIES,
+                root.display()
+            );
+        }
+        let file_type = entry.file_type();
+        if file_type.is_symlink() {
+            bail!(
+                "copy-path does not follow or copy symlinks: {}",
+                entry.path().display()
+            );
+        }
+        if !file_type.is_file() && !file_type.is_dir() {
+            bail!(
+                "copy-path supports only regular files and directories: {}",
+                entry.path().display()
+            );
+        }
+        if file_type.is_file() {
+            let length = entry
+                .metadata()
+                .with_context(|| format!("read copy source metadata {}", entry.path().display()))?
+                .len();
+            bytes = bytes
+                .checked_add(length)
+                .ok_or_else(|| anyhow!("copy-path size overflow for {}", root.display()))?;
+            if bytes > MAX_COPY_BYTES {
+                bail!(
+                    "copy-path source exceeds maximum of {} bytes: {}",
+                    MAX_COPY_BYTES,
+                    root.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_copy_relationship(src: &Path, dest: &Path) -> Result<()> {
+    let source = src
+        .canonicalize()
+        .with_context(|| format!("resolve copy source {}", src.display()))?;
+    let destination = resolve_through_existing_ancestor(dest)?;
+    if destination == source || destination.starts_with(&source) || source.starts_with(&destination)
+    {
+        bail!(
+            "copy source and destination must be distinct, non-nested paths: {} -> {}",
+            src.display(),
+            dest.display()
+        );
+    }
+    Ok(())
+}
+
+fn copy_file_noclobber(src: &Path, dest: &Path, parent: &Path) -> Result<()> {
+    let mut input =
+        File::open(src).with_context(|| format!("open copy source {}", src.display()))?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create staged copy in {}", parent.display()))?;
+    io::copy(&mut input, &mut staged)
+        .with_context(|| format!("copy {} into staging", src.display()))?;
+    staged
+        .as_file_mut()
+        .sync_all()
+        .with_context(|| format!("sync staged copy for {}", dest.display()))?;
+    let permissions = fs::symlink_metadata(src)
+        .with_context(|| format!("read permissions for {}", src.display()))?
+        .permissions();
+    staged
+        .as_file()
+        .set_permissions(permissions)
+        .with_context(|| format!("set staged permissions for {}", dest.display()))?;
+    staged.persist_noclobber(dest).map_err(|error| {
+        anyhow!(error.error).context(format!("commit copy without replacing {}", dest.display()))
+    })?;
+    Ok(())
+}
+
+fn copy_directory_noclobber(src: &Path, dest: &Path, parent: &Path) -> Result<()> {
+    let staging = tempfile::Builder::new()
+        .prefix(".ppduster-copy-")
+        .tempdir_in(parent)
+        .with_context(|| format!("create staged directory in {}", parent.display()))?;
+    for entry in WalkDir::new(src).follow_links(false).min_depth(1) {
+        let entry = entry.with_context(|| format!("walk copy source {}", src.display()))?;
+        let relative = entry
+            .path()
+            .strip_prefix(src)
+            .with_context(|| format!("derive relative copy path for {}", entry.path().display()))?;
+        let target = staging.path().join(relative);
+        if entry.file_type().is_dir() {
+            fs::create_dir(&target)
+                .with_context(|| format!("create staged directory {}", target.display()))?;
+        } else if entry.file_type().is_file() {
+            fs::copy(entry.path(), &target).with_context(|| {
+                format!(
+                    "copy {} to staging {}",
+                    entry.path().display(),
+                    target.display()
+                )
+            })?;
+        } else {
+            bail!(
+                "copy source changed to unsupported entry: {}",
+                entry.path().display()
+            );
+        }
+    }
+    let staging_path = staging.keep();
+    if let Err(error) = rename_directory_noreplace(&staging_path, dest) {
+        let _ = fs::remove_dir_all(&staging_path);
+        return Err(error).with_context(|| format!("commit directory copy {}", dest.display()));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn rename_directory_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+    let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "destination path contains NUL")
+    })?;
+    // SAFETY: both pointers refer to live, NUL-terminated C strings for the
+    // duration of the call. RENAME_EXCL gives the required no-clobber commit.
+    let result =
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn rename_directory_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+    let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "destination path contains NUL")
+    })?;
+    // SAFETY: both pointers are valid C strings; AT_FDCWD selects absolute or
+    // process-relative paths and RENAME_NOREPLACE forbids replacement.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn rename_directory_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(destination).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "copy destination already exists",
+        ));
+    }
+    // The native Rust rename primitive is no-clobber on the primary supported
+    // non-Unix target (Windows). The preceding check also gives conservative
+    // behavior on less common targets.
+    fs::rename(source, destination)
+}
+
+fn paths_have_equal_content(left: &Path, right: &Path) -> Result<bool> {
+    let left_metadata =
+        fs::symlink_metadata(left).with_context(|| format!("inspect {}", left.display()))?;
+    let right_metadata =
+        fs::symlink_metadata(right).with_context(|| format!("inspect {}", right.display()))?;
+    if left_metadata.file_type().is_symlink() || right_metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    if left_metadata.is_file() && right_metadata.is_file() {
+        if left_metadata.len() != right_metadata.len() {
+            return Ok(false);
+        }
+        return Ok(sha256_file(left)? == sha256_file(right)?);
+    }
+    if !left_metadata.is_dir() || !right_metadata.is_dir() {
+        return Ok(false);
+    }
+    directory_trees_equal(left, right)
+}
+
+fn directory_trees_equal(left: &Path, right: &Path) -> Result<bool> {
+    validate_copy_tree(left)?;
+    validate_copy_tree(right)?;
+    let mut left_entries = WalkDir::new(left)
+        .follow_links(false)
+        .min_depth(1)
+        .sort_by_file_name()
+        .into_iter();
+    let mut right_entries = WalkDir::new(right)
+        .follow_links(false)
+        .min_depth(1)
+        .sort_by_file_name()
+        .into_iter();
+    loop {
+        let left_entry = left_entries
+            .next()
+            .transpose()
+            .with_context(|| format!("walk {}", left.display()))?;
+        let right_entry = right_entries
+            .next()
+            .transpose()
+            .with_context(|| format!("walk {}", right.display()))?;
+        let (left_entry, right_entry) = match (left_entry, right_entry) {
+            (None, None) => return Ok(true),
+            (Some(left_entry), Some(right_entry)) => (left_entry, right_entry),
+            _ => return Ok(false),
+        };
+        let left_relative = left_entry.path().strip_prefix(left)?;
+        let right_relative = right_entry.path().strip_prefix(right)?;
+        if left_relative != right_relative || left_entry.file_type() != right_entry.file_type() {
+            return Ok(false);
+        }
+        if left_entry.file_type().is_file()
+            && !paths_have_equal_content(left_entry.path(), right_entry.path())?
+        {
+            return Ok(false);
+        }
+    }
+}
+
+fn file_matches_bytes(path: &Path, expected: &[u8]) -> Result<bool> {
+    let metadata =
+        fs::symlink_metadata(path).with_context(|| format!("inspect file {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok(false);
+    }
+    if metadata.len() != expected.len() as u64 {
+        return Ok(false);
+    }
+    let mut file = File::open(path).with_context(|| format!("open file {}", path.display()))?;
+    let mut actual = Vec::with_capacity(expected.len());
+    file.read_to_end(&mut actual)
+        .with_context(|| format!("read file {}", path.display()))?;
+    Ok(actual == expected)
+}
+
 fn inspect_path(action: &InspectPathAction) -> Result<PathMetadataOutput> {
     let path = validate_declared_path(&action.path)?;
     let metadata = match fs::symlink_metadata(&path) {
@@ -1123,6 +2050,7 @@ fn inspect_path(action: &InspectPathAction) -> Result<PathMetadataOutput> {
                 entry_count: None,
                 modified_at: None,
                 created_at: None,
+                sha256: None,
             })
         }
         Err(error) => {
@@ -1169,6 +2097,22 @@ fn inspect_path(action: &InspectPathAction) -> Result<PathMetadataOutput> {
         PathKind::Symlink => (None, None, None),
         PathKind::Other => (Some(metadata.len()), None, None),
     };
+    let sha256_is_required = action.sha256
+        || action
+            .expect
+            .as_ref()
+            .is_some_and(|expectation| expectation.sha256.is_some());
+    let sha256 = if sha256_is_required {
+        if kind != PathKind::File {
+            bail!(
+                "SHA-256 is available only for regular files: {}",
+                path.display()
+            );
+        }
+        Some(sha256_file(&path)?)
+    } else {
+        None
+    };
 
     Ok(PathMetadataOutput {
         path,
@@ -1179,6 +2123,7 @@ fn inspect_path(action: &InspectPathAction) -> Result<PathMetadataOutput> {
         entry_count,
         modified_at: Some(modified_at),
         created_at,
+        sha256,
     })
 }
 
@@ -1224,6 +2169,7 @@ fn verify_path_expectation(
             || expectation.max_size_bytes.is_some()
             || expectation.modified_at_or_after.is_some()
             || expectation.modified_at_or_before.is_some()
+            || expectation.sha256.is_some()
         {
             bail!(
                 "path does not exist, so metadata assertions cannot be evaluated: {}",
@@ -1317,6 +2263,20 @@ fn verify_path_expectation(
             );
         }
     }
+    if let Some(expected) = expectation.sha256.as_ref() {
+        let observed = metadata
+            .sha256
+            .as_ref()
+            .ok_or_else(|| anyhow!("SHA-256 is unavailable for {}", metadata.path.display()))?;
+        if !observed.eq_ignore_ascii_case(expected) {
+            bail!(
+                "expected SHA-256 {}, observed {} for {}",
+                expected,
+                observed,
+                metadata.path.display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1346,6 +2306,9 @@ fn summarize_path_metadata(metadata: &PathMetadataOutput) -> String {
     if let Some(created) = metadata.created_at.as_ref() {
         fields.push(format!("created_at: {}", format_timestamp(created)));
     }
+    if let Some(sha256) = metadata.sha256.as_ref() {
+        fields.push(format!("sha256: {sha256}"));
+    }
     fields.join("; ")
 }
 
@@ -1371,6 +2334,9 @@ fn describe_path_expectation(expectation: &PathExpectation) -> String {
     }
     if let Some(before) = expectation.modified_at_or_before.as_ref() {
         requirements.push(format!("modified_at <= {}", format_timestamp(before)));
+    }
+    if let Some(sha256) = expectation.sha256.as_ref() {
+        requirements.push(format!("sha256 = {sha256}"));
     }
     if requirements.is_empty() {
         String::new()
@@ -3459,7 +4425,8 @@ fn apply_run_script(
     args: &[String],
     cwd: Option<&str>,
     env: &BTreeMap<String, String>,
-) -> Result<String> {
+    success_exit_codes: &[u32],
+) -> Result<ApplyStepResult> {
     let process_cwd = std::env::current_dir().context("resolve current directory")?;
     let working_directory = cwd
         .map(expand_required_path)
@@ -3513,16 +4480,53 @@ fn apply_run_script(
         }
         match command.status() {
             Ok(status) => {
-                status.exit_ok(&format!(
+                let exit_code = status.code().map(|code| code as u32);
+                let termination_signal = process_termination_signal(&status);
+                let accepted = exit_code.is_some_and(|code| success_exit_codes.contains(&code));
+                let output = StepOutput::ProcessExit(ProcessExitOutput {
+                    exit_code,
+                    termination_signal,
+                    accepted,
+                    success_exit_codes: success_exit_codes.to_vec(),
+                });
+                let script_label = format!(
                     "{} script {}",
                     script_interpreter_name(interpreter),
                     script_path.display()
-                ))?;
-                return Ok(format!(
-                    "ran {} script {}",
-                    script_interpreter_name(interpreter),
-                    script_path.display()
-                ));
+                );
+                return match exit_code {
+                    Some(code) if accepted => Ok(ApplyStepResult::AppliedWithOutput {
+                        summary: format!("ran {} with accepted exit code {}", script_label, code),
+                        output,
+                    }),
+                    Some(code) => {
+                        let error = format!(
+                            "{} returned exit code {}; configured success_exit_codes are [{}]",
+                            script_label,
+                            code,
+                            format_exit_codes(success_exit_codes)
+                        );
+                        Ok(ApplyStepResult::Failed {
+                            summary: error.clone(),
+                            error,
+                            output: Some(output),
+                        })
+                    }
+                    None => {
+                        let termination = termination_signal
+                            .map(|signal| format!("terminated by signal {}", signal))
+                            .unwrap_or_else(|| "did not exit normally".into());
+                        let error = format!(
+                            "{} {}; success_exit_codes apply only to normal exits",
+                            script_label, termination
+                        );
+                        Ok(ApplyStepResult::Failed {
+                            summary: error.clone(),
+                            error,
+                            output: Some(output),
+                        })
+                    }
+                };
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 missing.push((*program).to_owned());
@@ -3545,6 +4549,27 @@ fn apply_run_script(
         script_interpreter_name(interpreter),
         missing.join(", ")
     )
+}
+
+fn process_termination_signal(status: &ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        status.signal()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
+}
+
+fn format_exit_codes(codes: &[u32]) -> String {
+    codes
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn validate_script_working_directory(path: &Path) -> Result<PathBuf> {
@@ -3741,6 +4766,70 @@ fn is_satisfied(step: &Step, run_command_checks: bool) -> Result<Option<String>>
             }
         };
     }
+    if let Action::WriteFile(action) = &step.action {
+        let path = validate_safe_mutation_path(&action.path, "write-file")?;
+        return match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => bail!(
+                "write-file destination is not a regular file: {}",
+                path.display()
+            ),
+            Ok(_) if file_matches_bytes(&path, action.content.as_bytes())? => Ok(Some(format!(
+                "file already has the requested content: {}",
+                path.display()
+            ))),
+            Ok(_) if matches!(action.on_conflict, WriteConflictPolicy::Fail) => bail!(
+                "write-file destination has different content: {}",
+                path.display()
+            ),
+            Ok(_) => Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => {
+                Err(error).with_context(|| format!("inspect write destination {}", path.display()))
+            }
+        };
+    }
+    if let Action::CopyPath(action) = &step.action {
+        let src = validate_declared_path(&action.src)?;
+        let dest = validate_safe_mutation_path(&action.dest, "copy-path")?;
+        let source_exists = match fs::symlink_metadata(&src) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspect copy source {}", src.display()))
+            }
+        };
+        if !source_exists {
+            if run_command_checks {
+                bail!("copy-path source does not exist: {}", src.display());
+            }
+            return Ok(None);
+        }
+        let src = validate_copy_source(&action.src)?;
+        validate_copy_relationship(&src, &dest)?;
+        return if path_entry_exists(&dest)? {
+            if paths_have_equal_content(&src, &dest)? {
+                Ok(Some(format!(
+                    "destination already matches source: {}",
+                    dest.display()
+                )))
+            } else {
+                bail!(
+                    "copy-path destination exists with different content: {}",
+                    dest.display()
+                )
+            }
+        } else {
+            Ok(None)
+        };
+    }
+    if let Action::RemovePath(action) = &step.action {
+        let path = validate_safe_mutation_path(&action.path, "remove-path")?;
+        return if path_entry_exists(&path)? {
+            Ok(None)
+        } else {
+            Ok(Some(format!("path is already absent: {}", path.display())))
+        };
+    }
     // Repository presence is not repository freshness. A git-clone action must
     // reach its apply phase so it can fetch the requested branch and decide
     // whether the existing checkout is current, behind, ahead, or diverged.
@@ -3748,6 +4837,16 @@ fn is_satisfied(step: &Step, run_command_checks: bool) -> Result<Option<String>>
         return Ok(None);
     }
     if run_command_checks {
+        if let Action::ConfigurePackageRegistryFiles {
+            secrets,
+            npm,
+            nuget,
+        } = &step.action
+        {
+            if let Some(reason) = package_registry::is_satisfied(secrets, npm, nuget)? {
+                return Ok(Some(reason));
+            }
+        }
         if let Action::AppStoreInstall(action) = &step.action {
             if app_store_app_is_installed(action.app_id)? {
                 return Ok(Some(format!(
@@ -3811,9 +4910,9 @@ pub fn extracted_path_is_safe(root: &Path, rel: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::automation::task::{
-        ActivateLicenseAction, AppBundleIdentity, AppStoreInstallAction, Checksum,
-        CreateDirectoryAction, InspectPathAction, PathExpectation, PathKind, Task,
-        TrustRequirement,
+        ActivateLicenseAction, AppBundleIdentity, AppStoreInstallAction, Checksum, CopyPathAction,
+        CreateDirectoryAction, InspectPathAction, PathExpectation, PathKind, RemovePathAction,
+        StepCondition, Task, TrustRequirement, WriteFileAction,
     };
     use std::path::PathBuf;
 
@@ -3902,6 +5001,8 @@ mod tests {
             }),
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::GitClone {
                 repo: remote.to_string_lossy().into_owned(),
                 dest: destination.to_string_lossy().into_owned(),
@@ -3929,6 +5030,8 @@ mod tests {
             check: None,
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action,
         }
     }
@@ -4011,6 +5114,7 @@ mod tests {
             Action::InspectPath(InspectPathAction {
                 path: temp.path().to_string_lossy().into_owned(),
                 recursive_size: true,
+                sha256: false,
                 expect: Some(PathExpectation {
                     exists: Some(true),
                     kind: Some(PathKind::Directory),
@@ -4028,7 +5132,10 @@ mod tests {
         assert!(matches!(report.outcomes[0], ActionOutcome::Observed { .. }));
         assert!(matches!(report.steps[0].status, StepStatus::Satisfied));
         let StepOutput::PathMetadata(metadata) =
-            report.steps[0].output.as_ref().expect("path output");
+            report.steps[0].output.as_ref().expect("path output")
+        else {
+            panic!("expected path metadata output");
+        };
         assert!(metadata.exists);
         assert_eq!(metadata.kind, Some(PathKind::Directory));
         assert_eq!(metadata.size_bytes, Some(8));
@@ -4050,6 +5157,7 @@ mod tests {
             Action::InspectPath(InspectPathAction {
                 path: missing.to_string_lossy().into_owned(),
                 recursive_size: true,
+                sha256: false,
                 expect: Some(PathExpectation {
                     exists: Some(false),
                     ..PathExpectation::default()
@@ -4059,7 +5167,9 @@ mod tests {
 
         let report = run_task(&task, &RunOptions::default()).unwrap();
         assert!(report.errors.is_empty());
-        let StepOutput::PathMetadata(metadata) = report.steps[0].output.as_ref().unwrap();
+        let StepOutput::PathMetadata(metadata) = report.steps[0].output.as_ref().unwrap() else {
+            panic!("expected path metadata output");
+        };
         assert!(!metadata.exists);
         assert_eq!(metadata.kind, None);
         assert_eq!(metadata.size_bytes, None);
@@ -4075,6 +5185,7 @@ mod tests {
             Action::InspectPath(InspectPathAction {
                 path: missing.to_string_lossy().into_owned(),
                 recursive_size: false,
+                sha256: false,
                 expect: Some(PathExpectation {
                     exists: Some(true),
                     kind: Some(PathKind::File),
@@ -4108,6 +5219,7 @@ mod tests {
         let initial = inspect_path(&InspectPathAction {
             path: file.to_string_lossy().into_owned(),
             recursive_size: false,
+            sha256: false,
             expect: None,
         })
         .unwrap();
@@ -4117,6 +5229,7 @@ mod tests {
             Action::InspectPath(InspectPathAction {
                 path: file.to_string_lossy().into_owned(),
                 recursive_size: false,
+                sha256: false,
                 expect: Some(PathExpectation {
                     modified_at_or_after: Some(modified),
                     modified_at_or_before: Some(modified),
@@ -4131,6 +5244,280 @@ mod tests {
     }
 
     #[test]
+    fn inspect_path_reports_and_verifies_sha256_in_dry_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("payload.txt");
+        fs::write(&file, b"abc").unwrap();
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let task = base_task(plain_step(
+            "inspect-hash",
+            Action::InspectPath(InspectPathAction {
+                path: file.to_string_lossy().into_owned(),
+                recursive_size: false,
+                sha256: true,
+                expect: Some(PathExpectation {
+                    kind: Some(PathKind::File),
+                    sha256: Some(expected.into()),
+                    ..PathExpectation::default()
+                }),
+            }),
+        ));
+
+        let report = run_task(&task, &RunOptions::default()).unwrap();
+        let Some(StepOutput::PathMetadata(metadata)) = report.steps[0].output.as_ref() else {
+            panic!("expected path metadata output");
+        };
+        assert_eq!(metadata.sha256.as_deref(), Some(expected));
+        assert!(matches!(report.outcomes[0], ActionOutcome::Observed { .. }));
+    }
+
+    #[test]
+    fn write_and_copy_files_are_dry_run_safe_and_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.txt");
+        let destination = temp.path().join("copy.txt");
+        let mut task = base_task(plain_step(
+            "write",
+            Action::WriteFile(WriteFileAction {
+                path: source.to_string_lossy().into_owned(),
+                content: "exact content\n".into(),
+                on_conflict: WriteConflictPolicy::Fail,
+            }),
+        ));
+        task.steps.push(plain_step(
+            "copy",
+            Action::CopyPath(CopyPathAction {
+                src: source.to_string_lossy().into_owned(),
+                dest: destination.to_string_lossy().into_owned(),
+            }),
+        ));
+
+        let planned = run_task(&task, &RunOptions::default()).unwrap();
+        assert_eq!(planned.plans.len(), 2);
+        assert!(!source.exists());
+        assert!(!destination.exists());
+
+        let applied = apply_test_task(&task);
+        assert_eq!(fs::read_to_string(&source).unwrap(), "exact content\n");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "exact content\n");
+        assert!(applied
+            .outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, ActionOutcome::Applied { .. })));
+
+        let repeated = apply_test_task(&task);
+        assert!(repeated
+            .outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, ActionOutcome::AlreadySatisfied { .. })));
+    }
+
+    #[test]
+    fn write_file_conflict_is_preserved_unless_replace_is_explicit() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.txt");
+        fs::write(&path, "valuable").unwrap();
+        let mut step = plain_step(
+            "write",
+            Action::WriteFile(WriteFileAction {
+                path: path.to_string_lossy().into_owned(),
+                content: "replacement".into(),
+                on_conflict: WriteConflictPolicy::Fail,
+            }),
+        );
+        let error = run_task(
+            &base_task(step.clone()),
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("different content"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "valuable");
+
+        let Action::WriteFile(action) = &mut step.action else {
+            unreachable!()
+        };
+        action.on_conflict = WriteConflictPolicy::Replace;
+        let report = apply_test_task(&base_task(step));
+        assert!(matches!(report.outcomes[0], ActionOutcome::Applied { .. }));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "replacement");
+    }
+
+    #[test]
+    fn copy_directory_preserves_tree_and_rejects_different_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(source.join("nested/empty")).unwrap();
+        fs::write(source.join("nested/data.bin"), b"payload").unwrap();
+        let task = base_task(plain_step(
+            "copy-tree",
+            Action::CopyPath(CopyPathAction {
+                src: source.to_string_lossy().into_owned(),
+                dest: destination.to_string_lossy().into_owned(),
+            }),
+        ));
+
+        apply_test_task(&task);
+        assert_eq!(
+            fs::read(destination.join("nested/data.bin")).unwrap(),
+            b"payload"
+        );
+        assert!(destination.join("nested/empty").is_dir());
+        assert!(matches!(
+            apply_test_task(&task).outcomes[0],
+            ActionOutcome::AlreadySatisfied { .. }
+        ));
+
+        fs::write(destination.join("extra.txt"), "different").unwrap();
+        let error = run_task(
+            &task,
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("different content"));
+        assert_eq!(
+            fs::read_to_string(destination.join("extra.txt")).unwrap(),
+            "different"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_path_rejects_symlinks_in_source_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::write(temp.path().join("outside.txt"), "outside").unwrap();
+        std::os::unix::fs::symlink(temp.path().join("outside.txt"), source.join("link")).unwrap();
+        let task = base_task(plain_step(
+            "copy-tree",
+            Action::CopyPath(CopyPathAction {
+                src: source.to_string_lossy().into_owned(),
+                dest: destination.to_string_lossy().into_owned(),
+            }),
+        ));
+
+        let error = run_task(
+            &task,
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("does not follow or copy symlinks"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn composite_when_skips_and_require_failure_halts() {
+        let temp = tempfile::tempdir().unwrap();
+        let skipped_path = temp.path().join("skipped.txt");
+        let required_path = temp.path().join("required.txt");
+        let later_path = temp.path().join("later.txt");
+        let mut skipped = plain_step(
+            "skip",
+            Action::WriteFile(WriteFileAction {
+                path: skipped_path.to_string_lossy().into_owned(),
+                content: "no".into(),
+                on_conflict: WriteConflictPolicy::Fail,
+            }),
+        );
+        skipped.when = Some(StepCondition::Not {
+            condition: Box::new(StepCondition::Path {
+                path: temp.path().to_string_lossy().into_owned(),
+                expect: PathExpectation {
+                    exists: Some(true),
+                    kind: Some(PathKind::Directory),
+                    ..PathExpectation::default()
+                },
+            }),
+        });
+        let mut required = plain_step(
+            "require",
+            Action::WriteFile(WriteFileAction {
+                path: required_path.to_string_lossy().into_owned(),
+                content: "no".into(),
+                on_conflict: WriteConflictPolicy::Fail,
+            }),
+        );
+        required.require = Some(StepCondition::All {
+            conditions: vec![
+                StepCondition::Any {
+                    conditions: vec![
+                        StepCondition::Path {
+                            path: temp.path().join("missing-a").to_string_lossy().into_owned(),
+                            expect: PathExpectation {
+                                exists: Some(true),
+                                ..PathExpectation::default()
+                            },
+                        },
+                        StepCondition::Path {
+                            path: temp.path().to_string_lossy().into_owned(),
+                            expect: PathExpectation {
+                                kind: Some(PathKind::Directory),
+                                ..PathExpectation::default()
+                            },
+                        },
+                    ],
+                },
+                StepCondition::Path {
+                    path: temp.path().join("missing-b").to_string_lossy().into_owned(),
+                    expect: PathExpectation {
+                        exists: Some(true),
+                        ..PathExpectation::default()
+                    },
+                },
+            ],
+        });
+        let later = plain_step(
+            "later",
+            Action::WriteFile(WriteFileAction {
+                path: later_path.to_string_lossy().into_owned(),
+                content: "no".into(),
+                on_conflict: WriteConflictPolicy::Fail,
+            }),
+        );
+        let mut task = base_task(skipped);
+        task.steps.push(required);
+        task.steps.push(later);
+
+        let report = apply_test_task(&task);
+        assert!(matches!(report.steps[0].status, StepStatus::Skipped));
+        assert!(matches!(report.steps[1].status, StepStatus::Failed));
+        assert!(matches!(report.steps[2].status, StepStatus::Skipped));
+        assert_eq!(report.errors.len(), 1);
+        assert!(!skipped_path.exists());
+        assert!(!required_path.exists());
+        assert!(!later_path.exists());
+    }
+
+    #[test]
+    fn remove_path_missing_is_already_satisfied_without_touching_trash() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing.txt");
+        let task = base_task(plain_step(
+            "remove",
+            Action::RemovePath(RemovePathAction {
+                path: missing.to_string_lossy().into_owned(),
+            }),
+        ));
+
+        let report = apply_test_task(&task);
+        assert!(matches!(
+            report.outcomes[0],
+            ActionOutcome::AlreadySatisfied { .. }
+        ));
+    }
+
+    #[test]
     fn run_task_plans_by_default() {
         let task = base_task(Step {
             id: "download".into(),
@@ -4139,6 +5526,8 @@ mod tests {
             check: None,
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::DownloadFile {
                 url: "https://example.com/app.tgz".into(),
                 dest: "$HOME/Library/Caches/app.tgz".into(),
@@ -4162,6 +5551,8 @@ mod tests {
             check: None,
             dangerous: true,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::RunCommand {
                 program: "bash".into(),
                 args: vec!["-lc".into(), "echo hi".into()],
@@ -4183,12 +5574,15 @@ mod tests {
             check: None,
             dangerous: true,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::RunScript {
                 interpreter: ScriptInterpreter::Sh,
                 script: "/tmp/ppduster-script.sh".into(),
                 args: Vec::new(),
                 cwd: None,
                 env: BTreeMap::new(),
+                success_exit_codes: vec![0],
             },
         });
         let err = run_task(&task, &RunOptions::default()).unwrap_err();
@@ -4214,6 +5608,7 @@ mod tests {
             &["argument value".into()],
             Some(&temp.path().to_string_lossy()),
             &env,
+            &[0],
         )
         .unwrap();
 
@@ -4244,6 +5639,7 @@ mod tests {
             &[],
             None,
             &BTreeMap::new(),
+            &[0],
         )
         .unwrap_err();
         assert!(err.to_string().contains("must not be a symlink"));
@@ -4484,6 +5880,8 @@ mod tests {
             }),
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::DownloadFile {
                 url: "https://example.com/release.bin".into(),
                 dest: "$HOME/Library/Caches/release.bin".into(),
@@ -4842,6 +6240,8 @@ mod tests {
             }),
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::BrewInstall {
                 package: "git".into(),
                 cask: false,
@@ -4860,6 +6260,8 @@ mod tests {
             check: None,
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::GitClone {
                 repo: "https://github.com/example/repo.git".into(),
                 dest: "$HOME/Library/Caches/repo".into(),
@@ -4880,6 +6282,8 @@ mod tests {
             check: None,
             dangerous: false,
             allow_elevation: ElevationPolicy::Allow,
+            when: None,
+            require: None,
             action: Action::RunCommand {
                 program: "sudo".into(),
                 args: vec!["systemsetup".into(), "-getremotelogin".into()],
@@ -4912,6 +6316,8 @@ mod tests {
             check: None,
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::DownloadFile {
                 url: format!("file://{}", source.display()),
                 dest: tmp
@@ -4954,6 +6360,8 @@ mod tests {
                     check: None,
                     dangerous: false,
                     allow_elevation: ElevationPolicy::Forbidden,
+                    when: None,
+                    require: None,
                     action: Action::GitClone {
                         repo: "https://github.com/example/repo.git".into(),
                         dest: "$HOME/Library/Caches/repo".into(),
@@ -4967,6 +6375,8 @@ mod tests {
                     check: None,
                     dangerous: false,
                     allow_elevation: ElevationPolicy::Forbidden,
+                    when: None,
+                    require: None,
                     action: Action::BrewInstall {
                         package: "git".into(),
                         cask: false,
@@ -4992,6 +6402,8 @@ mod tests {
             check: None,
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::RunCommand {
                 program: "false".into(),
                 args: vec![],
@@ -5022,6 +6434,8 @@ mod tests {
             check: None,
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::RunCommand {
                 program: "true".into(),
                 args: vec![],
@@ -5060,6 +6474,8 @@ mod tests {
                     check: None,
                     dangerous: false,
                     allow_elevation: ElevationPolicy::Forbidden,
+                    when: None,
+                    require: None,
                     action: Action::RunCommand {
                         program: "false".into(),
                         args: vec![],
@@ -5075,6 +6491,8 @@ mod tests {
                     check: None,
                     dangerous: false,
                     allow_elevation: ElevationPolicy::Forbidden,
+                    when: None,
+                    require: None,
                     action: Action::RunCommand {
                         program: "true".into(),
                         args: vec![],
@@ -5099,6 +6517,69 @@ mod tests {
     }
 
     #[test]
+    fn run_task_rejects_invalid_programmatic_package_registry_action() {
+        let task = base_task(Step {
+            id: "package-config".into(),
+            name: String::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
+            action: Action::ConfigurePackageRegistryFiles {
+                secrets: crate::automation::task::EncryptedSecretsSpec {
+                    profile: "github-packages".into(),
+                    username_env: "GITHUB_PACKAGES_USER".into(),
+                    token_env: "GITHUB_PACKAGES_TOKEN".into(),
+                },
+                npm: crate::automation::task::NpmRegistryFileSpec {
+                    scope: "@dodopizza".into(),
+                    registry: "http://npm.pkg.github.com/".into(),
+                },
+                nuget: crate::automation::task::NugetRegistryFileSpec {
+                    public_source_name: "nuget.org".into(),
+                    public_source: "https://api.nuget.org/v3/index.json".into(),
+                    source_name: "github".into(),
+                    source: "https://nuget.pkg.github.com/dodopizza/index.json".into(),
+                    package_patterns: vec!["Dodo.*".into()],
+                },
+            },
+        });
+
+        let err = run_task(&task, &RunOptions::default()).unwrap_err();
+
+        assert!(err.to_string().contains("npm.registry to be an HTTPS URL"));
+    }
+
+    #[test]
+    fn run_task_accepts_flattened_steps_with_scenario_provenance() {
+        let mut task = base_task(Step {
+            id: "inspect".into(),
+            name: String::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
+            action: Action::RunCommand {
+                program: "/usr/bin/true".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        });
+        task.scenarios = vec!["child-scenario".into()];
+
+        let report = run_task(&task, &RunOptions::default()).unwrap();
+
+        assert_eq!(report.scenarios, ["child-scenario"]);
+        assert_eq!(report.plans.len(), 1);
+    }
+
+    #[test]
     fn shell_mode_allow_runs_via_shell() {
         let task = base_task(Step {
             id: "cmd".into(),
@@ -5107,6 +6588,8 @@ mod tests {
             check: None,
             dangerous: true,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::RunCommand {
                 program: "sh".into(),
                 args: vec!["-lc".into(), ":".into()],
@@ -5148,12 +6631,15 @@ mod tests {
             check: None,
             dangerous: true,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::RunScript {
                 interpreter: ScriptInterpreter::Sh,
                 script: "verify.sh".into(),
                 args: vec![argument.into()],
                 cwd: Some(dir.path().to_string_lossy().into_owned()),
                 env: BTreeMap::from([("PPDUSTER_SCRIPT_VALUE".into(), environment.into())]),
+                success_exit_codes: vec![0],
             },
         });
 
@@ -5250,6 +6736,7 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
             &[argument.into()],
             Some(&dir.path().to_string_lossy()),
             &BTreeMap::from([("PPDUSTER_SCRIPT_VALUE".into(), environment.into())]),
+            &[0],
         )
         .unwrap();
 
@@ -5352,6 +6839,8 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
                     check: None,
                     dangerous: false,
                     allow_elevation: ElevationPolicy::Forbidden,
+                    when: None,
+                    require: None,
                     action: Action::DownloadFile {
                         url: format!("file://{}", source.display()),
                         dest: destination.to_string_lossy().into_owned(),
@@ -5367,6 +6856,8 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
                     check: None,
                     dangerous: false,
                     allow_elevation: ElevationPolicy::Forbidden,
+                    when: None,
+                    require: None,
                     action: Action::ActivateLicense(ActivateLicenseAction {
                         provider: LicenseProvider::LightBurn,
                         method: LicenseMethod::VendorUi,
@@ -5427,6 +6918,8 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
             check: None,
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::AppStoreInstall(AppStoreInstallAction {
                 app_id: 497_799_835,
                 operation: AppStoreOperation::Install,
@@ -5500,6 +6993,8 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
             check: None,
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::InstallDmg {
                 dmg: "$HOME/Library/Caches/app.dmg".into(),
                 app_name: Some("Example.app".into()),
@@ -5521,6 +7016,8 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
             check: None,
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::InstallDmg {
                 dmg: "$HOME/Library/Caches/app.dmg".into(),
                 app_name: Some("Example.app".into()),
@@ -5589,6 +7086,8 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
             check: None,
             dangerous: false,
             allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
             action: Action::BambuStudioRelease(crate::automation::task::BambuStudioReleaseAction {
                 channel: ReleaseChannel::Release,
             }),

@@ -4,10 +4,13 @@ use eframe::egui::{
 };
 use ppduster::automation::PackTrust;
 use ppduster::automation::{
-    describe_step, run_task, Action, ReleaseChannel, RunOptions, RunReport, ScriptInterpreter,
-    Step, StepStatus, Task, TaskPack, TaskSource,
+    describe_step, run_task, Action, AuthPolicy, ReleaseChannel, RunOptions, RunReport,
+    ScriptInterpreter, Step, StepStatus, Task, TaskPack, TaskSource,
 };
-use std::path::PathBuf;
+use ppduster::github::{list_accessible_repositories, GithubRepository};
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -28,6 +31,42 @@ struct ScenarioGroup {
     description: String,
     step_count: usize,
     step_summaries: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GithubCloneProtocol {
+    Https,
+    Ssh,
+}
+
+struct GithubPickerState {
+    open: bool,
+    search: String,
+    destination_root: String,
+    protocol: GithubCloneProtocol,
+    repositories: Vec<GithubRepository>,
+    selected_ids: BTreeSet<String>,
+    loaded_once: bool,
+    loading: bool,
+    error: Option<String>,
+    receiver: Option<Receiver<Result<Vec<GithubRepository>, String>>>,
+}
+
+impl Default for GithubPickerState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            search: String::new(),
+            destination_root: default_github_destination_root(),
+            protocol: GithubCloneProtocol::Https,
+            repositories: Vec::new(),
+            selected_ids: BTreeSet::new(),
+            loaded_once: false,
+            loading: false,
+            error: None,
+            receiver: None,
+        }
+    }
 }
 
 fn main() -> eframe::Result {
@@ -61,6 +100,7 @@ struct ScenarioApp {
     confirm_run: bool,
     running: bool,
     run_receiver: Option<Receiver<Result<RunReport, String>>>,
+    github_picker: GithubPickerState,
 }
 
 impl ScenarioApp {
@@ -94,6 +134,7 @@ impl ScenarioApp {
             confirm_run: false,
             running: false,
             run_receiver: None,
+            github_picker: GithubPickerState::default(),
         }
     }
 
@@ -105,10 +146,77 @@ impl ScenarioApp {
         let task = self
             .selected_task()
             .ok_or_else(|| anyhow::anyhow!("сценарий не выбран"))?;
-        self.task_pack
+        let resolved = self
+            .task_pack
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("библиотека сценариев не загружена"))?
-            .resolve(&task.id)
+            .resolve(&task.id)?;
+        materialize_github_repositories(
+            resolved,
+            &self.github_picker.repositories,
+            &self.github_picker.selected_ids,
+            &self.github_picker.destination_root,
+            self.github_picker.protocol,
+        )
+    }
+
+    fn invalidate_plan(&mut self) {
+        self.report = None;
+        self.report_applied = false;
+        self.plan_error = None;
+        self.confirm_run = false;
+    }
+
+    fn start_github_repository_load(&mut self, ctx: &egui::Context) {
+        if self.github_picker.loading {
+            return;
+        }
+        if !self.github_picker.selected_ids.is_empty() {
+            self.invalidate_plan();
+        }
+        let (sender, receiver) = mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let result = list_accessible_repositories().map_err(|error| format!("{error:#}"));
+            let _ = sender.send(result);
+            repaint.request_repaint();
+        });
+        self.github_picker.receiver = Some(receiver);
+        self.github_picker.loading = true;
+        self.github_picker.error = None;
+    }
+
+    fn poll_github_repository_load(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = &self.github_picker.receiver else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(repositories)) => {
+                let selection_uses_loaded_metadata = !self.github_picker.selected_ids.is_empty();
+                self.github_picker.repositories = repositories;
+                self.github_picker.loaded_once = true;
+                self.github_picker.error = None;
+                self.github_picker.loading = false;
+                self.github_picker.receiver = None;
+                if selection_uses_loaded_metadata {
+                    self.invalidate_plan();
+                }
+            }
+            Ok(Err(error)) => {
+                self.github_picker.error = Some(error);
+                self.github_picker.loading = false;
+                self.github_picker.receiver = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.github_picker.error =
+                    Some("Фоновая загрузка репозиториев неожиданно завершилась".into());
+                self.github_picker.loading = false;
+                self.github_picker.receiver = None;
+            }
+        }
     }
 
     fn build_plan(&mut self) {
@@ -202,12 +310,16 @@ impl ScenarioApp {
         }
         self.selected_task = index;
         self.selected_step = Some(0);
-        self.report = None;
-        self.report_applied = false;
-        self.plan_error = None;
+        self.github_picker.open = false;
+        self.github_picker.selected_ids.clear();
+        self.github_picker.search.clear();
+        self.invalidate_plan();
     }
 
     fn command_for_selected(&self) -> Option<String> {
+        if !self.github_picker.selected_ids.is_empty() {
+            return None;
+        }
         let task = self.selected_task()?;
         let resolved = self.resolved_selected_task().ok()?;
         let mut command = format!("ppduster setup run {}", task.id);
@@ -235,10 +347,12 @@ impl ScenarioApp {
 impl eframe::App for ScenarioApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_run(ui.ctx());
+        self.poll_github_repository_load(ui.ctx());
         self.top_bar(ui);
         self.left_library(ui);
         self.right_inspector(ui);
         self.canvas(ui);
+        self.github_repository_picker(ui.ctx());
         self.run_confirmation(ui.ctx());
     }
 }
@@ -494,6 +608,16 @@ impl ScenarioApp {
                     }
                     return;
                 };
+                let has_configurable_git_step = self
+                    .task_pack
+                    .as_ref()
+                    .and_then(|pack| pack.resolve(&task.id).ok())
+                    .is_some_and(|resolved| {
+                        resolved
+                            .steps
+                            .iter()
+                            .any(|step| matches!(step.action, Action::GitClone { .. }))
+                    });
                 let resolved = self.resolved_selected_task();
                 let resolved_task = resolved.as_ref().ok().cloned();
                 let resolution_error = resolved.err().map(|error| format!("{error:#}"));
@@ -509,7 +633,9 @@ impl ScenarioApp {
                     .task_pack
                     .as_ref()
                     .zip(preview_options.as_ref())
-                    .map(|(pack, options)| scenario_groups(pack, &task, options))
+                    .map(|(pack, options)| {
+                        scenario_groups(pack, &task, options, resolved_task.as_ref())
+                    })
                     .transpose()
                     .unwrap_or_else(|error| {
                         self.plan_error = Some(format!("{error:#}"));
@@ -573,6 +699,7 @@ impl ScenarioApp {
                         .any(|step| matches!(step.action, Action::BambuStudioRelease(_))))
                     {
                         section_label(ui, "КАНАЛ РЕЛИЗА");
+                        let channel_before = self.channel;
                         ui.horizontal(|ui| {
                             ui.selectable_value(
                                 &mut self.channel,
@@ -585,6 +712,55 @@ impl ScenarioApp {
                                 "Beta",
                             );
                         });
+                        if self.channel != channel_before {
+                            self.invalidate_plan();
+                        }
+                        ui.add_space(12.0);
+                    }
+
+                    if has_configurable_git_step {
+                        section_label(ui, "РЕПОЗИТОРИИ GITHUB");
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(
+                                    "Можно заменить первый git-шаг одним или несколькими репозиториями из вашего GitHub.",
+                                )
+                                .size(9.0)
+                                .color(MUTED),
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(6.0);
+                        let selected_count = self.github_picker.selected_ids.len();
+                        if ui
+                            .add_enabled(
+                                !self.running,
+                                egui::Button::new(if selected_count == 0 {
+                                    "Выбрать репозитории…".into()
+                                } else {
+                                    format!("Выбрано {selected_count} · изменить…")
+                                })
+                                .min_size(Vec2::new(ui.available_width(), 32.0)),
+                            )
+                            .clicked()
+                        {
+                            self.github_picker.open = true;
+                            if self.github_picker.repositories.is_empty()
+                                && !self.github_picker.loading
+                            {
+                                self.start_github_repository_load(ui.ctx());
+                            }
+                        }
+                        if selected_count > 0 {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Ветка каждого репозитория: main · папка: {}",
+                                    self.github_picker.destination_root
+                                ))
+                                .size(8.0)
+                                .color(PURPLE),
+                            );
+                        }
                         ui.add_space(12.0);
                     }
 
@@ -650,11 +826,17 @@ impl ScenarioApp {
                     ui.add_space(14.0);
 
                     section_label(ui, "РАЗРЕШЕНИЯ");
-                    ui.checkbox(&mut self.allow_elevation, "Разрешить elevation");
-                    ui.checkbox(
-                        &mut self.allow_shell,
-                        "Разрешить shell-команды и скрипты",
-                    );
+                    let permissions_changed = ui
+                        .checkbox(&mut self.allow_elevation, "Разрешить elevation")
+                        .changed()
+                        | ui.checkbox(
+                            &mut self.allow_shell,
+                            "Разрешить shell-команды и скрипты",
+                        )
+                        .changed();
+                    if permissions_changed {
+                        self.invalidate_plan();
+                    }
                     ui.label(
                         RichText::new("Без этих флагов опасные шаги не попадут в план.")
                             .size(9.0)
@@ -664,7 +846,7 @@ impl ScenarioApp {
 
                     if ui
                         .add_enabled(
-                            resolved_task.is_some(),
+                            resolved_task.is_some() && !self.github_picker.loading,
                             egui::Button::new(
                                 RichText::new("Проверить план")
                                     .strong()
@@ -679,9 +861,15 @@ impl ScenarioApp {
                         self.build_plan();
                     }
                     ui.add_space(7.0);
-                    let can_run = self.report.is_some()
+                    let can_run = self
+                        .report
+                        .as_ref()
+                        .is_some_and(|report| report.errors.is_empty())
+                        && !self.report_applied
                         && self.plan_error.is_none()
+                        && !self.github_picker.loading
                         && !self.running
+                        && github_selection_auth_ready(&self.github_picker)
                         && resolved_task.as_ref().is_some_and(task_supports_gui_run);
                     if ui
                         .add_enabled(
@@ -703,12 +891,25 @@ impl ScenarioApp {
                         .as_ref()
                         .is_some_and(|resolved| !task_supports_gui_run(resolved))
                     {
+                        let git_auth_missing = resolved_task
+                            .as_ref()
+                            .is_some_and(task_has_unready_git_credentials);
                         ui.label(
-                            RichText::new(
-                                "Этот сценарий требует терминала или vendor UI; используйте команду ниже.",
-                            )
+                            RichText::new(if git_auth_missing {
+                                "Git credentials пока не готовы для фонового запуска. Настройте gh credential helper или SSH agent в окне выбора репозиториев."
+                            } else {
+                                "Этот сценарий требует терминала или vendor UI; используйте команду ниже."
+                            })
                             .size(9.0)
                             .color(MUTED),
+                        );
+                    } else if !github_selection_auth_ready(&self.github_picker) {
+                        ui.label(
+                            RichText::new(
+                                "Запуск заблокирован, пока Git credentials не готовы. Используйте подсказку в окне выбора репозиториев и затем снова проверьте план.",
+                            )
+                            .size(9.0)
+                            .color(ORANGE),
                         );
                     }
                     ui.add_space(7.0);
@@ -722,6 +923,14 @@ impl ScenarioApp {
                         {
                             ui.ctx().copy_text(command);
                         }
+                    } else if !self.github_picker.selected_ids.is_empty() {
+                        ui.label(
+                            RichText::new(
+                                "Выбранные GitHub-репозитории включены в план этого запуска в интерфейсе.",
+                            )
+                            .size(9.0)
+                            .color(MUTED),
+                        );
                     }
 
                     if let Some(error) = &self.plan_error {
@@ -877,7 +1086,7 @@ impl ScenarioApp {
                     match self
                         .task_pack
                         .as_ref()
-                        .map(|pack| scenario_groups(pack, &task, &options))
+                        .map(|pack| scenario_groups(pack, &task, &options, Some(&resolved)))
                         .transpose()
                     {
                         Ok(Some(groups)) => groups,
@@ -1018,6 +1227,386 @@ impl ScenarioApp {
             });
     }
 
+    fn github_repository_picker(&mut self, ctx: &egui::Context) {
+        if !self.github_picker.open {
+            return;
+        }
+
+        let query = self.github_picker.search.trim().to_lowercase();
+        let visible_repositories = self
+            .github_picker
+            .repositories
+            .iter()
+            .filter(|repository| {
+                query.is_empty()
+                    || repository.name_with_owner.to_lowercase().contains(&query)
+                    || repository
+                        .owner_name
+                        .as_ref()
+                        .is_some_and(|name| name.to_lowercase().contains(&query))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let missing_selected = self
+            .github_picker
+            .selected_ids
+            .iter()
+            .filter(|id| {
+                !self
+                    .github_picker
+                    .repositories
+                    .iter()
+                    .any(|repository| &repository.id == *id)
+            })
+            .count();
+        let source_requires_git_auth = self
+            .task_pack
+            .as_ref()
+            .and_then(|pack| {
+                self.selected_task()
+                    .and_then(|task| pack.resolve(&task.id).ok())
+            })
+            .and_then(|task| {
+                task.steps
+                    .into_iter()
+                    .find(|step| matches!(step.action, Action::GitClone { .. }))
+            })
+            .is_some_and(|step| matches!(step.auth, AuthPolicy::GitCredential));
+        let selection_requires_git_auth = source_requires_git_auth
+            || matches!(self.github_picker.protocol, GithubCloneProtocol::Ssh)
+            || self.github_picker.repositories.iter().any(|repository| {
+                repository.is_private && self.github_picker.selected_ids.contains(&repository.id)
+            });
+        let mut configuration_changed = false;
+        let mut request_refresh = false;
+        let mut close = false;
+
+        egui::Modal::new(Id::new("github-repository-picker"))
+            .frame(
+                Frame::popup(&ctx.global_style())
+                    .fill(surface(self.dark))
+                    .corner_radius(14)
+                    .inner_margin(Margin::same(20)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(640.0);
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("Репозитории GitHub")
+                                .strong()
+                                .size(20.0)
+                                .color(text(self.dark)),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Список загружается через вашу существующую сессию GitHub CLI; токен не попадает в ppduster.",
+                            )
+                            .size(9.0)
+                            .color(MUTED),
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add_enabled(
+                                !self.github_picker.loading,
+                                egui::Button::new(if self.github_picker.loaded_once {
+                                    "Обновить"
+                                } else {
+                                    "Загрузить"
+                                }),
+                            )
+                            .clicked()
+                        {
+                            request_refresh = true;
+                        }
+                        if self.github_picker.loading {
+                            ui.spinner();
+                        }
+                    });
+                });
+
+                ui.add_space(14.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.github_picker.search)
+                        .hint_text("Поиск по owner/repository…")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(10.0);
+
+                Frame::new()
+                    .fill(panel(self.dark))
+                    .stroke(Stroke::new(1.0, line(self.dark)))
+                    .corner_radius(10)
+                    .inner_margin(Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Корневая папка")
+                                    .strong()
+                                    .size(9.0)
+                                    .color(text(self.dark)),
+                            );
+                            let root_response = ui.add_enabled(
+                                !self.running,
+                                egui::TextEdit::singleline(
+                                    &mut self.github_picker.destination_root,
+                                )
+                                .desired_width(300.0),
+                            );
+                            configuration_changed |= root_response.changed();
+                            let before = self.github_picker.protocol;
+                            ui.selectable_value(
+                                &mut self.github_picker.protocol,
+                                GithubCloneProtocol::Https,
+                                "HTTPS",
+                            );
+                            ui.selectable_value(
+                                &mut self.github_picker.protocol,
+                                GithubCloneProtocol::Ssh,
+                                "SSH",
+                            );
+                            configuration_changed |= before != self.github_picker.protocol;
+                        });
+                        ui.label(
+                            RichText::new(
+                                "Путь: <корень>/<owner>/<repository>; синхронизируется main. Протокол применяется при новом clone; существующий origin сохраняется.",
+                            )
+                            .size(8.0)
+                            .color(MUTED),
+                        );
+                    });
+
+                if selection_requires_git_auth {
+                    ui.add_space(8.0);
+                    Frame::new()
+                        .fill(translucent(ORANGE, if self.dark { 34 } else { 15 }))
+                        .stroke(Stroke::new(1.0, translucent(ORANGE, 90)))
+                        .corner_radius(9)
+                        .inner_margin(Margin::same(9))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(if matches!(
+                                    self.github_picker.protocol,
+                                    GithubCloneProtocol::Ssh
+                                ) {
+                                    "Для SSH нужен настроенный GitHub-ключ и доступный SSH agent. Загрузка списка через gh этого не проверяет."
+                                } else {
+                                    "Для private HTTPS обычный git должен использовать GitHub CLI как credential helper."
+                                })
+                                .size(9.0)
+                                .color(ORANGE),
+                            );
+                            let (label, command) = if matches!(
+                                self.github_picker.protocol,
+                                GithubCloneProtocol::Ssh
+                            ) {
+                                ("Скопировать проверку SSH", "ssh -T git@github.com")
+                            } else {
+                                (
+                                    "Скопировать настройку Git",
+                                    "gh auth setup-git --hostname github.com",
+                                )
+                            };
+                            if ui.button(label).clicked() {
+                                ui.ctx().copy_text(command.into());
+                            }
+                        });
+                }
+
+                if let Some(error) = &self.github_picker.error {
+                    ui.add_space(10.0);
+                    error_box(ui, error, self.dark);
+                    if ui.button("Скопировать команду входа").clicked() {
+                        ui.ctx().copy_text("gh auth login --hostname github.com".into());
+                    }
+                }
+
+                ui.add_space(10.0);
+                if self.github_picker.loading && self.github_picker.repositories.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(30.0);
+                        ui.spinner();
+                        ui.label(RichText::new("Получаю доступные репозитории…").color(MUTED));
+                        ui.add_space(30.0);
+                    });
+                } else if self.github_picker.repositories.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(24.0);
+                        ui.label(
+                            RichText::new(if self.github_picker.loaded_once {
+                                "Доступных репозиториев нет"
+                            } else {
+                                "Список пока не загружен"
+                            })
+                                .strong()
+                                .color(text(self.dark)),
+                        );
+                        ui.label(
+                            RichText::new(if self.github_picker.loaded_once {
+                                "GitHub вернул пустой список для текущего аккаунта."
+                            } else {
+                                "Нужны установленный gh и выполненный gh auth login."
+                            })
+                                .size(9.0)
+                                .color(MUTED),
+                        );
+                        ui.add_space(24.0);
+                    });
+                } else {
+                    ScrollArea::vertical()
+                        .id_salt("github-repository-list")
+                        .max_height(360.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if visible_repositories.is_empty() {
+                                ui.label(
+                                    RichText::new("По этому запросу ничего не найдено.")
+                                        .color(MUTED),
+                                );
+                            }
+                            for repository in &visible_repositories {
+                                let mut selected =
+                                    self.github_picker.selected_ids.contains(&repository.id);
+                                let selectable = selected
+                                    || (!repository.is_archived
+                                        && repository.main_branch.is_some()
+                                        && self.github_picker.selected_ids.len()
+                                            < MAX_SELECTED_GITHUB_REPOSITORIES);
+                                Frame::new()
+                                    .fill(card(self.dark))
+                                    .stroke(Stroke::new(1.0, line(self.dark)))
+                                    .corner_radius(9)
+                                    .inner_margin(Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            let response = ui.add_enabled(
+                                                selectable && !self.running,
+                                                egui::Checkbox::without_text(&mut selected),
+                                            );
+                                            if response.changed() {
+                                                if selected {
+                                                    self.github_picker
+                                                        .selected_ids
+                                                        .insert(repository.id.clone());
+                                                } else {
+                                                    self.github_picker
+                                                        .selected_ids
+                                                        .remove(&repository.id);
+                                                }
+                                                configuration_changed = true;
+                                            }
+                                            ui.vertical(|ui| {
+                                                ui.label(
+                                                    RichText::new(&repository.name_with_owner)
+                                                        .strong()
+                                                        .size(10.0)
+                                                        .color(text(self.dark)),
+                                                );
+                                                let default_branch = repository
+                                                    .default_branch
+                                                    .as_deref()
+                                                    .unwrap_or("нет default");
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{} · default: {default_branch}{}{}",
+                                                        if repository.main_branch.is_some() {
+                                                            "main"
+                                                        } else {
+                                                            "нет main"
+                                                        },
+                                                        if repository.is_private {
+                                                            " · PRIVATE"
+                                                        } else {
+                                                            " · PUBLIC"
+                                                        },
+                                                        if repository.is_archived {
+                                                            " · ARCHIVED"
+                                                        } else {
+                                                            ""
+                                                        }
+                                                    ))
+                                                    .monospace()
+                                                    .size(8.0)
+                                                    .color(if selectable { PURPLE } else { MUTED }),
+                                                );
+                                            });
+                                        });
+                                    });
+                                ui.add_space(5.0);
+                            }
+                        });
+                }
+
+                if missing_selected > 0 {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{missing_selected} ранее выбранных репозиториев больше не доступно; снимите выбор или обновите доступ."
+                        ))
+                        .size(9.0)
+                        .color(ORANGE),
+                    );
+                }
+                if self.github_picker.selected_ids.len() >= MAX_SELECTED_GITHUB_REPOSITORIES {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "Достигнут лимит: {} репозиториев за один сценарий.",
+                            MAX_SELECTED_GITHUB_REPOSITORIES
+                        ))
+                        .size(9.0)
+                        .color(ORANGE),
+                    );
+                }
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "Выбрано: {}",
+                            self.github_picker.selected_ids.len()
+                        ))
+                        .strong()
+                        .color(PURPLE),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Готово").strong().color(Color32::WHITE),
+                                )
+                                .fill(PURPLE),
+                            )
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.github_picker.selected_ids.is_empty() && !self.running,
+                                egui::Button::new("Сбросить выбор"),
+                            )
+                            .clicked()
+                        {
+                            self.github_picker.selected_ids.clear();
+                            configuration_changed = true;
+                        }
+                    });
+                });
+            });
+
+        if request_refresh {
+            self.start_github_repository_load(ctx);
+        }
+        if configuration_changed {
+            self.selected_step = Some(0);
+            self.invalidate_plan();
+        }
+        if close {
+            self.github_picker.open = false;
+        }
+    }
+
     fn run_confirmation(&mut self, ctx: &egui::Context) {
         if !self.confirm_run {
             return;
@@ -1076,6 +1665,176 @@ impl ScenarioApp {
     }
 }
 
+const MAX_SELECTED_GITHUB_REPOSITORIES: usize = 200;
+
+fn default_github_destination_root() -> String {
+    dirs::home_dir()
+        .map(|home| home.join("Developer").display().to_string())
+        .unwrap_or_else(|| "$HOME/Developer".into())
+}
+
+fn materialize_github_repositories(
+    mut task: Task,
+    repositories: &[GithubRepository],
+    selected_ids: &BTreeSet<String>,
+    destination_root: &str,
+    protocol: GithubCloneProtocol,
+) -> anyhow::Result<Task> {
+    if selected_ids.is_empty() {
+        return Ok(task);
+    }
+    if selected_ids.len() > MAX_SELECTED_GITHUB_REPOSITORIES {
+        anyhow::bail!(
+            "за один запуск можно выбрать не более {} GitHub-репозиториев",
+            MAX_SELECTED_GITHUB_REPOSITORIES
+        );
+    }
+
+    let destination_root = destination_root.trim();
+    if destination_root.is_empty() {
+        anyhow::bail!("укажите корневую папку для GitHub-репозиториев");
+    }
+    if Path::new(destination_root)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        anyhow::bail!("корневая папка GitHub не должна содержать '..'");
+    }
+
+    let source_index = task
+        .steps
+        .iter()
+        .position(|step| matches!(step.action, Action::GitClone { .. }))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "сценарий {} не содержит git-шаг, который можно настроить",
+                task.id
+            )
+        })?;
+    let source_step = task.steps[source_index].clone();
+    let mut selected = Vec::with_capacity(selected_ids.len());
+    for id in selected_ids {
+        let repository = repositories
+            .iter()
+            .find(|repository| &repository.id == id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ранее выбранный GitHub-репозиторий {} больше не доступен; обновите список и выбор",
+                    id
+                )
+            })?;
+        if repository.is_archived {
+            anyhow::bail!(
+                "архивный GitHub-репозиторий {} нельзя добавить в сценарий",
+                repository.name_with_owner
+            );
+        }
+        selected.push(repository);
+    }
+    selected.sort_by(|left, right| {
+        left.name_with_owner
+            .to_lowercase()
+            .cmp(&right.name_with_owner.to_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut generated_steps = Vec::with_capacity(selected.len());
+    for repository in selected {
+        validate_github_repository_identity(repository)?;
+        let branch = repository.main_branch.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "GitHub-репозиторий {} не имеет ветки main",
+                repository.name_with_owner
+            )
+        })?;
+        if branch.trim().is_empty() {
+            anyhow::bail!(
+                "GitHub-репозиторий {} вернул пустое имя ветки main",
+                repository.name_with_owner
+            );
+        }
+
+        let mut step = source_step.clone();
+        step.id = format!(
+            "{}/{}",
+            source_step.id,
+            github_step_slug(&repository.name_with_owner)
+        );
+        step.name = format!("Clone or update {}", repository.name_with_owner);
+        step.check = None;
+        // The desktop picker performs its own noninteractive credential gate.
+        // Avoid the runner's terminal prompt in the background UI worker.
+        step.auth = AuthPolicy::None;
+        step.action = Action::GitClone {
+            repo: github_clone_url(repository, protocol),
+            dest: PathBuf::from(destination_root)
+                .join(&repository.owner)
+                .join(&repository.name)
+                .display()
+                .to_string(),
+            branch: Some(branch.to_owned()),
+        };
+        generated_steps.push(step);
+    }
+
+    task.steps
+        .splice(source_index..=source_index, generated_steps);
+    task.validate().map_err(anyhow::Error::msg)?;
+    Ok(task)
+}
+
+fn validate_github_repository_identity(repository: &GithubRepository) -> anyhow::Result<()> {
+    let mut components = repository.name_with_owner.split('/');
+    let owner = components.next().unwrap_or_default();
+    let name = components.next().unwrap_or_default();
+    if components.next().is_some()
+        || owner != repository.owner
+        || name != repository.name
+        || !is_safe_github_component(owner)
+        || !is_safe_github_component(name)
+    {
+        anyhow::bail!(
+            "GitHub вернул недопустимое имя репозитория {}",
+            repository.name_with_owner
+        );
+    }
+    Ok(())
+}
+
+fn is_safe_github_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+}
+
+fn github_clone_url(repository: &GithubRepository, protocol: GithubCloneProtocol) -> String {
+    match protocol {
+        GithubCloneProtocol::Https => {
+            format!("https://github.com/{}.git", repository.name_with_owner)
+        }
+        GithubCloneProtocol::Ssh => {
+            format!("git@github.com:{}.git", repository.name_with_owner)
+        }
+    }
+}
+
+fn github_step_slug(name_with_owner: &str) -> String {
+    let mut slug = String::with_capacity(name_with_owner.len());
+    let mut previous_dash = false;
+    for character in name_with_owner.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            previous_dash = false;
+        } else if !previous_dash {
+            slug.push('-');
+            previous_dash = true;
+        }
+    }
+    slug.trim_matches('-').to_owned()
+}
+
 fn task_matches_query(task: &Task, normalized_query: &str) -> bool {
     normalized_query.is_empty()
         || task.name.to_lowercase().contains(normalized_query)
@@ -1101,8 +1860,9 @@ fn scenario_groups(
     pack: &TaskPack,
     template: &Task,
     options: &RunOptions,
+    configured: Option<&Task>,
 ) -> anyhow::Result<Vec<ScenarioGroup>> {
-    template
+    let mut groups = template
         .scenarios
         .iter()
         .map(|scenario_id| {
@@ -1126,7 +1886,79 @@ fn scenario_groups(
                 step_summaries: describe_task_steps(&resolved, options),
             })
         })
-        .collect()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    if !template.is_template() {
+        return Ok(groups);
+    }
+
+    if let Some(configured) = configured {
+        let base = pack.resolve(&template.id)?;
+        if configured.steps.len() != base.steps.len() {
+            let source_step_id = base
+                .steps
+                .iter()
+                .find(|step| matches!(step.action, Action::GitClone { .. }))
+                .map(|step| step.id.as_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "configured template {} changed step count without a git source step",
+                        template.id
+                    )
+                })?;
+            let group = groups
+                .iter_mut()
+                .find(|group| {
+                    source_step_id == group.id
+                        || source_step_id
+                            .strip_prefix(&group.id)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "configured git step {} is outside direct groups of template {}",
+                        source_step_id,
+                        template.id
+                    )
+                })?;
+            group.step_count = group
+                .step_count
+                .checked_add(configured.steps.len() - base.steps.len())
+                .ok_or_else(|| anyhow::anyhow!("configured scenario group is too large"))?;
+        }
+
+        let mut offset = 0usize;
+        for group in &mut groups {
+            let end = offset
+                .checked_add(group.step_count)
+                .ok_or_else(|| anyhow::anyhow!("configured scenario group offset overflow"))?;
+            let steps = configured.steps.get(offset..end).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "configured task {} does not match scenario group {}",
+                    configured.id,
+                    group.id
+                )
+            })?;
+            group.step_summaries = steps
+                .iter()
+                .map(|step| {
+                    describe_step(step, options).unwrap_or_else(|error| {
+                        format!("{}: не удалось описать шаг: {error:#}", step.id)
+                    })
+                })
+                .collect();
+            offset = end;
+        }
+        if offset != configured.steps.len() {
+            anyhow::bail!(
+                "configured task {} has {} ungrouped step(s)",
+                configured.id,
+                configured.steps.len() - offset
+            );
+        }
+    }
+
+    Ok(groups)
 }
 
 fn paint_step_inspector(ui: &mut egui::Ui, step: &Step, options: Option<&RunOptions>, dark: bool) {
@@ -1455,16 +2287,18 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, dark: bool) {
 
 fn action_color(action: &Action) -> Color32 {
     match action {
-        Action::CreateDirectory(_) | Action::InspectPath(_) => CYAN,
-        Action::DownloadFile { .. } | Action::GitClone { .. } => PURPLE,
-        Action::ExtractArchive { .. } | Action::InstallDmg { .. } | Action::InstallPkg { .. } => {
-            ORANGE
-        }
+        Action::CreateDirectory(_) | Action::InspectPath(_) | Action::WriteFile(_) => CYAN,
+        Action::CopyPath(_) | Action::DownloadFile { .. } | Action::GitClone { .. } => PURPLE,
+        Action::RemovePath(_)
+        | Action::ExtractArchive { .. }
+        | Action::InstallDmg { .. }
+        | Action::InstallPkg { .. } => ORANGE,
         Action::MacosRequirements { .. } => CYAN,
         Action::BrewInstall { .. } | Action::AppStoreInstall(_) => BLUE,
         Action::RunCommand { .. } | Action::RunScript { .. } => Color32::from_rgb(139, 95, 191),
         Action::BambuStudioRelease(_) => ORANGE,
         Action::ActivateLicense(_) => Color32::from_rgb(183, 90, 115),
+        Action::ConfigurePackageRegistryFiles { .. } => CYAN,
     }
 }
 
@@ -1472,6 +2306,9 @@ fn action_icon(action: &Action) -> &'static str {
     match action {
         Action::CreateDirectory(_) => "+DIR",
         Action::InspectPath(_) => "INFO",
+        Action::CopyPath(_) => "COPY",
+        Action::WriteFile(_) => "TXT",
+        Action::RemovePath(_) => "DEL",
         Action::GitClone { .. } => "⌘",
         Action::BrewInstall { .. } => "B",
         Action::RunCommand { .. } => ">_",
@@ -1487,6 +2324,7 @@ fn action_icon(action: &Action) -> &'static str {
         Action::AppStoreInstall(_) => "A",
         Action::BambuStudioRelease(_) => "3D",
         Action::ActivateLicense(_) => "KEY",
+        Action::ConfigurePackageRegistryFiles { .. } => "REG",
     }
 }
 
@@ -1494,6 +2332,9 @@ fn action_eyebrow(action: &Action) -> &'static str {
     match action {
         Action::CreateDirectory(_) => "Папка",
         Action::InspectPath(_) => "Метаданные",
+        Action::CopyPath(_) => "Копирование",
+        Action::WriteFile(_) => "Запись файла",
+        Action::RemovePath(_) => "Корзина",
         Action::GitClone { .. } => "Источник",
         Action::BrewInstall { .. } | Action::AppStoreInstall(_) => "Пакет",
         Action::RunCommand { .. } => "Команда",
@@ -1508,6 +2349,7 @@ fn action_eyebrow(action: &Action) -> &'static str {
         Action::MacosRequirements { .. } => "Проверка",
         Action::BambuStudioRelease(_) => "Релиз",
         Action::ActivateLicense(_) => "Активация",
+        Action::ConfigurePackageRegistryFiles { .. } => "Реестр пакетов",
     }
 }
 
@@ -1521,12 +2363,89 @@ fn step_title(step: &Step) -> String {
 
 fn task_supports_gui_run(task: &Task) -> bool {
     task.steps.iter().all(|step| {
-        matches!(step.auth, ppduster::automation::AuthPolicy::None)
-            && !matches!(
-                step.action,
-                Action::ActivateLicense(_) | Action::AppStoreInstall(_) | Action::RunScript { .. }
+        matches!(step.auth, AuthPolicy::None) && action_supports_gui_run(&step.action)
+    })
+}
+
+fn git_clone_auth_ready(repo: &str) -> bool {
+    if repo.starts_with("git@") || repo.starts_with("ssh://") {
+        if std::env::var_os("SSH_AUTH_SOCK").is_none() {
+            return false;
+        }
+        let ssh_keygen = if Path::new("/usr/bin/ssh-keygen").is_file() {
+            "/usr/bin/ssh-keygen"
+        } else {
+            "ssh-keygen"
+        };
+        return Command::new(ssh_keygen)
+            .args(["-F", "github.com"])
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+            })
+            .unwrap_or(false);
+    }
+    Command::new("git")
+        .args([
+            "config",
+            "--get-urlmatch",
+            "credential.helper",
+            "https://github.com",
+        ])
+        .output()
+        .map(|output| {
+            output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+        })
+        .unwrap_or(false)
+}
+
+fn github_selection_auth_ready(picker: &GithubPickerState) -> bool {
+    if picker.selected_ids.is_empty() {
+        return true;
+    }
+    if matches!(picker.protocol, GithubCloneProtocol::Ssh) {
+        return git_clone_auth_ready("git@github.com:owner/repository.git");
+    }
+    if picker.repositories.iter().any(|repository| {
+        repository.is_private && picker.selected_ids.contains(&repository.id)
+    }) {
+        return git_clone_auth_ready("https://github.com/owner/repository.git");
+    }
+    true
+}
+
+fn task_has_unready_git_credentials(task: &Task) -> bool {
+    task.steps.iter().any(|step| {
+        matches!(step.auth, AuthPolicy::GitCredential)
+            && matches!(
+                &step.action,
+                Action::GitClone { repo, .. } if !git_clone_auth_ready(repo)
             )
     })
+}
+
+fn action_supports_gui_run(action: &Action) -> bool {
+    match action {
+        Action::ActivateLicense(_)
+        | Action::AppStoreInstall(_)
+        | Action::RunScript { .. }
+        | Action::ConfigurePackageRegistryFiles { .. } => false,
+        Action::CreateDirectory(_)
+        | Action::InspectPath(_)
+        | Action::CopyPath(_)
+        | Action::WriteFile(_)
+        | Action::RemovePath(_)
+        | Action::GitClone { .. }
+        | Action::BrewInstall { .. }
+        | Action::RunCommand { .. }
+        | Action::DownloadFile { .. }
+        | Action::ExtractArchive { .. }
+        | Action::InstallDmg { .. }
+        | Action::InstallPkg { .. }
+        | Action::MacosRequirements { .. }
+        | Action::BambuStudioRelease(_) => true,
+    }
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -1682,7 +2601,7 @@ mod tests {
     }
 
     #[test]
-    fn gui_execution_excludes_vendor_ui_flows() {
+    fn gui_execution_excludes_flows_that_need_external_context() {
         let pack = load_tasks().unwrap();
         assert!(task_supports_gui_run(
             &pack.resolve("bambu-studio-install").unwrap()
@@ -1693,6 +2612,9 @@ mod tests {
         assert!(task_supports_gui_run(
             &pack.resolve("app-store-bootstrap").unwrap()
         ));
+        assert!(!task_supports_gui_run(
+            pack.get("dev-dodopizza-package-registries").unwrap()
+        ));
     }
 
     #[test]
@@ -1702,7 +2624,8 @@ mod tests {
         assert!(template.is_template());
 
         let resolved = pack.resolve(&template.id).unwrap();
-        let groups = scenario_groups(&pack, template, &RunOptions::default()).unwrap();
+        let groups =
+            scenario_groups(&pack, template, &RunOptions::default(), Some(&resolved)).unwrap();
 
         assert_eq!(groups.len(), template.scenarios.len());
         assert_eq!(
@@ -1734,5 +2657,160 @@ mod tests {
 
         assert_eq!(summaries.len(), resolved.steps.len());
         assert!(summaries.iter().all(|summary| !summary.trim().is_empty()));
+    }
+
+    #[test]
+    fn github_selection_expands_to_one_typed_git_step_per_repository() {
+        let pack = load_tasks().unwrap();
+        let task = pack.resolve("dev-brew-bootstrap").unwrap();
+        let repositories = vec![
+            github_repository("R2", "zeta/api", "trunk"),
+            github_repository("R1", "acme/api", "main"),
+        ];
+        let selected_ids = BTreeSet::from(["R2".to_owned(), "R1".to_owned()]);
+
+        let configured = materialize_github_repositories(
+            task,
+            &repositories,
+            &selected_ids,
+            "/tmp/workspaces",
+            GithubCloneProtocol::Ssh,
+        )
+        .unwrap();
+
+        assert_eq!(configured.steps.len(), 3);
+        assert_eq!(configured.steps[0].id, "clone-repo/acme-api");
+        assert_eq!(configured.steps[1].id, "clone-repo/zeta-api");
+        assert!(configured.steps[..2]
+            .iter()
+            .all(|step| matches!(step.auth, AuthPolicy::None)));
+        assert!(matches!(
+            &configured.steps[0].action,
+            Action::GitClone { repo, dest, branch }
+                if repo == "git@github.com:acme/api.git"
+                    && dest == "/tmp/workspaces/acme/api"
+                    && branch.as_deref() == Some("main")
+        ));
+        assert!(matches!(
+            &configured.steps[1].action,
+            Action::GitClone { repo, dest, branch }
+                if repo == "git@github.com:zeta/api.git"
+                    && dest == "/tmp/workspaces/zeta/api"
+                    && branch.as_deref() == Some("main")
+        ));
+        assert!(matches!(
+            configured.steps[2].action,
+            Action::BrewInstall { .. }
+        ));
+
+        let report = run_task(&configured, &RunOptions::default()).unwrap();
+        assert_eq!(report.steps.len(), 3);
+        assert!(report.steps[0].summary.contains("acme/api"));
+        assert!(report.steps[1].summary.contains("zeta/api"));
+    }
+
+    #[test]
+    fn github_selection_rejects_missing_branch_and_path_traversal() {
+        let pack = load_tasks().unwrap();
+        let task = pack.resolve("dev-brew-bootstrap").unwrap();
+        let mut missing_branch = github_repository("R1", "acme/empty", "main");
+        missing_branch.main_branch = None;
+        let selected_ids = BTreeSet::from(["R1".to_owned()]);
+        let error = materialize_github_repositories(
+            task.clone(),
+            &[missing_branch],
+            &selected_ids,
+            "/tmp/workspaces",
+            GithubCloneProtocol::Https,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("ветки main"));
+
+        let traversal = github_repository("R1", "../escape", "main");
+        let error = materialize_github_repositories(
+            task,
+            &[traversal],
+            &selected_ids,
+            "/tmp/workspaces",
+            GithubCloneProtocol::Https,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("недопустимое имя"));
+    }
+
+    #[test]
+    fn github_selection_can_configure_the_first_git_step_in_a_template() {
+        let pack = load_tasks().unwrap();
+        let task = pack.resolve("macos-developer-workstation").unwrap();
+        let original_steps = task.steps.len();
+        let repositories = [
+            github_repository("R1", "acme/workstation", "trunk"),
+            github_repository("R2", "zeta/workstation", "main"),
+        ];
+        let selected_ids = BTreeSet::from(["R1".to_owned(), "R2".to_owned()]);
+
+        let configured = materialize_github_repositories(
+            task,
+            &repositories,
+            &selected_ids,
+            "/tmp/workspaces",
+            GithubCloneProtocol::Https,
+        )
+        .unwrap();
+
+        assert_eq!(configured.steps.len(), original_steps + 1);
+        let selected_step = configured
+            .steps
+            .iter()
+            .find(|step| step.id.contains("acme-workstation"))
+            .unwrap();
+        assert!(matches!(
+            &selected_step.action,
+            Action::GitClone { branch, .. } if branch.as_deref() == Some("main")
+        ));
+
+        let template = pack.get("macos-developer-workstation").unwrap();
+        let groups =
+            scenario_groups(&pack, template, &RunOptions::default(), Some(&configured)).unwrap();
+        assert_eq!(
+            groups.iter().map(|group| group.step_count).sum::<usize>(),
+            configured.steps.len()
+        );
+        let configured_group = groups
+            .iter()
+            .find(|group| {
+                group
+                    .step_summaries
+                    .iter()
+                    .any(|summary| summary.contains("acme/workstation"))
+            })
+            .unwrap();
+        assert!(configured_group
+            .step_summaries
+            .iter()
+            .any(|summary| summary.contains("zeta/workstation")));
+    }
+
+    fn github_repository(
+        id: &str,
+        name_with_owner: &str,
+        default_branch: &str,
+    ) -> GithubRepository {
+        let (owner, name) = name_with_owner.split_once('/').unwrap();
+        GithubRepository {
+            id: id.into(),
+            name: name.into(),
+            name_with_owner: name_with_owner.into(),
+            url: format!("https://github.com/{name_with_owner}"),
+            ssh_url: format!("git@github.com:{name_with_owner}.git"),
+            is_private: false,
+            is_archived: false,
+            default_branch: Some(default_branch.into()),
+            main_branch: Some("main".into()),
+            owner: owner.into(),
+            owner_name: None,
+        }
     }
 }

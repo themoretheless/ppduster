@@ -1,7 +1,12 @@
 task:
   id: filesystem-basics
   name: Filesystem basics
-  description: Inspect a safe temporary root, create a nested directory without a shell, then report its type, recursive logical size, emptiness, and timestamps.
+  description: |
+    Inspect the temporary root, create an isolated workspace, write and copy exact
+    file contents without a shell, verify the copied file's SHA-256, and report
+    recursive size and timestamps. An obsolete marker is moved to Trash only when
+    it already exists; the example source and copy are otherwise left in the
+    temporary workspace so repeated applied runs are idempotent.
   platform: any
   trust: bundled-only
   steps:
@@ -14,10 +19,68 @@ task:
         kind: directory
     - id: create-example-directory
       name: Create the example directory
+      require:
+        type: all
+        conditions:
+          - type: path
+            path: $TMPDIR
+            expect:
+              exists: true
+          - type: any
+            conditions:
+              - type: path
+                path: $TMPDIR
+                expect:
+                  kind: directory
+              - type: path
+                path: $TMPDIR
+                expect:
+                  kind: other
+          - type: not
+            condition:
+              type: path
+              path: $TMPDIR
+              expect:
+                kind: symlink
       type: create-directory
       path: $TMPDIR/ppduster-filesystem-basics/nested
+    - id: write-example-file
+      name: Write exact example contents
+      type: write-file
+      path: $TMPDIR/ppduster-filesystem-basics/nested/source.txt
+      content: |-
+        ppduster filesystem demo
+      on_conflict: fail
+    - id: copy-example-file
+      name: Copy the example file
+      type: copy-path
+      src: $TMPDIR/ppduster-filesystem-basics/nested/source.txt
+      dest: $TMPDIR/ppduster-filesystem-basics/nested/copy.txt
+    - id: inspect-example-copy
+      name: Verify the copied file hash
+      when:
+        type: path
+        path: $TMPDIR/ppduster-filesystem-basics/nested/copy.txt
+        expect:
+          exists: true
+      type: inspect-path
+      path: $TMPDIR/ppduster-filesystem-basics/nested/copy.txt
+      sha256: true
+      expect:
+        exists: true
+        kind: file
+        sha256: c93e7031a5611063faa8f747d6f367c3626e77d6af1da5553ad5e3c86f8f6206
     - id: inspect-example-directory
       name: Get directory size and dates
       type: inspect-path
       path: $TMPDIR/ppduster-filesystem-basics/nested
       recursive_size: true
+    - id: remove-obsolete-marker
+      name: Remove an obsolete marker when present
+      when:
+        type: path
+        path: $TMPDIR/ppduster-filesystem-basics/nested/obsolete.txt
+        expect:
+          exists: true
+      type: remove-path
+      path: $TMPDIR/ppduster-filesystem-basics/nested/obsolete.txt

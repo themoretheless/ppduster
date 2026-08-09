@@ -5,11 +5,17 @@ use ppduster::app_store;
 use ppduster::app_store_cli;
 use ppduster::app_store_installer::StoreOperation;
 use ppduster::audit;
+use ppduster::automation::package_secrets::{
+    exec_for_task as exec_with_package_secrets, init_for_task as init_package_secrets,
+    vault_path_for_task, PackageTool, PasswordMode, SecretInitMode,
+};
 use ppduster::automation::{run_task, PackTrust, ReleaseChannel, RunOptions, TaskPack, TaskSource};
 use ppduster::clean;
 use ppduster::report::{self, OutputFormat};
 use ppduster::rules::RulePack;
 use ppduster::scan::{self, ScanOptions};
+use std::cell::Cell;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -170,6 +176,57 @@ enum SetupCmd {
         #[arg(long)]
         tasks_dir: Vec<PathBuf>,
     },
+    /// Create or use the password-encrypted package credential vault.
+    Secrets {
+        #[command(subcommand)]
+        action: PackageSecretsCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PackageSecretsCmd {
+    /// Create a new encrypted vault outside the repository.
+    Init {
+        /// Bundled package-registry task id.
+        id: String,
+        /// Override the vault path (primarily for isolated automation).
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Read username, token, password, and confirmation as JSON from stdin.
+        #[arg(long)]
+        input_json_stdin: bool,
+    },
+    /// Unlock the vault and run a supported package command without a shell.
+    Exec {
+        /// Bundled package-registry task id.
+        id: String,
+        #[arg(value_enum)]
+        tool: PackageToolCli,
+        /// Override the vault path (primarily for isolated automation).
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Read one password line from stdin instead of prompting on a terminal.
+        #[arg(long)]
+        password_stdin: bool,
+        /// Package-manager arguments. A literal `--` separator is required.
+        #[arg(last = true, required = true)]
+        args: Vec<OsString>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PackageToolCli {
+    Npm,
+    Dotnet,
+}
+
+impl From<PackageToolCli> for PackageTool {
+    fn from(value: PackageToolCli) -> Self {
+        match value {
+            PackageToolCli::Npm => Self::Npm,
+            PackageToolCli::Dotnet => Self::Dotnet,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -270,13 +327,16 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     let output = OutputFormat::from(cli.output);
     let audit_path = audit::resolve_log_path(cli.audit_log.as_ref());
+    let suppress_audit = Cell::new(false);
     let log_audit = |action: &str, outcome: &str, detail: Option<&str>| {
-        if let Some(path) = audit_path.as_ref() {
-            let _ = audit::append_event(path, action, outcome, detail);
+        if !suppress_audit.get() {
+            if let Some(path) = audit_path.as_ref() {
+                let _ = audit::append_event(path, action, outcome, detail);
+            }
         }
     };
 
-    let result: Result<()> = match cli.command {
+    let result: Result<()> = (|| match cli.command {
         Commands::Scan {
             category,
             all,
@@ -363,7 +423,11 @@ fn run() -> Result<()> {
             Ok(())
         }
         Commands::Setup { action } => {
-            let tasks = load_tasks(&action, cli.trust_external_packs)?;
+            let trust_external_packs = match &action {
+                SetupCmd::Secrets { .. } => false,
+                _ => cli.trust_external_packs,
+            };
+            let tasks = load_tasks(&action, trust_external_packs)?;
             match action {
                 SetupCmd::List => {
                     for task in &tasks.tasks {
@@ -417,6 +481,77 @@ fn run() -> Result<()> {
                         )
                     }
                 }
+                SetupCmd::Secrets { action } => match action {
+                    PackageSecretsCmd::Init {
+                        id,
+                        file,
+                        input_json_stdin,
+                    } => {
+                        let task = tasks
+                            .get(&id)
+                            .ok_or_else(|| anyhow::anyhow!("unknown bundled task id {}", id))?;
+                        let vault_path = vault_path_for_task(task, file.as_deref())?;
+                        if audit_path
+                            .as_deref()
+                            .is_some_and(|audit| paths_collide(audit, &vault_path))
+                        {
+                            suppress_audit.set(true);
+                            anyhow::bail!("audit log path must differ from the encrypted vault");
+                        }
+                        let mode = if input_json_stdin {
+                            SecretInitMode::JsonStdin
+                        } else {
+                            SecretInitMode::Interactive
+                        };
+                        let path = init_package_secrets(task, file.as_deref(), mode)?;
+                        println!("Created encrypted package secret vault: {}", path.display());
+                        Ok(())
+                    }
+                    PackageSecretsCmd::Exec {
+                        id,
+                        tool,
+                        file,
+                        password_stdin,
+                        args,
+                    } => {
+                        let task = tasks
+                            .get(&id)
+                            .ok_or_else(|| anyhow::anyhow!("unknown bundled task id {}", id))?;
+                        let vault_path = vault_path_for_task(task, file.as_deref())?;
+                        if audit_path
+                            .as_deref()
+                            .is_some_and(|audit| paths_collide(audit, &vault_path))
+                        {
+                            suppress_audit.set(true);
+                            anyhow::bail!("audit log path must differ from the encrypted vault");
+                        }
+                        let password_mode = if password_stdin {
+                            PasswordMode::Stdin
+                        } else {
+                            PasswordMode::Interactive
+                        };
+                        let tool = PackageTool::from(tool);
+                        let status = exec_with_package_secrets(
+                            task,
+                            file.as_deref(),
+                            password_mode,
+                            tool,
+                            &args,
+                        )?;
+                        if status.success() {
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "{} package command exited with status {}",
+                                match tool {
+                                    PackageTool::Npm => "npm",
+                                    PackageTool::Dotnet => "dotnet",
+                                },
+                                status
+                            ))
+                        }
+                    }
+                },
             }
         }
         Commands::AppStore { action } => run_app_store(action, output),
@@ -446,7 +581,7 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-    };
+    })();
 
     match result {
         Ok(()) => {
@@ -547,6 +682,62 @@ fn run_app_store(action: AppStoreCmd, output: OutputFormat) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn paths_collide(left: &std::path::Path, right: &std::path::Path) -> bool {
+    if let Ok(metadata) = std::fs::symlink_metadata(left) {
+        if metadata.file_type().is_symlink() {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return true;
+            }
+        }
+    }
+    if left.exists() && right.exists() && same_file::is_same_file(left, right).unwrap_or(false) {
+        return true;
+    }
+    let left = normalized_path(left);
+    let right = normalized_path(right);
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        left == right
+    }
+}
+
+fn normalized_path(path: &std::path::Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    if let (Some(parent), Some(name)) = (absolute.parent(), absolute.file_name()) {
+        if let Ok(parent) = parent.canonicalize() {
+            return parent.join(name);
+        }
+    }
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn discover_rule_dirs(extra: Option<&PathBuf>) -> Result<Vec<PathBuf>> {

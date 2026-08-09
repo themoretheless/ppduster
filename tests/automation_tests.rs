@@ -1,10 +1,14 @@
 use ppduster::automation::{
     run_task, Action, AppStoreOperation, ArchiveFormat, AuthPolicy, ElevationPolicy, LicenseMethod,
-    LicenseProvider, PackTrust, RunOptions, ScriptInterpreter, TaskFile, TaskPack, TaskSource,
+    LicenseProvider, PackTrust, RunOptions, ScriptInterpreter, StepCondition, TaskFile, TaskPack,
+    TaskSource,
 };
+#[cfg(unix)]
+use ppduster::automation::{ActionOutcome, StepOutput, StepStatus};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 
 fn bin() -> PathBuf {
     std::env::var("CARGO_BIN_EXE_ppduster")
@@ -579,6 +583,76 @@ task:
 }
 
 #[test]
+fn nested_scenarios_namespace_exit_code_condition_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    write_task(
+        dir.path(),
+        "probe.yaml",
+        r#"
+task:
+  id: probe-scenario
+  name: Probe scenario
+  description: Produces a branchable script result with local step identifiers.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: /tmp/ppduster-probe.sh
+      success_exit_codes: [0, 10]
+    - id: branch
+      when: { type: exit-code, step: probe, codes: [10] }
+      type: run-command
+      program: /usr/bin/true
+"#,
+    );
+    write_task(
+        dir.path(),
+        "middle.yaml",
+        r#"
+task:
+  id: middle
+  name: Middle template
+  description: Adds one namespace level around the probe scenario.
+  platform: any
+  scenarios: [probe-scenario]
+"#,
+    );
+    write_task(
+        dir.path(),
+        "root.yaml",
+        r#"
+task:
+  id: root
+  name: Root template
+  description: Adds a second namespace level around the probe scenario.
+  platform: any
+  scenarios: [middle]
+"#,
+    );
+
+    let pack = load_bundled_tasks(dir.path());
+    let resolved = pack.resolve("root").unwrap();
+    assert_eq!(
+        resolved
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "middle/probe-scenario/probe",
+            "middle/probe-scenario/branch"
+        ]
+    );
+    let Some(StepCondition::ExitCode { step, codes }) = resolved.steps[1].when.as_ref() else {
+        panic!("expected an exit-code condition");
+    };
+    assert_eq!(step, "middle/probe-scenario/probe");
+    assert_eq!(codes, &[10]);
+}
+
+#[test]
 fn loads_bundled_task_pack() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
@@ -1024,6 +1098,612 @@ task:
 }
 
 #[test]
+fn bundled_tasks_include_dodopizza_package_registry_files() {
+    let pack = TaskPack::load_many(
+        &[TaskSource {
+            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap();
+
+    let task = pack
+        .get("dev-dodopizza-package-registries")
+        .expect("bundled package registry task");
+    assert_eq!(task.steps.len(), 1);
+
+    let report = run_task(task, &RunOptions::default()).unwrap();
+    assert_eq!(report.plans.len(), 1);
+    assert!(report.plans[0].summary.contains("@dodopizza"));
+    assert!(report.plans[0].summary.contains("Dodo.*"));
+    assert!(report.plans[0]
+        .summary
+        .contains("encrypted secrets profile dodopizza-github-packages"));
+    assert!(report.plans[0].summary.contains("GITHUB_PACKAGES_USER"));
+    assert!(report.plans[0].summary.contains("GITHUB_PACKAGES_TOKEN"));
+    assert!(report.plans[0]
+        .summary
+        .contains("https://npm.pkg.github.com/"));
+    assert!(report.plans[0]
+        .summary
+        .contains("https://api.nuget.org/v3/index.json"));
+    assert!(report.plans[0]
+        .summary
+        .contains("https://nuget.pkg.github.com/dodopizza/index.json"));
+    assert!(report.plans[0]
+        .summary
+        .contains("NuGet <clear/> replaces inherited sources"));
+}
+
+#[test]
+fn package_registry_cli_writes_only_literal_credential_references() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    fs::write(dir.path().join("package.json"), b"{}\n").unwrap();
+    fs::write(dir.path().join("Example.sln"), b"\n").unwrap();
+    let empty_bin = dir.path().join("empty-bin");
+    fs::create_dir(&empty_bin).unwrap();
+    let audit = dir.path().join("audit.jsonl");
+    let secret_canary = "do-not-write-this-token-7f38e0";
+    let user_canary = "do-not-write-this-user-29c1a4";
+
+    let dry_run = Command::new(env!("CARGO_BIN_EXE_ppduster"))
+        .current_dir(dir.path())
+        .args([
+            "--audit-log",
+            audit.to_str().unwrap(),
+            "setup",
+            "run",
+            "dev-dodopizza-package-registries",
+        ])
+        .env("GITHUB_PACKAGES_TOKEN", secret_canary)
+        .env("GITHUB_PACKAGES_USER", user_canary)
+        .env("PATH", &empty_bin)
+        .output()
+        .unwrap();
+    assert!(dry_run.status.success());
+    assert!(!dir.path().join(".npmrc").exists());
+    assert!(!dir.path().join("NuGet.Config").exists());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ppduster"))
+        .current_dir(dir.path())
+        .args([
+            "--audit-log",
+            audit.to_str().unwrap(),
+            "setup",
+            "run",
+            "dev-dodopizza-package-registries",
+            "--yes",
+        ])
+        .env("GITHUB_PACKAGES_TOKEN", secret_canary)
+        .env("GITHUB_PACKAGES_USER", user_canary)
+        .env("PATH", &empty_bin)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let npmrc = fs::read_to_string(dir.path().join(".npmrc")).unwrap();
+    let nuget = fs::read_to_string(dir.path().join("NuGet.Config")).unwrap();
+    let second = Command::new(env!("CARGO_BIN_EXE_ppduster"))
+        .current_dir(dir.path())
+        .args([
+            "--audit-log",
+            audit.to_str().unwrap(),
+            "setup",
+            "run",
+            "dev-dodopizza-package-registries",
+            "--yes",
+        ])
+        .env("GITHUB_PACKAGES_TOKEN", secret_canary)
+        .env("GITHUB_PACKAGES_USER", user_canary)
+        .env("PATH", &empty_bin)
+        .output()
+        .unwrap();
+    assert!(second.status.success());
+    assert!(String::from_utf8_lossy(&second.stdout).contains("satisfied"));
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".npmrc")).unwrap(),
+        npmrc
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("NuGet.Config")).unwrap(),
+        nuget
+    );
+
+    let report = format!(
+        "{}{}{}{}{}{}{}",
+        String::from_utf8_lossy(&dry_run.stdout),
+        String::from_utf8_lossy(&dry_run.stderr),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr),
+        fs::read_to_string(&audit).unwrap()
+    );
+
+    assert!(npmrc.contains("${GITHUB_PACKAGES_TOKEN}"));
+    assert!(nuget.contains("%GITHUB_PACKAGES_USER%"));
+    assert!(nuget.contains("%GITHUB_PACKAGES_TOKEN%"));
+    for rendered in [&npmrc, &nuget, &report] {
+        assert!(!rendered.contains(secret_canary));
+        assert!(!rendered.contains(user_canary));
+    }
+}
+
+#[test]
+fn package_registry_conflict_is_redacted_and_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    fs::write(dir.path().join("package.json"), b"{}\n").unwrap();
+    fs::write(dir.path().join("Example.sln"), b"\n").unwrap();
+    let audit = dir.path().join("audit.jsonl");
+    let conflict_canary = "existing-secret-must-stay-redacted-913aa2";
+    let token_canary = "environment-token-must-stay-redacted-13fe9b";
+    let existing = format!(
+        "<configuration><!-- {} --></configuration>\n",
+        conflict_canary
+    );
+    fs::write(dir.path().join("NuGet.Config"), &existing).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ppduster"))
+        .current_dir(dir.path())
+        .args([
+            "--audit-log",
+            audit.to_str().unwrap(),
+            "setup",
+            "run",
+            "dev-dodopizza-package-registries",
+            "--yes",
+        ])
+        .env("GITHUB_PACKAGES_TOKEN", token_canary)
+        .env("GITHUB_PACKAGES_USER", "redacted-user")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(!dir.path().join(".npmrc").exists());
+    assert_eq!(
+        fs::read_to_string(dir.path().join("NuGet.Config")).unwrap(),
+        existing
+    );
+    assert!(
+        audit.exists(),
+        "missing audit log; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let audit_contents = fs::read_to_string(audit).unwrap();
+    assert!(audit_contents.contains("\"outcome\":\"failed\""));
+    let rendered = format!(
+        "{}{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        audit_contents
+    );
+    for secret in [conflict_canary, token_canary, "redacted-user"] {
+        assert!(!rendered.contains(secret));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn encrypted_package_vault_is_separate_and_redacted_end_to_end() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let vault_dir = dir.path().join("vault");
+    let vault = vault_dir.join("packages.age");
+    let bin = dir.path().join("bin");
+    let audit = dir.path().join("audit.jsonl");
+    fs::create_dir(&repo).unwrap();
+    fs::create_dir(repo.join(".git")).unwrap();
+    fs::write(repo.join("package.json"), b"{}\n").unwrap();
+    fs::write(repo.join("Example.sln"), b"\n").unwrap();
+    fs::create_dir(&bin).unwrap();
+    fs::create_dir(&vault_dir).unwrap();
+    fs::set_permissions(&vault_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let configure = Command::new(env!("CARGO_BIN_EXE_ppduster"))
+        .current_dir(&repo)
+        .args([
+            "--audit-log",
+            audit.to_str().unwrap(),
+            "setup",
+            "run",
+            "dev-dodopizza-package-registries",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert!(configure.status.success());
+
+    let username = "vault-user-canary-04d8";
+    let token = "vault-token-canary-88ec";
+    let password = "vault-password-canary-6c573a";
+    let input = serde_json::json!({
+        "username": username,
+        "token": token,
+        "password": password,
+        "password_confirmation": password,
+    })
+    .to_string();
+    let mut init = Command::new(env!("CARGO_BIN_EXE_ppduster"));
+    init.current_dir(&repo).args([
+        "--audit-log",
+        audit.to_str().unwrap(),
+        "setup",
+        "secrets",
+        "init",
+        "dev-dodopizza-package-registries",
+        "--file",
+        vault.to_str().unwrap(),
+        "--input-json-stdin",
+    ]);
+    let init_output = output_with_stdin(init, input.as_bytes());
+    assert!(
+        init_output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&init_output.stdout),
+        String::from_utf8_lossy(&init_output.stderr)
+    );
+    assert!(vault.exists());
+    assert!(!repo.join("packages.age").exists());
+    assert_eq!(
+        fs::metadata(&vault).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(&vault_dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+
+    let fake_npm = bin.join("npm");
+    fs::write(
+        &fake_npm,
+        b"#!/bin/sh\n\
+          test \"$1\" = ci || exit 31\n\
+          test \"$2\" = --ignore-scripts || exit 36\n\
+          test -n \"$GITHUB_PACKAGES_TOKEN\" || exit 32\n\
+          test -z \"$GITHUB_PACKAGES_USER\" || exit 33\n\
+          test \"$NPM_CONFIG_IGNORE_SCRIPTS\" = true || exit 34\n\
+          test -n \"$NPM_CONFIG_USERCONFIG\" || exit 37\n\
+          test -n \"$NPM_CONFIG_GLOBALCONFIG\" || exit 38\n\
+          test -z \"$npm_config_ignore_scripts\" || exit 39\n\
+          test -z \"$npm_config_userconfig\" || exit 40\n\
+          test -z \"$NODE_OPTIONS\" || exit 35\n\
+          printf 'PACKAGE_SECRET_ENV_PROBE_OK token=%s\\n' \"$GITHUB_PACKAGES_TOKEN\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_npm, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut exec = Command::new(env!("CARGO_BIN_EXE_ppduster"));
+    exec.current_dir(&repo)
+        .env("PATH", &bin)
+        .env("NODE_OPTIONS", "--require=untrusted-hook")
+        .env("npm_config_ignore_scripts", "false")
+        .env("npm_config_userconfig", "/attacker/npmrc")
+        .env(
+            "npm_config_@dodopizza:registry",
+            "https://attacker.invalid/",
+        )
+        .args([
+            "--audit-log",
+            audit.to_str().unwrap(),
+            "setup",
+            "secrets",
+            "exec",
+            "dev-dodopizza-package-registries",
+            "npm",
+            "--file",
+            vault.to_str().unwrap(),
+            "--password-stdin",
+            "--",
+            "ci",
+        ]);
+    let exec_output = output_with_stdin(exec, format!("{password}\n").as_bytes());
+    assert!(
+        exec_output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&exec_output.stdout),
+        String::from_utf8_lossy(&exec_output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&exec_output.stdout)
+        .contains("PACKAGE_SECRET_ENV_PROBE_OK token=[REDACTED]"));
+
+    let fake_dotnet = bin.join("dotnet");
+    fs::write(
+        &fake_dotnet,
+        b"#!/bin/sh\n\
+          test \"$1\" = restore || exit 41\n\
+          test \"$2\" = --configfile || exit 45\n\
+          test \"$3\" = NuGet.Config || exit 46\n\
+          test -n \"$GITHUB_PACKAGES_TOKEN\" || exit 42\n\
+          test -n \"$GITHUB_PACKAGES_USER\" || exit 43\n\
+          test -z \"$DOTNET_STARTUP_HOOKS\" || exit 44\n\
+          test -z \"$restoreSources\" || exit 49\n\
+          test -z \"$RESTOREADDITIONALPROJECTSOURCES\" || exit 50\n\
+          test -z \"$rEsToReCoNfIgFiLe\" || exit 51\n\
+          test -z \"$RestoreFallbackFolders\" || exit 52\n\
+          test -z \"$restoreAdditionalProjectFallbackFolders\" || exit 53\n\
+          test \"$MSBUILDDISABLENODEREUSE\" = 1 || exit 47\n\
+          test \"$DOTNET_CLI_USE_MSBUILD_SERVER\" = 0 || exit 48\n\
+          printf 'DOTNET_SECRET_ENV_PROBE_OK user=%s token=%s\\n' \"$GITHUB_PACKAGES_USER\" \"$GITHUB_PACKAGES_TOKEN\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_dotnet, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut dotnet_exec = Command::new(env!("CARGO_BIN_EXE_ppduster"));
+    dotnet_exec
+        .current_dir(&repo)
+        .env("PATH", &bin)
+        .env("DOTNET_STARTUP_HOOKS", "untrusted-hook.dll")
+        .env(
+            "restoreSources",
+            "https://source-override-canary.invalid/v3/index.json",
+        )
+        .env(
+            "RESTOREADDITIONALPROJECTSOURCES",
+            "https://additional-source-canary.invalid/v3/index.json",
+        )
+        .env("rEsToReCoNfIgFiLe", "config-override-canary.xml")
+        .env("RestoreFallbackFolders", "fallback-override-canary")
+        .env(
+            "restoreAdditionalProjectFallbackFolders",
+            "additional-fallback-canary",
+        )
+        .args([
+            "--audit-log",
+            audit.to_str().unwrap(),
+            "setup",
+            "secrets",
+            "exec",
+            "dev-dodopizza-package-registries",
+            "dotnet",
+            "--file",
+            vault.to_str().unwrap(),
+            "--password-stdin",
+            "--",
+            "restore",
+        ]);
+    let dotnet_output = output_with_stdin(dotnet_exec, format!("{password}\n").as_bytes());
+    assert!(
+        dotnet_output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&dotnet_output.stdout),
+        String::from_utf8_lossy(&dotnet_output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&dotnet_output.stdout)
+        .contains("DOTNET_SECRET_ENV_PROBE_OK user=[REDACTED] token=[REDACTED]"));
+
+    let npmrc = fs::read(repo.join(".npmrc")).unwrap();
+    let nuget = fs::read(repo.join("NuGet.Config")).unwrap();
+    let ciphertext = fs::read(&vault).unwrap();
+    let audit_contents = fs::read(&audit).unwrap();
+    let visible = [
+        configure.stdout,
+        configure.stderr,
+        init_output.stdout,
+        init_output.stderr,
+        exec_output.stdout,
+        exec_output.stderr,
+        dotnet_output.stdout,
+        dotnet_output.stderr,
+        npmrc,
+        nuget,
+        ciphertext,
+        audit_contents,
+    ]
+    .concat();
+    for secret in [
+        username,
+        token,
+        password,
+        "source-override-canary",
+        "additional-source-canary",
+        "config-override-canary",
+        "fallback-override-canary",
+        "additional-fallback-canary",
+    ] {
+        assert!(
+            !visible
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes()),
+            "secret canary leaked into a persisted or rendered surface"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn encrypted_package_vault_wrong_password_is_generic_and_starts_no_child() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let vault_dir = dir.path().join("vault");
+    let vault = vault_dir.join("packages.age");
+    let bin = dir.path().join("bin");
+    let child_marker = dir.path().join("child-ran");
+    let audit = dir.path().join("audit.jsonl");
+    fs::create_dir(&repo).unwrap();
+    fs::create_dir(repo.join(".git")).unwrap();
+    fs::write(repo.join("package.json"), b"{}\n").unwrap();
+    fs::write(repo.join("Example.csproj"), b"\n").unwrap();
+    fs::create_dir(&bin).unwrap();
+    fs::create_dir(&vault_dir).unwrap();
+    fs::set_permissions(&vault_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let configured = Command::new(env!("CARGO_BIN_EXE_ppduster"))
+        .current_dir(&repo)
+        .args(["setup", "run", "dev-dodopizza-package-registries", "--yes"])
+        .status()
+        .unwrap();
+    assert!(configured.success());
+
+    let password = "correct-password-canary-181a";
+    let input = serde_json::json!({
+        "username": "wrong-password-user-canary",
+        "token": "wrong-password-token-canary",
+        "password": password,
+        "password_confirmation": password,
+    })
+    .to_string();
+    let mut init = Command::new(env!("CARGO_BIN_EXE_ppduster"));
+    init.current_dir(&repo).args([
+        "setup",
+        "secrets",
+        "init",
+        "dev-dodopizza-package-registries",
+        "--file",
+        vault.to_str().unwrap(),
+        "--input-json-stdin",
+    ]);
+    assert!(output_with_stdin(init, input.as_bytes()).status.success());
+
+    let fake_npm = bin.join("npm");
+    fs::write(
+        &fake_npm,
+        format!("#!/bin/sh\nprintf ran > '{}'\n", child_marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_npm, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let wrong_password = "wrong-password-canary-ef97";
+    let mut exec = Command::new(env!("CARGO_BIN_EXE_ppduster"));
+    exec.current_dir(&repo).env("PATH", &bin).args([
+        "--audit-log",
+        audit.to_str().unwrap(),
+        "setup",
+        "secrets",
+        "exec",
+        "dev-dodopizza-package-registries",
+        "npm",
+        "--file",
+        vault.to_str().unwrap(),
+        "--password-stdin",
+        "--",
+        "ci",
+    ]);
+    let output = output_with_stdin(exec, format!("{wrong_password}\n").as_bytes());
+    assert!(!output.status.success());
+    assert!(!child_marker.exists());
+    let rendered = [output.stdout, output.stderr, fs::read(&audit).unwrap()].concat();
+    let rendered = String::from_utf8_lossy(&rendered);
+    assert!(rendered.contains("secret_unlock_failed"));
+    for secret in [
+        password,
+        wrong_password,
+        "wrong-password-user-canary",
+        "wrong-password-token-canary",
+    ] {
+        assert!(!rendered.contains(secret));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn encrypted_vault_rejects_repo_paths_and_audit_aliases_before_reading_secrets() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let vault_dir = dir.path().join("vault");
+    let vault = vault_dir.join("packages.age");
+    let audit = dir.path().join("safe-audit.jsonl");
+    fs::create_dir(&repo).unwrap();
+    fs::create_dir(repo.join(".git")).unwrap();
+    fs::create_dir(&vault_dir).unwrap();
+    fs::set_permissions(&vault_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let secret_input = br#"{"username":"unread-user-canary","token":"unread-token-canary","password":"unread-password-canary","password_confirmation":"unread-password-canary"}"#;
+
+    let mut inside_repo = Command::new(env!("CARGO_BIN_EXE_ppduster"));
+    inside_repo.current_dir(&repo).args([
+        "--audit-log",
+        audit.to_str().unwrap(),
+        "setup",
+        "secrets",
+        "init",
+        "dev-dodopizza-package-registries",
+        "--file",
+        repo.join("packages.age").to_str().unwrap(),
+        "--input-json-stdin",
+    ]);
+    let inside_output = output_with_stdin(inside_repo, secret_input);
+    assert!(!inside_output.status.success());
+    assert!(!repo.join("packages.age").exists());
+
+    let mut exact_collision = Command::new(env!("CARGO_BIN_EXE_ppduster"));
+    exact_collision.current_dir(&repo).args([
+        "--audit-log",
+        vault.to_str().unwrap(),
+        "setup",
+        "secrets",
+        "init",
+        "dev-dodopizza-package-registries",
+        "--file",
+        vault.to_str().unwrap(),
+        "--input-json-stdin",
+    ]);
+    let collision_output = output_with_stdin(exact_collision, secret_input);
+    assert!(!collision_output.status.success());
+    assert!(!vault.exists());
+
+    let dangling_audit = dir.path().join("dangling-audit");
+    symlink(&vault, &dangling_audit).unwrap();
+    let mut dangling_collision = Command::new(env!("CARGO_BIN_EXE_ppduster"));
+    dangling_collision.current_dir(&repo).args([
+        "--audit-log",
+        dangling_audit.to_str().unwrap(),
+        "setup",
+        "secrets",
+        "init",
+        "dev-dodopizza-package-registries",
+        "--file",
+        vault.to_str().unwrap(),
+        "--input-json-stdin",
+    ]);
+    let dangling_output = output_with_stdin(dangling_collision, secret_input);
+    assert!(!dangling_output.status.success());
+    assert!(!vault.exists());
+
+    let rendered = [
+        inside_output.stdout,
+        inside_output.stderr,
+        collision_output.stdout,
+        collision_output.stderr,
+        dangling_output.stdout,
+        dangling_output.stderr,
+        fs::read(audit).unwrap(),
+    ]
+    .concat();
+    let rendered = String::from_utf8_lossy(&rendered);
+    for secret in [
+        "unread-user-canary",
+        "unread-token-canary",
+        "unread-password-canary",
+    ] {
+        assert!(!rendered.contains(secret));
+    }
+}
+
+fn output_with_stdin(mut command: Command, input: &[u8]) -> Output {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _ = child.stdin.take().unwrap().write_all(input);
+    child.wait_with_output().unwrap()
+}
+
+#[test]
 fn external_pack_requires_flag() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
@@ -1139,6 +1819,127 @@ task:
     );
     assert_eq!(expectation.min_size_bytes, Some(1));
     assert_eq!(expectation.max_size_bytes, Some(4096));
+}
+
+#[test]
+fn extended_filesystem_actions_and_conditions_round_trip() {
+    let digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    let yaml = format!(
+        r#"
+task:
+  id: extended-filesystem-schema
+  name: Extended filesystem schema
+  description: Exercises exact writes, safe copies, recoverable removal, hashes, and boolean guards.
+  platform: any
+  trust: bundled-only
+  steps:
+    - id: write
+      require:
+        type: all
+        conditions:
+          - type: path
+            path: $TMPDIR
+            expect: {{ exists: true, kind: directory }}
+          - type: not
+            condition:
+              type: path
+              path: $TMPDIR
+              expect: {{ kind: symlink }}
+      type: write-file
+      path: $TMPDIR/ppduster/source.txt
+      content: abc
+      on_conflict: replace
+    - id: copy
+      when:
+        type: any
+        conditions:
+          - type: path
+            path: $TMPDIR/ppduster/source.txt
+            expect: {{ sha256: {digest} }}
+          - type: path
+            path: $TMPDIR/ppduster/copy.txt
+            expect: {{ exists: false }}
+      type: copy-path
+      src: $TMPDIR/ppduster/source.txt
+      dest: $TMPDIR/ppduster/copy.txt
+    - id: inspect
+      type: inspect-path
+      path: $TMPDIR/ppduster/copy.txt
+      sha256: true
+      expect:
+        sha256: {digest}
+    - id: remove
+      type: remove-path
+      path: $TMPDIR/ppduster/obsolete.txt
+"#
+    );
+
+    let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+    task.validate().unwrap();
+    assert!(matches!(task.steps[0].action, Action::WriteFile(_)));
+    assert!(matches!(task.steps[1].action, Action::CopyPath(_)));
+    assert!(matches!(task.steps[2].action, Action::InspectPath(_)));
+    assert!(matches!(task.steps[3].action, Action::RemovePath(_)));
+
+    let rendered = serde_yaml::to_string(&task).unwrap();
+    let reparsed = serde_yaml::from_str::<ppduster::automation::Task>(&rendered).unwrap();
+    reparsed.validate().unwrap();
+    let Action::InspectPath(inspect) = &reparsed.steps[2].action else {
+        panic!("expected inspect-path action");
+    };
+    assert!(inspect.sha256);
+    assert_eq!(
+        inspect
+            .expect
+            .as_ref()
+            .and_then(|expect| expect.sha256.as_deref()),
+        Some(digest)
+    );
+    assert!(reparsed.steps[0].require.is_some());
+    assert!(reparsed.steps[1].when.is_some());
+}
+
+#[test]
+fn extended_filesystem_schema_rejects_invalid_hashes_and_empty_boolean_conditions() {
+    for (name, guard, expected_error) in [
+        (
+            "bad-hash",
+            "type: path\n        path: $TMPDIR/file\n        expect: { sha256: deadbeef }",
+            "64 hexadecimal",
+        ),
+        (
+            "empty-all",
+            "type: all\n        conditions: []",
+            "at least one child",
+        ),
+        (
+            "empty-any",
+            "type: any\n        conditions: []",
+            "at least one child",
+        ),
+    ] {
+        let yaml = format!(
+            r#"
+task:
+  id: {name}
+  name: Invalid filesystem condition
+  description: Demonstrates strict validation of typed boolean path conditions.
+  platform: any
+  steps:
+    - id: guarded
+      require:
+        {guard}
+      type: create-directory
+      path: $TMPDIR/example
+"#
+        );
+        let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+        let error = task.validate().unwrap_err();
+        assert!(
+            error.contains(expected_error),
+            "case {name}: unexpected error: {error}"
+        );
+    }
 }
 
 #[test]
@@ -1310,6 +2111,7 @@ task:
       cwd: $HOME/work
       env:
         SETUP_MODE: safe
+      success_exit_codes: [0, 10, 42]
     - id: powershell
       dangerous: true
       type: run-script
@@ -1326,6 +2128,7 @@ task:
         args,
         cwd,
         env,
+        success_exit_codes,
     } = &task_file.task.steps[0].action
     else {
         panic!("expected a run-script action");
@@ -1335,12 +2138,14 @@ task:
     assert!(args.is_empty());
     assert!(cwd.is_none());
     assert!(env.is_empty());
+    assert_eq!(success_exit_codes, &[0]);
 
     let Action::RunScript {
         interpreter,
         args,
         cwd,
         env,
+        success_exit_codes,
         ..
     } = &task_file.task.steps[1].action
     else {
@@ -1350,6 +2155,7 @@ task:
     assert_eq!(args, &["--label", "two words"]);
     assert_eq!(cwd.as_deref(), Some("$HOME/work"));
     assert_eq!(env.get("SETUP_MODE").map(String::as_str), Some("safe"));
+    assert_eq!(success_exit_codes, &[0, 10, 42]);
 
     let Action::RunScript { interpreter, .. } = &task_file.task.steps[2].action else {
         panic!("expected a run-script action");
@@ -1364,15 +2170,17 @@ task:
         reparsed.task.steps[0].action,
         Action::RunScript {
             interpreter: ScriptInterpreter::Sh,
+            ref success_exit_codes,
             ..
-        }
+        } if success_exit_codes == &[0]
     ));
     assert!(matches!(
         reparsed.task.steps[1].action,
         Action::RunScript {
             interpreter: ScriptInterpreter::Bash,
+            ref success_exit_codes,
             ..
-        }
+        } if success_exit_codes == &[0, 10, 42]
     ));
     assert!(matches!(
         reparsed.task.steps[2].action,
@@ -1381,6 +2189,471 @@ task:
             ..
         }
     ));
+}
+
+#[test]
+fn run_script_success_exit_codes_must_be_nonempty_and_unique() {
+    for (codes, expected_error) in [
+        ("[]", "must contain at least one exit code"),
+        ("[0, 10, 10]", "contains duplicate exit code 10"),
+    ] {
+        let yaml = format!(
+            r#"
+task:
+  id: invalid-script-exit-codes
+  name: Invalid script exit codes
+  description: Rejects ambiguous script success policies.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: /opt/example/probe.sh
+      success_exit_codes: {codes}
+"#
+        );
+
+        let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+        let error = task.validate().unwrap_err();
+        assert!(
+            error.contains("success_exit_codes") && error.contains(expected_error),
+            "unexpected error for {codes}: {error}"
+        );
+    }
+}
+
+#[test]
+fn exit_code_condition_parses_validates_and_round_trips() {
+    let yaml = r#"
+task:
+  id: conditional-script
+  name: Conditional script
+  description: Branches on an explicitly accepted script exit code.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: /opt/example/probe.sh
+      success_exit_codes: [0, 10]
+    - id: handle-probe-result
+      when:
+        type: exit-code
+        step: probe
+        codes: [10]
+      type: run-command
+      program: "true"
+"#;
+
+    let task_file = serde_yaml::from_str::<TaskFile>(yaml).unwrap();
+    task_file.task.validate().unwrap();
+    let expected_condition =
+        serde_yaml::from_str::<serde_yaml::Value>("type: exit-code\nstep: probe\ncodes: [10]\n")
+            .unwrap();
+    assert_eq!(
+        serde_yaml::to_value(task_file.task.steps[1].when.as_ref().unwrap()).unwrap(),
+        expected_condition
+    );
+
+    let rendered = serde_yaml::to_string(&task_file).unwrap();
+    let reparsed = serde_yaml::from_str::<TaskFile>(&rendered).unwrap();
+    reparsed.task.validate().unwrap();
+    assert_eq!(
+        serde_yaml::to_value(reparsed.task.steps[1].when.as_ref().unwrap()).unwrap(),
+        expected_condition
+    );
+}
+
+#[test]
+fn exit_code_condition_codes_must_be_nonempty_and_unique() {
+    for (codes, expected_error) in [
+        ("[]", "requires at least one code"),
+        ("[10, 10]", "contains duplicate code 10"),
+    ] {
+        let yaml = format!(
+            r#"
+task:
+  id: invalid-condition-codes
+  name: Invalid condition codes
+  description: Rejects ambiguous exit-code conditions.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: /opt/example/probe.sh
+      success_exit_codes: [0, 10]
+    - id: conditional
+      when:
+        type: exit-code
+        step: probe
+        codes: {codes}
+      type: run-command
+      program: "true"
+"#
+        );
+
+        let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+        let error = task.validate().unwrap_err();
+        assert!(
+            error.contains("exit-code condition") && error.contains(expected_error),
+            "unexpected error for {codes}: {error}"
+        );
+    }
+}
+
+#[test]
+fn exit_code_condition_rejects_future_step_reference() {
+    let yaml = r#"
+task:
+  id: future-condition-source
+  name: Future condition source
+  description: Conditions may only observe scripts that have already run.
+  platform: any
+  steps:
+    - id: conditional
+      when:
+        type: exit-code
+        step: probe
+        codes: [10]
+      type: run-command
+      program: "true"
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: /opt/example/probe.sh
+      success_exit_codes: [0, 10]
+"#;
+
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    let error = task.validate().unwrap_err();
+    assert!(
+        error.contains("conditional")
+            && error.contains("probe")
+            && error.contains("must reference an earlier step"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn exit_code_condition_rejects_non_script_step_reference() {
+    let yaml = r#"
+task:
+  id: non-script-condition-source
+  name: Non-script condition source
+  description: Exit-code conditions only observe typed script steps.
+  platform: any
+  steps:
+    - id: probe
+      type: run-command
+      program: "true"
+    - id: conditional
+      when:
+        type: exit-code
+        step: probe
+        codes: [0]
+      type: run-command
+      program: "true"
+"#;
+
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    let error = task.validate().unwrap_err();
+    assert!(
+        error.contains("conditional")
+            && error.contains("probe")
+            && error.contains("not a run-script step"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn exit_code_condition_rejects_code_not_accepted_by_source_script() {
+    let yaml = r#"
+task:
+  id: unreachable-condition-code
+  name: Unreachable condition code
+  description: A branch code must be retained as an accepted script result.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: /opt/example/probe.sh
+      success_exit_codes: [0, 10]
+    - id: conditional
+      when:
+        type: exit-code
+        step: probe
+        codes: [20]
+      type: run-command
+      program: "true"
+"#;
+
+    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
+    let error = task.validate().unwrap_err();
+    assert!(
+        error.contains("condition code 20")
+            && error.contains("probe")
+            && error.contains("success_exit_codes"),
+        "unexpected error: {error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn accepted_nonzero_script_exit_code_runs_only_the_matching_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("probe.sh");
+    let matching_directory = temp.path().join("matched");
+    let other_directory = temp.path().join("other");
+    fs::write(&script, "exit 10\n").unwrap();
+    let yaml = format!(
+        r#"
+task:
+  id: runtime-exit-code-branch
+  name: Runtime exit-code branch
+  description: Runs exactly the branch selected by an accepted nonzero script exit code.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: '{}'
+      success_exit_codes: [0, 10, 20]
+    - id: matching-branch
+      when:
+        type: exit-code
+        step: probe
+        codes: [10]
+      type: create-directory
+      path: '{}'
+    - id: other-branch
+      when:
+        type: exit-code
+        step: probe
+        codes: [20]
+      type: create-directory
+      path: '{}'
+"#,
+        script.display(),
+        matching_directory.display(),
+        other_directory.display()
+    );
+    let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+
+    let report = run_task(
+        &task,
+        &RunOptions {
+            apply: true,
+            allow_shell: true,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(
+        report.errors.is_empty(),
+        "unexpected errors: {:?}",
+        report.errors
+    );
+    assert_eq!(report.steps.len(), 3);
+    assert!(matches!(report.steps[0].status, StepStatus::Applied));
+    let Some(StepOutput::ProcessExit(process)) = report.steps[0].output.as_ref() else {
+        panic!("expected process-exit output for probe");
+    };
+    assert_eq!(process.exit_code, Some(10));
+    assert_eq!(process.termination_signal, None);
+    assert!(process.accepted);
+    assert_eq!(process.success_exit_codes, &[0, 10, 20]);
+
+    assert!(matches!(report.steps[1].status, StepStatus::Applied));
+    assert!(matches!(report.outcomes[1], ActionOutcome::Applied { .. }));
+    assert!(matching_directory.is_dir());
+
+    assert!(matches!(report.steps[2].status, StepStatus::Skipped));
+    assert!(matches!(
+        report.outcomes[2],
+        ActionOutcome::Skipped { ref reason }
+            if reason.contains("probe") && reason.contains("exit code 10")
+    ));
+    assert!(!other_directory.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn unexpected_script_exit_code_reports_process_output_and_blocks_later_steps() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("probe.sh");
+    let later_directory = temp.path().join("must-not-exist");
+    fs::write(&script, "exit 23\n").unwrap();
+    let yaml = format!(
+        r#"
+task:
+  id: runtime-unexpected-exit-code
+  name: Runtime unexpected exit code
+  description: Stops after a script returns a code outside its accepted set.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: '{}'
+      success_exit_codes: [0, 10]
+    - id: later
+      type: create-directory
+      path: '{}'
+"#,
+        script.display(),
+        later_directory.display()
+    );
+    let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+
+    let report = run_task(
+        &task,
+        &RunOptions {
+            apply: true,
+            allow_shell: true,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.errors.len(), 1);
+    assert!(report.errors[0].contains("exit code 23"));
+    assert!(report.errors[0].contains("success_exit_codes are [0, 10]"));
+    assert_eq!(report.steps.len(), 2);
+    assert!(matches!(report.steps[0].status, StepStatus::Failed));
+    assert!(matches!(report.outcomes[0], ActionOutcome::Blocked));
+    let Some(StepOutput::ProcessExit(process)) = report.steps[0].output.as_ref() else {
+        panic!("expected process-exit output for failed probe");
+    };
+    assert_eq!(process.exit_code, Some(23));
+    assert_eq!(process.termination_signal, None);
+    assert!(!process.accepted);
+    assert_eq!(process.success_exit_codes, &[0, 10]);
+
+    assert!(matches!(report.steps[1].status, StepStatus::Skipped));
+    assert!(matches!(report.outcomes[1], ActionOutcome::Blocked));
+    assert!(!later_directory.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn unavailable_script_exit_code_is_not_inverted_into_a_matching_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("probe.sh");
+    let forbidden_directory = temp.path().join("must-not-run");
+    fs::write(&script, "exit 10\n").unwrap();
+    let yaml = format!(
+        r#"
+task:
+  id: unavailable-exit-code
+  name: Unavailable exit code
+  description: Does not treat a missing process result as a negated exit-code match.
+  platform: any
+  steps:
+    - id: probe
+      check:
+        command_succeeds: ["/usr/bin/true"]
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: '{}'
+      success_exit_codes: [0, 10]
+    - id: must-not-run
+      when:
+        type: not
+        condition:
+          type: exit-code
+          step: probe
+          codes: [10]
+      type: create-directory
+      path: '{}'
+"#,
+        script.display(),
+        forbidden_directory.display()
+    );
+    let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+
+    let report = run_task(
+        &task,
+        &RunOptions {
+            apply: true,
+            allow_shell: true,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(report.errors.is_empty());
+    assert!(matches!(report.steps[0].status, StepStatus::Satisfied));
+    assert!(report.steps[0].output.is_none());
+    assert!(matches!(report.steps[1].status, StepStatus::Skipped));
+    assert!(matches!(
+        report.outcomes[1],
+        ActionOutcome::Skipped { ref reason }
+            if reason.contains("unavailable") && reason.contains("no exit code")
+    ));
+    assert!(!forbidden_directory.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn conditional_inspect_path_stays_planned_during_dry_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("probe.sh");
+    let missing = temp.path().join("missing");
+    fs::write(&script, "exit 0\n").unwrap();
+    let yaml = format!(
+        r#"
+task:
+  id: conditional-inspect-dry-run
+  name: Conditional inspect dry-run
+  description: Keeps guarded observations in the plan until their probe has run.
+  platform: any
+  steps:
+    - id: probe
+      dangerous: true
+      type: run-script
+      interpreter: sh
+      script: '{}'
+    - id: inspect
+      when:
+        type: exit-code
+        step: probe
+        codes: [0]
+      type: inspect-path
+      path: '{}'
+      expect:
+        exists: true
+"#,
+        script.display(),
+        missing.display()
+    );
+    let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+
+    let report = run_task(
+        &task,
+        &RunOptions {
+            allow_shell: true,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(report.errors.is_empty());
+    assert_eq!(report.plans.len(), 2);
+    assert!(matches!(report.steps[0].status, StepStatus::Pending));
+    assert!(matches!(report.steps[1].status, StepStatus::Pending));
+    assert!(matches!(report.outcomes[1], ActionOutcome::Planned { .. }));
+    assert!(report.steps[1].output.is_none());
 }
 
 #[test]
