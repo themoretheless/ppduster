@@ -51,7 +51,7 @@ switches, dry-run planning, and explicit confirmation before supported scenarios
 applied. **New group** opens a visual project constructor. A project file owns a tree
 of arbitrarily nested groups, and every group can contain scenarios or more groups.
 After a project YAML is opened, the left navigator is populated directly from its
-`project.entries`; nested `group` entries appear in adjacent columns.
+`project.entries`; nested `group` entries appear as an expandable tree.
 Selecting a scenario opens only its blocks on the canvas; selecting a group changes the
 insertion location without replacing the current canvas. Add atomic Git, filesystem,
 and Homebrew blocks from the palette and edit their typed parameters on the right. Every
