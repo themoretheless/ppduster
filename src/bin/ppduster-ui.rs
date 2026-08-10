@@ -163,6 +163,14 @@ struct ComposerArraySource {
     item: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposerLoopSource {
+    step_id: String,
+    step_name: String,
+    item: String,
+    fields: Vec<String>,
+}
+
 fn composer_array_sources(task: &Task, before_index: usize) -> Vec<ComposerArraySource> {
     task.steps
         .iter()
@@ -175,6 +183,37 @@ fn composer_array_sources(task: &Task, before_index: usize) -> Vec<ComposerArray
                 item: "repository",
             }),
             _ => None,
+        })
+        .collect()
+}
+
+fn composer_loop_sources(task: &Task, before_index: usize) -> Vec<ComposerLoopSource> {
+    task.steps
+        .iter()
+        .take(before_index)
+        .filter_map(|step| match &step.action {
+            Action::ForEach { item, fields, .. } => Some(ComposerLoopSource {
+                step_id: step.id.clone(),
+                step_name: step_title(step),
+                item: item.clone(),
+                fields: fields.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn composer_string_context_options(source: &ComposerLoopSource) -> Vec<(String, String)> {
+    let has_field =
+        |field: &str| source.fields.is_empty() || source.fields.iter().any(|value| value == field);
+    GITHUB_REPOSITORY_CONTEXT_FIELDS
+        .into_iter()
+        .filter(|(field, kind)| has_field(field) && kind.starts_with("string"))
+        .map(|(field, kind)| {
+            (
+                format!("{}.{} · {}", source.item, field, kind),
+                format!("{{{{{}.{}}}}}", source.item, field),
+            )
         })
         .collect()
 }
@@ -2113,10 +2152,12 @@ impl ScenarioApp {
                 });
                 ui.add_space(8.0);
                 let array_sources = composer_array_sources(task, index);
+                let loop_sources = composer_loop_sources(task, index);
                 changed |= paint_composer_step_editor(
                     ui,
                     &mut task.steps[index],
                     &array_sources,
+                    &loop_sources,
                     self.dark,
                 );
                 ui.add_space(12.0);
@@ -3562,6 +3603,7 @@ fn paint_composer_step_editor(
     ui: &mut egui::Ui,
     step: &mut Step,
     array_sources: &[ComposerArraySource],
+    loop_sources: &[ComposerLoopSource],
     dark: bool,
 ) -> bool {
     let mut changed = false;
@@ -3570,6 +3612,7 @@ fn paint_composer_step_editor(
     changed |= ui.text_edit_singleline(&mut step.name).changed();
     ui.label(RichText::new("ID блока").size(9.0).color(MUTED));
     changed |= ui.text_edit_singleline(&mut step.id).changed();
+    let editor_step_id = step.id.clone();
     ui.add_space(8.0);
     match &mut step.action {
         Action::GithubListRepositories => {
@@ -3697,14 +3740,112 @@ fn paint_composer_step_editor(
             dest,
             branch,
         } => {
-            changed |= composer_text_field(ui, "ID блока For each", loop_step);
-            changed |= composer_text_field(ui, "Repository URL", repo);
-            changed |= composer_text_field(ui, "Локальная папка", dest);
-            changed |= composer_text_field(
-                ui,
-                "Ветка",
-                branch.get_or_insert_with(|| "{{repository.default_branch}}".into()),
-            );
+            ui.label(RichText::new("Цикл-источник").size(9.0).color(MUTED));
+            let selected_loop = loop_sources
+                .iter()
+                .find(|source| source.step_id == *loop_step);
+            let loop_label = selected_loop
+                .map(|source| source.step_name.clone())
+                .unwrap_or_else(|| "Выберите предыдущий For each".into());
+            egui::ComboBox::from_id_salt(("clone-loop-source", editor_step_id.clone()))
+                .selected_text(loop_label)
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    for source in loop_sources {
+                        if ui
+                            .selectable_label(
+                                source.step_id == *loop_step,
+                                format!("{} → {}", source.step_name, source.item),
+                            )
+                            .clicked()
+                        {
+                            *loop_step = source.step_id.clone();
+                            *repo = format!("{{{{{}.https_url}}}}", source.item);
+                            *dest = format!(
+                                "$HOME/Developer/{{{{{}.owner}}}}/{{{{{}.name}}}}",
+                                source.item, source.item
+                            );
+                            *branch = Some(format!("{{{{{}.default_branch}}}}", source.item));
+                            changed = true;
+                            ui.close();
+                        }
+                    }
+                });
+
+            let selected_loop = loop_sources
+                .iter()
+                .find(|source| source.step_id == *loop_step);
+            if let Some(source) = selected_loop {
+                let has_field = |field: &str| {
+                    source.fields.is_empty() || source.fields.iter().any(|value| value == field)
+                };
+                let repository_options = composer_string_context_options(source);
+                changed |= composer_binding_selector(
+                    ui,
+                    &editor_step_id,
+                    "Repository URL",
+                    repo,
+                    &repository_options,
+                );
+
+                let mut destination_options = Vec::new();
+                if has_field("owner") && has_field("name") {
+                    destination_options.push((
+                        format!(
+                            "$HOME/Developer/{}/{}",
+                            source.item.to_owned() + ".owner",
+                            source.item.to_owned() + ".name"
+                        ),
+                        format!(
+                            "$HOME/Developer/{{{{{}.owner}}}}/{{{{{}.name}}}}",
+                            source.item, source.item
+                        ),
+                    ));
+                }
+                if has_field("full_name") {
+                    destination_options.push((
+                        format!("$HOME/Developer/{}.full_name", source.item),
+                        format!("$HOME/Developer/{{{{{}.full_name}}}}", source.item),
+                    ));
+                }
+                if has_field("name") {
+                    destination_options.push((
+                        format!("$HOME/Developer/{}.name", source.item),
+                        format!("$HOME/Developer/{{{{{}.name}}}}", source.item),
+                    ));
+                }
+                changed |= composer_binding_selector(
+                    ui,
+                    &editor_step_id,
+                    "Локальная папка",
+                    dest,
+                    &destination_options,
+                );
+
+                let branch_value =
+                    branch.get_or_insert_with(|| format!("{{{{{}.default_branch}}}}", source.item));
+                let branch_options = if has_field("default_branch") {
+                    vec![(
+                        format!("{}.default_branch", source.item),
+                        format!("{{{{{}.default_branch}}}}", source.item),
+                    )]
+                } else {
+                    Vec::new()
+                };
+                changed |= composer_binding_selector(
+                    ui,
+                    &editor_step_id,
+                    "Ветка",
+                    branch_value,
+                    &branch_options,
+                );
+            } else {
+                ui.label(
+                    RichText::new("Перед клонированием нет блока For each.")
+                        .size(8.0)
+                        .color(ORANGE),
+                );
+            }
             changed |= composer_git_auth(ui, &mut step.auth);
         }
         Action::GitInspect { repo, dest } => {
@@ -3788,6 +3929,43 @@ fn paint_composer_step_editor(
 fn composer_text_field(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
     ui.label(RichText::new(label).size(9.0).color(MUTED));
     ui.text_edit_singleline(value).changed()
+}
+
+fn composer_binding_selector(
+    ui: &mut egui::Ui,
+    step_id: &str,
+    label: &str,
+    value: &mut String,
+    options: &[(String, String)],
+) -> bool {
+    ui.label(RichText::new(label).size(9.0).color(MUTED));
+    if options.is_empty() {
+        ui.label(
+            RichText::new("Нет выбранного совместимого поля в контексте цикла")
+                .size(8.0)
+                .color(ORANGE),
+        );
+        return false;
+    }
+    let selected = options
+        .iter()
+        .find(|(_, template)| template == value)
+        .map(|(name, _)| name.clone())
+        .unwrap_or_else(|| "Выберите поле контекста".into());
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(("context-binding", step_id, label))
+        .selected_text(selected)
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            for (name, template) in options {
+                if ui.selectable_label(template == value, name).clicked() {
+                    *value = template.clone();
+                    changed = true;
+                    ui.close();
+                }
+            }
+        });
+    changed
 }
 
 fn composer_git_auth(ui: &mut egui::Ui, auth: &mut AuthPolicy) -> bool {
@@ -5007,6 +5185,30 @@ project:
                 item: "repository",
             }]
         );
+        let Action::ForEach { fields, .. } = &task.steps[1].action else {
+            unreachable!()
+        };
+        let loop_sources = composer_loop_sources(&task, 2);
+        assert_eq!(
+            loop_sources,
+            vec![ComposerLoopSource {
+                step_id: "loop".into(),
+                step_name: "Для каждого элемента".into(),
+                item: "repository".into(),
+                fields: fields.clone(),
+            }]
+        );
+        let string_options = composer_string_context_options(&loop_sources[0]);
+        assert_eq!(string_options.len(), 7);
+        assert!(string_options
+            .iter()
+            .any(|(_, template)| template == "{{repository.https_url}}"));
+        assert!(string_options
+            .iter()
+            .any(|(_, template)| template == "{{repository.name}}"));
+        assert!(!string_options
+            .iter()
+            .any(|(_, template)| template == "{{repository.private}}"));
     }
 
     #[test]
