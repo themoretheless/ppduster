@@ -127,14 +127,13 @@ impl TaskPack {
         self.tasks.iter().find(|t| t.id == id)
     }
 
-    /// Resolve a scenario or reusable template into one flat task.
+    /// Resolve a scenario or reusable template into one executable task.
     ///
     /// The returned task keeps the root composition as runtime provenance
-    /// available through `Task::included_scenarios`, while `steps` contains all
-    /// primitive child steps in declaration order. Child step IDs are prefixed
-    /// with their inclusion path (for example, `developer-tools/install-ripgrep`)
-    /// so reports retain provenance and IDs remain unambiguous across scenario
-    /// boundaries.
+    /// available through `Task::included_scenarios`, while legacy templates are
+    /// flattened into `steps` in declaration order. A direct v2 graph is kept
+    /// intact. Graph tasks cannot yet be nested in a legacy scenario template:
+    /// silently flattening or inferring edges would change their semantics.
     pub fn resolve(&self, id: &str) -> Result<Task> {
         let index = self
             .tasks
@@ -177,6 +176,17 @@ impl TaskPack {
             .validate()
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("validate scenario {}", self.tasks[index].id))?;
+        if self.tasks[index].graph.is_some() {
+            if let Some(parent_index) = stack.last() {
+                bail!(
+                    "scenario {} cannot include graph task {}; graph composition must be explicit",
+                    self.tasks[*parent_index].id,
+                    self.tasks[index].id
+                );
+            }
+            cache.insert(index, Vec::new());
+            return Ok(Vec::new());
+        }
         if let Some(steps) = cache.get(&index) {
             return Ok(steps.clone());
         }
@@ -374,5 +384,81 @@ fn validate_trust(task: &Task, trust: PackTrust, allow_external: bool, path: &Pa
             )
         }
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automation::graph::WorkflowGraph;
+    use crate::automation::task::{Action, AuthPolicy, ElevationPolicy};
+
+    fn step(id: &str) -> Step {
+        Step {
+            id: id.into(),
+            name: String::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
+            action: Action::GithubListRepositories,
+        }
+    }
+
+    fn task(id: &str) -> Task {
+        Task {
+            id: id.into(),
+            name: id.into(),
+            description: format!("Task {id}."),
+            platform: Platform::Any,
+            trust: TrustRequirement::BundledOnly,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            steps: vec![step("run")],
+            graph: None,
+        }
+    }
+
+    fn pack(tasks: Vec<Task>) -> TaskPack {
+        let origins = tasks
+            .iter()
+            .map(|task| (task.id.clone(), PackTrust::Bundled))
+            .collect();
+        TaskPack {
+            tasks,
+            sources: Vec::new(),
+            origins,
+            unavailable: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_preserves_a_direct_v2_graph() {
+        let mut graph_task = task("graph-task");
+        graph_task.graph = Some(WorkflowGraph::from_linear_v1(&graph_task.steps).unwrap());
+        graph_task.steps.clear();
+
+        let resolved = pack(vec![graph_task]).resolve("graph-task").unwrap();
+        assert!(resolved.steps.is_empty());
+        assert!(resolved.graph.is_some());
+        resolved.validate_executable().unwrap();
+    }
+
+    #[test]
+    fn legacy_scenario_template_does_not_silently_flatten_graph_child() {
+        let mut child = task("graph-child");
+        child.graph = Some(WorkflowGraph::from_linear_v1(&child.steps).unwrap());
+        child.steps.clear();
+
+        let mut parent = task("parent");
+        parent.steps.clear();
+        parent.scenarios = vec!["graph-child".into()];
+
+        let error = pack(vec![parent, child]).resolve("parent").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("cannot include graph task graph-child"));
     }
 }

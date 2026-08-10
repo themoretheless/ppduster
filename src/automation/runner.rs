@@ -1,8 +1,22 @@
+use crate::automation::binding::{materialize_step, resolve_binding, BindingLimits};
+use crate::automation::block::definition_for_action;
+use crate::automation::context::{
+    Binding, ContextOrigin, ContextPathSegment, ContextProvenance, ContextScope, ContextStore,
+    ContextType, ContextValue, FieldRef, ResolvedSchemaOwned, Sensitivity, TemplatePart,
+};
+use crate::automation::expression::{
+    check_rule, ExpressionLimits, ExpressionV1, ReferenceV1, RuleEvaluation, RuleExprV1,
+};
+use crate::automation::graph::{
+    ActionNode, EdgePort, ForEachNode, GraphNode, IfNode, JoinMode, JoinNode, LoopFailurePolicy,
+    SwitchNode, WorkflowGraph,
+};
 use crate::automation::package_registry;
 use crate::automation::task::{
     Action, AppBundleIdentity, AppStoreOperation, ArchiveFormat, AuthPolicy, ElevationPolicy,
-    InspectPathAction, LicenseMethod, LicenseProvider, PathExpectation, PathKind, ReleaseChannel,
-    ScriptInterpreter, ShellMode, Step, StepCondition, Task, WriteConflictPolicy,
+    IndeterminatePolicy, InspectPathAction, LicenseMethod, LicenseProvider, PathExpectation,
+    PathKind, ReleaseChannel, ScriptInterpreter, ShellMode, Step, StepCondition, Task,
+    WriteConflictPolicy,
 };
 use crate::github::get_account_repositories;
 use crate::ppstore::{self, InstallOutcome};
@@ -13,7 +27,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::IsTerminal;
@@ -58,6 +72,20 @@ pub enum StepStatus {
     Failed,
 }
 
+impl StepStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::WaitingForAttention => "waiting-for-attention",
+            Self::Skipped => "skipped",
+            Self::Satisfied => "satisfied",
+            Self::Applied => "applied",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct StepLogEntry {
     pub step_id: String,
@@ -78,12 +106,83 @@ pub struct StepReport {
     pub output: Option<StepOutput>,
 }
 
+impl StepReport {
+    /// Stable runtime envelope exposed as `steps.<id>`. Action output is
+    /// nested below `output`; status metadata remains available even when an
+    /// action was skipped or failed before producing an action-specific value.
+    pub fn context_value(&self) -> serde_json::Value {
+        let output = self
+            .output
+            .as_ref()
+            .and_then(|output| output.context_value().ok())
+            .unwrap_or(serde_json::Value::Null);
+        let error = matches!(self.status, StepStatus::Failed).then(|| {
+            let message = self
+                .logs
+                .last()
+                .map(|entry| entry.message.as_str())
+                .unwrap_or(self.summary.as_str());
+            serde_json::json!({
+                "code": "step-failed",
+                "message": message,
+                "step_id": self.step_id,
+                "retryable": false,
+            })
+        });
+        serde_json::json!({
+            "status": self.status.as_str(),
+            "changed": matches!(self.status, StepStatus::Applied),
+            "summary": self.summary,
+            "output": output,
+            "error": error,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "kebab-case")]
 pub enum StepOutput {
     GithubRepositories(GithubRepositoriesOutput),
     PathMetadata(PathMetadataOutput),
     ProcessExit(ProcessExitOutput),
+    /// Schema-addressed output for actions whose result is represented by the
+    /// shared context contract rather than a bespoke Rust structure.
+    ///
+    /// `schema_id` is stable and versioned. `value` is validated against the
+    /// corresponding block output schema before it is exposed to bindings.
+    Structured(StructuredStepOutput),
+}
+
+impl StepOutput {
+    /// Return the action-owned value without the enum's serde transport
+    /// envelope. Context paths always start at this value.
+    pub fn context_value(&self) -> Result<serde_json::Value> {
+        match self {
+            Self::Structured(output) => Ok(output.value.clone()),
+            other => {
+                let serialized = serde_json::to_value(other).context("serialize step output")?;
+                serialized
+                    .get("value")
+                    .cloned()
+                    .context("step output has no value")
+            }
+        }
+    }
+
+    pub fn schema_id(&self) -> &str {
+        match self {
+            Self::GithubRepositories(_) => "ppduster.github.repositories@1",
+            Self::PathMetadata(_) => "ppduster.path.metadata@1",
+            Self::ProcessExit(_) => "ppduster.process.exit@1",
+            Self::Structured(output) => &output.schema_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StructuredStepOutput {
+    pub schema_id: String,
+    pub value: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,8 +266,95 @@ pub struct RunReport {
     pub plans: Vec<ActionPlan>,
     pub outcomes: Vec<ActionOutcome>,
     pub steps: Vec<StepReport>,
+    /// Validated action outputs keyed by stable step IDs. Transport metadata
+    /// from [`StepOutput`] is deliberately absent: bindings start directly at
+    /// the output contract (`github.repositories`, `repository.path`, ...).
+    pub context: ContextStore,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
+}
+
+/// Compile completed step outputs into the runtime context used by bindings
+/// and rules. Every value is checked against the same block contract that the
+/// visual editor exposes; a producer cannot publish a differently shaped
+/// value under a trusted schema ID.
+pub fn context_store_from_reports(task: &Task, reports: &[StepReport]) -> Result<ContextStore> {
+    let steps_by_id = task
+        .steps
+        .iter()
+        .map(|step| (step.id.as_str(), step))
+        .collect::<BTreeMap<_, _>>();
+    let mut store = ContextStore::default();
+
+    for report in reports {
+        let Some(output) = &report.output else {
+            continue;
+        };
+        // Nested legacy foreach reports have instance IDs such as `clone[1]`.
+        // They are intentionally not promoted to the parent scope; Graph v2
+        // gives every nested instance an explicit scope path.
+        let Some(step) = steps_by_id.get(report.step_id.as_str()) else {
+            continue;
+        };
+        let definition = definition_for_action(&step.action);
+        let expected_schema_id = definition
+            .output_schema_id()
+            .with_context(|| format!("block {} has no output schema id", definition.kind.id()))?;
+        if output.schema_id() != expected_schema_id {
+            bail!(
+                "step {} published schema {}, expected {}",
+                report.step_id,
+                output.schema_id(),
+                expected_schema_id
+            );
+        }
+        let value = output
+            .context_value()
+            .with_context(|| format!("read output context for step {}", report.step_id))?;
+        definition
+            .output_schema
+            .validate_value(&value)
+            .with_context(|| {
+                format!(
+                    "step {} output violates schema {}",
+                    report.step_id, expected_schema_id
+                )
+            })?;
+        store.insert(
+            ContextScope::Step {
+                step_id: report.step_id.clone(),
+            },
+            ContextValue::new(value, ContextProvenance::step(&report.step_id))
+                .with_schema(definition.output_schema),
+        );
+    }
+
+    Ok(store)
+}
+
+fn context_schema_store_before(task: &Task, consumer_step_id: &str) -> Result<ContextStore> {
+    let mut store = ContextStore::default();
+    let mut found_consumer = false;
+    for step in &task.steps {
+        if step.id == consumer_step_id {
+            found_consumer = true;
+            break;
+        }
+        let definition = definition_for_action(&step.action);
+        store.insert(
+            ContextScope::Step {
+                step_id: step.id.clone(),
+            },
+            // The checker reads only the attached schema. Null makes an
+            // accidental value lookup fail closed instead of inventing data.
+            ContextValue::new(serde_json::Value::Null, ContextProvenance::step(&step.id))
+                .with_schema(definition.output_schema),
+        );
+    }
+    if !found_consumer {
+        bail!("condition consumer step {consumer_step_id} is not in task")
+    }
+    Ok(store)
 }
 
 #[derive(Debug, Default)]
@@ -192,11 +378,277 @@ enum ApplyStepResult {
     },
 }
 
+fn structured_step_output(schema_id: impl Into<String>, value: serde_json::Value) -> StepOutput {
+    StepOutput::Structured(StructuredStepOutput {
+        schema_id: schema_id.into(),
+        value,
+    })
+}
+
+fn context_path(raw: &str) -> String {
+    expand_path_template(raw)
+        .unwrap_or_else(|| PathBuf::from(raw))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Build the stable, action-specific result for actions that predate typed
+/// outputs. This function is deliberately infallible: publishing context must
+/// never turn an already completed mutation into a failed step.
+fn legacy_action_output(step: &Step, changed: bool) -> Option<StepOutput> {
+    let output = match &step.action {
+        Action::GithubListRepositories
+        | Action::InspectPath(_)
+        | Action::RunCommand { .. }
+        | Action::RunScript { .. } => return None,
+        Action::ForEach { .. } | Action::ForEachGitCloneIfMissing { .. } => return None,
+        Action::CreateDirectory(action) => structured_step_output(
+            "ppduster.filesystem.create-directory@1",
+            serde_json::json!({
+                "path": {
+                    "value": context_path(&action.path),
+                    "exists": true,
+                    "kind": "directory",
+                    "created": changed,
+                    "changed": changed,
+                }
+            }),
+        ),
+        Action::CopyPath(action) => structured_step_output(
+            "ppduster.filesystem.copy-path@1",
+            serde_json::json!({
+                "path": {
+                    "source": context_path(&action.src),
+                    "destination": context_path(&action.dest),
+                    "copied": true,
+                    "changed": changed,
+                }
+            }),
+        ),
+        Action::WriteFile(action) => {
+            let sha256 = hex::encode(Sha256::digest(action.content.as_bytes()));
+            structured_step_output(
+                "ppduster.filesystem.write-file@1",
+                serde_json::json!({
+                    "file": {
+                        "path": context_path(&action.path),
+                        "bytes": action.content.len(),
+                        "sha256": sha256,
+                        "created": changed,
+                        "changed": changed,
+                    }
+                }),
+            )
+        }
+        Action::RemovePath(action) => structured_step_output(
+            "ppduster.filesystem.remove-path@1",
+            serde_json::json!({
+                "path": {
+                    "value": context_path(&action.path),
+                    "exists": false,
+                    "removed": changed,
+                    "changed": changed,
+                }
+            }),
+        ),
+        Action::GitClone { repo, dest, branch } => structured_step_output(
+            "ppduster.git.clone@1",
+            repository_context_value(repo, dest, branch.as_deref(), changed, "sync"),
+        ),
+        Action::GitInspect { repo, dest } => structured_step_output(
+            "ppduster.git.inspect@1",
+            repository_context_value(repo, dest, None, false, "inspect"),
+        ),
+        Action::GitCloneIfMissing { repo, dest, branch } => structured_step_output(
+            "ppduster.git.clone-if-missing@1",
+            repository_context_value(repo, dest, branch.as_deref(), changed, "clone-if-missing"),
+        ),
+        Action::GitFetch { repo, dest, branch } => structured_step_output(
+            "ppduster.git.fetch@1",
+            repository_context_value(repo, dest, Some(branch), changed, "fetch"),
+        ),
+        Action::GitFastForward { repo, dest, branch } => structured_step_output(
+            "ppduster.git.fast-forward@1",
+            repository_context_value(repo, dest, Some(branch), changed, "fast-forward"),
+        ),
+        Action::BrewInstall { package, cask } => structured_step_output(
+            "ppduster.package.brew-install@1",
+            serde_json::json!({
+                "package": {
+                    "name": package,
+                    "cask": cask,
+                    "installed": true,
+                    "changed": changed,
+                }
+            }),
+        ),
+        Action::ConfigurePackageRegistryFiles { npm, nuget, .. } => structured_step_output(
+            "ppduster.configuration.package-registries@1",
+            serde_json::json!({
+                "configuration": {
+                    "npm_scope": npm.scope,
+                    "npm_registry": npm.registry,
+                    "nuget_public_source": nuget.public_source,
+                    "nuget_private_source": nuget.source,
+                    "changed": changed,
+                    "secrets_redacted": true,
+                }
+            }),
+        ),
+        Action::DownloadFile {
+            url,
+            dest,
+            checksum,
+        } => structured_step_output(
+            "ppduster.artifact.download@1",
+            serde_json::json!({
+                "artifact": {
+                    "url": url,
+                    "path": context_path(dest),
+                    "sha256": checksum.sha256,
+                    "downloaded": changed,
+                    "verified": true,
+                    "changed": changed,
+                }
+            }),
+        ),
+        Action::ExtractArchive {
+            src, dest, format, ..
+        } => structured_step_output(
+            "ppduster.artifact.extract@1",
+            serde_json::json!({
+                "archive": {
+                    "source": context_path(src),
+                    "destination": context_path(dest),
+                    "format": archive_format_name(*format),
+                    "extracted": true,
+                    "changed": changed,
+                }
+            }),
+        ),
+        Action::InstallDmg {
+            dmg,
+            app_name,
+            target,
+            identity,
+        } => structured_step_output(
+            "ppduster.installation.dmg@1",
+            serde_json::json!({
+                "installation": {
+                    "source": context_path(dmg),
+                    "target": context_path(target.as_deref().unwrap_or("$HOME/Applications")),
+                    "app_name": app_name,
+                    "bundle_identifier": identity.as_ref().map(|value| value.bundle_identifier.as_str()),
+                    "version": identity.as_ref().map(|value| value.version.as_str()),
+                    "installed": true,
+                    "changed": changed,
+                }
+            }),
+        ),
+        Action::InstallPkg { pkg, target } => structured_step_output(
+            "ppduster.installation.pkg@1",
+            serde_json::json!({
+                "installation": {
+                    "source": context_path(pkg),
+                    "target": target.as_deref().unwrap_or("/"),
+                    "installed": true,
+                    "changed": changed,
+                }
+            }),
+        ),
+        Action::MacosRequirements {
+            minimum_version,
+            require_rosetta_on_apple_silicon,
+        } => structured_step_output(
+            "ppduster.system.macos-requirements@1",
+            serde_json::json!({
+                "system": {
+                    "platform": "macos",
+                    "minimum_version": minimum_version,
+                    "rosetta_required": require_rosetta_on_apple_silicon,
+                    "satisfied": true,
+                    "changed": changed,
+                }
+            }),
+        ),
+        Action::AppStoreInstall(action) => structured_step_output(
+            "ppduster.installation.app-store@1",
+            serde_json::json!({
+                "application": {
+                    "id": action.app_id,
+                    "operation": app_store_operation_name(action.operation),
+                    "installed": true,
+                    "changed": changed,
+                }
+            }),
+        ),
+        Action::BambuStudioRelease(action) => structured_step_output(
+            "ppduster.installation.bambu-studio@1",
+            serde_json::json!({
+                "application": {
+                    "name": "Bambu Studio",
+                    "channel": release_channel_name(action.channel),
+                    "installed": true,
+                    "changed": changed,
+                }
+            }),
+        ),
+        Action::ActivateLicense(action) => structured_step_output(
+            "ppduster.license.activation@1",
+            serde_json::json!({
+                "license": {
+                    "provider": match action.provider { LicenseProvider::LightBurn => "lightburn" },
+                    "method": match action.method { LicenseMethod::VendorUi => "vendor-ui" },
+                    "activated": true,
+                    "changed": changed,
+                    "secret_exposed": false,
+                }
+            }),
+        ),
+    };
+    Some(output)
+}
+
+fn repository_context_value(
+    repo: &str,
+    dest: &str,
+    branch: Option<&str>,
+    changed: bool,
+    operation: &str,
+) -> serde_json::Value {
+    let path = context_path(dest);
+    let exists = Path::new(&path).exists();
+    serde_json::json!({
+        "repository": {
+            "path": path,
+            "remote_url": repo,
+            "branch": branch,
+            "exists": exists,
+            "operation": operation,
+            "cloned": operation == "clone-if-missing" && changed,
+            "fetched": operation == "fetch",
+            "updated": (operation == "sync" || operation == "fast-forward") && changed,
+            "changed": changed,
+        }
+    })
+}
+
 pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
     run_task_with_interactivity(task, opts, terminal_is_interactive())
 }
 
 fn run_task_with_interactivity(
+    task: &Task,
+    opts: &RunOptions,
+    terminal_interactive: bool,
+) -> Result<RunReport> {
+    if task.graph.is_some() {
+        return run_graph_task_with_interactivity(task, opts, terminal_interactive);
+    }
+    run_linear_task_with_interactivity(task, opts, terminal_interactive)
+}
+
+fn run_linear_task_with_interactivity(
     task: &Task,
     opts: &RunOptions,
     terminal_interactive: bool,
@@ -255,7 +707,7 @@ fn run_task_with_interactivity(
         }
         if opts.apply {
             if let Some(condition) = &step.when {
-                match evaluate_condition(condition, &steps) {
+                match evaluate_condition(condition, &steps, task, &step.id) {
                     Ok(ConditionEvaluation::Matched(_)) => {}
                     Ok(ConditionEvaluation::NotMatched(reason))
                     | Ok(ConditionEvaluation::Unavailable(reason)) => {
@@ -305,7 +757,7 @@ fn run_task_with_interactivity(
                 }
             }
             if let Some(condition) = &step.require {
-                match evaluate_condition(condition, &steps) {
+                match evaluate_condition(condition, &steps, task, &step.id) {
                     Ok(ConditionEvaluation::Matched(_)) => {}
                     Ok(ConditionEvaluation::NotMatched(reason))
                     | Ok(ConditionEvaluation::Unavailable(reason)) => {
@@ -370,6 +822,7 @@ fn run_task_with_interactivity(
                 match resolve_for_each_items(source_step, array_path, fields, &steps) {
                     Ok(items) => {
                         let count = items.len();
+                        let output_items = items.clone();
                         loop_contexts.insert(step.id.clone(), (item.clone(), items));
                         let summary = format!(
                             "prepared {count} iteration(s) from {source_step}.{array_path} as {item}"
@@ -384,7 +837,18 @@ fn run_task_with_interactivity(
                                 step_id: step.id.clone(),
                                 message: summary.clone(),
                             }],
-                            output: None,
+                            output: Some(structured_step_output(
+                                "ppduster.control.for-each@1",
+                                serde_json::json!({
+                                    "loop": {
+                                        "source_step": source_step,
+                                        "array_path": array_path,
+                                        "item_alias": item,
+                                        "count": count,
+                                        "items": output_items,
+                                    }
+                                }),
+                            )),
                         });
                         outcomes.push(ActionOutcome::Applied { summary });
                     }
@@ -538,7 +1002,19 @@ fn run_task_with_interactivity(
                         status: StepStatus::Failed,
                         prerequisites: plan.prerequisites,
                         logs,
-                        output: None,
+                        output: Some(structured_step_output(
+                            "ppduster.control.for-each-results@1",
+                            serde_json::json!({
+                                "loop": {
+                                    "source_step": loop_step,
+                                    "count": items.len(),
+                                    "applied": applied,
+                                    "satisfied": satisfied,
+                                    "failed": true,
+                                    "error": message,
+                                }
+                            }),
+                        )),
                     });
                     errors.push(format!("step {} {message}", step.id));
                     outcomes.push(ActionOutcome::Blocked);
@@ -563,7 +1039,18 @@ fn run_task_with_interactivity(
                         },
                         prerequisites: plan.prerequisites,
                         logs,
-                        output: None,
+                        output: Some(structured_step_output(
+                            "ppduster.control.for-each-results@1",
+                            serde_json::json!({
+                                "loop": {
+                                    "source_step": loop_step,
+                                    "count": items.len(),
+                                    "applied": applied,
+                                    "satisfied": satisfied,
+                                    "failed": false,
+                                }
+                            }),
+                        )),
                     });
                     outcomes.push(if applied > 0 {
                         ActionOutcome::Applied { summary }
@@ -655,6 +1142,7 @@ fn run_task_with_interactivity(
                 let planned_summary = describe_step(step, opts)?;
                 match apply_git_inspect(repo, dest) {
                     Ok(ApplyStepResult::AlreadySatisfied(summary)) => {
+                        let output = legacy_action_output(step, false);
                         steps.push(StepReport {
                             step_id: step.id.clone(),
                             step_name: step_name(step),
@@ -665,7 +1153,7 @@ fn run_task_with_interactivity(
                                 step_id: step.id.clone(),
                                 message: summary.clone(),
                             }],
-                            output: None,
+                            output,
                         });
                         outcomes.push(ActionOutcome::Observed { summary });
                     }
@@ -694,6 +1182,7 @@ fn run_task_with_interactivity(
         }
         let satisfaction = is_satisfied(step, opts.apply)?;
         if let Some(reason) = satisfaction {
+            let output = legacy_action_output(step, false);
             steps.push(StepReport {
                 step_id: step.id.clone(),
                 step_name: step_name(step),
@@ -704,7 +1193,7 @@ fn run_task_with_interactivity(
                     step_id: step.id.clone(),
                     message: reason.clone(),
                 }],
-                output: None,
+                output,
             });
             outcomes.push(ActionOutcome::AlreadySatisfied { reason });
             continue;
@@ -808,13 +1297,21 @@ fn run_task_with_interactivity(
                 result => result,
             };
             let (status, summary, applied, output) = match result {
-                ApplyStepResult::Applied(summary) => (StepStatus::Applied, summary, true, None),
+                ApplyStepResult::Applied(summary) => (
+                    StepStatus::Applied,
+                    summary,
+                    true,
+                    legacy_action_output(step, true),
+                ),
                 ApplyStepResult::AppliedWithOutput { summary, output } => {
                     (StepStatus::Applied, summary, true, Some(output))
                 }
-                ApplyStepResult::AlreadySatisfied(summary) => {
-                    (StepStatus::Satisfied, summary, false, None)
-                }
+                ApplyStepResult::AlreadySatisfied(summary) => (
+                    StepStatus::Satisfied,
+                    summary,
+                    false,
+                    legacy_action_output(step, false),
+                ),
                 ApplyStepResult::Failed { .. } => unreachable!(),
             };
             steps[step_idx].status = status;
@@ -834,6 +1331,8 @@ fn run_task_with_interactivity(
         outcomes.push(ActionOutcome::Planned { action: plan });
     }
 
+    let context = context_store_from_reports(task, &steps)?;
+
     Ok(RunReport {
         task_id: task.id.clone(),
         task_name: task.name.clone(),
@@ -842,8 +1341,1812 @@ fn run_task_with_interactivity(
         plans,
         outcomes,
         steps,
+        context,
         errors,
     })
+}
+
+const GRAPH_MAX_DEPTH: usize = 32;
+const GRAPH_MAX_NODE_ACTIVATIONS: usize = 4_096;
+const GRAPH_MAX_LOOP_ITERATIONS: usize = 10_000;
+const GRAPH_MAX_REPORTS: usize = 16_384;
+
+#[derive(Debug, Clone, Default)]
+struct GraphScopeState {
+    values: ContextStore,
+    schemas: ContextStore,
+    aliases: BTreeMap<String, FieldRef>,
+}
+
+#[derive(Debug, Default)]
+struct GraphRunAccumulator {
+    plans: Vec<ActionPlan>,
+    outcomes: Vec<ActionOutcome>,
+    steps: Vec<StepReport>,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GraphExecutionBudget {
+    node_activations: usize,
+    loop_iterations: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphSignal {
+    Successful,
+    Failed,
+    /// A structurally incoming path that was not selected at runtime. Join
+    /// nodes treat it as a neutral completion, so an `all` barrier does not
+    /// wait forever for the inactive half of a success/failure diamond.
+    SkippedByControl,
+}
+
+impl GraphSignal {
+    fn is_successful(self) -> bool {
+        !matches!(self, Self::Failed)
+    }
+}
+
+#[derive(Debug, Default)]
+struct GraphInvocation {
+    failed: bool,
+}
+
+#[derive(Debug)]
+struct GraphNodeResult {
+    ports: BTreeSet<EdgePort>,
+    successful: bool,
+    failed: bool,
+}
+
+impl GraphNodeResult {
+    fn action_success() -> Self {
+        Self {
+            ports: BTreeSet::from([EdgePort::Success, EdgePort::Always]),
+            successful: true,
+            failed: false,
+        }
+    }
+
+    fn action_skipped() -> Self {
+        Self {
+            // A false `when` is a successful no-op, matching v1 linear
+            // semantics and allowing migrated `Success` chains to continue.
+            ports: BTreeSet::from([EdgePort::Success, EdgePort::Always]),
+            successful: true,
+            failed: false,
+        }
+    }
+
+    fn action_failure() -> Self {
+        Self {
+            ports: BTreeSet::from([EdgePort::Failure, EdgePort::Always]),
+            successful: false,
+            failed: true,
+        }
+    }
+
+    fn action_planned() -> Self {
+        Self {
+            // Planning has no action outcome yet. Activate both conditional
+            // routes so the report contains every statically reachable plan.
+            ports: BTreeSet::from([EdgePort::Success, EdgePort::Failure, EdgePort::Always]),
+            successful: true,
+            failed: false,
+        }
+    }
+
+    fn control_success() -> Self {
+        Self {
+            ports: BTreeSet::from([EdgePort::Completed]),
+            successful: true,
+            failed: false,
+        }
+    }
+
+    fn control_failure() -> Self {
+        Self {
+            ports: BTreeSet::from([EdgePort::Failure]),
+            successful: false,
+            failed: true,
+        }
+    }
+
+    fn control_planned(include_empty: bool) -> Self {
+        let mut ports = BTreeSet::from([EdgePort::Completed, EdgePort::Failure]);
+        if include_empty {
+            ports.insert(EdgePort::Empty);
+        }
+        Self {
+            ports,
+            successful: true,
+            failed: false,
+        }
+    }
+}
+
+struct GraphRuntime<'a> {
+    task: &'a Task,
+    opts: &'a RunOptions,
+    terminal_interactive: bool,
+    accumulator: GraphRunAccumulator,
+    budget: GraphExecutionBudget,
+}
+
+fn run_graph_task_with_interactivity(
+    task: &Task,
+    opts: &RunOptions,
+    terminal_interactive: bool,
+) -> Result<RunReport> {
+    task.validate_executable()
+        .map_err(AutomationError::Message)?;
+    let graph = task
+        .graph
+        .as_ref()
+        .context("graph task has no workflow graph")?;
+    if opts.release_channel.is_some() && !graph_contains_bambu(graph) {
+        bail!("--channel is only supported by tasks with a bambu-studio-release action node");
+    }
+    preflight_graph_capabilities(graph, opts, terminal_interactive)?;
+
+    let mut runtime = GraphRuntime {
+        task,
+        opts,
+        terminal_interactive,
+        accumulator: GraphRunAccumulator::default(),
+        budget: GraphExecutionBudget::default(),
+    };
+    let mut scope = GraphScopeState::default();
+    let invocation = runtime.execute_graph(graph, &mut scope, "", 1)?;
+    if invocation.failed && runtime.accumulator.errors.is_empty() {
+        runtime
+            .accumulator
+            .errors
+            .push("workflow graph finished through an unhandled failure path".into());
+    }
+
+    Ok(RunReport {
+        task_id: task.id.clone(),
+        task_name: task.name.clone(),
+        task_description: task.description.clone(),
+        scenarios: task.included_scenarios().to_vec(),
+        plans: runtime.accumulator.plans,
+        outcomes: runtime.accumulator.outcomes,
+        steps: runtime.accumulator.steps,
+        // Nested graph executions receive cloned stores. Only action outputs
+        // produced directly in the root graph are therefore published here.
+        context: scope.values,
+        errors: runtime.accumulator.errors,
+    })
+}
+
+fn graph_contains_bambu(graph: &WorkflowGraph) -> bool {
+    graph.nodes.iter().any(|node| match node {
+        GraphNode::Action(node) => matches!(node.step.action, Action::BambuStudioRelease(_)),
+        GraphNode::ForEach(node) => graph_contains_bambu(&node.body),
+        GraphNode::If(node) => {
+            graph_contains_bambu(&node.then_graph)
+                || node.else_graph.as_deref().is_some_and(graph_contains_bambu)
+        }
+        GraphNode::Switch(node) => {
+            node.cases
+                .iter()
+                .any(|case| graph_contains_bambu(&case.graph))
+                || node.default.as_deref().is_some_and(graph_contains_bambu)
+        }
+        GraphNode::Join(_) => false,
+    })
+}
+
+fn preflight_graph_capabilities(
+    graph: &WorkflowGraph,
+    opts: &RunOptions,
+    terminal_interactive: bool,
+) -> Result<()> {
+    preflight_graph_policy_order(graph, opts, terminal_interactive, false).map(|_| ())
+}
+
+/// Prove that every safety-critical input which can only be materialized at
+/// runtime is checked before the first possible mutation on its structural
+/// path. Literal bindings are applied and validated immediately. A dynamic
+/// binding is allowed as the first mutation (its materialized policy is
+/// checked by the one-step runner), and inside a `for-each` whose own two-phase
+/// preflight runs before any iteration. Once a previous mutation is possible,
+/// an unresolved safety input fails closed instead of risking partial apply.
+fn preflight_graph_policy_order(
+    graph: &WorkflowGraph,
+    opts: &RunOptions,
+    terminal_interactive: bool,
+    mut mutation_possible: bool,
+) -> Result<bool> {
+    for index in deterministic_graph_order(graph)? {
+        let node = &graph.nodes[index];
+        match node {
+            GraphNode::Action(node) => {
+                let static_bindings = node
+                    .bindings
+                    .iter()
+                    .filter(|(_, binding)| binding_is_statically_resolvable(binding))
+                    .map(|(target, binding)| (target.clone(), binding.clone()))
+                    .collect::<BTreeMap<_, _>>();
+                let step = materialize_step(
+                    &node.step,
+                    &static_bindings,
+                    &ContextStore::default(),
+                    BindingLimits::default(),
+                )
+                .with_context(|| {
+                    format!(
+                        "preflight static bindings for graph action {}",
+                        node.step.id
+                    )
+                })?;
+                // Keep the graph-wide safety barrier equivalent to the linear
+                // runner's all-step preflight. In particular, destination and
+                // existing-DMG identity checks must fail before an earlier
+                // graph action can mutate the machine.
+                enforce_step_policy(&step, opts, terminal_interactive)?;
+                if mutation_possible {
+                    if let Some(target) = node.bindings.iter().find_map(|(target, binding)| {
+                        (!binding_is_statically_resolvable(binding)
+                            && binding_affects_preflight_policy(&node.step.action, target))
+                        .then_some(target)
+                    }) {
+                        bail!(
+                            "step {} has runtime-bound safety-critical input {target:?} after a possible earlier mutation; move it before mutating actions or place the mutations in one preflighted for-each",
+                            node.step.id
+                        );
+                    }
+                }
+                mutation_possible |= !definition_for_action(&node.step.action).read_only;
+            }
+            GraphNode::ForEach(node) => {
+                mutation_possible = preflight_graph_policy_order(
+                    &node.body,
+                    opts,
+                    terminal_interactive,
+                    mutation_possible,
+                )?;
+            }
+            GraphNode::If(node) => {
+                let then_mutation = preflight_graph_policy_order(
+                    &node.then_graph,
+                    opts,
+                    terminal_interactive,
+                    mutation_possible,
+                )?;
+                let else_mutation = if let Some(graph) = node.else_graph.as_deref() {
+                    preflight_graph_policy_order(
+                        graph,
+                        opts,
+                        terminal_interactive,
+                        mutation_possible,
+                    )?
+                } else {
+                    mutation_possible
+                };
+                mutation_possible = then_mutation || else_mutation;
+            }
+            GraphNode::Switch(node) => {
+                let mut branch_mutation = mutation_possible;
+                for case in &node.cases {
+                    branch_mutation |= preflight_graph_policy_order(
+                        &case.graph,
+                        opts,
+                        terminal_interactive,
+                        mutation_possible,
+                    )?;
+                }
+                if let Some(graph) = node.default.as_deref() {
+                    branch_mutation |= preflight_graph_policy_order(
+                        graph,
+                        opts,
+                        terminal_interactive,
+                        mutation_possible,
+                    )?;
+                }
+                mutation_possible = branch_mutation;
+            }
+            GraphNode::Join(_) => {}
+        }
+    }
+    Ok(mutation_possible)
+}
+
+fn binding_is_statically_resolvable(binding: &Binding) -> bool {
+    match binding {
+        Binding::Literal { .. } | Binding::Template { .. } => true,
+        Binding::Field { .. } => false,
+        Binding::Interpolated { parts } => parts
+            .iter()
+            .all(|part| matches!(part, TemplatePart::Literal { .. })),
+    }
+}
+
+fn binding_affects_preflight_policy(action: &Action, target: &str) -> bool {
+    let root = target
+        .strip_prefix('/')
+        .unwrap_or(target)
+        .split(['/', '.'])
+        .next()
+        .unwrap_or_default();
+    match action {
+        Action::CreateDirectory(_) => root == "path",
+        Action::InspectPath(_) => root == "path",
+        Action::CopyPath(_) => matches!(root, "src" | "dest"),
+        Action::WriteFile(_) | Action::RemovePath(_) => root == "path",
+        Action::GitClone { .. }
+        | Action::GitInspect { .. }
+        | Action::GitCloneIfMissing { .. }
+        | Action::GitFetch { .. }
+        | Action::GitFastForward { .. } => matches!(root, "repo" | "dest"),
+        Action::RunCommand { .. } => matches!(root, "program" | "cwd" | "shell"),
+        Action::RunScript { .. } => matches!(root, "interpreter" | "script" | "cwd"),
+        Action::ConfigurePackageRegistryFiles { .. }
+        | Action::DownloadFile { .. }
+        | Action::ExtractArchive { .. }
+        | Action::InstallDmg { .. }
+        | Action::InstallPkg { .. } => true,
+        Action::GithubListRepositories
+        | Action::ForEach { .. }
+        | Action::ForEachGitCloneIfMissing { .. }
+        | Action::BrewInstall { .. }
+        | Action::MacosRequirements { .. }
+        | Action::AppStoreInstall(_)
+        | Action::BambuStudioRelease(_)
+        | Action::ActivateLicense(_) => false,
+    }
+}
+
+impl GraphRuntime<'_> {
+    fn execute_graph(
+        &mut self,
+        graph: &WorkflowGraph,
+        scope: &mut GraphScopeState,
+        instance_prefix: &str,
+        depth: usize,
+    ) -> Result<GraphInvocation> {
+        if depth > GRAPH_MAX_DEPTH {
+            bail!("workflow graph nesting exceeds {GRAPH_MAX_DEPTH}");
+        }
+        let order = deterministic_graph_order(graph)?;
+        let entries = graph.entries.iter().cloned().collect::<BTreeSet<_>>();
+        let mut signals = BTreeMap::<String, Vec<GraphSignal>>::new();
+        let mut emitted = BTreeSet::<(String, EdgePort)>::new();
+        let mut invocation = GraphInvocation::default();
+
+        for index in order {
+            let node = &graph.nodes[index];
+            let node_id = node.id();
+            let incoming = signals.remove(node_id).unwrap_or_default();
+            let is_entry = entries.contains(node_id);
+            if !matches!(node, GraphNode::Join(_)) && !is_entry && incoming.is_empty() {
+                continue;
+            }
+            if self.budget.node_activations >= GRAPH_MAX_NODE_ACTIVATIONS {
+                bail!("workflow graph exceeds {GRAPH_MAX_NODE_ACTIVATIONS} node activations");
+            }
+            if self.accumulator.steps.len() >= GRAPH_MAX_REPORTS {
+                bail!("workflow graph exceeds {GRAPH_MAX_REPORTS} step reports");
+            }
+            let error_checkpoint = self.accumulator.errors.len();
+            let result = match node {
+                GraphNode::Join(join) => {
+                    let expected = graph
+                        .edges
+                        .iter()
+                        .filter(|edge| edge.to.node == node_id)
+                        .count();
+                    self.execute_join(join, &incoming, expected, instance_prefix)
+                }
+                _ => Some(self.execute_node(node, scope, instance_prefix, depth)?),
+            };
+            let Some(result) = result else {
+                continue;
+            };
+
+            self.budget.node_activations = self.budget.node_activations.saturating_add(1);
+
+            let mut failure_routed = false;
+            for port in &result.ports {
+                emitted.insert((node_id.to_owned(), port.clone()));
+                for edge in graph
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.from.node == node_id && edge.from.port == *port)
+                {
+                    if matches!(port, EdgePort::Failure) {
+                        failure_routed = true;
+                    }
+                    signals
+                        .entry(edge.to.node.clone())
+                        .or_default()
+                        .push(match port {
+                            EdgePort::Failure => GraphSignal::Failed,
+                            EdgePort::Success | EdgePort::Completed | EdgePort::Empty => {
+                                GraphSignal::Successful
+                            }
+                            EdgePort::Always | EdgePort::Input if result.successful => {
+                                GraphSignal::Successful
+                            }
+                            EdgePort::Always | EdgePort::Input => GraphSignal::Failed,
+                        });
+                }
+            }
+            if result.failed {
+                if failure_routed {
+                    // The failure remains visible in the step report, but an
+                    // explicit failure route owns recovery. Do not also leave
+                    // it in `RunReport.errors`, which is the CLI's final task
+                    // failure signal.
+                    self.accumulator.errors.truncate(error_checkpoint);
+                } else {
+                    invocation.failed = true;
+                }
+            }
+        }
+
+        if !graph.exits.is_empty() {
+            let active_exits = graph
+                .exits
+                .iter()
+                .filter(|exit| emitted.contains(&(exit.from.node.clone(), exit.from.port.clone())))
+                .collect::<Vec<_>>();
+            if active_exits.is_empty() {
+                invocation.failed = true;
+                self.accumulator.errors.push(format!(
+                    "graph {} did not activate any declared exit",
+                    graph.id.as_deref().unwrap_or("<anonymous>")
+                ));
+            }
+            if self.opts.apply
+                && active_exits
+                    .iter()
+                    .any(|exit| matches!(exit.from.port, EdgePort::Failure))
+            {
+                invocation.failed = true;
+            }
+        }
+        Ok(invocation)
+    }
+
+    fn execute_node(
+        &mut self,
+        node: &GraphNode,
+        scope: &mut GraphScopeState,
+        instance_prefix: &str,
+        depth: usize,
+    ) -> Result<GraphNodeResult> {
+        match node {
+            GraphNode::Action(node) => self.execute_action(node, scope, instance_prefix),
+            GraphNode::ForEach(node) => {
+                self.execute_for_each(node, scope, instance_prefix, depth + 1)
+            }
+            GraphNode::If(node) => self.execute_if(node, scope, instance_prefix, depth + 1),
+            GraphNode::Switch(node) => self.execute_switch(node, scope, instance_prefix, depth + 1),
+            GraphNode::Join(_) => unreachable!("joins are dispatched with their input signals"),
+        }
+    }
+
+    fn execute_join(
+        &mut self,
+        node: &JoinNode,
+        incoming: &[GraphSignal],
+        expected: usize,
+        instance_prefix: &str,
+    ) -> Option<GraphNodeResult> {
+        if !self.opts.apply {
+            if incoming.is_empty() {
+                return None;
+            }
+            self.push_control_report(
+                &node.id,
+                "Join",
+                StepStatus::Pending,
+                format!(
+                    "join {:?} is deferred until {} incoming path(s) have runtime outcomes",
+                    node.mode,
+                    incoming.len()
+                ),
+                instance_prefix,
+            );
+            return Some(GraphNodeResult::control_planned(false));
+        }
+        if incoming.is_empty() {
+            // A join contained wholly inside an inactive route must remain
+            // inactive; only a partially activated fan-in receives neutral
+            // skipped tokens for its unselected paths.
+            return None;
+        }
+        let skipped = expected.saturating_sub(incoming.len());
+        let mut effective = incoming.to_vec();
+        if matches!(node.mode, JoinMode::All) {
+            effective.extend(std::iter::repeat_n(GraphSignal::SkippedByControl, skipped));
+        }
+        let result = match node.mode {
+            JoinMode::All if effective.iter().all(|signal| signal.is_successful()) => {
+                GraphNodeResult::control_success()
+            }
+            JoinMode::All => GraphNodeResult::control_failure(),
+            JoinMode::Any => GraphNodeResult::control_success(),
+            JoinMode::FirstSuccessful if incoming.iter().any(|signal| signal.is_successful()) => {
+                GraphNodeResult::control_success()
+            }
+            JoinMode::FirstSuccessful => GraphNodeResult::control_failure(),
+        };
+        let summary = match node.mode {
+            JoinMode::All => {
+                format!("joined all {expected} incoming paths ({skipped} skipped by control flow)")
+            }
+            JoinMode::Any => format!("joined {} activated incoming path(s)", incoming.len()),
+            JoinMode::FirstSuccessful => {
+                if result.failed {
+                    "no incoming path completed successfully".into()
+                } else {
+                    "joined the first successful incoming path".into()
+                }
+            }
+        };
+        self.push_control_report(
+            &node.id,
+            "Join",
+            if result.failed {
+                StepStatus::Failed
+            } else if self.opts.apply {
+                StepStatus::Satisfied
+            } else {
+                StepStatus::Pending
+            },
+            summary,
+            instance_prefix,
+        );
+        Some(result)
+    }
+
+    fn execute_action(
+        &mut self,
+        node: &ActionNode,
+        scope: &mut GraphScopeState,
+        instance_prefix: &str,
+    ) -> Result<GraphNodeResult> {
+        if self.opts.apply {
+            match evaluate_graph_step_gate(&node.step, scope) {
+                GraphStepGate::Run => {}
+                GraphStepGate::Skip(reason) => {
+                    let plan = plan_step(&node.step, self.opts)?;
+                    self.push_plan(plan.clone(), instance_prefix);
+                    self.accumulator.outcomes.push(ActionOutcome::Skipped {
+                        reason: reason.clone(),
+                    });
+                    self.push_step_report(
+                        StepReport {
+                            step_id: node.step.id.clone(),
+                            step_name: step_name(&node.step),
+                            summary: plan.summary,
+                            status: StepStatus::Skipped,
+                            prerequisites: plan.prerequisites,
+                            logs: vec![StepLogEntry {
+                                step_id: node.step.id.clone(),
+                                message: format!("when condition not met: {reason}"),
+                            }],
+                            output: None,
+                        },
+                        instance_prefix,
+                    );
+                    insert_action_schema(&mut scope.schemas, &node.step);
+                    return Ok(GraphNodeResult::action_skipped());
+                }
+                GraphStepGate::Fail(message) => {
+                    self.push_action_failure(&node.step, &message, instance_prefix)?;
+                    insert_action_schema(&mut scope.schemas, &node.step);
+                    return Ok(GraphNodeResult::action_failure());
+                }
+            }
+        }
+
+        let mut materialized = match materialize_step(
+            &node.step,
+            &node.bindings,
+            &scope.values,
+            BindingLimits::default(),
+        ) {
+            Ok(step) => step,
+            Err(_error) if !self.opts.apply => {
+                let mut plan = plan_step(&node.step, self.opts)?;
+                plan.summary = format!(
+                    "deferred until runtime context values are available during apply; {}",
+                    plan.summary
+                );
+                let report = StepReport {
+                    step_id: node.step.id.clone(),
+                    step_name: step_name(&node.step),
+                    summary: plan.summary.clone(),
+                    status: StepStatus::Pending,
+                    prerequisites: plan.prerequisites.clone(),
+                    logs: vec![StepLogEntry {
+                        step_id: node.step.id.clone(),
+                        message: "typed bindings will be materialized during apply".into(),
+                    }],
+                    output: None,
+                };
+                self.push_plan(plan.clone(), instance_prefix);
+                self.accumulator.outcomes.push(ActionOutcome::Planned {
+                    action: self.prefixed_plan(plan, instance_prefix),
+                });
+                self.push_step_report(report, instance_prefix);
+                insert_action_schema(&mut scope.schemas, &node.step);
+                return Ok(GraphNodeResult::action_planned());
+            }
+            Err(error) => {
+                let message = format!("step {} binding failed: {error}", node.step.id);
+                self.push_action_failure(&node.step, &message, instance_prefix)?;
+                insert_action_schema(&mut scope.schemas, &node.step);
+                return Ok(GraphNodeResult::action_failure());
+            }
+        };
+        materialized.when = None;
+        materialized.require = None;
+
+        let mut one_step_task = self.task.clone();
+        one_step_task.scenarios.clear();
+        one_step_task.resolved_scenarios.clear();
+        one_step_task.steps = vec![materialized.clone()];
+        one_step_task.graph = None;
+        let mut one_step_opts = self.opts.clone();
+        if !matches!(materialized.action, Action::BambuStudioRelease(_)) {
+            one_step_opts.release_channel = None;
+        }
+        let report = match run_linear_task_with_interactivity(
+            &one_step_task,
+            &one_step_opts,
+            self.terminal_interactive,
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("step {} execution failed: {error:#}", materialized.id);
+                self.push_action_failure(&materialized, &message, instance_prefix)?;
+                return Ok(GraphNodeResult::action_failure());
+            }
+        };
+        for entry in report.context.entries() {
+            scope
+                .values
+                .insert(entry.scope.clone(), entry.context.clone());
+        }
+        insert_action_schema(&mut scope.schemas, &materialized);
+
+        let status = report.steps.first().map(|report| &report.status);
+        let result = match status {
+            Some(StepStatus::Failed) => GraphNodeResult::action_failure(),
+            Some(StepStatus::Skipped) => GraphNodeResult::action_skipped(),
+            Some(StepStatus::Pending) => GraphNodeResult::action_planned(),
+            Some(
+                StepStatus::Running
+                | StepStatus::WaitingForAttention
+                | StepStatus::Satisfied
+                | StepStatus::Applied,
+            ) => GraphNodeResult::action_success(),
+            None => {
+                bail!(
+                    "one-step graph action {} produced no report",
+                    materialized.id
+                )
+            }
+        };
+        self.append_linear_report(report, instance_prefix);
+        Ok(result)
+    }
+
+    fn push_action_failure(
+        &mut self,
+        step: &Step,
+        message: &str,
+        instance_prefix: &str,
+    ) -> Result<()> {
+        let plan = plan_step(step, self.opts)?;
+        self.push_plan(plan.clone(), instance_prefix);
+        self.accumulator.outcomes.push(ActionOutcome::Blocked);
+        self.push_step_report(failed_step_report(step, &plan, message), instance_prefix);
+        self.accumulator.errors.push(format!(
+            "{}{}",
+            display_instance_prefix(instance_prefix),
+            message
+        ));
+        Ok(())
+    }
+
+    fn append_linear_report(&mut self, report: RunReport, instance_prefix: &str) {
+        for plan in report.plans {
+            self.push_plan(plan, instance_prefix);
+        }
+        let outcomes = report
+            .outcomes
+            .into_iter()
+            .map(|outcome| self.prefixed_outcome(outcome, instance_prefix))
+            .collect::<Vec<_>>();
+        self.accumulator.outcomes.extend(outcomes);
+        for step in report.steps {
+            self.push_step_report(step, instance_prefix);
+        }
+        self.accumulator.errors.extend(
+            report
+                .errors
+                .into_iter()
+                .map(|error| format!("{}{}", display_instance_prefix(instance_prefix), error)),
+        );
+    }
+
+    fn prefixed_plan(&self, mut plan: ActionPlan, instance_prefix: &str) -> ActionPlan {
+        if !instance_prefix.is_empty() {
+            plan.step_id = format!("{instance_prefix}/{}", plan.step_id);
+            plan.step_name = format!("{} · {}", plan.step_name, instance_prefix);
+        }
+        plan
+    }
+
+    fn prefixed_outcome(&self, outcome: ActionOutcome, instance_prefix: &str) -> ActionOutcome {
+        match outcome {
+            ActionOutcome::Planned { action } => ActionOutcome::Planned {
+                action: self.prefixed_plan(action, instance_prefix),
+            },
+            other => other,
+        }
+    }
+
+    fn push_plan(&mut self, plan: ActionPlan, instance_prefix: &str) {
+        let plan = self.prefixed_plan(plan, instance_prefix);
+        self.accumulator.plans.push(plan);
+    }
+
+    fn push_step_report(&mut self, mut report: StepReport, instance_prefix: &str) {
+        if !instance_prefix.is_empty() {
+            report.step_id = format!("{instance_prefix}/{}", report.step_id);
+            report.step_name = format!("{} · {}", report.step_name, instance_prefix);
+            for log in &mut report.logs {
+                log.step_id = format!("{instance_prefix}/{}", log.step_id);
+            }
+        }
+        self.accumulator.steps.push(report);
+    }
+
+    fn push_control_report(
+        &mut self,
+        id: &str,
+        name: &str,
+        status: StepStatus,
+        summary: String,
+        instance_prefix: &str,
+    ) {
+        if matches!(status, StepStatus::Failed) {
+            self.accumulator.outcomes.push(ActionOutcome::Blocked);
+            self.accumulator.errors.push(format!(
+                "{}control node {id} failed: {summary}",
+                display_instance_prefix(instance_prefix)
+            ));
+        } else if self.opts.apply {
+            self.accumulator.outcomes.push(ActionOutcome::Observed {
+                summary: summary.clone(),
+            });
+        }
+        self.push_step_report(
+            StepReport {
+                step_id: id.into(),
+                step_name: name.into(),
+                summary: summary.clone(),
+                status,
+                prerequisites: Vec::new(),
+                logs: vec![StepLogEntry {
+                    step_id: id.into(),
+                    message: summary,
+                }],
+                output: None,
+            },
+            instance_prefix,
+        );
+    }
+}
+
+impl GraphRuntime<'_> {
+    fn execute_if(
+        &mut self,
+        node: &IfNode,
+        scope: &GraphScopeState,
+        instance_prefix: &str,
+        depth: usize,
+    ) -> Result<GraphNodeResult> {
+        if !self.opts.apply {
+            let mut failed = false;
+            let mut then_scope = scope.clone();
+            let then_prefix =
+                nested_instance_prefix(instance_prefix, &format!("{}[then]", node.id));
+            failed |= self
+                .execute_graph(&node.then_graph, &mut then_scope, &then_prefix, depth)?
+                .failed;
+            if let Some(else_graph) = node.else_graph.as_deref() {
+                let mut else_scope = scope.clone();
+                let else_prefix =
+                    nested_instance_prefix(instance_prefix, &format!("{}[else]", node.id));
+                failed |= self
+                    .execute_graph(else_graph, &mut else_scope, &else_prefix, depth)?
+                    .failed;
+            }
+            let summary = "planned all conditional branches; selection is deferred until apply";
+            self.push_control_report(
+                &node.id,
+                "If",
+                if failed {
+                    StepStatus::Failed
+                } else {
+                    StepStatus::Pending
+                },
+                summary.into(),
+                instance_prefix,
+            );
+            return Ok(if failed {
+                GraphNodeResult::control_failure()
+            } else {
+                GraphNodeResult::control_planned(false)
+            });
+        }
+
+        let branch = match evaluate_graph_rule(&node.condition, scope) {
+            Ok(RuleEvaluation::True) => Some(("then", node.then_graph.as_ref())),
+            Ok(RuleEvaluation::False) => node.else_graph.as_deref().map(|graph| ("else", graph)),
+            Ok(RuleEvaluation::Null) => {
+                return Ok(self.control_evaluation_failure(
+                    &node.id,
+                    "If",
+                    "condition evaluated to null",
+                    instance_prefix,
+                ))
+            }
+            Ok(RuleEvaluation::Missing(issue)) => {
+                return Ok(self.control_evaluation_failure(
+                    &node.id,
+                    "If",
+                    &format!("condition input is missing: {}", issue.message),
+                    instance_prefix,
+                ))
+            }
+            Ok(RuleEvaluation::Unknown(issue)) => {
+                return Ok(self.control_evaluation_failure(
+                    &node.id,
+                    "If",
+                    &format!("condition input is unavailable: {}", issue.message),
+                    instance_prefix,
+                ))
+            }
+            Ok(RuleEvaluation::Error(error)) => {
+                return Ok(self.control_evaluation_failure(
+                    &node.id,
+                    "If",
+                    &format!("condition evaluation failed: {}", error.message),
+                    instance_prefix,
+                ))
+            }
+            Err(error) => {
+                return Ok(self.control_evaluation_failure(
+                    &node.id,
+                    "If",
+                    &format!("condition type-check failed: {error:#}"),
+                    instance_prefix,
+                ))
+            }
+        };
+
+        let Some((branch_name, branch_graph)) = branch else {
+            self.push_control_report(
+                &node.id,
+                "If",
+                StepStatus::Satisfied,
+                "condition was false; no else branch was declared".into(),
+                instance_prefix,
+            );
+            return Ok(GraphNodeResult::control_success());
+        };
+        let mut child_scope = scope.clone();
+        let child_prefix =
+            nested_instance_prefix(instance_prefix, &format!("{}[{branch_name}]", node.id));
+        let child = self.execute_graph(branch_graph, &mut child_scope, &child_prefix, depth)?;
+        self.push_control_report(
+            &node.id,
+            "If",
+            if child.failed {
+                StepStatus::Failed
+            } else {
+                StepStatus::Satisfied
+            },
+            format!("selected {branch_name} branch"),
+            instance_prefix,
+        );
+        Ok(if child.failed {
+            GraphNodeResult::control_failure()
+        } else {
+            GraphNodeResult::control_success()
+        })
+    }
+
+    fn execute_switch(
+        &mut self,
+        node: &SwitchNode,
+        scope: &GraphScopeState,
+        instance_prefix: &str,
+        depth: usize,
+    ) -> Result<GraphNodeResult> {
+        if !self.opts.apply {
+            let mut failed = false;
+            for case in &node.cases {
+                let mut child_scope = scope.clone();
+                let prefix = nested_instance_prefix(
+                    instance_prefix,
+                    &format!("{}[case:{}]", node.id, case.id),
+                );
+                failed |= self
+                    .execute_graph(&case.graph, &mut child_scope, &prefix, depth)?
+                    .failed;
+            }
+            if let Some(default) = node.default.as_deref() {
+                let mut child_scope = scope.clone();
+                let prefix =
+                    nested_instance_prefix(instance_prefix, &format!("{}[default]", node.id));
+                failed |= self
+                    .execute_graph(default, &mut child_scope, &prefix, depth)?
+                    .failed;
+            }
+            self.push_control_report(
+                &node.id,
+                "Switch",
+                if failed {
+                    StepStatus::Failed
+                } else {
+                    StepStatus::Pending
+                },
+                "planned every switch case; selector is deferred until apply".into(),
+                instance_prefix,
+            );
+            return Ok(if failed {
+                GraphNodeResult::control_failure()
+            } else {
+                GraphNodeResult::control_planned(false)
+            });
+        }
+
+        let expected = ResolvedSchemaOwned {
+            value_type: ContextType::Any,
+            required: true,
+            nullable: true,
+            sensitivity: Sensitivity::Public,
+        };
+        let selector = match resolve_binding(
+            &node.selector,
+            &expected,
+            &scope.values,
+            BindingLimits::default(),
+        ) {
+            Ok(selector) => selector.value,
+            Err(error) => {
+                return Ok(self.control_evaluation_failure(
+                    &node.id,
+                    "Switch",
+                    &format!("selector binding failed: {error}"),
+                    instance_prefix,
+                ))
+            }
+        };
+        let selected = node
+            .cases
+            .iter()
+            .find(|case| case.values.iter().any(|value| value == &selector));
+        let (selected_name, selected_graph) = if let Some(case) = selected {
+            (format!("case:{}", case.id), case.graph.as_ref())
+        } else if let Some(default) = node.default.as_deref() {
+            ("default".into(), default)
+        } else {
+            return Ok(self.control_evaluation_failure(
+                &node.id,
+                "Switch",
+                "selector matched no case and no default was declared",
+                instance_prefix,
+            ));
+        };
+        let mut child_scope = scope.clone();
+        let prefix =
+            nested_instance_prefix(instance_prefix, &format!("{}[{selected_name}]", node.id));
+        let child = self.execute_graph(selected_graph, &mut child_scope, &prefix, depth)?;
+        self.push_control_report(
+            &node.id,
+            "Switch",
+            if child.failed {
+                StepStatus::Failed
+            } else {
+                StepStatus::Satisfied
+            },
+            format!("selected {selected_name}"),
+            instance_prefix,
+        );
+        Ok(if child.failed {
+            GraphNodeResult::control_failure()
+        } else {
+            GraphNodeResult::control_success()
+        })
+    }
+
+    fn execute_for_each(
+        &mut self,
+        node: &ForEachNode,
+        scope: &GraphScopeState,
+        instance_prefix: &str,
+        depth: usize,
+    ) -> Result<GraphNodeResult> {
+        let item_type =
+            collection_item_type(&node.collection, &scope.schemas).unwrap_or(ContextType::Any);
+        if !self.opts.apply {
+            let mut symbolic = scope.clone();
+            insert_loop_value(
+                &mut symbolic,
+                &node.id,
+                0,
+                serde_json::Value::Null,
+                item_type,
+                Sensitivity::Public,
+            );
+            symbolic
+                .aliases
+                .insert(node.item_alias.clone(), FieldRef::loop_item(&node.id));
+            if let Some(alias) = &node.index_alias {
+                let index_scope = loop_index_scope(&node.id);
+                insert_loop_value(
+                    &mut symbolic,
+                    &index_scope,
+                    0,
+                    serde_json::Value::Null,
+                    ContextType::Integer,
+                    Sensitivity::Public,
+                );
+                symbolic
+                    .aliases
+                    .insert(alias.clone(), FieldRef::loop_item(index_scope));
+            }
+            let prefix = nested_instance_prefix(instance_prefix, &format!("{}[*]", node.id));
+            let body = self.execute_graph(&node.body, &mut symbolic, &prefix, depth)?;
+            self.push_control_report(
+                &node.id,
+                "For each",
+                if body.failed {
+                    StepStatus::Failed
+                } else {
+                    StepStatus::Pending
+                },
+                "planned one symbolic loop body; collection values are deferred until apply".into(),
+                instance_prefix,
+            );
+            return Ok(if body.failed {
+                GraphNodeResult::control_failure()
+            } else {
+                GraphNodeResult::control_planned(true)
+            });
+        }
+
+        let expected = ResolvedSchemaOwned {
+            value_type: ContextType::array(ContextType::Any),
+            required: true,
+            nullable: false,
+            sensitivity: Sensitivity::Secret,
+        };
+        let collection = match resolve_binding(
+            &node.collection,
+            &expected,
+            &scope.values,
+            BindingLimits::default(),
+        ) {
+            Ok(collection) => collection,
+            Err(error) => {
+                return Ok(self.control_evaluation_failure(
+                    &node.id,
+                    "For each",
+                    &format!("collection binding failed: {error}"),
+                    instance_prefix,
+                ))
+            }
+        };
+        let Some(items) = collection.value.as_array() else {
+            return Ok(self.control_evaluation_failure(
+                &node.id,
+                "For each",
+                "collection binding did not resolve to an array",
+                instance_prefix,
+            ));
+        };
+        self.budget.loop_iterations = self.budget.loop_iterations.saturating_add(items.len());
+        if self.budget.loop_iterations > GRAPH_MAX_LOOP_ITERATIONS {
+            bail!("workflow graph exceeds {GRAPH_MAX_LOOP_ITERATIONS} total loop iterations");
+        }
+
+        if items.is_empty() {
+            self.push_control_report(
+                &node.id,
+                "For each",
+                StepStatus::Satisfied,
+                "collection was empty".into(),
+                instance_prefix,
+            );
+            return Ok(GraphNodeResult {
+                ports: BTreeSet::from([EdgePort::Empty, EdgePort::Completed]),
+                successful: true,
+                failed: false,
+            });
+        }
+
+        // Two-phase execution: resolve and policy-check every iteration before
+        // the first body action can mutate the machine. A body action whose
+        // safety-critical binding depends on output produced by an earlier
+        // body action has no value during this phase and is rejected rather
+        // than allowing a later iteration to fail after partial application.
+        let mut preflight_budget = self.budget.clone();
+        preflight_budget.node_activations = preflight_budget.node_activations.saturating_add(1);
+        if preflight_budget.node_activations > GRAPH_MAX_NODE_ACTIVATIONS {
+            bail!("workflow graph preflight exceeds {GRAPH_MAX_NODE_ACTIVATIONS} node activations");
+        }
+        for (index, item) in items.iter().enumerate() {
+            let mut child_scope = scope.clone();
+            insert_loop_value(
+                &mut child_scope,
+                &node.id,
+                index,
+                item.clone(),
+                item_type.clone(),
+                collection.sensitivity,
+            );
+            child_scope
+                .aliases
+                .insert(node.item_alias.clone(), FieldRef::loop_item(&node.id));
+            if let Some(alias) = &node.index_alias {
+                let index_scope = loop_index_scope(&node.id);
+                insert_loop_value(
+                    &mut child_scope,
+                    &index_scope,
+                    index,
+                    serde_json::json!(index),
+                    ContextType::Integer,
+                    Sensitivity::Public,
+                );
+                child_scope
+                    .aliases
+                    .insert(alias.clone(), FieldRef::loop_item(index_scope));
+            }
+            self.preflight_iteration_graph(
+                &node.body,
+                &mut child_scope,
+                depth,
+                &mut preflight_budget,
+            )
+            .with_context(|| {
+                format!(
+                    "for-each {} iteration {} failed preflight before any iteration ran",
+                    node.id,
+                    index + 1
+                )
+            })?;
+        }
+
+        let mut failures = 0usize;
+        let mut completed = 0usize;
+        for (index, item) in items.iter().enumerate() {
+            let mut child_scope = scope.clone();
+            insert_loop_value(
+                &mut child_scope,
+                &node.id,
+                index,
+                item.clone(),
+                item_type.clone(),
+                collection.sensitivity,
+            );
+            child_scope
+                .aliases
+                .insert(node.item_alias.clone(), FieldRef::loop_item(&node.id));
+            if let Some(alias) = &node.index_alias {
+                let index_scope = loop_index_scope(&node.id);
+                insert_loop_value(
+                    &mut child_scope,
+                    &index_scope,
+                    index,
+                    serde_json::json!(index),
+                    ContextType::Integer,
+                    Sensitivity::Public,
+                );
+                child_scope
+                    .aliases
+                    .insert(alias.clone(), FieldRef::loop_item(index_scope));
+            }
+            let prefix =
+                nested_instance_prefix(instance_prefix, &format!("{}[{}]", node.id, index + 1));
+            let body = self.execute_graph(&node.body, &mut child_scope, &prefix, depth)?;
+            completed += 1;
+            if body.failed {
+                failures += 1;
+                if matches!(node.on_error, LoopFailurePolicy::Stop) {
+                    break;
+                }
+            }
+        }
+        let failed = failures > 0;
+        self.push_control_report(
+            &node.id,
+            "For each",
+            if failed {
+                StepStatus::Failed
+            } else {
+                StepStatus::Satisfied
+            },
+            format!(
+                "completed {completed} of {} iteration(s); {failures} failed; concurrency {} executes deterministically in sequence",
+                items.len(),
+                node.concurrency
+            ),
+            instance_prefix,
+        );
+        Ok(if failed {
+            GraphNodeResult::control_failure()
+        } else {
+            GraphNodeResult::control_success()
+        })
+    }
+
+    fn preflight_iteration_graph(
+        &self,
+        graph: &WorkflowGraph,
+        scope: &mut GraphScopeState,
+        depth: usize,
+        budget: &mut GraphExecutionBudget,
+    ) -> Result<()> {
+        if depth > GRAPH_MAX_DEPTH {
+            bail!("workflow graph nesting exceeds {GRAPH_MAX_DEPTH}");
+        }
+        for index in deterministic_graph_order(graph)? {
+            let node = &graph.nodes[index];
+            budget.node_activations = budget.node_activations.saturating_add(1);
+            if budget.node_activations > GRAPH_MAX_NODE_ACTIVATIONS {
+                bail!(
+                    "workflow graph preflight exceeds {GRAPH_MAX_NODE_ACTIVATIONS} node activations"
+                );
+            }
+            match node {
+                GraphNode::Action(node) => {
+                    match evaluate_graph_step_gate(&node.step, scope) {
+                        GraphStepGate::Run => {}
+                        GraphStepGate::Skip(_) => {
+                            insert_action_schema(&mut scope.schemas, &node.step);
+                            continue;
+                        }
+                        GraphStepGate::Fail(message) => bail!(message),
+                    }
+                    let materialized = materialize_step(
+                        &node.step,
+                        &node.bindings,
+                        &scope.values,
+                        BindingLimits::default(),
+                    )
+                    .with_context(|| {
+                        format!(
+                            "materialize action {}; bindings that depend on body-produced values are unsupported in loop preflight",
+                            node.step.id
+                        )
+                    })?;
+                    enforce_step_policy(&materialized, self.opts, self.terminal_interactive)?;
+                    insert_action_schema(&mut scope.schemas, &materialized);
+                }
+                GraphNode::ForEach(node) => {
+                    let expected = ResolvedSchemaOwned {
+                        value_type: ContextType::array(ContextType::Any),
+                        required: true,
+                        nullable: false,
+                        sensitivity: Sensitivity::Secret,
+                    };
+                    let collection = resolve_binding(
+                        &node.collection,
+                        &expected,
+                        &scope.values,
+                        BindingLimits::default(),
+                    )
+                    .with_context(|| {
+                        format!("resolve nested for-each {} during preflight", node.id)
+                    })?;
+                    let items = collection.value.as_array().with_context(|| {
+                        format!("nested for-each {} collection is not an array", node.id)
+                    })?;
+                    if items.len() > GRAPH_MAX_LOOP_ITERATIONS {
+                        bail!(
+                            "nested for-each {} exceeds {GRAPH_MAX_LOOP_ITERATIONS} iterations",
+                            node.id
+                        );
+                    }
+                    budget.loop_iterations = budget.loop_iterations.saturating_add(items.len());
+                    if budget.loop_iterations > GRAPH_MAX_LOOP_ITERATIONS {
+                        bail!(
+                            "workflow graph preflight exceeds {GRAPH_MAX_LOOP_ITERATIONS} total loop iterations"
+                        );
+                    }
+                    let item_type = collection_item_type(&node.collection, &scope.schemas)
+                        .unwrap_or(ContextType::Any);
+                    for (index, item) in items.iter().enumerate() {
+                        let mut child_scope = scope.clone();
+                        insert_loop_value(
+                            &mut child_scope,
+                            &node.id,
+                            index,
+                            item.clone(),
+                            item_type.clone(),
+                            collection.sensitivity,
+                        );
+                        child_scope
+                            .aliases
+                            .insert(node.item_alias.clone(), FieldRef::loop_item(&node.id));
+                        if let Some(alias) = &node.index_alias {
+                            let index_scope = loop_index_scope(&node.id);
+                            insert_loop_value(
+                                &mut child_scope,
+                                &index_scope,
+                                index,
+                                serde_json::json!(index),
+                                ContextType::Integer,
+                                Sensitivity::Public,
+                            );
+                            child_scope
+                                .aliases
+                                .insert(alias.clone(), FieldRef::loop_item(index_scope));
+                        }
+                        self.preflight_iteration_graph(
+                            &node.body,
+                            &mut child_scope,
+                            depth + 1,
+                            budget,
+                        )?;
+                    }
+                }
+                GraphNode::If(node) => match evaluate_graph_rule(&node.condition, scope)? {
+                    RuleEvaluation::True => self.preflight_iteration_graph(
+                        &node.then_graph,
+                        &mut scope.clone(),
+                        depth + 1,
+                        budget,
+                    )?,
+                    RuleEvaluation::False => {
+                        if let Some(graph) = node.else_graph.as_deref() {
+                            self.preflight_iteration_graph(
+                                graph,
+                                &mut scope.clone(),
+                                depth + 1,
+                                budget,
+                            )?;
+                        }
+                    }
+                    other => bail!(
+                        "if {} is indeterminate during loop preflight: {other:?}",
+                        node.id
+                    ),
+                },
+                GraphNode::Switch(node) => {
+                    let expected = ResolvedSchemaOwned {
+                        value_type: ContextType::Any,
+                        required: true,
+                        nullable: true,
+                        sensitivity: Sensitivity::Public,
+                    };
+                    let selector = resolve_binding(
+                        &node.selector,
+                        &expected,
+                        &scope.values,
+                        BindingLimits::default(),
+                    )?;
+                    let graph = node
+                        .cases
+                        .iter()
+                        .find(|case| case.values.contains(&selector.value))
+                        .map(|case| case.graph.as_ref())
+                        .or(node.default.as_deref())
+                        .with_context(|| {
+                            format!("switch {} matched no case during loop preflight", node.id)
+                        })?;
+                    self.preflight_iteration_graph(graph, &mut scope.clone(), depth + 1, budget)?;
+                }
+                GraphNode::Join(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn control_evaluation_failure(
+        &mut self,
+        id: &str,
+        name: &str,
+        message: &str,
+        instance_prefix: &str,
+    ) -> GraphNodeResult {
+        self.push_control_report(
+            id,
+            name,
+            StepStatus::Failed,
+            message.into(),
+            instance_prefix,
+        );
+        GraphNodeResult::control_failure()
+    }
+}
+
+fn collection_item_type(binding: &Binding, schemas: &ContextStore) -> Option<ContextType> {
+    let collection_type = match binding {
+        Binding::Literal { value } => ContextType::infer(value),
+        Binding::Field { field } => schemas.resolve_type_owned(field)?.value_type,
+        Binding::Template { .. } | Binding::Interpolated { .. } => ContextType::STRING,
+    };
+    match collection_type {
+        ContextType::Array { items } => Some(*items),
+        _ => None,
+    }
+}
+
+fn insert_loop_value(
+    scope: &mut GraphScopeState,
+    loop_id: &str,
+    index: usize,
+    value: serde_json::Value,
+    value_type: ContextType,
+    sensitivity: Sensitivity,
+) {
+    let context = ContextValue::new(
+        value,
+        ContextProvenance {
+            origin: ContextOrigin::LoopItem {
+                step_id: loop_id.into(),
+                index,
+            },
+            inputs: Vec::new(),
+            operation: Some("for-each-item".into()),
+        },
+    )
+    .with_type(value_type)
+    .sensitive(sensitivity);
+    let context_scope = ContextScope::LoopItem {
+        step_id: loop_id.into(),
+    };
+    scope.values.insert(context_scope.clone(), context.clone());
+    scope.schemas.insert(context_scope, context);
+}
+
+fn loop_index_scope(loop_id: &str) -> String {
+    format!("{loop_id}::index")
+}
+
+fn nested_instance_prefix(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.into()
+    } else {
+        format!("{parent}/{child}")
+    }
+}
+
+#[derive(Debug)]
+enum GraphStepGate {
+    Run,
+    Skip(String),
+    Fail(String),
+}
+
+fn evaluate_graph_step_gate(step: &Step, scope: &GraphScopeState) -> GraphStepGate {
+    if let Some(condition) = &step.when {
+        match evaluate_graph_condition(condition, scope) {
+            Ok(ConditionEvaluation::Matched(_)) => {}
+            Ok(ConditionEvaluation::NotMatched(reason))
+            | Ok(ConditionEvaluation::Unavailable(reason)) => {
+                return GraphStepGate::Skip(reason);
+            }
+            Err(error) => {
+                return GraphStepGate::Fail(format!(
+                    "step {} when condition failed to evaluate: {error:#}",
+                    step.id
+                ));
+            }
+        }
+    }
+    if let Some(condition) = &step.require {
+        match evaluate_graph_condition(condition, scope) {
+            Ok(ConditionEvaluation::Matched(_)) => {}
+            Ok(ConditionEvaluation::NotMatched(reason))
+            | Ok(ConditionEvaluation::Unavailable(reason)) => {
+                return GraphStepGate::Fail(format!(
+                    "step {} required condition was not met: {reason}",
+                    step.id
+                ));
+            }
+            Err(error) => {
+                return GraphStepGate::Fail(format!(
+                    "step {} required condition failed to evaluate: {error:#}",
+                    step.id
+                ));
+            }
+        }
+    }
+    GraphStepGate::Run
+}
+
+fn evaluate_graph_condition(
+    condition: &StepCondition,
+    scope: &GraphScopeState,
+) -> Result<ConditionEvaluation> {
+    match condition {
+        StepCondition::ExitCode { step, codes } => {
+            let reference = FieldRef::step(step).field("exit_code");
+            let exit_code = match scope.values.resolve(&reference) {
+                Ok(value) => value
+                    .value
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok()),
+                Err(_) => None,
+            };
+            let Some(exit_code) = exit_code else {
+                return Ok(ConditionEvaluation::Unavailable(format!(
+                    "step {step} produced no normal exit code"
+                )));
+            };
+            if codes.contains(&exit_code) {
+                Ok(ConditionEvaluation::Matched(format!(
+                    "step {step} returned accepted branch code {exit_code}"
+                )))
+            } else {
+                Ok(ConditionEvaluation::NotMatched(format!(
+                    "step {step} returned exit code {exit_code}; expected one of [{}]",
+                    format_exit_codes(codes)
+                )))
+            }
+        }
+        StepCondition::Path { path, expect } => {
+            let action = InspectPathAction {
+                path: path.clone(),
+                recursive_size: expect.min_size_bytes.is_some() || expect.max_size_bytes.is_some(),
+                sha256: expect.sha256.is_some(),
+                expect: Some(expect.clone()),
+            };
+            let metadata = inspect_path(&action)?;
+            match verify_path_expectation(expect, &metadata) {
+                Ok(()) => Ok(ConditionEvaluation::Matched(summarize_path_metadata(
+                    &metadata,
+                ))),
+                Err(error) => Ok(ConditionEvaluation::NotMatched(error.to_string())),
+            }
+        }
+        StepCondition::All { conditions } => {
+            let mut matched = Vec::new();
+            let mut unavailable = Vec::new();
+            for child in conditions {
+                match evaluate_graph_condition(child, scope)? {
+                    ConditionEvaluation::Matched(reason) => matched.push(reason),
+                    ConditionEvaluation::NotMatched(reason) => {
+                        return Ok(ConditionEvaluation::NotMatched(format!(
+                            "all condition failed: {reason}"
+                        )))
+                    }
+                    ConditionEvaluation::Unavailable(reason) => unavailable.push(reason),
+                }
+            }
+            if unavailable.is_empty() {
+                Ok(ConditionEvaluation::Matched(format!(
+                    "all conditions matched: {}",
+                    matched.join("; ")
+                )))
+            } else {
+                Ok(ConditionEvaluation::Unavailable(format!(
+                    "all condition is unavailable: {}",
+                    unavailable.join("; ")
+                )))
+            }
+        }
+        StepCondition::Any { conditions } => {
+            let mut unmatched = Vec::new();
+            let mut unavailable = Vec::new();
+            for child in conditions {
+                match evaluate_graph_condition(child, scope)? {
+                    ConditionEvaluation::Matched(reason) => {
+                        return Ok(ConditionEvaluation::Matched(format!(
+                            "any condition matched: {reason}"
+                        )))
+                    }
+                    ConditionEvaluation::NotMatched(reason) => unmatched.push(reason),
+                    ConditionEvaluation::Unavailable(reason) => unavailable.push(reason),
+                }
+            }
+            if unavailable.is_empty() {
+                Ok(ConditionEvaluation::NotMatched(format!(
+                    "no any branch matched: {}",
+                    unmatched.join("; ")
+                )))
+            } else {
+                Ok(ConditionEvaluation::Unavailable(format!(
+                    "any condition is unavailable: {}",
+                    unavailable.join("; ")
+                )))
+            }
+        }
+        StepCondition::Not { condition } => match evaluate_graph_condition(condition, scope)? {
+            ConditionEvaluation::Matched(reason) => Ok(ConditionEvaluation::NotMatched(format!(
+                "negated condition matched: {reason}"
+            ))),
+            ConditionEvaluation::NotMatched(reason) => Ok(ConditionEvaluation::Matched(format!(
+                "negated condition did not match: {reason}"
+            ))),
+            ConditionEvaluation::Unavailable(reason) => Ok(ConditionEvaluation::Unavailable(
+                format!("negated condition is unavailable: {reason}"),
+            )),
+        },
+        StepCondition::Expression { rule, policy } => match evaluate_graph_rule(rule, scope)? {
+            RuleEvaluation::True => Ok(ConditionEvaluation::Matched(
+                "context rule evaluated to true".into(),
+            )),
+            RuleEvaluation::False => Ok(ConditionEvaluation::NotMatched(
+                "context rule evaluated to false".into(),
+            )),
+            RuleEvaluation::Null => {
+                apply_indeterminate_policy(policy.on_null, "context rule evaluated to null")
+            }
+            RuleEvaluation::Missing(issue) => apply_indeterminate_policy(
+                policy.on_missing,
+                &format!("context rule input is missing: {}", issue.message),
+            ),
+            RuleEvaluation::Unknown(issue) => apply_indeterminate_policy(
+                policy.on_unknown,
+                &format!("context rule input is unavailable: {}", issue.message),
+            ),
+            RuleEvaluation::Error(error) => bail!(
+                "context rule evaluation failed ({:?}): {}",
+                error.kind,
+                error.message
+            ),
+        },
+    }
+}
+
+fn evaluate_graph_rule(rule: &RuleExprV1, scope: &GraphScopeState) -> Result<RuleEvaluation> {
+    let mut rewritten = rule.clone();
+    rewrite_graph_locals(
+        &mut rewritten,
+        &scope.aliases,
+        &mut BTreeSet::<String>::new(),
+    );
+    let checked = check_rule(rewritten, &scope.schemas, ExpressionLimits::default()).map_err(
+        |diagnostics| {
+            anyhow!(
+                "context rule failed type-check: {}",
+                diagnostics
+                    .into_iter()
+                    .map(|diagnostic| format!(
+                        "{:?} at {}: {}",
+                        diagnostic.code, diagnostic.location, diagnostic.message
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        },
+    )?;
+    Ok(checked.evaluate_rule(&scope.values))
+}
+
+fn rewrite_graph_locals(
+    expression: &mut ExpressionV1,
+    aliases: &BTreeMap<String, FieldRef>,
+    quantifier_bindings: &mut BTreeSet<String>,
+) {
+    match expression {
+        ExpressionV1::Literal { .. } => {}
+        ExpressionV1::Ref { reference } | ExpressionV1::Exists { reference } => {
+            rewrite_graph_reference(reference, aliases, quantifier_bindings);
+        }
+        ExpressionV1::All { expressions } | ExpressionV1::Any { expressions } => {
+            for expression in expressions {
+                rewrite_graph_locals(expression, aliases, quantifier_bindings);
+            }
+        }
+        ExpressionV1::Not { expression }
+        | ExpressionV1::IsNull { expression }
+        | ExpressionV1::IsEmpty { expression } => {
+            rewrite_graph_locals(expression, aliases, quantifier_bindings);
+        }
+        ExpressionV1::Compare { left, right, .. } => {
+            rewrite_graph_locals(left, aliases, quantifier_bindings);
+            rewrite_graph_locals(right, aliases, quantifier_bindings);
+        }
+        ExpressionV1::Contains { value, needle } => {
+            rewrite_graph_locals(value, aliases, quantifier_bindings);
+            rewrite_graph_locals(needle, aliases, quantifier_bindings);
+        }
+        ExpressionV1::StartsWith { value, prefix } => {
+            rewrite_graph_locals(value, aliases, quantifier_bindings);
+            rewrite_graph_locals(prefix, aliases, quantifier_bindings);
+        }
+        ExpressionV1::EndsWith { value, suffix } => {
+            rewrite_graph_locals(value, aliases, quantifier_bindings);
+            rewrite_graph_locals(suffix, aliases, quantifier_bindings);
+        }
+        ExpressionV1::Matches { value, .. } => {
+            rewrite_graph_locals(value, aliases, quantifier_bindings);
+        }
+        ExpressionV1::In { needle, collection } => {
+            rewrite_graph_locals(needle, aliases, quantifier_bindings);
+            rewrite_graph_locals(collection, aliases, quantifier_bindings);
+        }
+        ExpressionV1::Quantifier {
+            collection,
+            binding,
+            predicate,
+            ..
+        } => {
+            rewrite_graph_locals(collection, aliases, quantifier_bindings);
+            let was_present = !quantifier_bindings.insert(binding.clone());
+            rewrite_graph_locals(predicate, aliases, quantifier_bindings);
+            if !was_present {
+                quantifier_bindings.remove(binding);
+            }
+        }
+    }
+}
+
+fn rewrite_graph_reference(
+    reference: &mut ReferenceV1,
+    aliases: &BTreeMap<String, FieldRef>,
+    quantifier_bindings: &BTreeSet<String>,
+) {
+    let ReferenceV1::Local { binding, path } = reference else {
+        return;
+    };
+    if quantifier_bindings.contains(binding) {
+        return;
+    }
+    let Some(mut field) = aliases.get(binding).cloned() else {
+        return;
+    };
+    field
+        .segments
+        .extend(path.iter().cloned().map(ContextPathSegment::field));
+    *reference = ReferenceV1::Context { field };
+}
+
+fn deterministic_graph_order(graph: &WorkflowGraph) -> Result<Vec<usize>> {
+    let mut processed = BTreeSet::<String>::new();
+    let mut order = Vec::with_capacity(graph.nodes.len());
+    while order.len() < graph.nodes.len() {
+        let next = graph.nodes.iter().enumerate().find(|(_, node)| {
+            !processed.contains(node.id())
+                && graph
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.to.node == node.id())
+                    .all(|edge| processed.contains(&edge.from.node))
+        });
+        let Some((index, node)) = next else {
+            bail!("workflow graph is cyclic or has an unresolved predecessor");
+        };
+        processed.insert(node.id().to_owned());
+        order.push(index);
+    }
+    Ok(order)
+}
+
+fn insert_action_schema(store: &mut ContextStore, step: &Step) {
+    let definition = definition_for_action(&step.action);
+    store.insert(
+        ContextScope::Step {
+            step_id: step.id.clone(),
+        },
+        ContextValue::new(serde_json::Value::Null, ContextProvenance::step(&step.id))
+            .with_schema(definition.output_schema),
+    );
+}
+
+fn display_instance_prefix(prefix: &str) -> String {
+    if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}: ")
+    }
 }
 
 fn enforce_step_policy(step: &Step, opts: &RunOptions, terminal_interactive: bool) -> Result<()> {
@@ -909,10 +3212,8 @@ fn resolve_for_each_items(
         .output
         .as_ref()
         .with_context(|| format!("source step {source_step} has no output context"))?;
-    let serialized = serde_json::to_value(output).context("serialize source step output")?;
-    let mut current = serialized
-        .get("value")
-        .context("source step output has no value")?;
+    let serialized = output.context_value()?;
+    let mut current = &serialized;
     for segment in array_path.split('.').filter(|segment| !segment.is_empty()) {
         current = current
             .get(segment)
@@ -1133,7 +3434,7 @@ fn validate_condition_paths(condition: &StepCondition) -> Result<()> {
             }
         }
         StepCondition::Not { condition } => validate_condition_paths(condition)?,
-        StepCondition::ExitCode { .. } => {}
+        StepCondition::ExitCode { .. } | StepCondition::Expression { .. } => {}
     }
     Ok(())
 }
@@ -1679,6 +3980,10 @@ fn describe_condition(condition: &StepCondition) -> String {
                 .join("; ")
         ),
         StepCondition::Not { condition } => format!("not ({})", describe_condition(condition)),
+        StepCondition::Expression { policy, .. } => format!(
+            "typed context rule (null: {:?}, missing: {:?}, unknown: {:?})",
+            policy.on_null, policy.on_missing, policy.on_unknown
+        ),
     }
 }
 
@@ -1700,6 +4005,8 @@ enum ConditionEvaluation {
 fn evaluate_condition(
     condition: &StepCondition,
     completed_steps: &[StepReport],
+    task: &Task,
+    consumer_step_id: &str,
 ) -> Result<ConditionEvaluation> {
     match condition {
         StepCondition::ExitCode { step, codes } => {
@@ -1758,7 +4065,7 @@ fn evaluate_condition(
             let mut matched = Vec::with_capacity(conditions.len());
             let mut unavailable = Vec::new();
             for child in conditions {
-                match evaluate_condition(child, completed_steps)? {
+                match evaluate_condition(child, completed_steps, task, consumer_step_id)? {
                     ConditionEvaluation::Matched(reason) => matched.push(reason),
                     ConditionEvaluation::NotMatched(reason) => {
                         return Ok(ConditionEvaluation::NotMatched(format!(
@@ -1783,7 +4090,7 @@ fn evaluate_condition(
             let mut unmatched = Vec::with_capacity(conditions.len());
             let mut unavailable = Vec::new();
             for child in conditions {
-                match evaluate_condition(child, completed_steps)? {
+                match evaluate_condition(child, completed_steps, task, consumer_step_id)? {
                     ConditionEvaluation::Matched(reason) => {
                         return Ok(ConditionEvaluation::Matched(format!(
                             "any condition matched: {reason}"
@@ -1804,17 +4111,73 @@ fn evaluate_condition(
                 unmatched.join("; ")
             )))
         }
-        StepCondition::Not { condition } => match evaluate_condition(condition, completed_steps)? {
-            ConditionEvaluation::Matched(reason) => Ok(ConditionEvaluation::NotMatched(format!(
-                "negated condition matched: {reason}"
-            ))),
-            ConditionEvaluation::NotMatched(reason) => Ok(ConditionEvaluation::Matched(format!(
-                "negated condition did not match: {reason}"
-            ))),
-            ConditionEvaluation::Unavailable(reason) => Ok(ConditionEvaluation::Unavailable(
-                format!("negated condition is unavailable: {reason}"),
-            )),
-        },
+        StepCondition::Not { condition } => {
+            match evaluate_condition(condition, completed_steps, task, consumer_step_id)? {
+                ConditionEvaluation::Matched(reason) => Ok(ConditionEvaluation::NotMatched(
+                    format!("negated condition matched: {reason}"),
+                )),
+                ConditionEvaluation::NotMatched(reason) => Ok(ConditionEvaluation::Matched(
+                    format!("negated condition did not match: {reason}"),
+                )),
+                ConditionEvaluation::Unavailable(reason) => Ok(ConditionEvaluation::Unavailable(
+                    format!("negated condition is unavailable: {reason}"),
+                )),
+            }
+        }
+        StepCondition::Expression { rule, policy } => {
+            let schemas = context_schema_store_before(task, consumer_step_id)?;
+            let values = context_store_from_reports(task, completed_steps)?;
+            let checked = check_rule(rule.clone(), &schemas, ExpressionLimits::default()).map_err(
+                |diagnostics| {
+                    anyhow!(
+                        "context rule failed type-check: {}",
+                        diagnostics
+                            .into_iter()
+                            .map(|diagnostic| format!(
+                                "{:?} at {}: {}",
+                                diagnostic.code, diagnostic.location, diagnostic.message
+                            ))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    )
+                },
+            )?;
+            match checked.evaluate_rule(&values) {
+                RuleEvaluation::True => Ok(ConditionEvaluation::Matched(
+                    "context rule evaluated to true".into(),
+                )),
+                RuleEvaluation::False => Ok(ConditionEvaluation::NotMatched(
+                    "context rule evaluated to false".into(),
+                )),
+                RuleEvaluation::Null => {
+                    apply_indeterminate_policy(policy.on_null, "context rule evaluated to null")
+                }
+                RuleEvaluation::Missing(issue) => apply_indeterminate_policy(
+                    policy.on_missing,
+                    &format!("context rule input is missing: {}", issue.message),
+                ),
+                RuleEvaluation::Unknown(issue) => apply_indeterminate_policy(
+                    policy.on_unknown,
+                    &format!("context rule input is unavailable: {}", issue.message),
+                ),
+                RuleEvaluation::Error(error) => bail!(
+                    "context rule evaluation failed ({:?}): {}",
+                    error.kind,
+                    error.message
+                ),
+            }
+        }
+    }
+}
+
+fn apply_indeterminate_policy(
+    policy: IndeterminatePolicy,
+    reason: &str,
+) -> Result<ConditionEvaluation> {
+    match policy {
+        IndeterminatePolicy::Fail => bail!("{reason}"),
+        IndeterminatePolicy::TreatAsFalse => Ok(ConditionEvaluation::NotMatched(reason.into())),
+        IndeterminatePolicy::TreatAsTrue => Ok(ConditionEvaluation::Matched(reason.into())),
     }
 }
 
@@ -1935,8 +4298,7 @@ fn apply_step(step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
             cwd,
             env,
             shell,
-        } => apply_run_command(program, args, cwd.as_deref(), env, *shell)
-            .map(ApplyStepResult::Applied),
+        } => apply_run_command(program, args, cwd.as_deref(), env, *shell),
         Action::RunScript {
             interpreter,
             script,
@@ -5129,7 +7491,7 @@ fn apply_run_command(
     cwd: Option<&str>,
     env: &BTreeMap<String, String>,
     shell: ShellMode,
-) -> Result<String> {
+) -> Result<ApplyStepResult> {
     let mut command = if matches!(shell, ShellMode::Allow) {
         let shell_command = render_shell_command(program, args);
         let mut shell_runner = Command::new("/bin/sh");
@@ -5151,11 +7513,37 @@ fn apply_run_command(
     for (key, value) in env {
         command.env(key, expand_env_value(value)?);
     }
-    command
+    let status = command
         .status()
-        .with_context(|| format!("run command {}", program))?
-        .exit_ok(program)?;
-    Ok(format!("ran {}", render_command(program, args, cwd)))
+        .with_context(|| format!("run command {}", program))?;
+    let exit_code = status.code().map(|code| code as u32);
+    let termination_signal = process_termination_signal(&status);
+    let accepted = status.success();
+    let output = StepOutput::ProcessExit(ProcessExitOutput {
+        exit_code,
+        termination_signal,
+        accepted,
+        success_exit_codes: vec![0],
+    });
+    let command_label = render_command(program, args, cwd);
+    if accepted {
+        return Ok(ApplyStepResult::AppliedWithOutput {
+            summary: format!("ran {command_label}"),
+            output,
+        });
+    }
+    let error = match exit_code {
+        Some(code) => format!("{} failed with exit code {}", program, code),
+        None => match termination_signal {
+            Some(signal) => format!("{} terminated by signal {}", program, signal),
+            None => format!("{} did not exit normally", program),
+        },
+    };
+    Ok(ApplyStepResult::Failed {
+        summary: error.clone(),
+        error,
+        output: Some(output),
+    })
 }
 
 fn apply_run_script(
@@ -5647,6 +8035,10 @@ pub fn extracted_path_is_safe(root: &Path, rel: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::automation::context::TemplatePart;
+    use crate::automation::expression::ExpressionValue;
+    use crate::automation::graph::{GraphEdge, SwitchCase};
+    use crate::automation::loader::{PackTrust, TaskPack, TaskSource};
     use crate::automation::task::{
         ActivateLicenseAction, AppBundleIdentity, AppStoreInstallAction, Checksum, CopyPathAction,
         CreateDirectoryAction, InspectPathAction, PathExpectation, PathKind, RemovePathAction,
@@ -5664,6 +8056,7 @@ mod tests {
             scenarios: Vec::new(),
             resolved_scenarios: Vec::new(),
             steps: vec![step],
+            graph: None,
         }
     }
 
@@ -5809,6 +8202,1011 @@ mod tests {
             require: None,
             action,
         }
+    }
+
+    fn graph_task(graph: WorkflowGraph) -> Task {
+        let mut task = base_task(plain_step(
+            "placeholder",
+            Action::RunCommand {
+                program: "/usr/bin/true".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        ));
+        task.steps.clear();
+        task.graph = Some(graph);
+        task
+    }
+
+    fn action_node(step: Step, bindings: BTreeMap<String, Binding>) -> GraphNode {
+        GraphNode::Action(Box::new(ActionNode { step, bindings }))
+    }
+
+    fn one_action_graph(step: Step, bindings: BTreeMap<String, Binding>) -> WorkflowGraph {
+        WorkflowGraph {
+            entries: vec![step.id.clone()],
+            nodes: vec![action_node(step, bindings)],
+            ..WorkflowGraph::default()
+        }
+    }
+
+    #[test]
+    fn graph_action_materializes_github_repository_into_clone_plan() {
+        let mut scope = GraphScopeState::default();
+        let producer = plain_step("github", Action::GithubListRepositories);
+        let definition = definition_for_action(&producer.action);
+        scope.values.insert(
+            ContextScope::Step {
+                step_id: producer.id.clone(),
+            },
+            ContextValue::new(
+                serde_json::json!({
+                    "github": {
+                        "account": { "login": "octocat" },
+                        "repositories": [{
+                            "id": "42",
+                            "owner": "octocat",
+                            "name": "hello-world",
+                            "full_name": "octocat/hello-world",
+                            "https_url": "https://github.com/octocat/hello-world.git",
+                            "ssh_url": "git@github.com:octocat/hello-world.git",
+                            "default_branch": "main",
+                            "private": false,
+                            "archived": false
+                        }]
+                    }
+                }),
+                ContextProvenance::step(&producer.id),
+            )
+            .with_schema(definition.output_schema.clone()),
+        );
+        scope.schemas.insert(
+            ContextScope::Step {
+                step_id: producer.id.clone(),
+            },
+            ContextValue::new(
+                serde_json::Value::Null,
+                ContextProvenance::step(&producer.id),
+            )
+            .with_schema(definition.output_schema),
+        );
+        let repository = FieldRef::step("github")
+            .field("github")
+            .field("repositories")
+            .index(0);
+        let clone = ActionNode {
+            step: plain_step(
+                "clone",
+                Action::GitCloneIfMissing {
+                    repo: "https://github.com/example/example.git".into(),
+                    dest: "$HOME/Developer/example/example".into(),
+                    branch: Some("main".into()),
+                },
+            ),
+            bindings: BTreeMap::from([
+                (
+                    "repo".into(),
+                    Binding::field(repository.clone().field("https_url")),
+                ),
+                (
+                    "dest".into(),
+                    Binding::interpolated([
+                        TemplatePart::literal("$HOME/Developer/"),
+                        TemplatePart::field(repository.clone().field("owner")),
+                        TemplatePart::literal("/"),
+                        TemplatePart::field(repository.clone().field("name")),
+                    ]),
+                ),
+                (
+                    "branch".into(),
+                    Binding::field(repository.field("default_branch")),
+                ),
+            ]),
+        };
+        let task = graph_task(one_action_graph(clone.step.clone(), clone.bindings.clone()));
+        let opts = RunOptions::default();
+        let mut runtime = GraphRuntime {
+            task: &task,
+            opts: &opts,
+            terminal_interactive: false,
+            accumulator: GraphRunAccumulator::default(),
+            budget: GraphExecutionBudget::default(),
+        };
+
+        let result = runtime.execute_action(&clone, &mut scope, "").unwrap();
+
+        assert!(result.successful);
+        assert_eq!(runtime.accumulator.plans.len(), 1);
+        let summary = &runtime.accumulator.plans[0].summary;
+        assert!(summary.contains("https://github.com/octocat/hello-world.git"));
+        assert!(summary.contains("$HOME/Developer/octocat/hello-world"));
+        assert!(summary.contains("branch main"));
+    }
+
+    #[test]
+    fn graph_if_runs_only_the_selected_branch() {
+        let then_step = plain_step(
+            "then-action",
+            Action::RunCommand {
+                program: "/usr/bin/true".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let else_step = plain_step(
+            "else-action",
+            Action::RunCommand {
+                program: "/usr/bin/false".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["choose".into()],
+            nodes: vec![GraphNode::If(IfNode {
+                id: "choose".into(),
+                condition: ExpressionV1::Literal {
+                    value: ExpressionValue::Bool(true),
+                },
+                then_graph: Box::new(one_action_graph(then_step, BTreeMap::new())),
+                else_graph: Some(Box::new(one_action_graph(else_step, BTreeMap::new()))),
+            })],
+            ..WorkflowGraph::default()
+        };
+
+        let task = graph_task(graph);
+        let planned = run_task(&task, &RunOptions::default()).unwrap();
+        assert_eq!(
+            planned.plans.len(),
+            2,
+            "planning must expose both conditional branches"
+        );
+
+        let report = apply_test_task(&task);
+
+        assert!(report
+            .steps
+            .iter()
+            .any(|step| step.step_id == "choose[then]/then-action"));
+        assert!(!report
+            .steps
+            .iter()
+            .any(|step| step.step_id.contains("else-action")));
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn graph_switch_runs_the_first_matching_case() {
+        let red = plain_step(
+            "red-action",
+            Action::RunCommand {
+                program: "/usr/bin/false".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let green = plain_step(
+            "green-action",
+            Action::RunCommand {
+                program: "/usr/bin/true".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["color".into()],
+            nodes: vec![GraphNode::Switch(SwitchNode {
+                id: "color".into(),
+                selector: Binding::literal("green"),
+                cases: vec![
+                    SwitchCase {
+                        id: "red".into(),
+                        values: vec![serde_json::json!("red")],
+                        graph: Box::new(one_action_graph(red, BTreeMap::new())),
+                    },
+                    SwitchCase {
+                        id: "green".into(),
+                        values: vec![serde_json::json!("green")],
+                        graph: Box::new(one_action_graph(green, BTreeMap::new())),
+                    },
+                ],
+                default: None,
+            })],
+            ..WorkflowGraph::default()
+        };
+
+        let task = graph_task(graph);
+        let planned = run_task(&task, &RunOptions::default()).unwrap();
+        assert_eq!(
+            planned.plans.len(),
+            2,
+            "planning must expose every switch case"
+        );
+
+        let report = apply_test_task(&task);
+
+        assert!(report
+            .steps
+            .iter()
+            .any(|step| step.step_id == "color[case:green]/green-action"));
+        assert!(!report
+            .steps
+            .iter()
+            .any(|step| step.step_id.contains("red-action")));
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn graph_for_each_binds_scalar_and_object_items() {
+        let scalar_action = plain_step(
+            "scalar-action",
+            Action::RunCommand {
+                program: "/usr/bin/true".into(),
+                args: vec!["placeholder".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let object_action = plain_step(
+            "object-action",
+            Action::RunCommand {
+                program: "/usr/bin/true".into(),
+                args: vec!["placeholder".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let scalar_loop = GraphNode::ForEach(ForEachNode {
+            id: "scalar-loop".into(),
+            collection: Binding::literal(serde_json::json!(["one", "two"])),
+            item_alias: "item".into(),
+            index_alias: None,
+            concurrency: 8,
+            on_error: LoopFailurePolicy::Stop,
+            body: Box::new(one_action_graph(
+                scalar_action,
+                BTreeMap::from([(
+                    "/args/0".into(),
+                    Binding::field(FieldRef::loop_item("scalar-loop")),
+                )]),
+            )),
+        });
+        let object_loop = GraphNode::ForEach(ForEachNode {
+            id: "object-loop".into(),
+            collection: Binding::literal(serde_json::json!([
+                { "name": "alpha" },
+                { "name": "beta" }
+            ])),
+            item_alias: "repository".into(),
+            index_alias: Some("index".into()),
+            concurrency: 2,
+            on_error: LoopFailurePolicy::Continue,
+            body: Box::new(one_action_graph(
+                object_action,
+                BTreeMap::from([(
+                    "/args/0".into(),
+                    Binding::field(FieldRef::loop_item("object-loop").field("name")),
+                )]),
+            )),
+        });
+        let graph = WorkflowGraph {
+            entries: vec!["scalar-loop".into()],
+            nodes: vec![scalar_loop, object_loop],
+            edges: vec![GraphEdge::new(
+                "scalar-loop",
+                EdgePort::Completed,
+                "object-loop",
+            )],
+            ..WorkflowGraph::default()
+        };
+
+        let report = apply_test_task(&graph_task(graph));
+
+        assert_eq!(
+            report
+                .steps
+                .iter()
+                .filter(|step| step.step_id.contains("scalar-action"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            report
+                .steps
+                .iter()
+                .filter(|step| step.step_id.contains("object-action"))
+                .count(),
+            2
+        );
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn graph_failure_port_activates_recovery_action() {
+        let fail = plain_step(
+            "fail",
+            Action::RunCommand {
+                program: "/usr/bin/false".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let recover = plain_step(
+            "recover",
+            Action::RunCommand {
+                program: "/usr/bin/true".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["fail".into()],
+            nodes: vec![
+                action_node(fail, BTreeMap::new()),
+                action_node(recover, BTreeMap::new()),
+            ],
+            edges: vec![GraphEdge::new("fail", EdgePort::Failure, "recover")],
+            ..WorkflowGraph::default()
+        };
+
+        let task = graph_task(graph);
+        let planned = run_task(&task, &RunOptions::default()).unwrap();
+        assert_eq!(
+            planned.plans.len(),
+            2,
+            "planning must expose the possible recovery path"
+        );
+
+        let report = apply_test_task(&task);
+
+        assert!(matches!(report.steps[0].status, StepStatus::Failed));
+        assert!(report.steps.iter().any(|step| {
+            step.step_id == "recover" && matches!(step.status, StepStatus::Applied)
+        }));
+        assert!(
+            report.errors.is_empty(),
+            "an explicitly routed and successfully recovered failure must not fail the task"
+        );
+    }
+
+    #[test]
+    fn graph_join_modes_have_explicit_failure_semantics() {
+        let task = graph_task(one_action_graph(
+            plain_step(
+                "placeholder",
+                Action::RunCommand {
+                    program: "/usr/bin/true".into(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    shell: ShellMode::Forbidden,
+                },
+            ),
+            BTreeMap::new(),
+        ));
+        let opts = RunOptions {
+            apply: true,
+            ..RunOptions::default()
+        };
+        let mut runtime = GraphRuntime {
+            task: &task,
+            opts: &opts,
+            terminal_interactive: false,
+            accumulator: GraphRunAccumulator::default(),
+            budget: GraphExecutionBudget::default(),
+        };
+        let mixed = [GraphSignal::Failed, GraphSignal::Successful];
+        let failed = [GraphSignal::Failed, GraphSignal::Failed];
+
+        let all = runtime
+            .execute_join(
+                &JoinNode {
+                    id: "all".into(),
+                    mode: JoinMode::All,
+                },
+                &mixed,
+                2,
+                "",
+            )
+            .unwrap();
+        let any = runtime
+            .execute_join(
+                &JoinNode {
+                    id: "any".into(),
+                    mode: JoinMode::Any,
+                },
+                &failed,
+                2,
+                "",
+            )
+            .unwrap();
+        let first_successful = runtime
+            .execute_join(
+                &JoinNode {
+                    id: "first".into(),
+                    mode: JoinMode::FirstSuccessful,
+                },
+                &mixed,
+                2,
+                "",
+            )
+            .unwrap();
+        let no_success = runtime
+            .execute_join(
+                &JoinNode {
+                    id: "none".into(),
+                    mode: JoinMode::FirstSuccessful,
+                },
+                &failed,
+                2,
+                "",
+            )
+            .unwrap();
+
+        assert!(all.failed);
+        assert!(!any.failed, "any joins on arrival, regardless of status");
+        assert!(!first_successful.failed);
+        assert!(no_success.failed);
+    }
+
+    #[test]
+    fn graph_all_join_treats_unselected_diamond_path_as_skipped() {
+        let branch = plain_step(
+            "branch",
+            Action::RunCommand {
+                program: "/usr/bin/true".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let left = plain_step(
+            "left",
+            Action::RunCommand {
+                program: "/usr/bin/true".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let right = plain_step(
+            "right",
+            Action::RunCommand {
+                program: "/usr/bin/true".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let after = plain_step(
+            "after",
+            Action::RunCommand {
+                program: "/usr/bin/true".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["branch".into()],
+            nodes: vec![
+                action_node(branch, BTreeMap::new()),
+                action_node(left, BTreeMap::new()),
+                action_node(right, BTreeMap::new()),
+                GraphNode::Join(JoinNode {
+                    id: "merge".into(),
+                    mode: JoinMode::All,
+                }),
+                action_node(after, BTreeMap::new()),
+            ],
+            edges: vec![
+                GraphEdge::new("branch", EdgePort::Success, "left"),
+                GraphEdge::new("branch", EdgePort::Failure, "right"),
+                GraphEdge::new("left", EdgePort::Success, "merge"),
+                GraphEdge::new("right", EdgePort::Success, "merge"),
+                GraphEdge::new("merge", EdgePort::Completed, "after"),
+            ],
+            ..WorkflowGraph::default()
+        };
+
+        let report = apply_test_task(&graph_task(graph));
+
+        assert!(report
+            .steps
+            .iter()
+            .any(|step| step.step_id == "merge" && step.summary.contains("1 skipped")));
+        assert!(report
+            .steps
+            .iter()
+            .any(|step| { step.step_id == "after" && matches!(step.status, StepStatus::Applied) }));
+        assert!(!report.steps.iter().any(|step| step.step_id == "right"));
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn migrated_when_skip_continues_over_success_edge() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        let mut skipped = plain_step(
+            "conditional",
+            Action::RunCommand {
+                program: "/usr/bin/false".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        skipped.when = Some(StepCondition::Path {
+            path: missing.to_string_lossy().into_owned(),
+            expect: PathExpectation {
+                exists: Some(true),
+                ..PathExpectation::default()
+            },
+        });
+        let next = plain_step(
+            "next",
+            Action::RunCommand {
+                program: "/usr/bin/true".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let graph = WorkflowGraph::from_linear_v1(&[skipped, next]).unwrap();
+
+        let report = apply_test_task(&graph_task(graph));
+
+        assert!(matches!(report.steps[0].status, StepStatus::Skipped));
+        assert!(report
+            .steps
+            .iter()
+            .any(|step| { step.step_id == "next" && matches!(step.status, StepStatus::Applied) }));
+    }
+
+    #[test]
+    fn graph_when_is_evaluated_before_unavailable_action_bindings() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        let guard = StepCondition::Path {
+            path: missing.to_string_lossy().into_owned(),
+            expect: PathExpectation {
+                exists: Some(true),
+                ..PathExpectation::default()
+            },
+        };
+        let mut source = plain_step(
+            "source",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: temp.path().join("source").to_string_lossy().into_owned(),
+            }),
+        );
+        source.when = Some(guard.clone());
+        let mut consumer = plain_step(
+            "consumer",
+            Action::InspectPath(InspectPathAction {
+                path: temp.path().join("consumer").to_string_lossy().into_owned(),
+                recursive_size: false,
+                sha256: false,
+                expect: None,
+            }),
+        );
+        consumer.when = Some(guard);
+        let graph = WorkflowGraph {
+            entries: vec!["source".into()],
+            nodes: vec![
+                action_node(source, BTreeMap::new()),
+                action_node(
+                    consumer,
+                    BTreeMap::from([(
+                        "recursive_size".into(),
+                        Binding::field(FieldRef::step("source").field("path").field("created")),
+                    )]),
+                ),
+            ],
+            edges: vec![GraphEdge::new("source", EdgePort::Success, "consumer")],
+            ..WorkflowGraph::default()
+        };
+
+        let report = apply_test_task(&graph_task(graph));
+
+        assert_eq!(report.steps.len(), 2);
+        assert!(report
+            .steps
+            .iter()
+            .all(|step| matches!(step.status, StepStatus::Skipped)));
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn foreach_preflights_all_items_before_first_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let safe = temp.path().join("safe");
+        let unsafe_path = "/System/ppduster-graph-preflight-must-not-exist";
+        let action = plain_step(
+            "mkdir",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: temp
+                    .path()
+                    .join("placeholder")
+                    .to_string_lossy()
+                    .into_owned(),
+            }),
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["paths".into()],
+            nodes: vec![GraphNode::ForEach(ForEachNode {
+                id: "paths".into(),
+                collection: Binding::literal(serde_json::json!([
+                    safe.to_string_lossy(),
+                    unsafe_path
+                ])),
+                item_alias: "path".into(),
+                index_alias: None,
+                concurrency: 1,
+                on_error: LoopFailurePolicy::Stop,
+                body: Box::new(one_action_graph(
+                    action,
+                    BTreeMap::from([(
+                        "path".into(),
+                        Binding::interpolated([TemplatePart::field(FieldRef::loop_item("paths"))]),
+                    )]),
+                )),
+            })],
+            ..WorkflowGraph::default()
+        };
+
+        let error = run_task(
+            &graph_task(graph),
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("iteration 2 failed preflight"));
+        assert!(!safe.exists());
+    }
+
+    #[test]
+    fn graph_preflights_all_static_destinations_before_first_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let safe = temp.path().join("must-not-exist");
+        let first = plain_step(
+            "first",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: safe.to_string_lossy().into_owned(),
+            }),
+        );
+        let blocked = plain_step(
+            "blocked",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: "/System/ppduster-graph-global-preflight-must-not-exist".into(),
+            }),
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["first".into()],
+            nodes: vec![
+                action_node(first, BTreeMap::new()),
+                action_node(blocked, BTreeMap::new()),
+            ],
+            edges: vec![GraphEdge::new("first", EdgePort::Success, "blocked")],
+            ..WorkflowGraph::default()
+        };
+
+        let error = run_task(
+            &graph_task(graph),
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("blocked by safety"));
+        assert!(
+            !safe.exists(),
+            "global graph preflight must run before the first mutation"
+        );
+    }
+
+    #[test]
+    fn graph_rejects_late_dynamic_safety_input_before_earlier_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let safe = temp.path().join("must-not-exist");
+        let first = plain_step(
+            "first",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: safe.to_string_lossy().into_owned(),
+            }),
+        );
+        let inspect = plain_step(
+            "inspect",
+            Action::InspectPath(InspectPathAction {
+                path: "/System/ppduster-graph-dynamic-preflight-must-not-exist".into(),
+                recursive_size: false,
+                sha256: false,
+                expect: None,
+            }),
+        );
+        let late = plain_step(
+            "late",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: temp
+                    .path()
+                    .join("placeholder")
+                    .to_string_lossy()
+                    .into_owned(),
+            }),
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["first".into()],
+            nodes: vec![
+                action_node(first, BTreeMap::new()),
+                action_node(inspect, BTreeMap::new()),
+                action_node(
+                    late,
+                    BTreeMap::from([(
+                        "path".into(),
+                        Binding::field(FieldRef::step("inspect").field("path")),
+                    )]),
+                ),
+            ],
+            edges: vec![
+                GraphEdge::new("first", EdgePort::Success, "inspect"),
+                GraphEdge::new("inspect", EdgePort::Success, "late"),
+            ],
+            ..WorkflowGraph::default()
+        };
+
+        let error = run_task(
+            &graph_task(graph),
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("runtime-bound safety-critical input"));
+        assert!(
+            !safe.exists(),
+            "dynamic policy analysis must fail before the earlier action mutates"
+        );
+    }
+
+    #[test]
+    fn graph_dynamic_policy_barrier_reaches_nested_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let safe = temp.path().join("must-not-exist");
+        let inspect = plain_step(
+            "inspect",
+            Action::InspectPath(InspectPathAction {
+                path: "/System/ppduster-graph-branch-preflight-must-not-exist".into(),
+                recursive_size: false,
+                sha256: false,
+                expect: None,
+            }),
+        );
+        let first = plain_step(
+            "first",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: safe.to_string_lossy().into_owned(),
+            }),
+        );
+        let late = plain_step(
+            "late",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: temp
+                    .path()
+                    .join("placeholder")
+                    .to_string_lossy()
+                    .into_owned(),
+            }),
+        );
+        let branch = one_action_graph(
+            late,
+            BTreeMap::from([(
+                "path".into(),
+                Binding::field(FieldRef::step("inspect").field("path")),
+            )]),
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["inspect".into()],
+            nodes: vec![
+                action_node(inspect, BTreeMap::new()),
+                action_node(first, BTreeMap::new()),
+                GraphNode::If(IfNode {
+                    id: "choose".into(),
+                    condition: ExpressionV1::Literal {
+                        value: ExpressionValue::Bool(true),
+                    },
+                    then_graph: Box::new(branch),
+                    else_graph: None,
+                }),
+            ],
+            edges: vec![
+                GraphEdge::new("inspect", EdgePort::Success, "first"),
+                GraphEdge::new("first", EdgePort::Success, "choose"),
+            ],
+            ..WorkflowGraph::default()
+        };
+
+        let error = run_task(
+            &graph_task(graph),
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("runtime-bound safety-critical input"));
+        assert!(!safe.exists());
+    }
+
+    #[test]
+    fn graph_dynamic_policy_barrier_reaches_foreach_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let safe = temp.path().join("must-not-exist");
+        let first = plain_step(
+            "first",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: safe.to_string_lossy().into_owned(),
+            }),
+        );
+        let late = plain_step(
+            "late",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: temp
+                    .path()
+                    .join("placeholder")
+                    .to_string_lossy()
+                    .into_owned(),
+            }),
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["first".into()],
+            nodes: vec![
+                action_node(first, BTreeMap::new()),
+                GraphNode::ForEach(ForEachNode {
+                    id: "paths".into(),
+                    collection: Binding::literal(serde_json::json!([
+                        "/System/ppduster-graph-loop-preflight-must-not-exist"
+                    ])),
+                    item_alias: "path".into(),
+                    index_alias: None,
+                    concurrency: 1,
+                    on_error: LoopFailurePolicy::Stop,
+                    body: Box::new(one_action_graph(
+                        late,
+                        BTreeMap::from([(
+                            "path".into(),
+                            Binding::interpolated([TemplatePart::field(FieldRef::loop_item(
+                                "paths",
+                            ))]),
+                        )]),
+                    )),
+                }),
+            ],
+            edges: vec![GraphEdge::new("first", EdgePort::Success, "paths")],
+            ..WorkflowGraph::default()
+        };
+
+        let error = run_task(
+            &graph_task(graph),
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("runtime-bound safety-critical input"));
+        assert!(!safe.exists());
+    }
+
+    #[test]
+    fn foreach_preflight_bounds_nested_expansion_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("must-not-exist");
+        let action = plain_step(
+            "mkdir-expanded",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: destination.to_string_lossy().into_owned(),
+            }),
+        );
+        let nested = GraphNode::ForEach(ForEachNode {
+            id: "inner".into(),
+            collection: Binding::literal(serde_json::Value::Array(vec![serde_json::json!(0); 65])),
+            item_alias: "inner_item".into(),
+            index_alias: None,
+            concurrency: 1,
+            on_error: LoopFailurePolicy::Stop,
+            body: Box::new(one_action_graph(action, BTreeMap::new())),
+        });
+        let graph = WorkflowGraph {
+            entries: vec!["outer".into()],
+            nodes: vec![GraphNode::ForEach(ForEachNode {
+                id: "outer".into(),
+                collection: Binding::literal(serde_json::Value::Array(vec![
+                    serde_json::json!(0);
+                    65
+                ])),
+                item_alias: "outer_item".into(),
+                index_alias: None,
+                concurrency: 1,
+                on_error: LoopFailurePolicy::Stop,
+                body: Box::new(WorkflowGraph {
+                    entries: vec!["inner".into()],
+                    nodes: vec![nested],
+                    ..WorkflowGraph::default()
+                }),
+            })],
+            ..WorkflowGraph::default()
+        };
+
+        let error = run_task(
+            &graph_task(graph),
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("preflight exceeds"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn github_account_clone_fixture_loads_and_plans_symbolically() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tasks/github-account-clone-v2.yaml");
+        let pack = TaskPack::load_many(
+            &[TaskSource {
+                path,
+                trust: PackTrust::Bundled,
+            }],
+            false,
+        )
+        .unwrap();
+        let task = pack.resolve("github-account-clone-v2").unwrap();
+
+        let report = run_task(&task, &RunOptions::default()).unwrap();
+
+        assert_eq!(report.plans.len(), 2);
+        assert!(report
+            .steps
+            .iter()
+            .any(|step| step.step_id == "repositories[*]/clone-repository"));
+        assert!(report.steps.iter().any(|step| {
+            step.step_id == "repositories[*]/clone-repository"
+                && step.summary.contains("deferred until runtime context")
+        }));
+        assert!(report.errors.is_empty());
     }
 
     #[test]
@@ -7229,6 +10627,7 @@ mod tests {
                     },
                 },
             ],
+            graph: None,
         };
 
         let report = run_task(&task, &RunOptions::default()).unwrap();
@@ -7269,6 +10668,11 @@ mod tests {
         assert!(matches!(report.steps[0].status, StepStatus::Failed));
         assert_eq!(report.errors.len(), 1);
         assert!(matches!(report.outcomes[0], ActionOutcome::Blocked));
+        let Some(StepOutput::ProcessExit(process)) = report.steps[0].output.as_ref() else {
+            panic!("expected failed command process context");
+        };
+        assert_eq!(process.exit_code, Some(1));
+        assert!(!process.accepted);
     }
 
     #[test]
@@ -7300,6 +10704,36 @@ mod tests {
         .unwrap();
         assert!(matches!(report.steps[0].status, StepStatus::Applied));
         assert!(matches!(report.outcomes[0], ActionOutcome::Applied { .. }));
+        let Some(StepOutput::ProcessExit(process)) = report.steps[0].output.as_ref() else {
+            panic!("expected successful command process context");
+        };
+        assert_eq!(process.exit_code, Some(0));
+        assert!(process.accepted);
+    }
+
+    #[test]
+    fn satisfied_run_command_does_not_publish_invented_process_context() {
+        let mut step = plain_step(
+            "checked-command",
+            Action::RunCommand {
+                program: "/usr/bin/false".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        step.check = Some(crate::automation::task::Check {
+            path_exists: None,
+            command_succeeds: Some(vec!["/usr/bin/true".into()]),
+        });
+
+        let report = apply_test_task(&base_task(step));
+
+        assert!(matches!(report.steps[0].status, StepStatus::Satisfied));
+        assert!(report.steps[0].output.is_none());
+        assert!(report.context.entries().is_empty());
+        assert!(report.errors.is_empty());
     }
 
     #[test]
@@ -7348,6 +10782,7 @@ mod tests {
                     },
                 },
             ],
+            graph: None,
         };
         let report = run_task(
             &task,
@@ -7710,6 +11145,7 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
                     }),
                 },
             ],
+            graph: None,
         };
 
         let err = run_task_with_interactivity(
@@ -7960,6 +11396,148 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
         assert_eq!(repository["default_branch"], "main");
         assert_eq!(repository["private"], true);
         assert_eq!(repository["archived"], false);
+    }
+
+    #[test]
+    fn structured_filesystem_output_is_published_for_applied_and_satisfied_steps() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("nested");
+        let task = base_task(plain_step(
+            "mkdir",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: directory.to_string_lossy().into_owned(),
+            }),
+        ));
+
+        let applied = apply_test_task(&task);
+        let Some(StepOutput::Structured(output)) = applied.steps[0].output.as_ref() else {
+            panic!("expected structured create-directory output");
+        };
+        assert_eq!(output.schema_id, "ppduster.filesystem.create-directory@1");
+        assert_eq!(output.value["path"]["created"], true);
+        assert_eq!(output.value["path"]["exists"], true);
+        let path = applied
+            .context
+            .resolve(
+                &crate::automation::context::FieldRef::step("mkdir")
+                    .field("path")
+                    .field("value"),
+            )
+            .unwrap();
+        assert_eq!(path.value, directory.to_string_lossy().as_ref());
+
+        let satisfied = apply_test_task(&task);
+        let Some(StepOutput::Structured(output)) = satisfied.steps[0].output.as_ref() else {
+            panic!("expected structured satisfied output");
+        };
+        assert_eq!(output.value["path"]["created"], false);
+        assert_eq!(output.value["path"]["changed"], false);
+    }
+
+    #[test]
+    fn context_value_removes_step_output_transport_envelope() {
+        let output = structured_step_output(
+            "example@1",
+            serde_json::json!({"items": [{"url": "https://example.invalid"}]}),
+        );
+        let value = output.context_value().unwrap();
+        assert_eq!(value["items"][0]["url"], "https://example.invalid");
+        assert!(value.get("schema_id").is_none());
+    }
+
+    fn created_rule(step_id: &str) -> StepCondition {
+        use crate::automation::expression::{
+            ComparisonOperator, ExpressionV1, ExpressionValue, ReferenceV1,
+        };
+
+        StepCondition::Expression {
+            rule: ExpressionV1::Compare {
+                operator: ComparisonOperator::Equal,
+                left: Box::new(ExpressionV1::Ref {
+                    reference: ReferenceV1::Context {
+                        field: crate::automation::context::FieldRef::step(step_id)
+                            .field("path")
+                            .field("created"),
+                    },
+                }),
+                right: Box::new(ExpressionV1::Literal {
+                    value: ExpressionValue::Bool(true),
+                }),
+            },
+            policy: crate::automation::task::RuleOutcomePolicy::default(),
+        }
+    }
+
+    #[test]
+    fn typed_context_rule_controls_a_later_step() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        let mut task = base_task(plain_step(
+            "first",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: first.to_string_lossy().into_owned(),
+            }),
+        ));
+        let mut dependent = plain_step(
+            "second",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: second.to_string_lossy().into_owned(),
+            }),
+        );
+        dependent.when = Some(created_rule("first"));
+        task.steps.push(dependent);
+
+        task.validate().unwrap();
+        let first_run = apply_test_task(&task);
+        assert!(matches!(first_run.steps[0].status, StepStatus::Applied));
+        assert!(matches!(first_run.steps[1].status, StepStatus::Applied));
+
+        fs::remove_dir(&second).unwrap();
+        let second_run = apply_test_task(&task);
+        assert!(matches!(second_run.steps[0].status, StepStatus::Satisfied));
+        assert!(matches!(second_run.steps[1].status, StepStatus::Skipped));
+        assert!(!second.exists());
+    }
+
+    #[test]
+    fn context_rule_unknown_requires_an_explicit_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let absent = temp.path().join("absent");
+        let target = temp.path().join("target");
+        let mut source = plain_step(
+            "source",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: temp.path().join("source").to_string_lossy().into_owned(),
+            }),
+        );
+        source.when = Some(StepCondition::Path {
+            path: absent.to_string_lossy().into_owned(),
+            expect: PathExpectation {
+                exists: Some(true),
+                ..PathExpectation::default()
+            },
+        });
+        let mut consumer = plain_step(
+            "consumer",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: target.to_string_lossy().into_owned(),
+            }),
+        );
+        let mut rule = created_rule("source");
+        let StepCondition::Expression { policy, .. } = &mut rule else {
+            unreachable!()
+        };
+        policy.on_unknown = IndeterminatePolicy::TreatAsFalse;
+        consumer.when = Some(rule);
+        let mut task = base_task(source);
+        task.steps.push(consumer);
+
+        let report = apply_test_task(&task);
+        assert!(report.errors.is_empty());
+        assert!(matches!(report.steps[0].status, StepStatus::Skipped));
+        assert!(matches!(report.steps[1].status, StepStatus::Skipped));
+        assert!(!target.exists());
     }
 
     #[test]

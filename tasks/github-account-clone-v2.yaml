@@ -1,0 +1,155 @@
+task:
+  id: github-account-clone-v2
+  name: Clone GitHub account repositories
+  description: >-
+    Lists every repository visible to the current GitHub CLI account and clones
+    each non-archived repository with a default branch into
+    $HOME/Developer/<owner>/<name>. Planning remains side-effect-free; applying
+    can create many local repositories, so review the generated plan first.
+  platform: any
+  trust: bundled-only
+  graph:
+    version: 2
+    entries:
+      - list-repositories
+    nodes:
+      - kind: action
+        config:
+          step:
+            id: list-repositories
+            name: List repositories visible to the GitHub account
+            type: github-list-repositories
+
+      - kind: for-each
+        config:
+          id: repositories
+          collection:
+            kind: field
+            field:
+              scope:
+                kind: step
+                step_id: list-repositories
+              segments:
+                - kind: field
+                  name: github
+                - kind: field
+                  name: repositories
+          item_alias: repository
+          concurrency: 1
+          on_error: continue
+          body:
+            version: 2
+            entries:
+              - clone-repository
+            nodes:
+              - kind: action
+                config:
+                  step:
+                    id: clone-repository
+                    name: Clone repository when it is missing
+                    auth: git-credential
+                    when:
+                      type: expression
+                      rule:
+                        op: all
+                        expressions:
+                          - op: compare
+                            operator: equal
+                            left:
+                              op: ref
+                              reference:
+                                scope: context
+                                field:
+                                  scope:
+                                    kind: loop-item
+                                    step_id: repositories
+                                  segments:
+                                    - kind: field
+                                      name: archived
+                            right:
+                              op: literal
+                              value:
+                                type: bool
+                                value: false
+                          - op: exists
+                            reference:
+                              scope: context
+                              field:
+                                scope:
+                                  kind: loop-item
+                                  step_id: repositories
+                                segments:
+                                  - kind: field
+                                    name: default_branch
+                          - op: not
+                            expression:
+                              op: is-null
+                              expression:
+                                op: ref
+                                reference:
+                                  scope: context
+                                  field:
+                                    scope:
+                                      kind: loop-item
+                                      step_id: repositories
+                                    segments:
+                                      - kind: field
+                                        name: default_branch
+                      policy:
+                        on_null: treat-as-false
+                        on_missing: treat-as-false
+                        on_unknown: fail
+                    type: git-clone-if-missing
+                    repo: https://github.com/example/example.git
+                    dest: $HOME/Developer/example/example
+                    branch: main
+                  bindings:
+                    repo:
+                      kind: field
+                      field:
+                        scope:
+                          kind: loop-item
+                          step_id: repositories
+                        segments:
+                          - kind: field
+                            name: https_url
+                    dest:
+                      kind: interpolated
+                      parts:
+                        - kind: literal
+                          value: $HOME/Developer/
+                        - kind: field
+                          field:
+                            scope:
+                              kind: loop-item
+                              step_id: repositories
+                            segments:
+                              - kind: field
+                                name: owner
+                        - kind: literal
+                          value: /
+                        - kind: field
+                          field:
+                            scope:
+                              kind: loop-item
+                              step_id: repositories
+                            segments:
+                              - kind: field
+                                name: name
+                    branch:
+                      kind: field
+                      field:
+                        scope:
+                          kind: loop-item
+                          step_id: repositories
+                        segments:
+                          - kind: field
+                            name: default_branch
+            edges: []
+    edges:
+      - from:
+          node: list-repositories
+          port: success
+        to:
+          node: repositories
+          port: input

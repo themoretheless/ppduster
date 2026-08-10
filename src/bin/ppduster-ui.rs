@@ -5,12 +5,17 @@ use eframe::egui::{
 };
 use ppduster::automation::PackTrust;
 use ppduster::automation::{
-    describe_step, run_task, Action, AuthPolicy, CopyPathAction, CreateDirectoryAction,
-    InspectPathAction, ReleaseChannel, RemovePathAction, RunOptions, RunReport, ScriptInterpreter,
-    Step, StepStatus, Task, TaskFile, TaskPack, TaskSource, TrustRequirement, WriteConflictPolicy,
-    WriteFileAction,
+    block_definition, definition_for_action, describe_step, run_task, Action, ActionKind,
+    AuthPolicy, ComparisonOperator, ContextPathSegment, ContextScope, CopyPathAction,
+    CreateDirectoryAction, ExpressionLimits, ExpressionV1, ExpressionValue, FieldRef, GraphNode,
+    IndeterminatePolicy, InspectPathAction, ObjectSchema, ReferenceV1, ReleaseChannel,
+    RemovePathAction, RuleOutcomePolicy, RunOptions, RunReport, ScriptInterpreter, SemanticFormat,
+    Sensitivity, Step, StepCondition, StepStatus, Task, TaskFile, TaskPack, TaskSource,
+    TrustRequirement, WorkflowGraph, WriteConflictPolicy, WriteFileAction,
 };
+use ppduster::automation::{ContextType, FieldSchema};
 use ppduster::github::{list_accessible_repositories, login_via_web, GithubRepository};
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -80,21 +85,21 @@ enum ProjectEntry {
         entries: Vec<ProjectEntry>,
     },
     Scenario {
-        task: Task,
+        task: Box<Task>,
     },
 }
 
 impl ScenarioProject {
     fn scenario(&self, path: &[usize]) -> Option<&Task> {
         project_entry(&self.entries, path).and_then(|entry| match entry {
-            ProjectEntry::Scenario { task } => Some(task),
+            ProjectEntry::Scenario { task } => Some(task.as_ref()),
             ProjectEntry::Group { .. } => None,
         })
     }
 
     fn scenario_mut(&mut self, path: &[usize]) -> Option<&mut Task> {
         project_entry_mut(&mut self.entries, path).and_then(|entry| match entry {
-            ProjectEntry::Scenario { task } => Some(task),
+            ProjectEntry::Scenario { task } => Some(task.as_mut()),
             ProjectEntry::Group { .. } => None,
         })
     }
@@ -143,24 +148,13 @@ enum ComposerBlockKind {
     BrewInstall,
 }
 
-const GITHUB_REPOSITORY_CONTEXT_FIELDS: [(&str, &str); 9] = [
-    ("id", "string"),
-    ("owner", "string"),
-    ("name", "string"),
-    ("full_name", "string"),
-    ("https_url", "string"),
-    ("ssh_url", "string"),
-    ("default_branch", "string?"),
-    ("private", "bool"),
-    ("archived", "bool"),
-];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ComposerArraySource {
     step_id: String,
     step_name: String,
-    path: &'static str,
-    item: &'static str,
+    path: String,
+    item: String,
+    item_type: ContextType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,53 +163,869 @@ struct ComposerLoopSource {
     step_name: String,
     item: String,
     fields: Vec<String>,
+    item_type: ContextType,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposerConditionField {
+    reference: FieldRef,
+    label: String,
+    value_type: ContextType,
+    required: bool,
+    nullable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerConditionOperator {
+    Equal,
+    NotEqual,
+    Exists,
+    IsNull,
+    IsEmpty,
+    Contains,
+    StartsWith,
+    EndsWith,
+    Matches,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+}
+
+impl ComposerConditionOperator {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Equal => "Равно",
+            Self::NotEqual => "Не равно",
+            Self::Exists => "Существует",
+            Self::IsNull => "Равно null",
+            Self::IsEmpty => "Пусто",
+            Self::Contains => "Содержит",
+            Self::StartsWith => "Начинается с",
+            Self::EndsWith => "Заканчивается на",
+            Self::Matches => "Регулярное выражение",
+            Self::LessThan => "Меньше",
+            Self::LessThanOrEqual => "Меньше или равно",
+            Self::GreaterThan => "Больше",
+            Self::GreaterThanOrEqual => "Больше или равно",
+        }
+    }
+
+    const fn requires_literal(self) -> bool {
+        !matches!(self, Self::Exists | Self::IsNull | Self::IsEmpty)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerLiteralKind {
+    Null,
+    Bool,
+    Integer,
+    Number,
+    String,
+}
+
+impl ComposerLiteralKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Null => "null",
+            Self::Bool => "bool",
+            Self::Integer => "integer",
+            Self::Number => "number",
+            Self::String => "string",
+        }
+    }
+
+    fn from_value(value: &ExpressionValue) -> Option<Self> {
+        match value {
+            ExpressionValue::Null => Some(Self::Null),
+            ExpressionValue::Bool(_) => Some(Self::Bool),
+            ExpressionValue::Int(_) | ExpressionValue::UInt(_) => Some(Self::Integer),
+            ExpressionValue::Float(_) => Some(Self::Number),
+            ExpressionValue::String(_) => Some(Self::String),
+            ExpressionValue::List(_) | ExpressionValue::Object(_) => None,
+        }
+    }
+
+    fn default_value(self) -> ExpressionValue {
+        match self {
+            Self::Null => ExpressionValue::Null,
+            Self::Bool => ExpressionValue::Bool(false),
+            Self::Integer => ExpressionValue::Int(0),
+            Self::Number => ExpressionValue::Float(0.0),
+            Self::String => ExpressionValue::String(String::new()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SimpleConditionRule {
+    field: FieldRef,
+    operator: ComposerConditionOperator,
+    literal: Option<ExpressionValue>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ComposerConditionRule {
+    Clause(SimpleConditionRule),
+    All(Vec<ComposerConditionRule>),
+    Any(Vec<ComposerConditionRule>),
+    Not(Box<ComposerConditionRule>),
+}
+
+// The visual editor intentionally exposes a smaller budget than the runtime
+// expression engine. This keeps a malformed or machine-generated AST from
+// turning the inspector into an unbounded recursive widget tree. Expressions
+// outside this envelope remain visible as YAML and are never rewritten.
+const CONDITION_EDITOR_MAX_DEPTH: usize = 8;
+const CONDITION_EDITOR_MAX_NODES: usize = 64;
+
 fn composer_array_sources(task: &Task, before_index: usize) -> Vec<ComposerArraySource> {
-    task.steps
-        .iter()
-        .take(before_index)
-        .filter_map(|step| match &step.action {
-            Action::GithubListRepositories => Some(ComposerArraySource {
-                step_id: step.id.clone(),
-                step_name: step_title(step),
-                path: "github.repositories",
-                item: "repository",
-            }),
-            _ => None,
-        })
-        .collect()
+    let mut sources = Vec::new();
+    for step in task.steps.iter().take(before_index) {
+        let definition = definition_for_action(&step.action);
+        let mut arrays = Vec::new();
+        collect_schema_arrays(&definition.output_schema, "", &mut arrays);
+        sources.extend(
+            arrays
+                .into_iter()
+                .map(|(path, item_type)| ComposerArraySource {
+                    step_id: step.id.clone(),
+                    step_name: step_title(step),
+                    item: item_alias_for_array_path(&path),
+                    path,
+                    item_type,
+                }),
+        );
+    }
+    sources
 }
 
 fn composer_loop_sources(task: &Task, before_index: usize) -> Vec<ComposerLoopSource> {
     task.steps
         .iter()
+        .enumerate()
         .take(before_index)
-        .filter_map(|step| match &step.action {
-            Action::ForEach { item, fields, .. } => Some(ComposerLoopSource {
-                step_id: step.id.clone(),
-                step_name: step_title(step),
-                item: item.clone(),
-                fields: fields.clone(),
-            }),
+        .filter_map(|(index, step)| match &step.action {
+            Action::ForEach {
+                source_step,
+                array_path,
+                item,
+                fields,
+            } => {
+                let item_type = composer_array_sources(task, index)
+                    .into_iter()
+                    .find(|source| source.step_id == *source_step && source.path == *array_path)
+                    .map(|source| project_item_type(&source.item_type, fields))
+                    .unwrap_or(ContextType::Any);
+                Some(ComposerLoopSource {
+                    step_id: step.id.clone(),
+                    step_name: step_title(step),
+                    item: item.clone(),
+                    fields: fields.clone(),
+                    item_type,
+                })
+            }
             _ => None,
         })
         .collect()
 }
 
-fn composer_string_context_options(source: &ComposerLoopSource) -> Vec<(String, String)> {
-    let has_field =
-        |field: &str| source.fields.is_empty() || source.fields.iter().any(|value| value == field);
-    GITHUB_REPOSITORY_CONTEXT_FIELDS
+fn composer_condition_fields(task: &Task, before_index: usize) -> Vec<ComposerConditionField> {
+    let mut fields = Vec::new();
+    for step in task.steps.iter().take(before_index) {
+        let definition = definition_for_action(&step.action);
+        collect_condition_fields(
+            &step.id,
+            &definition.output_schema,
+            "",
+            true,
+            false,
+            Sensitivity::Public,
+            &mut fields,
+        );
+    }
+    fields
+}
+
+fn collect_condition_fields(
+    step_id: &str,
+    schema: &ObjectSchema,
+    prefix: &str,
+    inherited_required: bool,
+    inherited_nullable: bool,
+    inherited_sensitivity: Sensitivity,
+    output: &mut Vec<ComposerConditionField>,
+) {
+    for (name, field) in &schema.fields {
+        let path = join_context_path(prefix, name);
+        let required = inherited_required && field.required;
+        let nullable = inherited_nullable || field.nullable;
+        let sensitivity = inherited_sensitivity.combine(field.sensitivity);
+        if sensitivity.is_secret() {
+            continue;
+        }
+        if !condition_type_contains_secret(&field.value_type, sensitivity) {
+            let reference = path
+                .split('.')
+                .fold(FieldRef::step(step_id), |reference, segment| {
+                    reference.field(segment)
+                });
+            output.push(ComposerConditionField {
+                reference,
+                label: format!(
+                    "{step_id}.{path} · {}",
+                    context_type_label(&field.value_type, nullable, !required)
+                ),
+                value_type: field.value_type.clone(),
+                required,
+                nullable,
+            });
+        }
+        if let ContextType::Object { schema } = &field.value_type {
+            collect_condition_fields(
+                step_id,
+                schema,
+                &path,
+                required,
+                nullable,
+                sensitivity,
+                output,
+            );
+        }
+    }
+}
+
+fn condition_type_contains_secret(
+    value_type: &ContextType,
+    inherited_sensitivity: Sensitivity,
+) -> bool {
+    match value_type {
+        ContextType::Array { items } => {
+            condition_type_contains_secret(items, inherited_sensitivity)
+        }
+        ContextType::Object { schema } => schema.fields.values().any(|field| {
+            let sensitivity = inherited_sensitivity.combine(field.sensitivity);
+            sensitivity.is_secret()
+                || condition_type_contains_secret(&field.value_type, sensitivity)
+        }),
+        ContextType::Any
+        | ContextType::Null
+        | ContextType::Boolean
+        | ContextType::Integer
+        | ContextType::Number
+        | ContextType::String { .. } => inherited_sensitivity.is_secret(),
+    }
+}
+
+fn condition_operators(value_type: &ContextType) -> Vec<ComposerConditionOperator> {
+    use ComposerConditionOperator as Operator;
+
+    let mut operators = match value_type {
+        ContextType::Any => vec![
+            Operator::Equal,
+            Operator::NotEqual,
+            Operator::Contains,
+            Operator::StartsWith,
+            Operator::EndsWith,
+            Operator::Matches,
+            Operator::IsEmpty,
+            Operator::LessThan,
+            Operator::LessThanOrEqual,
+            Operator::GreaterThan,
+            Operator::GreaterThanOrEqual,
+        ],
+        ContextType::Null | ContextType::Boolean => {
+            vec![Operator::Equal, Operator::NotEqual]
+        }
+        ContextType::Integer | ContextType::Number => vec![
+            Operator::Equal,
+            Operator::NotEqual,
+            Operator::LessThan,
+            Operator::LessThanOrEqual,
+            Operator::GreaterThan,
+            Operator::GreaterThanOrEqual,
+        ],
+        ContextType::String { .. } => vec![
+            Operator::Equal,
+            Operator::NotEqual,
+            Operator::Contains,
+            Operator::StartsWith,
+            Operator::EndsWith,
+            Operator::Matches,
+            Operator::IsEmpty,
+        ],
+        ContextType::Array { .. } | ContextType::Object { .. } => vec![Operator::IsEmpty],
+    };
+    operators.extend([Operator::Exists, Operator::IsNull]);
+    operators
+}
+
+fn condition_literal_kinds(
+    field: &ComposerConditionField,
+    operator: ComposerConditionOperator,
+) -> Vec<ComposerLiteralKind> {
+    use ComposerConditionOperator as Operator;
+    use ComposerLiteralKind as Literal;
+
+    if !operator.requires_literal() {
+        return Vec::new();
+    }
+    let mut kinds = match operator {
+        Operator::Contains | Operator::StartsWith | Operator::EndsWith | Operator::Matches => {
+            vec![Literal::String]
+        }
+        Operator::LessThan
+        | Operator::LessThanOrEqual
+        | Operator::GreaterThan
+        | Operator::GreaterThanOrEqual => match &field.value_type {
+            ContextType::Integer => vec![Literal::Integer],
+            ContextType::Number => vec![Literal::Number],
+            ContextType::Any => vec![Literal::Integer, Literal::Number],
+            _ => Vec::new(),
+        },
+        Operator::Equal | Operator::NotEqual => match &field.value_type {
+            ContextType::Any => vec![
+                Literal::Bool,
+                Literal::String,
+                Literal::Integer,
+                Literal::Number,
+            ],
+            ContextType::Null => vec![Literal::Null],
+            ContextType::Boolean => vec![Literal::Bool],
+            ContextType::Integer => vec![Literal::Integer],
+            ContextType::Number => vec![Literal::Number],
+            ContextType::String { .. } => vec![Literal::String],
+            ContextType::Array { .. } | ContextType::Object { .. } => Vec::new(),
+        },
+        Operator::Exists | Operator::IsNull | Operator::IsEmpty => Vec::new(),
+    };
+    if field.nullable
+        && matches!(operator, Operator::Equal | Operator::NotEqual)
+        && !kinds.contains(&Literal::Null)
+    {
+        kinds.push(Literal::Null);
+    }
+    kinds
+}
+
+fn default_condition_literal(
+    field: &ComposerConditionField,
+    operator: ComposerConditionOperator,
+) -> Option<ExpressionValue> {
+    condition_literal_kinds(field, operator)
         .into_iter()
-        .filter(|(field, kind)| has_field(field) && kind.starts_with("string"))
-        .map(|(field, kind)| {
+        .next()
+        .map(ComposerLiteralKind::default_value)
+}
+
+fn default_simple_condition(field: &ComposerConditionField) -> SimpleConditionRule {
+    let operator = condition_operators(&field.value_type)
+        .into_iter()
+        .next()
+        .unwrap_or(ComposerConditionOperator::Exists);
+    SimpleConditionRule {
+        field: field.reference.clone(),
+        operator,
+        literal: default_condition_literal(field, operator),
+    }
+}
+
+fn default_condition_field(fields: &[ComposerConditionField]) -> Option<&ComposerConditionField> {
+    fields
+        .iter()
+        .find(|field| {
+            !matches!(
+                &field.value_type,
+                ContextType::Array { .. } | ContextType::Object { .. }
+            )
+        })
+        .or_else(|| fields.first())
+}
+
+fn context_reference_expression(field: &FieldRef) -> ExpressionV1 {
+    ExpressionV1::Ref {
+        reference: ReferenceV1::Context {
+            field: field.clone(),
+        },
+    }
+}
+
+fn build_simple_condition_rule(rule: &SimpleConditionRule) -> ExpressionV1 {
+    let reference = || ReferenceV1::Context {
+        field: rule.field.clone(),
+    };
+    let value = || Box::new(context_reference_expression(&rule.field));
+    let literal = || {
+        Box::new(ExpressionV1::Literal {
+            value: rule.literal.clone().unwrap_or(ExpressionValue::Null),
+        })
+    };
+    match rule.operator {
+        ComposerConditionOperator::Exists => ExpressionV1::Exists {
+            reference: reference(),
+        },
+        ComposerConditionOperator::IsNull => ExpressionV1::IsNull {
+            expression: value(),
+        },
+        ComposerConditionOperator::IsEmpty => ExpressionV1::IsEmpty {
+            expression: value(),
+        },
+        ComposerConditionOperator::Equal
+        | ComposerConditionOperator::NotEqual
+        | ComposerConditionOperator::LessThan
+        | ComposerConditionOperator::LessThanOrEqual
+        | ComposerConditionOperator::GreaterThan
+        | ComposerConditionOperator::GreaterThanOrEqual => ExpressionV1::Compare {
+            operator: match rule.operator {
+                ComposerConditionOperator::Equal => ComparisonOperator::Equal,
+                ComposerConditionOperator::NotEqual => ComparisonOperator::NotEqual,
+                ComposerConditionOperator::LessThan => ComparisonOperator::LessThan,
+                ComposerConditionOperator::LessThanOrEqual => ComparisonOperator::LessThanOrEqual,
+                ComposerConditionOperator::GreaterThan => ComparisonOperator::GreaterThan,
+                ComposerConditionOperator::GreaterThanOrEqual => {
+                    ComparisonOperator::GreaterThanOrEqual
+                }
+                _ => unreachable!(),
+            },
+            left: value(),
+            right: literal(),
+        },
+        ComposerConditionOperator::Contains => ExpressionV1::Contains {
+            value: value(),
+            needle: literal(),
+        },
+        ComposerConditionOperator::StartsWith => ExpressionV1::StartsWith {
+            value: value(),
+            prefix: literal(),
+        },
+        ComposerConditionOperator::EndsWith => ExpressionV1::EndsWith {
+            value: value(),
+            suffix: literal(),
+        },
+        ComposerConditionOperator::Matches => ExpressionV1::Matches {
+            value: value(),
+            pattern: match rule.literal.as_ref() {
+                Some(ExpressionValue::String(pattern)) => pattern.clone(),
+                _ => String::new(),
+            },
+        },
+    }
+}
+
+fn simple_condition_rule(expression: &ExpressionV1) -> Option<SimpleConditionRule> {
+    fn context_field(expression: &ExpressionV1) -> Option<&FieldRef> {
+        match expression {
+            ExpressionV1::Ref {
+                reference: ReferenceV1::Context { field },
+            } => Some(field),
+            _ => None,
+        }
+    }
+
+    fn literal(expression: &ExpressionV1) -> Option<&ExpressionValue> {
+        match expression {
+            ExpressionV1::Literal { value } => Some(value),
+            _ => None,
+        }
+    }
+
+    match expression {
+        ExpressionV1::Exists {
+            reference: ReferenceV1::Context { field },
+        } => Some(SimpleConditionRule {
+            field: field.clone(),
+            operator: ComposerConditionOperator::Exists,
+            literal: None,
+        }),
+        ExpressionV1::IsNull { expression } => Some(SimpleConditionRule {
+            field: context_field(expression)?.clone(),
+            operator: ComposerConditionOperator::IsNull,
+            literal: None,
+        }),
+        ExpressionV1::IsEmpty { expression } => Some(SimpleConditionRule {
+            field: context_field(expression)?.clone(),
+            operator: ComposerConditionOperator::IsEmpty,
+            literal: None,
+        }),
+        ExpressionV1::Compare {
+            operator,
+            left,
+            right,
+        } => Some(SimpleConditionRule {
+            field: context_field(left)?.clone(),
+            operator: match operator {
+                ComparisonOperator::Equal => ComposerConditionOperator::Equal,
+                ComparisonOperator::NotEqual => ComposerConditionOperator::NotEqual,
+                ComparisonOperator::LessThan => ComposerConditionOperator::LessThan,
+                ComparisonOperator::LessThanOrEqual => ComposerConditionOperator::LessThanOrEqual,
+                ComparisonOperator::GreaterThan => ComposerConditionOperator::GreaterThan,
+                ComparisonOperator::GreaterThanOrEqual => {
+                    ComposerConditionOperator::GreaterThanOrEqual
+                }
+            },
+            literal: Some(literal(right)?.clone()),
+        }),
+        ExpressionV1::Contains { value, needle } => Some(SimpleConditionRule {
+            field: context_field(value)?.clone(),
+            operator: ComposerConditionOperator::Contains,
+            literal: Some(literal(needle)?.clone()),
+        }),
+        ExpressionV1::StartsWith { value, prefix } => Some(SimpleConditionRule {
+            field: context_field(value)?.clone(),
+            operator: ComposerConditionOperator::StartsWith,
+            literal: Some(literal(prefix)?.clone()),
+        }),
+        ExpressionV1::EndsWith { value, suffix } => Some(SimpleConditionRule {
+            field: context_field(value)?.clone(),
+            operator: ComposerConditionOperator::EndsWith,
+            literal: Some(literal(suffix)?.clone()),
+        }),
+        ExpressionV1::Matches { value, pattern } => Some(SimpleConditionRule {
+            field: context_field(value)?.clone(),
+            operator: ComposerConditionOperator::Matches,
+            literal: Some(ExpressionValue::String(pattern.clone())),
+        }),
+        _ => None,
+    }
+}
+
+fn simple_condition_rule_supported(
+    rule: &SimpleConditionRule,
+    fields: &[ComposerConditionField],
+) -> bool {
+    let Some(field) = fields.iter().find(|field| field.reference == rule.field) else {
+        // Keep a now-invisible stable reference editable so the user can
+        // explicitly replace it with one of the preceding fields.
+        return true;
+    };
+    if !condition_operators(&field.value_type).contains(&rule.operator) {
+        return false;
+    }
+    if !rule.operator.requires_literal() {
+        return rule.literal.is_none();
+    }
+    let Some(kind) = rule
+        .literal
+        .as_ref()
+        .and_then(ComposerLiteralKind::from_value)
+    else {
+        return false;
+    };
+    condition_literal_kinds(field, rule.operator).contains(&kind)
+}
+
+fn composer_condition_rule(expression: &ExpressionV1) -> Option<ComposerConditionRule> {
+    fn parse(
+        expression: &ExpressionV1,
+        depth: usize,
+        nodes: &mut usize,
+    ) -> Option<ComposerConditionRule> {
+        if depth > CONDITION_EDITOR_MAX_DEPTH || *nodes >= CONDITION_EDITOR_MAX_NODES {
+            return None;
+        }
+        *nodes += 1;
+        if let Some(rule) = simple_condition_rule(expression) {
+            return Some(ComposerConditionRule::Clause(rule));
+        }
+        match expression {
+            ExpressionV1::All { expressions } if !expressions.is_empty() => {
+                let mut rules = Vec::with_capacity(
+                    expressions
+                        .len()
+                        .min(CONDITION_EDITOR_MAX_NODES.saturating_sub(*nodes)),
+                );
+                for expression in expressions {
+                    rules.push(parse(expression, depth + 1, nodes)?);
+                }
+                Some(ComposerConditionRule::All(rules))
+            }
+            ExpressionV1::Any { expressions } if !expressions.is_empty() => {
+                let mut rules = Vec::with_capacity(
+                    expressions
+                        .len()
+                        .min(CONDITION_EDITOR_MAX_NODES.saturating_sub(*nodes)),
+                );
+                for expression in expressions {
+                    rules.push(parse(expression, depth + 1, nodes)?);
+                }
+                Some(ComposerConditionRule::Any(rules))
+            }
+            ExpressionV1::Not { expression } => Some(ComposerConditionRule::Not(Box::new(parse(
+                expression,
+                depth + 1,
+                nodes,
+            )?))),
+            // Quantifiers, `in`, value expressions, and future AST variants
+            // are deliberately not approximated by this editor.
+            _ => None,
+        }
+    }
+
+    let mut nodes = 0;
+    parse(expression, 0, &mut nodes)
+}
+
+fn build_composer_condition_rule(rule: &ComposerConditionRule) -> ExpressionV1 {
+    match rule {
+        ComposerConditionRule::Clause(rule) => build_simple_condition_rule(rule),
+        ComposerConditionRule::All(rules) => ExpressionV1::All {
+            expressions: rules.iter().map(build_composer_condition_rule).collect(),
+        },
+        ComposerConditionRule::Any(rules) => ExpressionV1::Any {
+            expressions: rules.iter().map(build_composer_condition_rule).collect(),
+        },
+        ComposerConditionRule::Not(rule) => ExpressionV1::Not {
+            expression: Box::new(build_composer_condition_rule(rule)),
+        },
+    }
+}
+
+fn composer_condition_rule_supported(
+    rule: &ComposerConditionRule,
+    fields: &[ComposerConditionField],
+) -> bool {
+    match rule {
+        ComposerConditionRule::Clause(rule) => simple_condition_rule_supported(rule, fields),
+        ComposerConditionRule::All(rules) | ComposerConditionRule::Any(rules) => {
+            !rules.is_empty()
+                && rules
+                    .iter()
+                    .all(|rule| composer_condition_rule_supported(rule, fields))
+        }
+        ComposerConditionRule::Not(rule) => composer_condition_rule_supported(rule, fields),
+    }
+}
+
+fn composer_condition_rule_nodes(rule: &ComposerConditionRule) -> usize {
+    match rule {
+        ComposerConditionRule::Clause(_) => 1,
+        ComposerConditionRule::All(rules) | ComposerConditionRule::Any(rules) => {
+            1 + rules
+                .iter()
+                .map(composer_condition_rule_nodes)
+                .sum::<usize>()
+        }
+        ComposerConditionRule::Not(rule) => 1 + composer_condition_rule_nodes(rule),
+    }
+}
+
+fn composer_condition_rule_depth(rule: &ComposerConditionRule) -> usize {
+    match rule {
+        ComposerConditionRule::Clause(_) => 0,
+        ComposerConditionRule::All(rules) | ComposerConditionRule::Any(rules) => rules
+            .iter()
+            .map(composer_condition_rule_depth)
+            .max()
+            .map_or(0, |depth| depth.saturating_add(1)),
+        ComposerConditionRule::Not(rule) => composer_condition_rule_depth(rule).saturating_add(1),
+    }
+}
+
+fn composer_condition_rule_fits_editor(rule: &ComposerConditionRule) -> bool {
+    composer_condition_rule_nodes(rule) <= CONDITION_EDITOR_MAX_NODES
+        && composer_condition_rule_depth(rule) <= CONDITION_EDITOR_MAX_DEPTH
+}
+
+fn composer_condition_replacement_fits(
+    current: &ComposerConditionRule,
+    replacement: &ComposerConditionRule,
+    depth: usize,
+    total_nodes: usize,
+) -> bool {
+    let projected_nodes = total_nodes
+        .saturating_sub(composer_condition_rule_nodes(current))
+        .saturating_add(composer_condition_rule_nodes(replacement));
+    projected_nodes <= CONDITION_EDITOR_MAX_NODES
+        && depth.saturating_add(composer_condition_rule_depth(replacement))
+            <= CONDITION_EDITOR_MAX_DEPTH
+}
+
+fn regex_pattern_error(pattern: &str) -> Option<String> {
+    let limits = ExpressionLimits::default();
+    if pattern.len() > limits.max_regex_pattern_bytes {
+        return Some(format!(
+            "Шаблон занимает {} байт; максимум — {}.",
+            pattern.len(),
+            limits.max_regex_pattern_bytes
+        ));
+    }
+    RegexBuilder::new(pattern)
+        .size_limit(limits.max_regex_compiled_bytes)
+        .dfa_size_limit(limits.max_regex_compiled_bytes)
+        .build()
+        .err()
+        .map(|error| format!("Некорректное регулярное выражение: {error}"))
+}
+
+fn collect_schema_arrays(
+    schema: &ObjectSchema,
+    prefix: &str,
+    output: &mut Vec<(String, ContextType)>,
+) {
+    for (name, field) in &schema.fields {
+        let path = join_context_path(prefix, name);
+        match &field.value_type {
+            ContextType::Array { items } => output.push((path, items.as_ref().clone())),
+            ContextType::Object { schema } => collect_schema_arrays(schema, &path, output),
+            _ => {}
+        }
+    }
+}
+
+fn join_context_path(prefix: &str, field: &str) -> String {
+    if prefix.is_empty() {
+        field.into()
+    } else {
+        format!("{prefix}.{field}")
+    }
+}
+
+fn item_alias_for_array_path(path: &str) -> String {
+    let candidate = path.rsplit('.').next().unwrap_or("item");
+    let singular = candidate
+        .strip_suffix("ies")
+        .map(|stem| format!("{stem}y"))
+        .or_else(|| candidate.strip_suffix('s').map(str::to_owned))
+        .unwrap_or_else(|| candidate.to_owned());
+    let sanitized = singular
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "item".into()
+    } else {
+        sanitized
+    }
+}
+
+fn project_item_type(item_type: &ContextType, fields: &[String]) -> ContextType {
+    if fields.is_empty() {
+        return item_type.clone();
+    }
+    let ContextType::Object { schema } = item_type else {
+        return item_type.clone();
+    };
+    let mut projected = schema.as_ref().clone();
+    projected
+        .fields
+        .retain(|name, _| fields.iter().any(|field| field == name));
+    ContextType::object(projected)
+}
+
+fn item_object_fields(item_type: &ContextType) -> Vec<(String, FieldSchema)> {
+    match item_type {
+        ContextType::Object { schema } => schema
+            .fields
+            .iter()
+            .map(|(name, field)| (name.clone(), field.clone()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn clone_item_field_names(fields: &[(String, FieldSchema)]) -> Vec<String> {
+    fields
+        .iter()
+        .filter(|(_, field)| match &field.value_type {
+            ContextType::String {
+                format: Some(format),
+            } => matches!(
+                format,
+                SemanticFormat::GitUrl | SemanticFormat::GitRef | SemanticFormat::RepositoryName
+            ),
+            _ => false,
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+fn composer_context_options(
+    source: &ComposerLoopSource,
+    expected: &ContextType,
+) -> Vec<(String, String)> {
+    let mut fields = Vec::new();
+    collect_bindable_fields(&source.item_type, "", &mut fields);
+    fields
+        .into_iter()
+        .filter(|(_, value_type)| expected.is_assignable_from(value_type))
+        .map(|(path, value_type)| {
+            let expression = if path.is_empty() {
+                source.item.clone()
+            } else {
+                format!("{}.{}", source.item, path)
+            };
             (
-                format!("{}.{} · {}", source.item, field, kind),
-                format!("{{{{{}.{}}}}}", source.item, field),
+                format!(
+                    "{} · {}",
+                    expression,
+                    context_type_label(&value_type, false, false)
+                ),
+                format!("{{{{{expression}}}}}"),
             )
         })
         .collect()
+}
+
+fn composer_destination_options(
+    source: &ComposerLoopSource,
+    expected: &ContextType,
+) -> Vec<(String, String)> {
+    let mut options = composer_context_options(source, expected);
+    let mut fields = Vec::new();
+    collect_bindable_fields(&source.item_type, "", &mut fields);
+    options.extend(
+        fields
+            .into_iter()
+            .filter(|(_, value_type)| {
+                matches!(
+                    value_type,
+                    ContextType::String {
+                        format: Some(SemanticFormat::RepositoryName)
+                    }
+                )
+            })
+            .map(|(path, _)| {
+                let expression = format!("{}.{}", source.item, path);
+                (
+                    format!("$HOME/Developer/{expression}"),
+                    format!("$HOME/Developer/{{{{{expression}}}}}"),
+                )
+            }),
+    );
+    let mut seen = BTreeSet::new();
+    options.retain(|(_, template)| seen.insert(template.clone()));
+    options
+}
+
+fn collect_bindable_fields(
+    value_type: &ContextType,
+    prefix: &str,
+    output: &mut Vec<(String, ContextType)>,
+) {
+    match value_type {
+        ContextType::Object { schema } => {
+            for (name, field) in &schema.fields {
+                let path = join_context_path(prefix, name);
+                match &field.value_type {
+                    ContextType::Object { .. } => {
+                        collect_bindable_fields(&field.value_type, &path, output)
+                    }
+                    ContextType::Array { .. } => {}
+                    _ => output.push((path, field.value_type.clone())),
+                }
+            }
+        }
+        ContextType::Array { .. } => {}
+        _ if prefix.is_empty() => output.push((String::new(), value_type.clone())),
+        _ => output.push((prefix.into(), value_type.clone())),
+    }
 }
 
 impl ComposerBlockKind {
@@ -234,36 +1044,20 @@ impl ComposerBlockKind {
         Self::BrewInstall,
     ];
 
-    fn title(self) -> &'static str {
+    fn action_kind(self) -> ActionKind {
         match self {
-            Self::GithubListRepositories => "Получить репозитории аккаунта",
-            Self::ForEach => "Для каждого элемента",
-            Self::GitInspect => "Проверить Git-репозиторий",
-            Self::GitCloneIfMissing => "Клонировать, если отсутствует",
-            Self::GitFetch => "Получить remote-ветку",
-            Self::GitFastForward => "Актуализировать ветку",
-            Self::CreateDirectory => "Создать папку",
-            Self::InspectPath => "Проверить путь",
-            Self::CopyPath => "Копировать путь",
-            Self::WriteFile => "Записать файл",
-            Self::RemovePath => "Переместить в корзину",
-            Self::BrewInstall => "Установить Homebrew-пакет",
-        }
-    }
-
-    fn category(self) -> &'static str {
-        match self {
-            Self::GithubListRepositories => "GITHUB",
-            Self::ForEach => "ЛОГИКА",
-            Self::GitInspect | Self::GitCloneIfMissing | Self::GitFetch | Self::GitFastForward => {
-                "GIT"
-            }
-            Self::CreateDirectory
-            | Self::InspectPath
-            | Self::CopyPath
-            | Self::WriteFile
-            | Self::RemovePath => "ФАЙЛЫ",
-            Self::BrewInstall => "ПАКЕТЫ",
+            Self::GithubListRepositories => ActionKind::GithubListRepositories,
+            Self::ForEach => ActionKind::ForEach,
+            Self::GitInspect => ActionKind::GitInspect,
+            Self::GitCloneIfMissing => ActionKind::GitCloneIfMissing,
+            Self::GitFetch => ActionKind::GitFetch,
+            Self::GitFastForward => ActionKind::GitFastForward,
+            Self::CreateDirectory => ActionKind::CreateDirectory,
+            Self::InspectPath => ActionKind::InspectPath,
+            Self::CopyPath => ActionKind::CopyPath,
+            Self::WriteFile => ActionKind::WriteFile,
+            Self::RemovePath => ActionKind::RemovePath,
+            Self::BrewInstall => ActionKind::BrewInstall,
         }
     }
 }
@@ -455,6 +1249,7 @@ impl ScenarioApp {
             trust: TrustRequirement::ExternalAllowed,
             scenarios: Vec::new(),
             resolved_scenarios: Vec::new(),
+            graph: None,
             steps: Vec::new(),
         };
         self.custom_project = Some(ScenarioProject {
@@ -465,7 +1260,9 @@ impl ScenarioApp {
             entries: vec![ProjectEntry::Group {
                 id: "main".into(),
                 name: "Основные сценарии".into(),
-                entries: vec![ProjectEntry::Scenario { task }],
+                entries: vec![ProjectEntry::Scenario {
+                    task: Box::new(task),
+                }],
             }],
         });
         self.selected_project_scenario = Some(vec![0, 0]);
@@ -499,10 +1296,26 @@ impl ScenarioApp {
         };
         let mut new_step = composer_step(kind, id.clone());
         if matches!(kind, ComposerBlockKind::ForEach) {
-            if task.steps.iter().any(|step| step.id == parent) {
-                if let Action::ForEach { source_step, .. } = &mut new_step.action {
-                    *source_step = parent.clone();
-                }
+            let source = composer_array_sources(task, task.steps.len())
+                .into_iter()
+                .find(|source| source.step_id == parent);
+            if let (
+                Some(source),
+                Action::ForEach {
+                    source_step,
+                    array_path,
+                    item,
+                    fields,
+                },
+            ) = (source, &mut new_step.action)
+            {
+                *source_step = source.step_id;
+                *array_path = source.path;
+                *item = source.item;
+                *fields = item_object_fields(&source.item_type)
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect();
             }
         } else if matches!(kind, ComposerBlockKind::GitCloneIfMissing)
             && task
@@ -713,7 +1526,7 @@ impl ScenarioApp {
         };
         let ordinal = entries.len() + 1;
         entries.push(ProjectEntry::Scenario {
-            task: Task {
+            task: Box::new(Task {
                 id: format!("scenario-{ordinal}"),
                 name: format!("Новый сценарий {ordinal}"),
                 description: "Сценарий, собранный из атомарных операций в ppduster.".into(),
@@ -721,8 +1534,9 @@ impl ScenarioApp {
                 trust: TrustRequirement::ExternalAllowed,
                 scenarios: Vec::new(),
                 resolved_scenarios: Vec::new(),
+                graph: None,
                 steps: Vec::new(),
-            },
+            }),
         });
         let mut scenario_path = path;
         scenario_path.push(entries.len() - 1);
@@ -741,7 +1555,7 @@ impl ScenarioApp {
         };
         let ordinal = entries.len() + 1;
         entries.push(ProjectEntry::Scenario {
-            task: github_repository_composer_task(ordinal),
+            task: Box::new(github_repository_composer_task(ordinal)),
         });
         let mut scenario_path = path;
         scenario_path.push(entries.len() - 1);
@@ -883,11 +1697,10 @@ impl ScenarioApp {
             apply,
             allow_shell: self.allow_shell,
             allow_elevation: self.allow_elevation,
-            release_channel: task
-                .steps
-                .iter()
-                .any(|step| matches!(step.action, Action::BambuStudioRelease(_)))
-                .then_some(self.channel),
+            release_channel: task_contains_action(task, &|action| {
+                matches!(action, Action::BambuStudioRelease(_))
+            })
+            .then_some(self.channel),
         }
     }
 
@@ -948,11 +1761,9 @@ impl ScenarioApp {
         let task = self.selected_task()?;
         let resolved = self.resolved_selected_task().ok()?;
         let mut command = format!("ppduster setup run {}", task.id);
-        if resolved
-            .steps
-            .iter()
-            .any(|step| matches!(step.action, Action::BambuStudioRelease(_)))
-        {
+        if task_contains_action(&resolved, &|action| {
+            matches!(action, Action::BambuStudioRelease(_))
+        }) {
             command.push_str(match self.channel {
                 ReleaseChannel::Release => " --channel release",
                 ReleaseChannel::Beta => " --channel beta",
@@ -1118,11 +1929,13 @@ impl ScenarioApp {
                     .max_height(list_height)
                     .show(ui, |ui| {
                         for kind in ComposerBlockKind::ALL {
-                            let context = composer_output_context(kind);
+                            let definition = block_definition(kind.action_kind());
+                            let context_lines = schema_context_lines(&definition.output_schema);
+                            let context_search = context_lines.join(" ");
                             if !query.is_empty()
-                                && !kind.title().to_lowercase().contains(&query)
-                                && !kind.category().to_lowercase().contains(&query)
-                                && !context.to_lowercase().contains(&query)
+                                && !definition.title.to_lowercase().contains(&query)
+                                && !definition.category.to_lowercase().contains(&query)
+                                && !context_search.to_lowercase().contains(&query)
                             {
                                 continue;
                             }
@@ -1135,7 +1948,7 @@ impl ScenarioApp {
                                     ui.set_width(ui.available_width());
                                     ui.horizontal(|ui| {
                                         ui.label(
-                                            RichText::new(kind.title())
+                                            RichText::new(&definition.title)
                                                 .strong()
                                                 .size(11.0)
                                                 .color(text(self.dark)),
@@ -1144,19 +1957,40 @@ impl ScenarioApp {
                                             Layout::right_to_left(Align::Center),
                                             |ui| {
                                                 ui.label(
-                                                    RichText::new(kind.category())
+                                                    RichText::new(&definition.category)
                                                         .size(8.0)
                                                         .color(CYAN),
                                                 );
                                             },
                                         );
                                     });
-                                    ui.label(
-                                        RichText::new(format!("Выход: {context}"))
+                                    for (index, line) in context_lines.iter().take(4).enumerate() {
+                                        let prefix = if index == 0 {
+                                            "Выход: "
+                                        } else {
+                                            "       "
+                                        };
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(format!("{prefix}{line}"))
+                                                    .monospace()
+                                                    .size(8.0)
+                                                    .color(PURPLE),
+                                            )
+                                            .wrap(),
+                                        );
+                                    }
+                                    if context_lines.len() > 4 {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "       … ещё {}",
+                                                context_lines.len() - 4
+                                            ))
                                             .monospace()
                                             .size(8.0)
-                                            .color(PURPLE),
-                                    );
+                                            .color(MUTED),
+                                        );
+                                    }
                                 })
                                 .response
                                 .interact(Sense::click());
@@ -1317,7 +2151,9 @@ fn load_project_yaml(yaml: &str) -> anyhow::Result<ScenarioProject> {
         entries: vec![ProjectEntry::Group {
             id: "imported".into(),
             name: "Импортированные сценарии".into(),
-            entries: vec![ProjectEntry::Scenario { task }],
+            entries: vec![ProjectEntry::Scenario {
+                task: Box::new(task),
+            }],
         }],
     })
 }
@@ -1739,12 +2575,11 @@ impl ScenarioApp {
                         ui.add_space(14.0);
                     }
 
-                    if resolved_task
-                        .as_ref()
-                        .is_some_and(|resolved| resolved
-                        .steps
-                        .iter()
-                        .any(|step| matches!(step.action, Action::BambuStudioRelease(_))))
+                    if resolved_task.as_ref().is_some_and(|resolved| {
+                        task_contains_action(resolved, &|action| {
+                            matches!(action, Action::BambuStudioRelease(_))
+                        })
+                    })
                     {
                         section_label(ui, "КАНАЛ РЕЛИЗА");
                         let channel_before = self.channel;
@@ -2165,6 +3000,7 @@ impl ScenarioApp {
                 ui.add_space(8.0);
                 let array_sources = composer_array_sources(task, index);
                 let loop_sources = composer_loop_sources(task, index);
+                let condition_fields = composer_condition_fields(task, index);
                 changed |= paint_composer_step_editor(
                     ui,
                     &mut task.steps[index],
@@ -2173,13 +3009,20 @@ impl ScenarioApp {
                     self.dark,
                 );
                 ui.add_space(12.0);
-                section_label(ui, "ВЫХОДНОЙ КОНТЕКСТ");
-                ui.label(
-                    RichText::new(composer_step_output_context(&task.steps[index]))
-                        .monospace()
-                        .size(8.0)
-                        .color(PURPLE),
+                changed |= paint_composer_conditions(
+                    ui,
+                    &mut task.steps[index],
+                    &condition_fields,
+                    self.dark,
                 );
+                ui.add_space(12.0);
+                section_label(ui, "ВЫХОДНОЙ КОНТЕКСТ");
+                for line in composer_step_context_lines(task, index) {
+                    ui.add(
+                        egui::Label::new(RichText::new(line).monospace().size(8.0).color(PURPLE))
+                            .wrap(),
+                    );
+                }
                 ui.label(
                     RichText::new(
                         "Поля контекста доступны условиям и следующим блокам по ID этого блока.",
@@ -3093,6 +3936,7 @@ fn github_repository_composer_task(ordinal: usize) -> Task {
         trust: TrustRequirement::ExternalAllowed,
         scenarios: Vec::new(),
         resolved_scenarios: Vec::new(),
+        graph: None,
         steps,
     }
 }
@@ -3321,73 +4165,124 @@ fn composer_block_id(kind: ComposerBlockKind) -> &'static str {
     }
 }
 
-fn composer_output_context(kind: ComposerBlockKind) -> &'static str {
-    match kind {
-        ComposerBlockKind::GithubListRepositories => {
-            "github.account.login, github.repositories[]: { id, owner, name, full_name, https_url, ssh_url, default_branch, private, archived }"
+fn composer_step_context_lines(task: &Task, index: usize) -> Vec<String> {
+    let Some(step) = task.steps.get(index) else {
+        return Vec::new();
+    };
+    let definition = definition_for_action(&step.action);
+    let mut lines = schema_context_lines(&definition.output_schema);
+    let Action::ForEach {
+        source_step,
+        array_path,
+        item,
+        fields,
+    } = &step.action
+    else {
+        return lines;
+    };
+
+    lines.retain(|line| !line.starts_with("loop.items[]"));
+    let Some(source) = composer_array_sources(task, index)
+        .into_iter()
+        .find(|source| source.step_id == *source_step && source.path == *array_path)
+    else {
+        return lines;
+    };
+    let item_type = project_item_type(&source.item_type, fields);
+    match &item_type {
+        ContextType::Object { schema } => {
+            lines.push(format!("{item} : object (current item)"));
+            collect_schema_context_lines(schema, item, &mut lines);
         }
-        ComposerBlockKind::ForEach => "item (текущий элемент массива)",
-        ComposerBlockKind::GitInspect => {
-            "repository.exists, repository.path, repository.remote_url"
+        ContextType::Array { items } => lines.push(format!(
+            "{item}[] : {} (current item)",
+            context_type_label(items, false, false)
+        )),
+        _ => lines.push(format!(
+            "{item} : {} (current item)",
+            context_type_label(&item_type, false, false)
+        )),
+    }
+    lines
+}
+
+fn schema_context_lines(schema: &ObjectSchema) -> Vec<String> {
+    let mut lines = Vec::new();
+    collect_schema_context_lines(schema, "", &mut lines);
+    lines
+}
+
+fn collect_schema_context_lines(schema: &ObjectSchema, prefix: &str, lines: &mut Vec<String>) {
+    for (name, field) in &schema.fields {
+        let path = join_context_path(prefix, name);
+        match &field.value_type {
+            ContextType::Object { schema } => {
+                lines.push(format!(
+                    "{path} : {}",
+                    context_type_label(&field.value_type, field.nullable, !field.required)
+                ));
+                collect_schema_context_lines(schema, &path, lines);
+            }
+            ContextType::Array { items } => {
+                let array_path = format!("{path}[]");
+                lines.push(format!(
+                    "{array_path} : {}",
+                    context_type_label(items, field.nullable, !field.required)
+                ));
+                if let ContextType::Object { schema } = items.as_ref() {
+                    collect_schema_context_lines(schema, &array_path, lines);
+                }
+            }
+            _ => lines.push(format!(
+                "{path} : {}",
+                context_type_label(&field.value_type, field.nullable, !field.required)
+            )),
         }
-        ComposerBlockKind::GitCloneIfMissing => {
-            "repository.path, repository.remote_url, repository.branch, repository.cloned"
-        }
-        ComposerBlockKind::GitFetch => {
-            "repository.path, repository.remote_url, repository.branch, repository.fetched"
-        }
-        ComposerBlockKind::GitFastForward => {
-            "repository.path, repository.branch, repository.updated"
-        }
-        ComposerBlockKind::CreateDirectory => "path.value, path.created",
-        ComposerBlockKind::InspectPath => {
-            "path.value, path.exists, path.kind, path.size_bytes, path.sha256"
-        }
-        ComposerBlockKind::CopyPath => "path.source, path.destination, path.copied",
-        ComposerBlockKind::WriteFile => "file.path, file.bytes, file.changed",
-        ComposerBlockKind::RemovePath => "path.value, path.removed",
-        ComposerBlockKind::BrewInstall => "package.name, package.cask, package.installed",
     }
 }
 
-fn composer_step_output_context(step: &Step) -> String {
-    match &step.action {
-        Action::GithubListRepositories => {
-            composer_output_context(ComposerBlockKind::GithubListRepositories).into()
+fn context_type_label(value_type: &ContextType, nullable: bool, optional: bool) -> String {
+    let mut label = match value_type {
+        ContextType::Any => "any".into(),
+        ContextType::Null => "null".into(),
+        ContextType::Boolean => "bool".into(),
+        ContextType::Integer => "integer".into(),
+        ContextType::Number => "number".into(),
+        ContextType::String { format } => format
+            .map(|format| format!("string<{}>", semantic_format_label(format)))
+            .unwrap_or_else(|| "string".into()),
+        ContextType::Array { items } => {
+            format!("array<{}>", context_type_label(items, false, false))
         }
-        Action::ForEach { item, fields, .. } => {
-            let selected =
-                |field: &str| fields.is_empty() || fields.iter().any(|value| value == field);
-            let body = GITHUB_REPOSITORY_CONTEXT_FIELDS
-                .iter()
-                .filter(|(field, _)| selected(field))
-                .map(|(field, kind)| format!("  {field}: {kind}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("{item} {{\n{body}\n}}")
-        }
-        Action::ForEachGitCloneIfMissing { .. } => {
-            composer_output_context(ComposerBlockKind::GitCloneIfMissing).into()
-        }
-        Action::GitInspect { .. } => composer_output_context(ComposerBlockKind::GitInspect).into(),
-        Action::GitCloneIfMissing { .. } => {
-            composer_output_context(ComposerBlockKind::GitCloneIfMissing).into()
-        }
-        Action::GitFetch { .. } => composer_output_context(ComposerBlockKind::GitFetch).into(),
-        Action::GitFastForward { .. } => {
-            composer_output_context(ComposerBlockKind::GitFastForward).into()
-        }
-        Action::CreateDirectory(_) => {
-            composer_output_context(ComposerBlockKind::CreateDirectory).into()
-        }
-        Action::InspectPath(_) => composer_output_context(ComposerBlockKind::InspectPath).into(),
-        Action::CopyPath(_) => composer_output_context(ComposerBlockKind::CopyPath).into(),
-        Action::WriteFile(_) => composer_output_context(ComposerBlockKind::WriteFile).into(),
-        Action::RemovePath(_) => composer_output_context(ComposerBlockKind::RemovePath).into(),
-        Action::BrewInstall { .. } => {
-            composer_output_context(ComposerBlockKind::BrewInstall).into()
-        }
-        _ => "result.status, result.summary".into(),
+        ContextType::Object { .. } => "object".into(),
+    };
+    if nullable {
+        label.push_str(" | null");
+    }
+    if optional {
+        label.push_str(" (optional)");
+    }
+    label
+}
+
+fn semantic_format_label(format: SemanticFormat) -> &'static str {
+    match format {
+        SemanticFormat::Path => "path",
+        SemanticFormat::FilePath => "file-path",
+        SemanticFormat::DirectoryPath => "directory-path",
+        SemanticFormat::Url => "url",
+        SemanticFormat::GitUrl => "git-url",
+        SemanticFormat::SecretRef => "secret-ref",
+        SemanticFormat::Sha256 => "sha256",
+        SemanticFormat::DateTime => "date-time",
+        SemanticFormat::Duration => "duration",
+        SemanticFormat::Email => "email",
+        SemanticFormat::Hostname => "hostname",
+        SemanticFormat::IpAddress => "ip-address",
+        SemanticFormat::Uuid => "uuid",
+        SemanticFormat::GitRef => "git-ref",
+        SemanticFormat::RepositoryName => "repository-name",
+        SemanticFormat::Identifier => "identifier",
     }
 }
 
@@ -3400,10 +4295,7 @@ fn composer_step(kind: ComposerBlockKind, id: String) -> Step {
             source_step: "list-github-repositories-1".into(),
             array_path: "github.repositories".into(),
             item: "repository".into(),
-            fields: GITHUB_REPOSITORY_CONTEXT_FIELDS
-                .iter()
-                .map(|(field, _)| (*field).into())
-                .collect(),
+            fields: Vec::new(),
         },
         ComposerBlockKind::GitInspect => Action::GitInspect {
             repo: repository,
@@ -3452,7 +4344,7 @@ fn composer_step(kind: ComposerBlockKind, id: String) -> Step {
     };
     Step {
         id,
-        name: kind.title().into(),
+        name: block_definition(kind.action_kind()).title,
         auth: AuthPolicy::None,
         check: None,
         dangerous: false,
@@ -3611,6 +4503,643 @@ fn paint_step_inspector(ui: &mut egui::Ui, step: &Step, options: Option<&RunOpti
         });
 }
 
+fn paint_composer_conditions(
+    ui: &mut egui::Ui,
+    step: &mut Step,
+    fields: &[ComposerConditionField],
+    dark: bool,
+) -> bool {
+    let mut changed = false;
+    let step_id = step.id.clone();
+    section_label(ui, "УСЛОВИЯ");
+    ui.label(
+        RichText::new("Доступны только типизированные поля предыдущих блоков.")
+            .size(8.0)
+            .color(MUTED),
+    );
+    ui.add_space(5.0);
+    changed |= paint_condition_slot(
+        ui,
+        &step_id,
+        "when",
+        "Выполнять, когда",
+        &mut step.when,
+        fields,
+        dark,
+    );
+    ui.add_space(8.0);
+    changed |= paint_condition_slot(
+        ui,
+        &step_id,
+        "require",
+        "Требовать перед запуском",
+        &mut step.require,
+        fields,
+        dark,
+    );
+    changed
+}
+
+fn paint_condition_slot(
+    ui: &mut egui::Ui,
+    step_id: &str,
+    slot_id: &str,
+    title: &str,
+    condition: &mut Option<StepCondition>,
+    fields: &[ComposerConditionField],
+    dark: bool,
+) -> bool {
+    let mut changed = false;
+    let mut enabled = condition.is_some();
+    let toggle = ui.add_enabled(
+        enabled || !fields.is_empty(),
+        egui::Checkbox::new(&mut enabled, title),
+    );
+    if toggle.changed() {
+        if enabled {
+            if let Some(field) = default_condition_field(fields) {
+                let rule = default_simple_condition(field);
+                *condition = Some(StepCondition::Expression {
+                    rule: build_simple_condition_rule(&rule),
+                    policy: RuleOutcomePolicy::default(),
+                });
+            }
+        } else {
+            *condition = None;
+        }
+        changed = true;
+    }
+    if !enabled {
+        if fields.is_empty() {
+            ui.label(
+                RichText::new("Нет предыдущего блока с выходным контекстом.")
+                    .size(8.0)
+                    .color(MUTED),
+            );
+        }
+        return changed;
+    }
+
+    let Some(condition_value) = condition.as_mut() else {
+        return changed;
+    };
+    let condition_yaml = serde_yaml::to_string(&*condition_value)
+        .unwrap_or_else(|error| format!("Не удалось показать условие: {error}"));
+    // Replacing an unsupported typed AST is an explicit model edit, but its
+    // null/missing/unknown policy is independent of the AST shape and must not
+    // silently reset. Legacy conditions have no such policy.
+    let replacement_policy = match &*condition_value {
+        StepCondition::Expression { policy, .. } => *policy,
+        _ => RuleOutcomePolicy::default(),
+    };
+    let mut replace_with_simple = false;
+    match condition_value {
+        StepCondition::Expression { rule, policy } => {
+            if let Some(mut editable) = composer_condition_rule(rule)
+                .filter(|editable| composer_condition_rule_supported(editable, fields))
+            {
+                let editor_changed = paint_composer_condition_rule_editor(
+                    ui,
+                    &format!("{step_id}-{slot_id}"),
+                    &mut editable,
+                    fields,
+                    dark,
+                );
+                if editor_changed {
+                    *rule = build_composer_condition_rule(&editable);
+                    changed = true;
+                }
+                changed |= paint_rule_outcome_policy(ui, &format!("{step_id}-{slot_id}"), policy);
+            } else {
+                ui.label(
+                    RichText::new(
+                        "Расширенное typed-выражение сохранено без изменений (read-only).",
+                    )
+                    .size(8.0)
+                    .color(ORANGE),
+                );
+                paint_condition_yaml(ui, &condition_yaml, dark);
+                changed |= paint_rule_outcome_policy(ui, &format!("{step_id}-{slot_id}"), policy);
+                replace_with_simple = ui
+                    .add_enabled(
+                        !fields.is_empty(),
+                        egui::Button::new("Заменить простым typed-условием"),
+                    )
+                    .clicked();
+            }
+        }
+        StepCondition::ExitCode { .. }
+        | StepCondition::Path { .. }
+        | StepCondition::All { .. }
+        | StepCondition::Any { .. }
+        | StepCondition::Not { .. } => {
+            ui.label(
+                RichText::new("Legacy-условие сохранено без изменений (read-only).")
+                    .size(8.0)
+                    .color(ORANGE),
+            );
+            paint_condition_yaml(ui, &condition_yaml, dark);
+            replace_with_simple = ui
+                .add_enabled(
+                    !fields.is_empty(),
+                    egui::Button::new("Заменить typed-условием"),
+                )
+                .clicked();
+        }
+    }
+    if replace_with_simple {
+        if let Some(field) = default_condition_field(fields) {
+            let rule = default_simple_condition(field);
+            *condition_value = StepCondition::Expression {
+                rule: build_simple_condition_rule(&rule),
+                policy: replacement_policy,
+            };
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn paint_composer_condition_rule_editor(
+    ui: &mut egui::Ui,
+    editor_id: &str,
+    rule: &mut ComposerConditionRule,
+    fields: &[ComposerConditionField],
+    dark: bool,
+) -> bool {
+    if !composer_condition_rule_fits_editor(rule) {
+        ui.label(
+            RichText::new("Условие превышает лимиты визуального редактора и сохранено read-only.")
+                .size(8.0)
+                .color(ORANGE),
+        );
+        return false;
+    }
+    let mut total_nodes = composer_condition_rule_nodes(rule);
+    paint_composer_condition_rule_editor_inner(
+        ui,
+        editor_id,
+        rule,
+        fields,
+        dark,
+        0,
+        &mut total_nodes,
+    )
+}
+
+fn paint_composer_condition_rule_editor_inner(
+    ui: &mut egui::Ui,
+    editor_id: &str,
+    rule: &mut ComposerConditionRule,
+    fields: &[ComposerConditionField],
+    dark: bool,
+    depth: usize,
+    total_nodes: &mut usize,
+) -> bool {
+    let mut changed = false;
+    let mut replacement = None;
+    let group_is_all = match rule {
+        ComposerConditionRule::All(_) => Some(true),
+        ComposerConditionRule::Any(_) => Some(false),
+        ComposerConditionRule::Clause(_) | ComposerConditionRule::Not(_) => None,
+    };
+    match rule {
+        ComposerConditionRule::Clause(clause) => {
+            changed |= paint_simple_condition_editor(ui, editor_id, clause, fields, dark);
+        }
+        ComposerConditionRule::All(rules) | ComposerConditionRule::Any(rules) => {
+            let is_all = group_is_all.expect("group kind is known");
+            ui.label(
+                RichText::new(if is_all {
+                    "Все условия (И)"
+                } else {
+                    "Хотя бы одно условие (ИЛИ)"
+                })
+                .strong()
+                .size(9.0)
+                .color(PURPLE),
+            );
+            let can_remove = rules.len() > 1;
+            let mut remove = None;
+            for (index, child) in rules.iter_mut().enumerate() {
+                ui.push_id((editor_id, index), |ui| {
+                    Frame::new()
+                        .fill(code_surface(dark))
+                        .corner_radius(7)
+                        .inner_margin(Margin::same(7))
+                        .show(ui, |ui| {
+                            changed |= paint_composer_condition_rule_editor_inner(
+                                ui,
+                                &format!("{editor_id}-{index}"),
+                                child,
+                                fields,
+                                dark,
+                                depth + 1,
+                                total_nodes,
+                            );
+                            if can_remove && ui.small_button("Удалить условие").clicked()
+                            {
+                                remove = Some(index);
+                            }
+                        });
+                });
+            }
+            if let Some(index) = remove {
+                *total_nodes =
+                    (*total_nodes).saturating_sub(composer_condition_rule_nodes(&rules[index]));
+                rules.remove(index);
+                changed = true;
+            }
+            let can_add = *total_nodes < CONDITION_EDITOR_MAX_NODES
+                && depth.saturating_add(1) <= CONDITION_EDITOR_MAX_DEPTH;
+            if ui
+                .add_enabled(can_add, egui::Button::new("+ Добавить условие").small())
+                .clicked()
+            {
+                if let Some(field) = default_condition_field(fields) {
+                    rules.push(ComposerConditionRule::Clause(default_simple_condition(
+                        field,
+                    )));
+                    *total_nodes += 1;
+                    changed = true;
+                }
+            }
+            if ui
+                .small_button(if is_all {
+                    "Сменить на ИЛИ"
+                } else {
+                    "Сменить на И"
+                })
+                .clicked()
+            {
+                replacement = Some(if is_all {
+                    ComposerConditionRule::Any(rules.clone())
+                } else {
+                    ComposerConditionRule::All(rules.clone())
+                });
+            }
+        }
+        ComposerConditionRule::Not(child) => {
+            ui.label(RichText::new("НЕ").strong().size(9.0).color(PURPLE));
+            ui.indent((editor_id, "not"), |ui| {
+                changed |= paint_composer_condition_rule_editor_inner(
+                    ui,
+                    &format!("{editor_id}-not"),
+                    child,
+                    fields,
+                    dark,
+                    depth + 1,
+                    total_nodes,
+                );
+            });
+            if ui.small_button("Убрать НЕ").clicked() {
+                replacement = Some((**child).clone());
+            }
+        }
+    }
+
+    if replacement.is_none() {
+        if let Some(field) = default_condition_field(fields) {
+            let default = ComposerConditionRule::Clause(default_simple_condition(field));
+            ui.horizontal_wrapped(|ui| {
+                let all = ComposerConditionRule::All(vec![rule.clone(), default.clone()]);
+                if ui
+                    .add_enabled(
+                        composer_condition_replacement_fits(rule, &all, depth, *total_nodes),
+                        egui::Button::new("Обернуть в И").small(),
+                    )
+                    .clicked()
+                {
+                    replacement = Some(all);
+                }
+                let any = ComposerConditionRule::Any(vec![rule.clone(), default]);
+                if ui
+                    .add_enabled(
+                        composer_condition_replacement_fits(rule, &any, depth, *total_nodes),
+                        egui::Button::new("Обернуть в ИЛИ").small(),
+                    )
+                    .clicked()
+                {
+                    replacement = Some(any);
+                }
+                let not = ComposerConditionRule::Not(Box::new(rule.clone()));
+                if ui
+                    .add_enabled(
+                        composer_condition_replacement_fits(rule, &not, depth, *total_nodes),
+                        egui::Button::new("Обернуть в НЕ").small(),
+                    )
+                    .clicked()
+                {
+                    replacement = Some(not);
+                }
+            });
+        }
+    }
+    if let Some(replacement) = replacement {
+        *total_nodes = (*total_nodes)
+            .saturating_sub(composer_condition_rule_nodes(rule))
+            .saturating_add(composer_condition_rule_nodes(&replacement));
+        *rule = replacement;
+        changed = true;
+    }
+    changed
+}
+
+fn paint_simple_condition_editor(
+    ui: &mut egui::Ui,
+    editor_id: &str,
+    rule: &mut SimpleConditionRule,
+    fields: &[ComposerConditionField],
+    dark: bool,
+) -> bool {
+    let mut changed = false;
+    ui.label(RichText::new("Поле контекста").size(8.0).color(MUTED));
+    let selected_label = fields
+        .iter()
+        .find(|field| field.reference == rule.field)
+        .map(|field| field.label.clone())
+        .unwrap_or_else(|| format!("Недоступно: {}", field_ref_label(&rule.field)));
+    egui::ComboBox::from_id_salt((editor_id, "field"))
+        .selected_text(selected_label)
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            for field in fields {
+                if ui
+                    .selectable_label(field.reference == rule.field, &field.label)
+                    .clicked()
+                {
+                    rule.field = field.reference.clone();
+                    let operators = condition_operators(&field.value_type);
+                    if !operators.contains(&rule.operator) {
+                        rule.operator = operators
+                            .first()
+                            .copied()
+                            .unwrap_or(ComposerConditionOperator::Exists);
+                    }
+                    rule.literal = default_condition_literal(field, rule.operator);
+                    changed = true;
+                    ui.close();
+                }
+            }
+        });
+
+    let Some(field) = fields.iter().find(|field| field.reference == rule.field) else {
+        ui.label(
+            RichText::new("Ссылка больше не видима на этой позиции. Выберите предыдущий блок.")
+                .size(8.0)
+                .color(ORANGE),
+        );
+        return changed;
+    };
+    ui.label(
+        RichText::new(if field.required {
+            "Поле гарантировано схемой"
+        } else {
+            "Поле может отсутствовать"
+        })
+        .size(8.0)
+        .color(MUTED),
+    );
+    ui.label(RichText::new("Операция").size(8.0).color(MUTED));
+    let operators = condition_operators(&field.value_type);
+    if !operators.contains(&rule.operator) {
+        rule.operator = operators
+            .first()
+            .copied()
+            .unwrap_or(ComposerConditionOperator::Exists);
+        rule.literal = default_condition_literal(field, rule.operator);
+        changed = true;
+    }
+    egui::ComboBox::from_id_salt((editor_id, "operator"))
+        .selected_text(rule.operator.label())
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            for operator in &operators {
+                if ui
+                    .selectable_label(*operator == rule.operator, operator.label())
+                    .clicked()
+                {
+                    rule.operator = *operator;
+                    rule.literal = default_condition_literal(field, *operator);
+                    changed = true;
+                    ui.close();
+                }
+            }
+        });
+
+    if rule.operator.requires_literal() {
+        changed |= paint_condition_literal(ui, editor_id, field, rule);
+    } else {
+        rule.literal = None;
+    }
+    if field.nullable {
+        ui.label(
+            RichText::new("Поле допускает null — поведение задаётся политикой ниже.")
+                .size(8.0)
+                .color(PURPLE),
+        );
+    }
+    Frame::new()
+        .fill(code_surface(dark))
+        .corner_radius(7)
+        .inner_margin(Margin::same(7))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} {}",
+                    field_ref_label(&rule.field),
+                    rule.operator.label()
+                ))
+                .monospace()
+                .size(8.0)
+                .color(PURPLE),
+            );
+        });
+    changed
+}
+
+fn paint_condition_literal(
+    ui: &mut egui::Ui,
+    editor_id: &str,
+    field: &ComposerConditionField,
+    rule: &mut SimpleConditionRule,
+) -> bool {
+    let mut changed = false;
+    let kinds = condition_literal_kinds(field, rule.operator);
+    if kinds.is_empty() {
+        rule.literal = None;
+        return changed;
+    }
+    let current_kind = rule
+        .literal
+        .as_ref()
+        .and_then(ComposerLiteralKind::from_value);
+    if current_kind.is_none_or(|kind| !kinds.contains(&kind)) {
+        rule.literal = Some(kinds[0].default_value());
+        changed = true;
+    }
+    let mut selected_kind = rule
+        .literal
+        .as_ref()
+        .and_then(ComposerLiteralKind::from_value)
+        .unwrap_or(kinds[0]);
+    if kinds.len() > 1 {
+        ui.label(RichText::new("Тип значения").size(8.0).color(MUTED));
+        egui::ComboBox::from_id_salt((editor_id, "literal-kind"))
+            .selected_text(selected_kind.label())
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for kind in &kinds {
+                    if ui
+                        .selectable_label(*kind == selected_kind, kind.label())
+                        .clicked()
+                    {
+                        selected_kind = *kind;
+                        rule.literal = Some(kind.default_value());
+                        changed = true;
+                        ui.close();
+                    }
+                }
+            });
+    }
+    ui.label(RichText::new("Значение").size(8.0).color(MUTED));
+    if let Some(literal) = rule.literal.as_mut() {
+        changed |= match literal {
+            ExpressionValue::Null => {
+                ui.label(RichText::new("null").monospace().size(9.0).color(PURPLE));
+                false
+            }
+            ExpressionValue::Bool(value) => ui.checkbox(value, "true").changed(),
+            ExpressionValue::Int(value) => ui.add(egui::DragValue::new(value)).changed(),
+            ExpressionValue::UInt(value) => ui.add(egui::DragValue::new(value)).changed(),
+            ExpressionValue::Float(value) => {
+                ui.add(egui::DragValue::new(value).speed(0.1)).changed()
+            }
+            ExpressionValue::String(value) => ui.text_edit_singleline(value).changed(),
+            ExpressionValue::List(_) | ExpressionValue::Object(_) => false,
+        };
+        if rule.operator == ComposerConditionOperator::Matches {
+            if let ExpressionValue::String(pattern) = literal {
+                match regex_pattern_error(pattern) {
+                    Some(error) => {
+                        ui.label(RichText::new(error).size(8.0).color(ORANGE));
+                    }
+                    None => {
+                        ui.label(
+                            RichText::new("Регулярное выражение корректно")
+                                .size(8.0)
+                                .color(CYAN),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn paint_rule_outcome_policy(
+    ui: &mut egui::Ui,
+    editor_id: &str,
+    policy: &mut RuleOutcomePolicy,
+) -> bool {
+    ui.add_space(5.0);
+    ui.label(
+        RichText::new("Явная политика неопределённого результата")
+            .size(8.0)
+            .color(MUTED),
+    );
+    let mut changed = false;
+    changed |=
+        paint_indeterminate_policy(ui, editor_id, "on-null", "Если null", &mut policy.on_null);
+    changed |= paint_indeterminate_policy(
+        ui,
+        editor_id,
+        "on-missing",
+        "Если отсутствует",
+        &mut policy.on_missing,
+    );
+    changed |= paint_indeterminate_policy(
+        ui,
+        editor_id,
+        "on-unknown",
+        "Если неизвестно",
+        &mut policy.on_unknown,
+    );
+    changed
+}
+
+fn paint_indeterminate_policy(
+    ui: &mut egui::Ui,
+    editor_id: &str,
+    policy_id: &str,
+    label: &str,
+    value: &mut IndeterminatePolicy,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).size(8.0).color(MUTED));
+        egui::ComboBox::from_id_salt((editor_id, policy_id))
+            .selected_text(indeterminate_policy_label(*value))
+            .show_ui(ui, |ui| {
+                for policy in [
+                    IndeterminatePolicy::Fail,
+                    IndeterminatePolicy::TreatAsFalse,
+                    IndeterminatePolicy::TreatAsTrue,
+                ] {
+                    if ui
+                        .selectable_label(policy == *value, indeterminate_policy_label(policy))
+                        .clicked()
+                    {
+                        *value = policy;
+                        changed = true;
+                        ui.close();
+                    }
+                }
+            });
+    });
+    changed
+}
+
+const fn indeterminate_policy_label(policy: IndeterminatePolicy) -> &'static str {
+    match policy {
+        IndeterminatePolicy::Fail => "Ошибка",
+        IndeterminatePolicy::TreatAsFalse => "Считать false",
+        IndeterminatePolicy::TreatAsTrue => "Считать true",
+    }
+}
+
+fn paint_condition_yaml(ui: &mut egui::Ui, yaml: &str, dark: bool) {
+    Frame::new()
+        .fill(code_surface(dark))
+        .corner_radius(7)
+        .inner_margin(Margin::same(7))
+        .show(ui, |ui| {
+            ui.add(
+                egui::Label::new(RichText::new(yaml).monospace().size(8.0).color(text(dark)))
+                    .wrap(),
+            );
+        });
+}
+
+fn field_ref_label(reference: &FieldRef) -> String {
+    let mut label = match &reference.scope {
+        ContextScope::Scenario => "scenario".into(),
+        ContextScope::Step { step_id } => step_id.clone(),
+        ContextScope::LoopItem { step_id } => format!("loop:{step_id}"),
+    };
+    for segment in &reference.segments {
+        match segment {
+            ContextPathSegment::Field { name } => {
+                label.push('.');
+                label.push_str(name);
+            }
+            ContextPathSegment::Index { index } => label.push_str(&format!("[{index}]")),
+        }
+    }
+    label
+}
+
 fn paint_composer_step_editor(
     ui: &mut egui::Ui,
     step: &mut Step,
@@ -3620,6 +5149,7 @@ fn paint_composer_step_editor(
 ) -> bool {
     let mut changed = false;
     let is_git_fetch = matches!(&step.action, Action::GitFetch { .. });
+    let input_schema = definition_for_action(&step.action).input_schema;
     ui.label(RichText::new("Название блока").size(9.0).color(MUTED));
     changed |= ui.text_edit_singleline(&mut step.name).changed();
     ui.label(RichText::new("ID блока").size(9.0).color(MUTED));
@@ -3664,8 +5194,12 @@ fn paint_composer_step_editor(
                             .clicked()
                         {
                             *source_step = source.step_id.clone();
-                            *array_path = source.path.into();
-                            *item = source.item.into();
+                            *array_path = source.path.clone();
+                            *item = source.item.clone();
+                            *fields = item_object_fields(&source.item_type)
+                                .into_iter()
+                                .map(|(name, _)| name)
+                                .collect();
                             changed = true;
                             ui.close();
                         }
@@ -3691,53 +5225,79 @@ fn paint_composer_step_editor(
                     .size(9.0)
                     .color(MUTED),
             );
-            ui.horizontal(|ui| {
-                if ui.small_button("Все").clicked() {
-                    *fields = GITHUB_REPOSITORY_CONTEXT_FIELDS
-                        .iter()
-                        .map(|(field, _)| (*field).into())
-                        .collect();
-                    changed = true;
-                }
-                if ui.small_button("Для клонирования").clicked() {
-                    *fields = ["https_url", "owner", "name", "default_branch"]
-                        .into_iter()
-                        .map(str::to_owned)
-                        .collect();
-                    changed = true;
-                }
-            });
-            Frame::new()
-                .fill(code_surface(dark))
-                .corner_radius(8)
-                .inner_margin(Margin::same(8))
-                .show(ui, |ui| {
-                    let inherited_all = fields.is_empty();
-                    for (field, kind) in GITHUB_REPOSITORY_CONTEXT_FIELDS {
-                        let mut selected =
-                            inherited_all || fields.iter().any(|value| value == field);
-                        ui.horizontal(|ui| {
-                            if ui.checkbox(&mut selected, "").changed() {
-                                if inherited_all {
-                                    *fields = GITHUB_REPOSITORY_CONTEXT_FIELDS
-                                        .iter()
-                                        .map(|(field, _)| (*field).into())
-                                        .collect();
-                                }
-                                if selected {
-                                    if !fields.iter().any(|value| value == field) {
-                                        fields.push(field.into());
-                                    }
-                                } else {
-                                    fields.retain(|value| value != field);
-                                }
-                                changed = true;
-                            }
-                            ui.label(RichText::new(field).monospace().size(9.0).color(PURPLE));
-                            ui.label(RichText::new(kind).monospace().size(8.0).color(MUTED));
-                        });
+            let available_fields = selected_source
+                .map(|source| item_object_fields(&source.item_type))
+                .unwrap_or_default();
+            if available_fields.is_empty() {
+                ui.label(
+                    RichText::new(
+                        "Элемент массива скалярный или не имеет известной объектной схемы.",
+                    )
+                    .size(8.0)
+                    .color(MUTED),
+                );
+            } else {
+                ui.horizontal(|ui| {
+                    if ui.small_button("Все").clicked() {
+                        *fields = available_fields
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect();
+                        changed = true;
+                    }
+                    let clone_fields = clone_item_field_names(&available_fields);
+                    if ui
+                        .add_enabled(
+                            !clone_fields.is_empty(),
+                            egui::Button::new("Для клонирования"),
+                        )
+                        .clicked()
+                    {
+                        *fields = clone_fields;
+                        changed = true;
                     }
                 });
+                Frame::new()
+                    .fill(code_surface(dark))
+                    .corner_radius(8)
+                    .inner_margin(Margin::same(8))
+                    .show(ui, |ui| {
+                        let inherited_all = fields.is_empty();
+                        for (field, schema) in &available_fields {
+                            let mut selected =
+                                inherited_all || fields.iter().any(|value| value == field);
+                            ui.horizontal(|ui| {
+                                if ui.checkbox(&mut selected, "").changed() {
+                                    if inherited_all {
+                                        *fields = available_fields
+                                            .iter()
+                                            .map(|(name, _)| name.clone())
+                                            .collect();
+                                    }
+                                    if selected {
+                                        if !fields.iter().any(|value| value == field) {
+                                            fields.push(field.clone());
+                                        }
+                                    } else {
+                                        fields.retain(|value| value != field);
+                                    }
+                                    changed = true;
+                                }
+                                ui.label(RichText::new(field).monospace().size(9.0).color(PURPLE));
+                                ui.label(
+                                    RichText::new(context_type_label(
+                                        &schema.value_type,
+                                        schema.nullable,
+                                        !schema.required,
+                                    ))
+                                    .monospace()
+                                    .size(8.0)
+                                    .color(MUTED),
+                                );
+                            });
+                        }
+                    });
+            }
             ui.label(
                 RichText::new(format!(
                     "В дочернем блоке используйте {{{{{item}.field}}}} — например, {{{{{item}.https_url}}}}."
@@ -3772,12 +5332,30 @@ fn paint_composer_step_editor(
                             .clicked()
                         {
                             *loop_step = source.step_id.clone();
-                            *repo = format!("{{{{{}.https_url}}}}", source.item);
-                            *dest = format!(
-                                "$HOME/Developer/{{{{{}.owner}}}}/{{{{{}.name}}}}",
-                                source.item, source.item
-                            );
-                            *branch = Some(format!("{{{{{}.default_branch}}}}", source.item));
+                            if let Some((_, template)) =
+                                input_schema.field("repo").and_then(|field| {
+                                    composer_context_options(source, &field.value_type)
+                                        .into_iter()
+                                        .next()
+                                })
+                            {
+                                *repo = template;
+                            }
+                            if let Some((_, template)) =
+                                input_schema.field("dest").and_then(|field| {
+                                    composer_destination_options(source, &field.value_type)
+                                        .into_iter()
+                                        .next()
+                                })
+                            {
+                                *dest = template;
+                            }
+                            *branch = input_schema.field("branch").and_then(|field| {
+                                composer_context_options(source, &field.value_type)
+                                    .into_iter()
+                                    .next()
+                                    .map(|(_, template)| template)
+                            });
                             changed = true;
                             ui.close();
                         }
@@ -3788,10 +5366,10 @@ fn paint_composer_step_editor(
                 .iter()
                 .find(|source| source.step_id == *loop_step);
             if let Some(source) = selected_loop {
-                let has_field = |field: &str| {
-                    source.fields.is_empty() || source.fields.iter().any(|value| value == field)
-                };
-                let repository_options = composer_string_context_options(source);
+                let repository_options = input_schema
+                    .field("repo")
+                    .map(|field| composer_context_options(source, &field.value_type))
+                    .unwrap_or_default();
                 changed |= composer_binding_selector(
                     ui,
                     &editor_step_id,
@@ -3800,32 +5378,10 @@ fn paint_composer_step_editor(
                     &repository_options,
                 );
 
-                let mut destination_options = Vec::new();
-                if has_field("owner") && has_field("name") {
-                    destination_options.push((
-                        format!(
-                            "$HOME/Developer/{}/{}",
-                            source.item.to_owned() + ".owner",
-                            source.item.to_owned() + ".name"
-                        ),
-                        format!(
-                            "$HOME/Developer/{{{{{}.owner}}}}/{{{{{}.name}}}}",
-                            source.item, source.item
-                        ),
-                    ));
-                }
-                if has_field("full_name") {
-                    destination_options.push((
-                        format!("$HOME/Developer/{}.full_name", source.item),
-                        format!("$HOME/Developer/{{{{{}.full_name}}}}", source.item),
-                    ));
-                }
-                if has_field("name") {
-                    destination_options.push((
-                        format!("$HOME/Developer/{}.name", source.item),
-                        format!("$HOME/Developer/{{{{{}.name}}}}", source.item),
-                    ));
-                }
+                let destination_options = input_schema
+                    .field("dest")
+                    .map(|field| composer_destination_options(source, &field.value_type))
+                    .unwrap_or_default();
                 changed |= composer_binding_selector(
                     ui,
                     &editor_step_id,
@@ -3834,23 +5390,27 @@ fn paint_composer_step_editor(
                     &destination_options,
                 );
 
-                let branch_value =
-                    branch.get_or_insert_with(|| format!("{{{{{}.default_branch}}}}", source.item));
-                let branch_options = if has_field("default_branch") {
-                    vec![(
-                        format!("{}.default_branch", source.item),
-                        format!("{{{{{}.default_branch}}}}", source.item),
-                    )]
+                let branch_options = input_schema
+                    .field("branch")
+                    .map(|field| composer_context_options(source, &field.value_type))
+                    .unwrap_or_default();
+                if let Some((_, default_template)) = branch_options.first() {
+                    let branch_value = branch.get_or_insert_with(|| default_template.clone());
+                    changed |= composer_binding_selector(
+                        ui,
+                        &editor_step_id,
+                        "Ветка",
+                        branch_value,
+                        &branch_options,
+                    );
                 } else {
-                    Vec::new()
-                };
-                changed |= composer_binding_selector(
-                    ui,
-                    &editor_step_id,
-                    "Ветка",
-                    branch_value,
-                    &branch_options,
-                );
+                    ui.label(RichText::new("Ветка").size(9.0).color(MUTED));
+                    ui.label(
+                        RichText::new("В контексте нет поля формата git-ref")
+                            .size(8.0)
+                            .color(ORANGE),
+                    );
+                }
             } else {
                 ui.label(
                     RichText::new("Перед клонированием нет блока For each.")
@@ -4429,9 +5989,14 @@ fn step_title(step: &Step) -> String {
 }
 
 fn task_supports_gui_run(task: &Task) -> bool {
-    task.steps
-        .iter()
-        .all(|step| matches!(step.auth, AuthPolicy::None) && action_supports_gui_run(&step.action))
+    let supports = |step: &Step| {
+        matches!(step.auth, AuthPolicy::None) && action_supports_gui_run(&step.action)
+    };
+    task.steps.iter().all(&supports)
+        && task
+            .graph
+            .as_ref()
+            .is_none_or(|graph| graph_steps_all(graph, &supports))
 }
 
 fn git_clone_auth_ready(repo: &str) -> bool {
@@ -4475,7 +6040,7 @@ fn github_selection_auth_ready(picker: &GithubPickerState) -> bool {
 }
 
 fn task_has_unready_git_credentials(task: &Task) -> bool {
-    task.steps.iter().any(|step| {
+    let unready = |step: &Step| {
         matches!(step.auth, AuthPolicy::GitCredential)
             && matches!(
                 &step.action,
@@ -4487,6 +6052,67 @@ fn task_has_unready_git_credentials(task: &Task) -> bool {
                     | Action::GitFastForward { repo, .. }
                     if !git_clone_auth_ready(repo)
             )
+    };
+    task.steps.iter().any(&unready)
+        || task
+            .graph
+            .as_ref()
+            .is_some_and(|graph| graph_steps_any(graph, &unready))
+}
+
+fn task_contains_action(task: &Task, predicate: &dyn Fn(&Action) -> bool) -> bool {
+    task.steps.iter().any(|step| predicate(&step.action))
+        || task
+            .graph
+            .as_ref()
+            .is_some_and(|graph| graph_steps_any(graph, &|step| predicate(&step.action)))
+}
+
+fn graph_steps_all(graph: &WorkflowGraph, predicate: &dyn Fn(&Step) -> bool) -> bool {
+    graph.nodes.iter().all(|node| match node {
+        GraphNode::Action(node) => predicate(&node.step),
+        GraphNode::ForEach(node) => graph_steps_all(&node.body, predicate),
+        GraphNode::If(node) => {
+            graph_steps_all(&node.then_graph, predicate)
+                && node
+                    .else_graph
+                    .as_deref()
+                    .is_none_or(|graph| graph_steps_all(graph, predicate))
+        }
+        GraphNode::Switch(node) => {
+            node.cases
+                .iter()
+                .all(|case| graph_steps_all(&case.graph, predicate))
+                && node
+                    .default
+                    .as_deref()
+                    .is_none_or(|graph| graph_steps_all(graph, predicate))
+        }
+        GraphNode::Join(_) => true,
+    })
+}
+
+fn graph_steps_any(graph: &WorkflowGraph, predicate: &dyn Fn(&Step) -> bool) -> bool {
+    graph.nodes.iter().any(|node| match node {
+        GraphNode::Action(node) => predicate(&node.step),
+        GraphNode::ForEach(node) => graph_steps_any(&node.body, predicate),
+        GraphNode::If(node) => {
+            graph_steps_any(&node.then_graph, predicate)
+                || node
+                    .else_graph
+                    .as_deref()
+                    .is_some_and(|graph| graph_steps_any(graph, predicate))
+        }
+        GraphNode::Switch(node) => {
+            node.cases
+                .iter()
+                .any(|case| graph_steps_any(&case.graph, predicate))
+                || node
+                    .default
+                    .as_deref()
+                    .is_some_and(|graph| graph_steps_any(graph, predicate))
+        }
+        GraphNode::Join(_) => false,
     })
 }
 
@@ -4858,6 +6484,50 @@ mod tests {
     }
 
     #[test]
+    fn gui_capability_checks_actions_inside_graph_tasks() {
+        let mut task = github_repository_composer_task(1);
+        let unsupported = Step {
+            id: "script".into(),
+            name: "Script".into(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: true,
+            allow_elevation: Default::default(),
+            when: None,
+            require: None,
+            action: Action::RunScript {
+                interpreter: ScriptInterpreter::Sh,
+                script: "script.sh".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                success_exit_codes: vec![0],
+            },
+        };
+        task.steps.clear();
+        task.graph = Some(WorkflowGraph {
+            entries: vec![unsupported.id.clone()],
+            nodes: vec![GraphNode::Action(Box::new(
+                ppduster::automation::ActionNode {
+                    step: unsupported,
+                    bindings: BTreeMap::new(),
+                },
+            ))],
+            ..WorkflowGraph::default()
+        });
+
+        assert!(!task_supports_gui_run(&task));
+        assert!(task_contains_action(&task, &|action| matches!(
+            action,
+            Action::RunScript { .. }
+        )));
+        assert!(graph_steps_any(
+            task.graph.as_ref().unwrap(),
+            &|step| matches!(step.action, Action::RunScript { .. })
+        ));
+    }
+
+    #[test]
     fn template_canvas_uses_direct_scenario_groups() {
         let pack = load_tasks().unwrap();
         let template = pack.get("macos-developer-workstation").unwrap();
@@ -5027,6 +6697,7 @@ mod tests {
             trust: TrustRequirement::ExternalAllowed,
             scenarios: Vec::new(),
             resolved_scenarios: Vec::new(),
+            graph: None,
             steps: Vec::new(),
         };
         for (index, kind) in [
@@ -5074,6 +6745,7 @@ mod tests {
             trust: TrustRequirement::ExternalAllowed,
             scenarios: Vec::new(),
             resolved_scenarios: Vec::new(),
+            graph: None,
             steps: vec![composer_step(
                 ComposerBlockKind::GitInspect,
                 "inspect".into(),
@@ -5090,7 +6762,9 @@ mod tests {
                 entries: vec![ProjectEntry::Group {
                     id: "repositories".into(),
                     name: "Repositories".into(),
-                    entries: vec![ProjectEntry::Scenario { task }],
+                    entries: vec![ProjectEntry::Scenario {
+                        task: Box::new(task),
+                    }],
                 }],
             }],
         };
@@ -5114,6 +6788,7 @@ mod tests {
             trust: TrustRequirement::ExternalAllowed,
             scenarios: Vec::new(),
             resolved_scenarios: Vec::new(),
+            graph: None,
             steps: vec![
                 composer_step(ComposerBlockKind::InspectPath, "inspect-a".into()),
                 composer_step(ComposerBlockKind::InspectPath, "inspect-b".into()),
@@ -5123,7 +6798,9 @@ mod tests {
             id: "branched-project".into(),
             name: "Branched project".into(),
             description: String::new(),
-            entries: vec![ProjectEntry::Scenario { task }],
+            entries: vec![ProjectEntry::Scenario {
+                task: Box::new(task),
+            }],
             canvases: BTreeMap::from([(
                 "branched-scenario".into(),
                 ComposerCanvas {
@@ -5184,6 +6861,7 @@ project:
             trust: TrustRequirement::ExternalAllowed,
             scenarios: Vec::new(),
             resolved_scenarios: Vec::new(),
+            graph: None,
             steps: vec![composer_step(
                 ComposerBlockKind::CreateDirectory,
                 "create".into(),
@@ -5198,76 +6876,510 @@ project:
 
     #[test]
     fn composer_blocks_publish_searchable_output_context_contracts() {
-        assert_eq!(
-            composer_output_context(ComposerBlockKind::GitInspect),
-            "repository.exists, repository.path, repository.remote_url"
-        );
-        assert!(composer_output_context(ComposerBlockKind::InspectPath).contains("path.sha256"));
-        assert!(
-            composer_output_context(ComposerBlockKind::GitCloneIfMissing)
-                .contains("repository.cloned")
-        );
         for kind in ComposerBlockKind::ALL {
-            assert!(!composer_output_context(kind).trim().is_empty());
+            let definition = block_definition(kind.action_kind());
+            assert!(!schema_context_lines(&definition.output_schema).is_empty());
         }
+
+        let git = schema_context_lines(&block_definition(ActionKind::GitInspect).output_schema);
+        assert!(git
+            .iter()
+            .any(|line| line == "repository.remote_url : string<git-url>"));
+        assert!(git.iter().any(|line| line == "repository.exists : bool"));
+
+        let path = schema_context_lines(&block_definition(ActionKind::InspectPath).output_schema);
+        assert!(path
+            .iter()
+            .any(|line| line == "sha256 : string<sha256> | null (optional)"));
     }
 
     #[test]
-    fn foreach_output_context_contains_only_selected_fields() {
-        let mut step = composer_step(ComposerBlockKind::ForEach, "loop".into());
-        let Action::ForEach { fields, .. } = &mut step.action else {
-            unreachable!()
-        };
-        *fields = vec!["https_url".into(), "name".into()];
+    fn foreach_projection_preserves_only_selected_typed_fields() {
+        let mut task = github_repository_composer_task(1);
+        let source = composer_array_sources(&task, 1).remove(0);
+        let projected = project_item_type(&source.item_type, &["https_url".into(), "name".into()]);
+        let fields = item_object_fields(&projected);
 
-        let context = composer_step_output_context(&step);
-        assert!(context.contains("repository {"));
-        assert!(context.contains("https_url: string"));
-        assert!(context.contains("name: string"));
-        assert!(!context.contains("ssh_url"));
-        assert!(!context.contains("default_branch"));
+        assert_eq!(
+            fields
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["https_url", "name"]
+        );
+        assert!(matches!(
+            &fields[0].1.value_type,
+            ContextType::String {
+                format: Some(SemanticFormat::GitUrl)
+            }
+        ));
+        assert!(matches!(
+            &fields[1].1.value_type,
+            ContextType::String {
+                format: Some(SemanticFormat::RepositoryName)
+            }
+        ));
+
+        let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        loop_step.action = Action::ForEach {
+            source_step: "list-repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: vec!["https_url".into(), "name".into()],
+        };
+        task.steps.push(loop_step);
+        let lines = composer_step_context_lines(&task, 1);
+        assert!(lines
+            .iter()
+            .any(|line| line == "repository.https_url : string<git-url>"));
+        assert!(lines
+            .iter()
+            .any(|line| { line == "repository.name : string<repository-name>" }));
+        assert!(!lines.iter().any(|line| line.contains("repository.ssh_url")));
+        assert!(!lines.iter().any(|line| line.starts_with("loop.items[]")));
     }
 
     #[test]
     fn foreach_array_selector_discovers_typed_upstream_arrays() {
         let mut task = github_repository_composer_task(1);
-        task.steps
-            .push(composer_step(ComposerBlockKind::ForEach, "loop".into()));
+        let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        let Action::ForEach {
+            source_step,
+            array_path,
+            item,
+            fields,
+        } = &mut loop_step.action
+        else {
+            unreachable!()
+        };
+        *source_step = "list-repositories".into();
+        *array_path = "github.repositories".into();
+        *item = "repository".into();
+        fields.clear();
+        task.steps.push(loop_step);
 
         assert!(composer_array_sources(&task, 0).is_empty());
-        assert_eq!(
-            composer_array_sources(&task, 1),
-            vec![ComposerArraySource {
-                step_id: "list-repositories".into(),
-                step_name: "Получить репозитории аккаунта".into(),
-                path: "github.repositories",
-                item: "repository",
-            }]
-        );
+        let array_sources = composer_array_sources(&task, 1);
+        assert_eq!(array_sources.len(), 1);
+        assert_eq!(array_sources[0].step_id, "list-repositories");
+        assert_eq!(array_sources[0].step_name, "Получить репозитории аккаунта");
+        assert_eq!(array_sources[0].path, "github.repositories");
+        assert_eq!(array_sources[0].item, "repository");
+        assert!(matches!(
+            &array_sources[0].item_type,
+            ContextType::Object { .. }
+        ));
+
         let Action::ForEach { fields, .. } = &task.steps[1].action else {
             unreachable!()
         };
         let loop_sources = composer_loop_sources(&task, 2);
-        assert_eq!(
-            loop_sources,
-            vec![ComposerLoopSource {
-                step_id: "loop".into(),
-                step_name: "Для каждого элемента".into(),
-                item: "repository".into(),
-                fields: fields.clone(),
-            }]
+        assert_eq!(loop_sources.len(), 1);
+        assert_eq!(loop_sources[0].step_id, "loop");
+        assert_eq!(loop_sources[0].step_name, "Для каждого элемента");
+        assert_eq!(loop_sources[0].item, "repository");
+        assert_eq!(loop_sources[0].fields, *fields);
+
+        let repository_options = composer_context_options(
+            &loop_sources[0],
+            &ContextType::string(SemanticFormat::GitUrl),
         );
-        let string_options = composer_string_context_options(&loop_sources[0]);
-        assert_eq!(string_options.len(), 7);
-        assert!(string_options
+        assert_eq!(repository_options.len(), 2);
+        assert!(repository_options
             .iter()
             .any(|(_, template)| template == "{{repository.https_url}}"));
-        assert!(string_options
+        assert!(repository_options
+            .iter()
+            .any(|(_, template)| template == "{{repository.ssh_url}}"));
+        assert!(!repository_options
             .iter()
             .any(|(_, template)| template == "{{repository.name}}"));
-        assert!(!string_options
+
+        let branch_options = composer_context_options(
+            &loop_sources[0],
+            &ContextType::string(SemanticFormat::GitRef),
+        );
+        assert_eq!(
+            branch_options,
+            vec![(
+                "repository.default_branch · string<git-ref>".into(),
+                "{{repository.default_branch}}".into(),
+            )]
+        );
+
+        let destination_options = composer_destination_options(
+            &loop_sources[0],
+            &ContextType::string(SemanticFormat::DirectoryPath),
+        );
+        assert!(destination_options
             .iter()
-            .any(|(_, template)| template == "{{repository.private}}"));
+            .any(|(_, template)| template == "$HOME/Developer/{{repository.full_name}}"));
+        assert!(!destination_options
+            .iter()
+            .any(|(_, template)| template.contains("https_url")));
+    }
+
+    #[test]
+    fn array_selector_recursively_discovers_non_github_arrays() {
+        let mut task = github_repository_composer_task(1);
+        task.steps[0] = Step {
+            id: "run-script".into(),
+            name: "Run a script".into(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: true,
+            allow_elevation: Default::default(),
+            when: None,
+            require: None,
+            action: Action::RunScript {
+                interpreter: ScriptInterpreter::Sh,
+                script: "script.sh".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                success_exit_codes: vec![0, 2],
+            },
+        };
+
+        let sources = composer_array_sources(&task, 1);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].step_id, "run-script");
+        assert_eq!(sources[0].path, "success_exit_codes");
+        assert_eq!(sources[0].item, "success_exit_code");
+        assert_eq!(sources[0].item_type, ContextType::Integer);
+    }
+
+    #[test]
+    fn condition_picker_exposes_only_previous_step_schemas() {
+        let mut task = github_repository_composer_task(1);
+        task.steps.push(composer_step(
+            ComposerBlockKind::InspectPath,
+            "inspect-path".into(),
+        ));
+        task.steps.push(composer_step(
+            ComposerBlockKind::GitInspect,
+            "future-git".into(),
+        ));
+
+        assert!(composer_condition_fields(&task, 0).is_empty());
+        let before_inspect = composer_condition_fields(&task, 1);
+        assert!(!before_inspect.is_empty());
+        assert!(before_inspect.iter().all(|field| {
+            matches!(
+                &field.reference.scope,
+                ContextScope::Step { step_id } if step_id == "list-repositories"
+            )
+        }));
+        assert!(before_inspect.iter().any(|field| {
+            field_ref_label(&field.reference) == "list-repositories.github.account.login"
+        }));
+
+        let before_future = composer_condition_fields(&task, 2);
+        assert!(before_future.iter().any(|field| {
+            field_ref_label(&field.reference) == "inspect-path.exists"
+                && field.value_type == ContextType::Boolean
+        }));
+        assert!(!before_future
+            .iter()
+            .any(|field| field_ref_label(&field.reference).starts_with("future-git.")));
+    }
+
+    #[test]
+    fn condition_operators_and_literals_follow_field_types() {
+        use ComposerConditionOperator as Operator;
+        use ComposerLiteralKind as Literal;
+
+        let string_operators = condition_operators(&ContextType::string(SemanticFormat::GitUrl));
+        assert!(string_operators.contains(&Operator::Equal));
+        assert!(string_operators.contains(&Operator::Contains));
+        assert!(string_operators.contains(&Operator::StartsWith));
+        assert!(string_operators.contains(&Operator::EndsWith));
+        assert!(string_operators.contains(&Operator::Matches));
+        assert!(string_operators.contains(&Operator::IsEmpty));
+        assert!(!string_operators.contains(&Operator::GreaterThan));
+
+        let numeric_operators = condition_operators(&ContextType::Integer);
+        assert!(numeric_operators.contains(&Operator::LessThan));
+        assert!(numeric_operators.contains(&Operator::GreaterThanOrEqual));
+        assert!(!numeric_operators.contains(&Operator::Contains));
+
+        let boolean_operators = condition_operators(&ContextType::Boolean);
+        assert_eq!(
+            boolean_operators,
+            vec![
+                Operator::Equal,
+                Operator::NotEqual,
+                Operator::Exists,
+                Operator::IsNull,
+            ]
+        );
+        let object_operators = condition_operators(&ContextType::object(ObjectSchema::new(
+            "test.condition.object@1",
+        )));
+        assert_eq!(
+            object_operators,
+            vec![Operator::IsEmpty, Operator::Exists, Operator::IsNull]
+        );
+
+        let nullable_branch = ComposerConditionField {
+            reference: FieldRef::step("list").field("default_branch"),
+            label: String::new(),
+            value_type: ContextType::string(SemanticFormat::GitRef),
+            required: false,
+            nullable: true,
+        };
+        assert_eq!(
+            condition_literal_kinds(&nullable_branch, Operator::Equal),
+            vec![Literal::String, Literal::Null]
+        );
+        assert!(matches!(
+            default_condition_literal(&nullable_branch, Operator::Equal),
+            Some(ExpressionValue::String(value)) if value.is_empty()
+        ));
+        let nullable_number = ComposerConditionField {
+            value_type: ContextType::Number,
+            ..nullable_branch
+        };
+        assert_eq!(
+            condition_literal_kinds(&nullable_number, Operator::GreaterThan),
+            vec![Literal::Number]
+        );
+    }
+
+    #[test]
+    fn typed_when_and_require_conditions_round_trip_through_yaml() {
+        let field = FieldRef::step("list-repositories")
+            .field("github")
+            .field("account")
+            .field("login");
+        let when_rule = SimpleConditionRule {
+            field: field.clone(),
+            operator: ComposerConditionOperator::StartsWith,
+            literal: Some(ExpressionValue::String("octo".into())),
+        };
+        let require_rule = SimpleConditionRule {
+            field,
+            operator: ComposerConditionOperator::Exists,
+            literal: None,
+        };
+        let mut step = composer_step(ComposerBlockKind::InspectPath, "inspect".into());
+        step.when = Some(StepCondition::Expression {
+            rule: build_simple_condition_rule(&when_rule),
+            policy: RuleOutcomePolicy {
+                on_null: IndeterminatePolicy::TreatAsFalse,
+                on_missing: IndeterminatePolicy::TreatAsTrue,
+                on_unknown: IndeterminatePolicy::Fail,
+            },
+        });
+        step.require = Some(StepCondition::Expression {
+            rule: build_simple_condition_rule(&require_rule),
+            policy: RuleOutcomePolicy::default(),
+        });
+
+        let mut task = github_repository_composer_task(1);
+        task.steps.push(step.clone());
+        task.validate().unwrap();
+
+        let yaml = serde_yaml::to_string(&step).unwrap();
+        let decoded: Step = serde_yaml::from_str(&yaml).unwrap();
+        let Some(StepCondition::Expression { rule, policy }) = decoded.when else {
+            panic!("typed when condition was not preserved")
+        };
+        assert_eq!(simple_condition_rule(&rule), Some(when_rule));
+        assert_eq!(policy.on_null, IndeterminatePolicy::TreatAsFalse);
+        assert_eq!(policy.on_missing, IndeterminatePolicy::TreatAsTrue);
+        assert_eq!(policy.on_unknown, IndeterminatePolicy::Fail);
+        let Some(StepCondition::Expression { rule, .. }) = decoded.require else {
+            panic!("typed require condition was not preserved")
+        };
+        assert_eq!(simple_condition_rule(&rule), Some(require_rule));
+    }
+
+    #[test]
+    fn regex_and_empty_rules_round_trip_through_the_visual_model() {
+        let field = FieldRef::step("list-repositories")
+            .field("github")
+            .field("account")
+            .field("login");
+        let regex = SimpleConditionRule {
+            field: field.clone(),
+            operator: ComposerConditionOperator::Matches,
+            literal: Some(ExpressionValue::String("^[a-z0-9-]+$".into())),
+        };
+        let empty = SimpleConditionRule {
+            field,
+            operator: ComposerConditionOperator::IsEmpty,
+            literal: None,
+        };
+
+        assert_eq!(
+            simple_condition_rule(&build_simple_condition_rule(&regex)),
+            Some(regex.clone())
+        );
+        assert_eq!(
+            simple_condition_rule(&build_simple_condition_rule(&empty)),
+            Some(empty.clone())
+        );
+
+        let grouped = ComposerConditionRule::All(vec![
+            ComposerConditionRule::Clause(regex),
+            ComposerConditionRule::Not(Box::new(ComposerConditionRule::Any(vec![
+                ComposerConditionRule::Clause(empty.clone()),
+                ComposerConditionRule::Clause(empty),
+            ]))),
+        ]);
+        let expression = build_composer_condition_rule(&grouped);
+        assert_eq!(composer_condition_rule(&expression), Some(grouped));
+    }
+
+    #[test]
+    fn nested_visual_rule_and_policy_round_trip_without_loss() {
+        let field = FieldRef::step("list-repositories")
+            .field("github")
+            .field("account")
+            .field("login");
+        let clause = |operator, literal| {
+            ComposerConditionRule::Clause(SimpleConditionRule {
+                field: field.clone(),
+                operator,
+                literal,
+            })
+        };
+        let editable = ComposerConditionRule::Any(vec![
+            clause(
+                ComposerConditionOperator::Matches,
+                Some(ExpressionValue::String("^(octo|hubot)$".into())),
+            ),
+            ComposerConditionRule::Not(Box::new(ComposerConditionRule::All(vec![
+                clause(ComposerConditionOperator::IsEmpty, None),
+                clause(
+                    ComposerConditionOperator::NotEqual,
+                    Some(ExpressionValue::String("archived".into())),
+                ),
+            ]))),
+        ]);
+        let policy = RuleOutcomePolicy {
+            on_null: IndeterminatePolicy::TreatAsFalse,
+            on_missing: IndeterminatePolicy::TreatAsTrue,
+            on_unknown: IndeterminatePolicy::Fail,
+        };
+        let condition = StepCondition::Expression {
+            rule: build_composer_condition_rule(&editable),
+            policy,
+        };
+
+        let yaml = serde_yaml::to_string(&condition).unwrap();
+        let decoded: StepCondition = serde_yaml::from_str(&yaml).unwrap();
+        let StepCondition::Expression { rule, policy: got } = decoded else {
+            panic!("typed expression changed variants")
+        };
+        assert_eq!(got, policy);
+        let reparsed = composer_condition_rule(&rule).expect("rule remains visually editable");
+        assert_eq!(reparsed, editable);
+        assert_eq!(build_composer_condition_rule(&reparsed), rule);
+    }
+
+    #[test]
+    fn unsupported_quantifier_remains_read_only_and_serializes_unchanged() {
+        let rule = ExpressionV1::Quantifier {
+            quantifier: ppduster::automation::CollectionQuantifier::Any,
+            collection: Box::new(ExpressionV1::Ref {
+                reference: ReferenceV1::Context {
+                    field: FieldRef::step("list").field("github").field("repositories"),
+                },
+            }),
+            binding: "repository".into(),
+            predicate: Box::new(ExpressionV1::Matches {
+                value: Box::new(ExpressionV1::Ref {
+                    reference: ReferenceV1::Local {
+                        binding: "repository".into(),
+                        path: vec!["name".into()],
+                    },
+                }),
+                pattern: "^ppduster$".into(),
+            }),
+        };
+        let condition = StepCondition::Expression {
+            rule: rule.clone(),
+            policy: RuleOutcomePolicy {
+                on_null: IndeterminatePolicy::TreatAsFalse,
+                on_missing: IndeterminatePolicy::Fail,
+                on_unknown: IndeterminatePolicy::TreatAsTrue,
+            },
+        };
+
+        assert!(composer_condition_rule(&rule).is_none());
+        let yaml = serde_yaml::to_string(&condition).unwrap();
+        let decoded: StepCondition = serde_yaml::from_str(&yaml).unwrap();
+        let StepCondition::Expression {
+            rule: decoded_rule,
+            policy,
+        } = decoded
+        else {
+            panic!("quantifier expression changed variants")
+        };
+        assert_eq!(decoded_rule, rule);
+        assert_eq!(policy.on_null, IndeterminatePolicy::TreatAsFalse);
+        assert_eq!(policy.on_missing, IndeterminatePolicy::Fail);
+        assert_eq!(policy.on_unknown, IndeterminatePolicy::TreatAsTrue);
+    }
+
+    #[test]
+    fn visual_rule_parser_enforces_depth_and_node_budgets() {
+        let clause = || ExpressionV1::Exists {
+            reference: ReferenceV1::Context {
+                field: FieldRef::step("inspect").field("exists"),
+            },
+        };
+        let at_node_limit = ExpressionV1::All {
+            expressions: (0..CONDITION_EDITOR_MAX_NODES - 1)
+                .map(|_| clause())
+                .collect(),
+        };
+        assert!(composer_condition_rule(&at_node_limit).is_some());
+        let over_node_limit = ExpressionV1::All {
+            expressions: (0..CONDITION_EDITOR_MAX_NODES).map(|_| clause()).collect(),
+        };
+        assert!(composer_condition_rule(&over_node_limit).is_none());
+
+        let nested = |count| {
+            (0..count).fold(clause(), |expression, _| ExpressionV1::Not {
+                expression: Box::new(expression),
+            })
+        };
+        assert!(composer_condition_rule(&nested(CONDITION_EDITOR_MAX_DEPTH)).is_some());
+        assert!(composer_condition_rule(&nested(CONDITION_EDITOR_MAX_DEPTH + 1)).is_none());
+
+        let current = composer_condition_rule(&clause()).unwrap();
+        let negated = ComposerConditionRule::Not(Box::new(current.clone()));
+        assert!(!composer_condition_replacement_fits(
+            &current,
+            &negated,
+            0,
+            CONDITION_EDITOR_MAX_NODES,
+        ));
+        assert!(!composer_condition_replacement_fits(
+            &current,
+            &negated,
+            CONDITION_EDITOR_MAX_DEPTH,
+            1,
+        ));
+        let grouped = ComposerConditionRule::All(vec![current.clone(), current.clone()]);
+        assert!(composer_condition_replacement_fits(
+            &current, &grouped, 0, 1,
+        ));
+    }
+
+    #[test]
+    fn regex_feedback_accepts_unicode_and_rejects_invalid_or_oversized_patterns() {
+        assert!(regex_pattern_error("^(привет|мир)\\s+🚀$").is_none());
+        assert!(regex_pattern_error("(")
+            .expect("unclosed group must be rejected")
+            .contains("Некорректное"));
+        let oversized = "я".repeat(ExpressionLimits::default().max_regex_pattern_bytes);
+        assert!(regex_pattern_error(&oversized)
+            .expect("byte limit must be enforced for unicode too")
+            .contains("максимум"));
     }
 
     #[test]
@@ -5281,10 +7393,23 @@ project:
             task.steps[0].action,
             Action::GithubListRepositories
         ));
-        assert_eq!(
-            composer_step_output_context(&task.steps[0]),
-            "github.account.login, github.repositories[]: { id, owner, name, full_name, https_url, ssh_url, default_branch, private, archived }"
-        );
+        let lines =
+            schema_context_lines(&definition_for_action(&task.steps[0].action).output_schema);
+        assert!(lines
+            .iter()
+            .any(|line| line == "github.account.login : string<identifier>"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "github.repositories[] : object"));
+        assert!(lines
+            .iter()
+            .any(|line| { line == "github.repositories[].https_url : string<git-url>" }));
+        assert!(lines.iter().any(|line| {
+            line == "github.repositories[].default_branch : string<git-ref> | null (optional)"
+        }));
+        assert!(lines
+            .iter()
+            .all(|line| !line.contains(',') && line.len() < 96));
         assert!(task
             .steps
             .iter()

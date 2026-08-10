@@ -1,3 +1,7 @@
+use crate::automation::block::definition_for_action;
+use crate::automation::context::{ContextProvenance, ContextScope, ContextStore, ContextValue};
+use crate::automation::expression::{check_rule, ExpressionLimits, RuleExprV1};
+use crate::automation::graph::WorkflowGraph;
 use crate::rules::Platform;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -229,11 +233,13 @@ pub struct EncryptedSecretsSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskFile {
     pub task: Task,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Task {
     pub id: String,
     pub name: String,
@@ -245,9 +251,10 @@ pub struct Task {
     pub trust: TrustRequirement,
     /// Other scenarios included by this reusable template, in execution order.
     ///
-    /// A task definition contains either `scenarios` or `steps`. `TaskPack::resolve`
-    /// recursively expands scenario references into a flat, policy-checkable task
-    /// immediately before execution.
+    /// A task definition contains exactly one executable form: `scenarios`,
+    /// legacy linear `steps`, or a v2 `graph`. `TaskPack::resolve` recursively
+    /// expands scenario references into a flat, policy-checkable task immediately
+    /// before execution.
     #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "includes")]
     pub scenarios: Vec<String>,
     /// Root scenario references retained after `TaskPack::resolve` flattens a
@@ -256,6 +263,10 @@ pub struct Task {
     pub resolved_scenarios: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
+    /// Explicit v2 execution graph. Canvas layout metadata is deliberately not
+    /// part of this representation and is never used to infer control flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<WorkflowGraph>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,6 +289,33 @@ pub enum StepCondition {
     Not {
         condition: Box<StepCondition>,
     },
+    /// A checked, side-effect-free rule over typed context from dominating
+    /// steps. Indeterminate states are never implicitly coerced to false.
+    Expression {
+        rule: RuleExprV1,
+        #[serde(default)]
+        policy: RuleOutcomePolicy,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IndeterminatePolicy {
+    #[default]
+    Fail,
+    TreatAsFalse,
+    TreatAsTrue,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleOutcomePolicy {
+    #[serde(default)]
+    pub on_null: IndeterminatePolicy,
+    #[serde(default)]
+    pub on_missing: IndeterminatePolicy,
+    #[serde(default)]
+    pub on_unknown: IndeterminatePolicy,
 }
 
 impl StepCondition {
@@ -353,6 +391,11 @@ impl StepCondition {
             Self::Not { condition } => {
                 condition.validate_inner(step_id, depth + 1, nodes)?;
             }
+            Self::Expression { .. } => {
+                // The expression checker owns its independent depth, node,
+                // regex, and operation limits. It runs with the task's typed
+                // upstream schema in `Task::validate_steps`.
+            }
         }
         Ok(())
     }
@@ -364,6 +407,7 @@ impl StepCondition {
         match self {
             Self::ExitCode { step, codes } => visit(step, codes),
             Self::Path { .. } => Ok(()),
+            Self::Expression { .. } => Ok(()),
             Self::All { conditions } | Self::Any { conditions } => {
                 for condition in conditions {
                     condition.try_for_each_exit_code(visit)?;
@@ -374,10 +418,35 @@ impl StepCondition {
         }
     }
 
+    fn try_for_each_rule<F>(&self, visit: &mut F) -> Result<(), String>
+    where
+        F: FnMut(&RuleExprV1) -> Result<(), String>,
+    {
+        match self {
+            Self::Expression { rule, .. } => visit(rule),
+            Self::All { conditions } | Self::Any { conditions } => {
+                for condition in conditions {
+                    condition.try_for_each_rule(visit)?;
+                }
+                Ok(())
+            }
+            Self::Not { condition } => condition.try_for_each_rule(visit),
+            Self::ExitCode { .. } | Self::Path { .. } => Ok(()),
+        }
+    }
+
     fn prefix_source_step(&mut self, prefix: &str) {
         match self {
             Self::ExitCode { step, .. } => *step = format!("{prefix}/{step}"),
             Self::Path { .. } => {}
+            Self::Expression { rule, .. } => {
+                rule.visit_context_references_mut(|field| match &mut field.scope {
+                    ContextScope::Step { step_id } | ContextScope::LoopItem { step_id } => {
+                        *step_id = format!("{prefix}/{step_id}");
+                    }
+                    ContextScope::Scenario => {}
+                });
+            }
             Self::All { conditions } | Self::Any { conditions } => {
                 for condition in conditions {
                     condition.prefix_source_step(prefix);
@@ -388,7 +457,7 @@ impl StepCondition {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Step {
     pub id: String,
     #[serde(default)]
@@ -407,6 +476,55 @@ pub struct Step {
     pub require: Option<StepCondition>,
     #[serde(flatten)]
     pub action: Action,
+}
+
+#[derive(Deserialize)]
+struct StepWire {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    auth: AuthPolicy,
+    #[serde(default)]
+    check: Option<Check>,
+    #[serde(default)]
+    dangerous: bool,
+    #[serde(default)]
+    allow_elevation: ElevationPolicy,
+    #[serde(default)]
+    when: Option<StepCondition>,
+    #[serde(default)]
+    require: Option<StepCondition>,
+    #[serde(flatten)]
+    action: BTreeMap<String, serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for Step {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = StepWire::deserialize(deserializer)?;
+        let action =
+            serde_json::from_value(serde_json::Value::Object(wire.action.into_iter().collect()))
+                .map_err(|error| {
+                    serde::de::Error::custom(format!(
+                        "step {} has an invalid action: {error}",
+                        wire.id
+                    ))
+                })?;
+        Ok(Self {
+            id: wire.id,
+            name: wire.name,
+            auth: wire.auth,
+            check: wire.check,
+            dangerous: wire.dangerous,
+            allow_elevation: wire.allow_elevation,
+            when: wire.when,
+            require: wire.require,
+            action,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -497,7 +615,7 @@ fn default_script_success_exit_codes() -> Vec<u32> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Action {
     GithubListRepositories,
     ForEach {
@@ -621,12 +739,18 @@ pub enum Action {
 impl Task {
     pub fn validate(&self) -> Result<(), String> {
         self.validate_metadata()?;
-        if self.steps.is_empty() && self.scenarios.is_empty() {
-            return Err(format!("task {} has no steps or scenarios", self.id));
-        }
-        if !self.steps.is_empty() && !self.scenarios.is_empty() {
+        let executable_forms = usize::from(!self.steps.is_empty())
+            + usize::from(!self.scenarios.is_empty())
+            + usize::from(self.graph.is_some());
+        if executable_forms == 0 {
             return Err(format!(
-                "task {} must define either steps or scenarios, not both",
+                "task {} has no steps, scenarios, or graph",
+                self.id
+            ));
+        }
+        if executable_forms > 1 {
+            return Err(format!(
+                "task {} must define exactly one of steps, scenarios, or graph",
                 self.id
             ));
         }
@@ -653,15 +777,65 @@ impl Task {
             }
         }
 
-        self.validate_steps()
+        if !self.steps.is_empty() {
+            self.validate_steps()?;
+        }
+        if let Some(graph) = &self.graph {
+            graph.validate().map_err(|errors| {
+                format!(
+                    "task {} has an invalid workflow graph: {}",
+                    self.id,
+                    errors
+                        .into_iter()
+                        .map(|error| error.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            })?;
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_executable(&self) -> Result<(), String> {
         self.validate_metadata()?;
-        if self.steps.is_empty() {
-            return Err(format!("task {} has no executable steps", self.id));
+        // Historical programmatic callers may retain root scenario IDs in
+        // `scenarios` after flattening steps (new loader code uses
+        // `resolved_scenarios`). Preserve that executable compatibility, while
+        // never allowing scenario references to coexist with a v2 graph.
+        if self.graph.is_some() && !self.scenarios.is_empty() {
+            return Err(format!(
+                "task {} cannot execute a graph with scenario references",
+                self.id
+            ));
         }
-        self.validate_steps()
+        let executable_forms =
+            usize::from(!self.steps.is_empty()) + usize::from(self.graph.is_some());
+        if executable_forms == 0 {
+            return Err(format!("task {} has no executable steps or graph", self.id));
+        }
+        if executable_forms > 1 {
+            return Err(format!(
+                "task {} resolved to both linear steps and a graph",
+                self.id
+            ));
+        }
+        if !self.steps.is_empty() {
+            self.validate_steps()?;
+        }
+        if let Some(graph) = &self.graph {
+            graph.validate().map_err(|errors| {
+                format!(
+                    "task {} has an invalid executable graph: {}",
+                    self.id,
+                    errors
+                        .into_iter()
+                        .map(|error| error.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            })?;
+        }
+        Ok(())
     }
 
     fn validate_metadata(&self) -> Result<(), String> {
@@ -684,6 +858,7 @@ impl Task {
         let mut step_ids = std::collections::BTreeSet::<&str>::new();
         let mut foreach_ids = std::collections::BTreeSet::<&str>::new();
         let mut script_exit_codes = std::collections::BTreeMap::<&str, &[u32]>::new();
+        let mut context_schemas = ContextStore::default();
         for step in &self.steps {
             step.validate()?;
             if step_ids.contains(step.id.as_str()) {
@@ -719,6 +894,23 @@ impl Task {
                     }
                     Ok(())
                 })?;
+                condition.try_for_each_rule(&mut |rule| {
+                    check_rule(rule.clone(), &context_schemas, ExpressionLimits::default())
+                        .map(|_| ())
+                        .map_err(|diagnostics| {
+                            let details = diagnostics
+                                .into_iter()
+                                .map(|diagnostic| {
+                                    format!(
+                                        "{:?} at {}: {}",
+                                        diagnostic.code, diagnostic.location, diagnostic.message
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            format!("step {} has an invalid context rule: {details}", step.id)
+                        })
+                })?;
             }
             match &step.action {
                 Action::ForEach { source_step, .. } => {
@@ -741,6 +933,14 @@ impl Task {
                 _ => {}
             }
             step_ids.insert(step.id.as_str());
+            let definition = definition_for_action(&step.action);
+            context_schemas.insert(
+                ContextScope::Step {
+                    step_id: step.id.clone(),
+                },
+                ContextValue::new(serde_json::Value::Null, ContextProvenance::step(&step.id))
+                    .with_schema(definition.output_schema),
+            );
             if let Action::RunScript {
                 success_exit_codes, ..
             } = &step.action
@@ -1582,6 +1782,7 @@ mod tests {
                     },
                 },
             ],
+            graph: None,
         };
 
         task.validate().unwrap();
@@ -1592,5 +1793,89 @@ mod tests {
             .unwrap()
             .validate()
             .unwrap();
+    }
+
+    #[test]
+    fn legacy_task_yaml_round_trips_without_graph_field() {
+        let yaml = r#"
+id: legacy-linear
+name: Legacy linear
+description: Existing v1 task.
+trust: external-allowed
+steps:
+  - id: repositories
+    type: github-list-repositories
+"#;
+        let task: Task = serde_yaml::from_str(yaml).unwrap();
+        assert!(task.graph.is_none());
+        task.validate().unwrap();
+
+        let serialized = serde_yaml::to_string(&task).unwrap();
+        assert!(!serialized.contains("graph:"));
+        let round_trip: Task = serde_yaml::from_str(&serialized).unwrap();
+        assert!(round_trip.graph.is_none());
+        assert_eq!(round_trip.steps.len(), 1);
+    }
+
+    #[test]
+    fn action_yaml_rejects_unknown_fields_instead_of_using_unsafe_defaults() {
+        let yaml = r#"
+id: typo
+type: extract-archive
+src: archive.zip
+dest: unpacked
+max_unpack_bytes: 1024
+"#;
+
+        let error = serde_yaml::from_str::<Step>(yaml).unwrap_err();
+        let error = error.to_string();
+        assert!(error.contains("step typo"));
+        assert!(error.contains("max_unpack_bytes"));
+
+        let valid = yaml.replace("max_unpack_bytes", "max_unpacked_bytes");
+        let step = serde_yaml::from_str::<Step>(&valid).unwrap();
+        assert!(matches!(
+            step.action,
+            Action::ExtractArchive {
+                max_unpacked_bytes: 1024,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn task_requires_exactly_one_executable_form() {
+        let step = Step {
+            id: "repositories".into(),
+            name: String::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
+            action: Action::GithubListRepositories,
+        };
+        let graph = WorkflowGraph::from_linear_v1(std::slice::from_ref(&step)).unwrap();
+        let mut task = Task {
+            id: "exclusive".into(),
+            name: "Exclusive".into(),
+            description: "Exactly one executable form.".into(),
+            platform: crate::rules::Platform::Any,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            steps: vec![step],
+            graph: Some(graph),
+        };
+
+        let error = task.validate().unwrap_err();
+        assert!(error.contains("exactly one of steps, scenarios, or graph"));
+
+        task.steps.clear();
+        task.validate().unwrap();
+        task.scenarios.push("child".into());
+        let error = task.validate().unwrap_err();
+        assert!(error.contains("exactly one of steps, scenarios, or graph"));
     }
 }

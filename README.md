@@ -60,9 +60,10 @@ starts with a permanent Start block. Its plus button, and the plus button on eve
 block, opens a block picker that displays the planned typed
 output contract for downstream graph bindings. Blocks can be dragged freely around the
 canvas. Adding from the same plus button more than once creates multiple outgoing branches;
-their connections and canvas positions are saved with the project. The current executable
-form remains an ordered task while graph execution is developed. The constructor saves the
-whole project as portable YAML. Loading a legacy standalone task
+their connections and canvas positions are saved with the project. Legacy ordered tasks remain
+supported. The v2 automation format has an explicit, layout-free execution graph; canvas
+coordinates and visual `parents` metadata are never guessed to be runtime control flow. The
+constructor saves the whole project as portable YAML. Loading a legacy standalone task
 YAML wraps it in an imported project group, so existing files remain usable. Loaded and
 saved files retain external-pack trust and never weaken normal permission gates.
 
@@ -77,6 +78,19 @@ The visual constructor also provides a read-only **Get account repositories** Gi
 block. Its typed output contains `github.account.login` and `github.repositories[]`.
 Each repository exposes `id`, `owner`, `name`, `full_name`, `https_url`, `ssh_url`,
 `default_branch`, `private`, and `archived`.
+
+Every automation block publishes a versioned structural output schema and declares a typed
+input schema. The context picker walks those schemas recursively, including arrays and loop-item
+fields, and filters choices by structural type and semantic format (`git-url`, `git-ref`, path,
+repository name, and others). Bindings keep stable field references instead of interpolating
+untrusted source text. Conditions use a bounded, side-effect-free expression tree with explicit
+handling for `null`, missing values, unavailable values, and evaluation errors. The v2 graph IR
+adds nested `for-each`, `if`, `switch`, joins, typed ports, dominance checks, and safe migration
+from legacy linear steps without deriving execution edges from canvas layout. The condition editor
+can compose nested `AND`/`OR`/`NOT` groups, typed comparisons, emptiness checks, and bounded regular
+expressions while preserving unsupported advanced AST nodes read-only.
+The design choices and the stratified review of 100 relevant repositories are documented in
+[`docs/context-rules-research.md`](docs/context-rules-research.md).
 
 ppduster does not request or store a GitHub token. If `gh` is not authenticated, the
 picker offers **Sign in with GitHub** and starts `gh auth login --web --clipboard` in the
@@ -190,6 +204,11 @@ ppduster setup show dev-brew-bootstrap
 
 # Plan a task (default; no side effects)
 ppduster setup run dev-brew-bootstrap
+
+# Typed graph: list the current GitHub account, filter repositories, and plan
+# one clone-if-missing action per repository. Review before applying.
+ppduster setup run github-account-clone-v2
+ppduster setup run github-account-clone-v2 --yes
 
 # Built-in macOS automation starters
 ppduster setup show macos-top-01-brew-bootstrap
