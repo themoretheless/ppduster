@@ -357,7 +357,8 @@ struct ScenarioApp {
 impl ScenarioApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_unicode_fonts(&cc.egui_ctx);
-        configure_style(&cc.egui_ctx, false);
+        configure_styles(&cc.egui_ctx, egui::ThemePreference::System);
+        let dark = cc.egui_ctx.theme() == egui::Theme::Dark;
         let (task_pack, load_error) = match load_tasks() {
             Ok(pack) => (Some(pack), None),
             Err(error) => (None, Some(format!("{error:#}"))),
@@ -382,7 +383,7 @@ impl ScenarioApp {
             report: None,
             report_applied: false,
             plan_error: None,
-            dark: false,
+            dark,
             confirm_run: false,
             running: false,
             run_receiver: None,
@@ -1176,6 +1177,9 @@ impl ScenarioApp {
 
 impl eframe::App for ScenarioApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Keep custom colors in sync when the OS appearance changes while the
+        // application is using the system theme preference.
+        self.dark = ui.ctx().theme() == egui::Theme::Dark;
         self.poll_run(ui.ctx());
         self.poll_github_authorization(ui.ctx());
         self.poll_github_repository_load(ui.ctx());
@@ -1447,7 +1451,14 @@ impl ScenarioApp {
                             .clicked()
                         {
                             self.dark = !self.dark;
-                            configure_style(ui.ctx(), self.dark);
+                            configure_styles(
+                                ui.ctx(),
+                                if self.dark {
+                                    egui::ThemePreference::Dark
+                                } else {
+                                    egui::ThemePreference::Light
+                                },
+                            );
                         }
                         ui.label(RichText::new("SAFE MODE").strong().size(9.0).color(CYAN));
                     });
@@ -4692,7 +4703,9 @@ fn install_unicode_fonts(ctx: &egui::Context) {
             "/System/Library/Fonts/SFNS.ttf",
             vec![InsertFontFamily {
                 family: FontFamily::Proportional,
-                priority: FontPriority::Highest,
+                // Preserve egui's original metrics and use SF only for glyphs
+                // missing from the built-in proportional font.
+                priority: FontPriority::Lowest,
             }],
         ),
         (
@@ -4700,7 +4713,7 @@ fn install_unicode_fonts(ctx: &egui::Context) {
             "/System/Library/Fonts/SFNSMono.ttf",
             vec![InsertFontFamily {
                 family: FontFamily::Monospace,
-                priority: FontPriority::Highest,
+                priority: FontPriority::Lowest,
             }],
         ),
         (
@@ -4729,33 +4742,30 @@ fn install_unicode_fonts(ctx: &egui::Context) {
 #[cfg(not(target_os = "macos"))]
 fn install_unicode_fonts(_ctx: &egui::Context) {}
 
-fn configure_style(ctx: &egui::Context, dark: bool) {
-    let theme = if dark {
-        egui::Theme::Dark
-    } else {
-        egui::Theme::Light
-    };
-    ctx.set_theme(theme);
-    let mut visuals = if dark {
-        egui::Visuals::dark()
-    } else {
-        egui::Visuals::light()
-    };
-    visuals.panel_fill = surface(dark);
-    visuals.window_fill = surface(dark);
-    visuals.extreme_bg_color = code_surface(dark);
-    visuals.faint_bg_color = panel(dark);
-    visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
-    visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
-    visuals.widgets.active.corner_radius = CornerRadius::same(8);
-    visuals.selection.bg_fill = translucent(PURPLE, 70);
-    visuals.selection.stroke = Stroke::new(1.0, PURPLE);
-    ctx.set_visuals_of(theme, visuals);
+fn configure_styles(ctx: &egui::Context, preference: egui::ThemePreference) {
+    for (theme, dark) in [(egui::Theme::Light, false), (egui::Theme::Dark, true)] {
+        let mut visuals = if dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
+        visuals.panel_fill = surface(dark);
+        visuals.window_fill = surface(dark);
+        visuals.extreme_bg_color = code_surface(dark);
+        visuals.faint_bg_color = panel(dark);
+        visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
+        visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
+        visuals.widgets.active.corner_radius = CornerRadius::same(8);
+        visuals.selection.bg_fill = translucent(PURPLE, 70);
+        visuals.selection.stroke = Stroke::new(1.0, PURPLE);
+        ctx.set_visuals_of(theme, visuals);
 
-    let mut style = (*ctx.style_of(theme)).clone();
-    style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-    style.spacing.button_padding = Vec2::new(10.0, 7.0);
-    ctx.set_style_of(theme, style);
+        let mut style = (*ctx.style_of(theme)).clone();
+        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
+        style.spacing.button_padding = Vec2::new(10.0, 7.0);
+        ctx.set_style_of(theme, style);
+    }
+    ctx.set_theme(preference);
 }
 
 fn translucent(color: Color32, alpha: u8) -> Color32 {
