@@ -356,6 +356,7 @@ struct ScenarioApp {
 
 impl ScenarioApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        install_unicode_fonts(&cc.egui_ctx);
         configure_style(&cc.egui_ctx, false);
         let (task_pack, load_error) = match load_tasks() {
             Ok(pack) => (Some(pack), None),
@@ -3635,8 +3636,8 @@ fn paint_composer_step_editor(
                 source.step_id == *source_step && source.path == array_path.as_str()
             });
             let selected_label = selected_source
-                .map(|source| format!("{} → {}[]", source.step_name, source.path))
-                .unwrap_or_else(|| "Выберите массив из предыдущего блока".into());
+                .map(|source| format!("{}[]", source.path))
+                .unwrap_or_else(|| "Массив не выбран".into());
             egui::ComboBox::from_id_salt(("foreach-array-source", step.id.clone()))
                 .selected_text(selected_label)
                 .width(ui.available_width())
@@ -3647,7 +3648,7 @@ fn paint_composer_step_editor(
                         if ui
                             .selectable_label(
                                 selected,
-                                format!("{} → {}[]", source.step_name, source.path),
+                                format!("{}[] → {}", source.path, truncate(&source.step_name, 20)),
                             )
                             .clicked()
                         {
@@ -4679,6 +4680,54 @@ fn load_tasks_with_files(imported_files: &[PathBuf]) -> anyhow::Result<TaskPack>
     }));
     TaskPack::load_many_with_overrides(&sources, true)
 }
+
+#[cfg(target_os = "macos")]
+fn install_unicode_fonts(ctx: &egui::Context) {
+    use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+    use egui::{FontData, FontFamily};
+
+    let fonts = [
+        (
+            "macos-system-ui",
+            "/System/Library/Fonts/SFNS.ttf",
+            vec![InsertFontFamily {
+                family: FontFamily::Proportional,
+                priority: FontPriority::Highest,
+            }],
+        ),
+        (
+            "macos-system-mono",
+            "/System/Library/Fonts/SFNSMono.ttf",
+            vec![InsertFontFamily {
+                family: FontFamily::Monospace,
+                priority: FontPriority::Highest,
+            }],
+        ),
+        (
+            "macos-symbols",
+            "/System/Library/Fonts/Apple Symbols.ttf",
+            vec![
+                InsertFontFamily {
+                    family: FontFamily::Proportional,
+                    priority: FontPriority::Lowest,
+                },
+                InsertFontFamily {
+                    family: FontFamily::Monospace,
+                    priority: FontPriority::Lowest,
+                },
+            ],
+        ),
+    ];
+
+    for (name, path, families) in fonts {
+        if let Ok(bytes) = fs::read(path) {
+            ctx.add_font(FontInsert::new(name, FontData::from_owned(bytes), families));
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_unicode_fonts(_ctx: &egui::Context) {}
 
 fn configure_style(ctx: &egui::Context, dark: bool) {
     let theme = if dark {
