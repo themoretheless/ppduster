@@ -155,6 +155,30 @@ const GITHUB_REPOSITORY_CONTEXT_FIELDS: [(&str, &str); 9] = [
     ("archived", "bool"),
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposerArraySource {
+    step_id: String,
+    step_name: String,
+    path: &'static str,
+    item: &'static str,
+}
+
+fn composer_array_sources(task: &Task, before_index: usize) -> Vec<ComposerArraySource> {
+    task.steps
+        .iter()
+        .take(before_index)
+        .filter_map(|step| match &step.action {
+            Action::GithubListRepositories => Some(ComposerArraySource {
+                step_id: step.id.clone(),
+                step_name: step_title(step),
+                path: "github.repositories",
+                item: "repository",
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 impl ComposerBlockKind {
     const ALL: [Self; 12] = [
         Self::GithubListRepositories,
@@ -2088,7 +2112,13 @@ impl ScenarioApp {
                     }
                 });
                 ui.add_space(8.0);
-                changed |= paint_composer_step_editor(ui, &mut task.steps[index], self.dark);
+                let array_sources = composer_array_sources(task, index);
+                changed |= paint_composer_step_editor(
+                    ui,
+                    &mut task.steps[index],
+                    &array_sources,
+                    self.dark,
+                );
                 ui.add_space(12.0);
                 section_label(ui, "ВЫХОДНОЙ КОНТЕКСТ");
                 ui.label(
@@ -3528,7 +3558,12 @@ fn paint_step_inspector(ui: &mut egui::Ui, step: &Step, options: Option<&RunOpti
         });
 }
 
-fn paint_composer_step_editor(ui: &mut egui::Ui, step: &mut Step, dark: bool) -> bool {
+fn paint_composer_step_editor(
+    ui: &mut egui::Ui,
+    step: &mut Step,
+    array_sources: &[ComposerArraySource],
+    dark: bool,
+) -> bool {
     let mut changed = false;
     let is_git_fetch = matches!(&step.action, Action::GitFetch { .. });
     ui.label(RichText::new("Название блока").size(9.0).color(MUTED));
@@ -3552,9 +3587,49 @@ fn paint_composer_step_editor(ui: &mut egui::Ui, step: &mut Step, dark: bool) ->
             item,
             fields,
         } => {
-            changed |= composer_text_field(ui, "ID шага-источника", source_step);
-            changed |= composer_text_field(ui, "Путь к массиву", array_path);
-            changed |= composer_text_field(ui, "Имя элемента", item);
+            ui.label(RichText::new("Массив для перебора").size(9.0).color(MUTED));
+            let selected_source = array_sources.iter().find(|source| {
+                source.step_id == *source_step && source.path == array_path.as_str()
+            });
+            let selected_label = selected_source
+                .map(|source| format!("{} → {}[]", source.step_name, source.path))
+                .unwrap_or_else(|| "Выберите массив из предыдущего блока".into());
+            egui::ComboBox::from_id_salt(("foreach-array-source", step.id.clone()))
+                .selected_text(selected_label)
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    for source in array_sources {
+                        let selected =
+                            source.step_id == *source_step && source.path == array_path.as_str();
+                        if ui
+                            .selectable_label(
+                                selected,
+                                format!("{} → {}[]", source.step_name, source.path),
+                            )
+                            .clicked()
+                        {
+                            *source_step = source.step_id.clone();
+                            *array_path = source.path.into();
+                            *item = source.item.into();
+                            changed = true;
+                            ui.close();
+                        }
+                    }
+                });
+            if array_sources.is_empty() {
+                ui.label(
+                    RichText::new("Перед циклом нет блока с массивом в выходном контексте.")
+                        .size(8.0)
+                        .color(ORANGE),
+                );
+            } else {
+                ui.label(
+                    RichText::new(format!("Текущий элемент: {item}"))
+                        .monospace()
+                        .size(8.0)
+                        .color(PURPLE),
+                );
+            }
             ui.add_space(7.0);
             ui.label(
                 RichText::new("Поля для следующего блока")
@@ -4914,6 +4989,24 @@ project:
         assert!(context.contains("name: string"));
         assert!(!context.contains("ssh_url"));
         assert!(!context.contains("default_branch"));
+    }
+
+    #[test]
+    fn foreach_array_selector_discovers_typed_upstream_arrays() {
+        let mut task = github_repository_composer_task(1);
+        task.steps
+            .push(composer_step(ComposerBlockKind::ForEach, "loop".into()));
+
+        assert!(composer_array_sources(&task, 0).is_empty());
+        assert_eq!(
+            composer_array_sources(&task, 1),
+            vec![ComposerArraySource {
+                step_id: "list-repositories".into(),
+                step_name: "Получить репозитории аккаунта".into(),
+                path: "github.repositories",
+                item: "repository",
+            }]
+        );
     }
 
     #[test]
