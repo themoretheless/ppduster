@@ -3,15 +3,25 @@ use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Layout, Margin, Pos2, Rect,
     RichText, ScrollArea, Sense, Stroke, StrokeKind, Vec2,
 };
+use ppduster::automation::binding::validate_literal_binding;
+use ppduster::automation::block::default_step;
 use ppduster::automation::PackTrust;
 use ppduster::automation::{
     block_definition, definition_for_action, describe_step, run_task, Action, ActionKind,
-    AuthPolicy, ComparisonOperator, ContextPathSegment, ContextScope, CopyPathAction,
-    CreateDirectoryAction, ExpressionLimits, ExpressionV1, ExpressionValue, FieldRef, GraphNode,
-    IndeterminatePolicy, InspectPathAction, ObjectSchema, ReferenceV1, ReleaseChannel,
-    RemovePathAction, RuleOutcomePolicy, RunOptions, RunReport, ScriptInterpreter, SemanticFormat,
-    Sensitivity, Step, StepCondition, StepStatus, Task, TaskFile, TaskPack, TaskSource,
-    TrustRequirement, WorkflowGraph, WriteConflictPolicy, WriteFileAction,
+    ActionNode, AuthPolicy, Binding, BlockPolicyCapabilities, ComparisonOperator,
+    ContextPathSegment, ContextScope, EdgePort, ElevationPolicy, ExpressionLimits, ExpressionV1,
+    ExpressionValue, FieldRef, ForEachNode, GraphEdge, GraphNode, GraphValidationError,
+    GraphValidationErrorKind, IfNode, IndeterminatePolicy, JoinMode, JoinNode, LoopFailurePolicy,
+    ObjectSchema, PolicyRequirement, ReferenceV1, ReleaseChannel, RuleOutcomePolicy, RunOptions,
+    RunReport, ScriptInterpreter, SemanticFormat, Sensitivity, Step, StepCondition, StepStatus,
+    SwitchCase, SwitchNode, Task, TaskFile, TaskPack, TaskSource, TemplatePart, TrustRequirement,
+    WorkflowGraph,
+};
+#[cfg(test)]
+use ppduster::automation::{
+    ContextStore, CopyPathAction, CreateDirectoryAction, InspectPathAction, RemovePathAction,
+    StepLogEntry, StepOutput, StepReport, StructuredStepOutput, WriteConflictPolicy,
+    WriteFileAction,
 };
 use ppduster::automation::{ContextType, FieldSchema};
 use ppduster::github::{list_accessible_repositories, login_via_web, GithubRepository};
@@ -34,6 +44,56 @@ const PURPLE: Color32 = Color32::from_rgb(101, 87, 217);
 const CYAN: Color32 = Color32::from_rgb(21, 146, 136);
 const ORANGE: Color32 = Color32::from_rgb(208, 106, 53);
 const BLUE: Color32 = Color32::from_rgb(54, 127, 187);
+
+const COMPACT_VIEWPORT_WIDTH: f32 = 980.0;
+const WIDE_VIEWPORT_WIDTH: f32 = 1440.0;
+const COMPACT_LIBRARY_WIDTH: f32 = 220.0;
+const WIDE_LIBRARY_WIDTH: f32 = 270.0;
+const COMPACT_INSPECTOR_WIDTH: f32 = 340.0;
+const WIDE_INSPECTOR_WIDTH: f32 = 360.0;
+const CANVAS_MIN_ZOOM: f32 = 0.35;
+const CANVAS_MAX_ZOOM: f32 = 2.5;
+const CANVAS_ZOOM_STEP: f32 = 1.2;
+const CANVAS_FIT_PADDING: f32 = 56.0;
+
+/// Keep the editor usable down to the minimum supported viewport while
+/// preserving the roomier desktop proportions on wide windows.
+fn workspace_panel_widths(viewport_width: f32) -> (f32, f32) {
+    let wide_fraction = ((viewport_width - COMPACT_VIEWPORT_WIDTH)
+        / (WIDE_VIEWPORT_WIDTH - COMPACT_VIEWPORT_WIDTH))
+        .clamp(0.0, 1.0);
+    (
+        egui::lerp(COMPACT_LIBRARY_WIDTH..=WIDE_LIBRARY_WIDTH, wide_fraction),
+        egui::lerp(
+            COMPACT_INSPECTOR_WIDTH..=WIDE_INSPECTOR_WIDTH,
+            wide_fraction,
+        ),
+    )
+}
+
+/// Keep inspector widgets inside the fixed right panel even when schemas,
+/// bindings, paths, or YAML contain very long unbroken strings.
+fn bounded_inspector_scroll<R>(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::containers::scroll_area::ScrollAreaOutput<R> {
+    let outer_width = ui.available_width().max(0.0);
+    ScrollArea::vertical()
+        .id_salt(id_salt)
+        .max_width(outer_width)
+        .horizontal_scroll_offset(0.0)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let content_width = ui.available_width().max(0.0);
+            ui.set_width(content_width);
+            // Prose explicitly opts into wrapping. Compact labels, buttons,
+            // combo selections and popup rows truncate instead of widening
+            // the parent UI beyond the inspector.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            add_contents(ui)
+        })
+}
 
 #[derive(Debug, Clone)]
 struct ScenarioGroup {
@@ -61,18 +121,207 @@ struct ScenarioProject {
     canvases: BTreeMap<String, ComposerCanvas>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 struct CanvasPoint {
     x: f32,
     y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct CanvasView {
+    #[serde(default)]
+    pan: CanvasPoint,
+    #[serde(default = "default_canvas_zoom")]
+    zoom: f32,
+}
+
+const fn default_canvas_zoom() -> f32 {
+    1.0
+}
+
+impl Default for CanvasView {
+    fn default() -> Self {
+        Self {
+            pan: CanvasPoint::default(),
+            zoom: default_canvas_zoom(),
+        }
+    }
+}
+
+impl CanvasView {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn sanitized(mut self) -> Self {
+        if !self.pan.x.is_finite() {
+            self.pan.x = 0.0;
+        }
+        if !self.pan.y.is_finite() {
+            self.pan.y = 0.0;
+        }
+        if !self.zoom.is_finite() {
+            self.zoom = default_canvas_zoom();
+        }
+        self.zoom = self.zoom.clamp(CANVAS_MIN_ZOOM, CANVAS_MAX_ZOOM);
+        self
+    }
+
+    fn transform(self, viewport: Rect) -> egui::emath::TSTransform {
+        let view = self.sanitized();
+        egui::emath::TSTransform::new(
+            viewport.min.to_vec2() + Vec2::new(view.pan.x, view.pan.y),
+            view.zoom,
+        )
+    }
+
+    #[cfg(test)]
+    fn world_to_screen(self, viewport: Rect, point: Pos2) -> Pos2 {
+        self.transform(viewport) * point
+    }
+
+    fn screen_to_world(self, viewport: Rect, point: Pos2) -> Pos2 {
+        self.transform(viewport).inverse() * point
+    }
+
+    #[cfg(test)]
+    fn screen_rect(self, viewport: Rect, rect: Rect) -> Rect {
+        self.transform(viewport) * rect
+    }
+
+    fn visible_world_rect(self, viewport: Rect) -> Rect {
+        self.transform(viewport).inverse() * viewport
+    }
+
+    fn from_visible_world_rect(world: Rect, viewport: Rect) -> Self {
+        if !world.is_positive() || !viewport.is_positive() {
+            return Self::default();
+        }
+        let zoom = (viewport.width() / world.width())
+            .min(viewport.height() / world.height())
+            .clamp(CANVAS_MIN_ZOOM, CANVAS_MAX_ZOOM);
+        Self {
+            pan: CanvasPoint {
+                x: -world.left() * zoom,
+                y: -world.top() * zoom,
+            },
+            zoom,
+        }
+        .sanitized()
+    }
+
+    #[cfg(test)]
+    fn pan_by(&mut self, screen_delta: Vec2) {
+        if screen_delta.is_finite() {
+            self.pan.x += screen_delta.x;
+            self.pan.y += screen_delta.y;
+        }
+        *self = self.sanitized();
+    }
+
+    fn zoom_about(&mut self, viewport: Rect, anchor: Pos2, factor: f32) {
+        *self = self.sanitized();
+        if !factor.is_finite() || factor <= 0.0 || !viewport.is_positive() {
+            return;
+        }
+        let anchor_world = self.screen_to_world(viewport, anchor);
+        let next_zoom = (self.zoom * factor).clamp(CANVAS_MIN_ZOOM, CANVAS_MAX_ZOOM);
+        self.zoom = next_zoom;
+        self.pan.x = anchor.x - viewport.left() - anchor_world.x * next_zoom;
+        self.pan.y = anchor.y - viewport.top() - anchor_world.y * next_zoom;
+        *self = self.sanitized();
+    }
+
+    fn fit(world_bounds: Rect, viewport: Rect, padding: f32) -> Self {
+        if !world_bounds.is_positive() || !viewport.is_positive() {
+            return Self::default();
+        }
+        let available =
+            (viewport.size() - Vec2::splat(padding.max(0.0) * 2.0)).max(Vec2::splat(1.0));
+        let zoom = (available.x / world_bounds.width())
+            .min(available.y / world_bounds.height())
+            .clamp(CANVAS_MIN_ZOOM, CANVAS_MAX_ZOOM);
+        let pan = viewport.center() - viewport.min - world_bounds.center().to_vec2() * zoom;
+        Self {
+            pan: CanvasPoint { x: pan.x, y: pan.y },
+            zoom,
+        }
+        .sanitized()
+    }
+}
+
+fn graph_canvas_world_bounds(canvas: &ComposerCanvas, node_size: Vec2) -> Rect {
+    let header_bounds = Rect::from_min_size(Pos2::new(80.0, 88.0), Vec2::new(520.0, 80.0));
+    let mut points = canvas.positions.values();
+    let Some(first) = points.next() else {
+        return header_bounds.union(Rect::from_min_size(Pos2::new(80.0, 250.0), node_size));
+    };
+    let mut min = Pos2::new(first.x, first.y);
+    let mut max = min + node_size;
+    for point in points {
+        min.x = min.x.min(point.x);
+        min.y = min.y.min(point.y);
+        max.x = max.x.max(point.x + node_size.x);
+        max.y = max.y.max(point.y + node_size.y);
+    }
+    header_bounds.union(Rect::from_min_max(min, max))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ComposerCanvas {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     positions: BTreeMap<String, CanvasPoint>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Legacy v1 canvas wiring. Graph-native scenarios never read or write
+    /// this map: `WorkflowGraph::edges` is their sole execution topology.
+    #[serde(default, skip_serializing)]
     parents: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "CanvasView::is_default")]
+    view: CanvasView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComposerGraphAttach {
+    RootStart,
+    RootAfter {
+        node_id: String,
+    },
+    NestedStart {
+        scope: ComposerGraphNestedScope,
+    },
+    NestedAfter {
+        scope: ComposerGraphNestedScope,
+        node_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComposerGraphNestedScope {
+    ForEachBody { owner_id: String },
+    IfThen { owner_id: String },
+    IfElse { owner_id: String },
+    SwitchCase { owner_id: String, case_id: String },
+    SwitchDefault { owner_id: String },
+}
+
+impl ComposerGraphNestedScope {
+    fn owner_id(&self) -> &str {
+        match self {
+            Self::ForEachBody { owner_id }
+            | Self::IfThen { owner_id }
+            | Self::IfElse { owner_id }
+            | Self::SwitchCase { owner_id, .. }
+            | Self::SwitchDefault { owner_id } => owner_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerGraphBlockKind {
+    Action(ActionKind),
+    ForEach,
+    If,
+    Switch,
+    Join,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +382,7 @@ fn project_entry_mut<'a>(
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(test)]
 enum ComposerBlockKind {
     GithubListRepositories,
     ForEach,
@@ -149,6 +399,7 @@ enum ComposerBlockKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 struct ComposerArraySource {
     step_id: String,
     step_name: String,
@@ -158,12 +409,59 @@ struct ComposerArraySource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposerBindableField {
+    path: String,
+    value_type: ContextType,
+    required: bool,
+    nullable: bool,
+    sensitivity: Sensitivity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
+struct ComposerIndexedBinding {
+    source_step: String,
+    array_path: String,
+    index: usize,
+    field_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 struct ComposerLoopSource {
     step_id: String,
     step_name: String,
+    source_step: String,
+    array_path: String,
     item: String,
     fields: Vec<String>,
     item_type: ContextType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
+struct ComposerLoopBinding {
+    loop_step: String,
+    field_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
+enum ComposerLoopDestinationSuffix {
+    FullName {
+        field_path: String,
+    },
+    OwnerName {
+        owner_path: String,
+        name_path: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
+struct ComposerLoopDestinationBinding {
+    root: String,
+    suffix: ComposerLoopDestinationSuffix,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,10 +577,28 @@ enum ComposerConditionRule {
 // outside this envelope remain visible as YAML and are never rewritten.
 const CONDITION_EDITOR_MAX_DEPTH: usize = 8;
 const CONDITION_EDITOR_MAX_NODES: usize = 64;
+#[cfg(test)]
+#[allow(dead_code)]
+const COMPOSER_MAX_ARRAY_ORDINAL: usize = 10_000;
 
+#[cfg(test)]
 fn composer_array_sources(task: &Task, before_index: usize) -> Vec<ComposerArraySource> {
+    composer_array_sources_scoped(task, before_index, None)
+}
+
+#[cfg(test)]
+fn composer_array_sources_scoped(
+    task: &Task,
+    before_index: usize,
+    canvas: Option<&ComposerCanvas>,
+) -> Vec<ComposerArraySource> {
     let mut sources = Vec::new();
-    for step in task.steps.iter().take(before_index) {
+    for (index, step) in task.steps.iter().enumerate().take(before_index) {
+        if matches!(step.action, Action::ForEach { .. })
+            || composer_step_is_loop_body_child(task, index, canvas)
+        {
+            continue;
+        }
         let definition = definition_for_action(&step.action);
         let mut arrays = Vec::new();
         collect_schema_arrays(&definition.output_schema, "", &mut arrays);
@@ -301,7 +617,17 @@ fn composer_array_sources(task: &Task, before_index: usize) -> Vec<ComposerArray
     sources
 }
 
+#[cfg(test)]
 fn composer_loop_sources(task: &Task, before_index: usize) -> Vec<ComposerLoopSource> {
+    composer_loop_sources_scoped(task, before_index, None)
+}
+
+#[cfg(test)]
+fn composer_loop_sources_scoped(
+    task: &Task,
+    before_index: usize,
+    canvas: Option<&ComposerCanvas>,
+) -> Vec<ComposerLoopSource> {
     task.steps
         .iter()
         .enumerate()
@@ -313,7 +639,7 @@ fn composer_loop_sources(task: &Task, before_index: usize) -> Vec<ComposerLoopSo
                 item,
                 fields,
             } => {
-                let item_type = composer_array_sources(task, index)
+                let item_type = composer_array_sources_scoped(task, index, canvas)
                     .into_iter()
                     .find(|source| source.step_id == *source_step && source.path == *array_path)
                     .map(|source| project_item_type(&source.item_type, fields))
@@ -321,6 +647,8 @@ fn composer_loop_sources(task: &Task, before_index: usize) -> Vec<ComposerLoopSo
                 Some(ComposerLoopSource {
                     step_id: step.id.clone(),
                     step_name: step_title(step),
+                    source_step: source_step.clone(),
+                    array_path: array_path.clone(),
                     item: item.clone(),
                     fields: fields.clone(),
                     item_type,
@@ -331,9 +659,248 @@ fn composer_loop_sources(task: &Task, before_index: usize) -> Vec<ComposerLoopSo
         .collect()
 }
 
-fn composer_condition_fields(task: &Task, before_index: usize) -> Vec<ComposerConditionField> {
+#[cfg(test)]
+fn composer_parent_loop_id(
+    task: &Task,
+    index: usize,
+    canvas: Option<&ComposerCanvas>,
+) -> Option<String> {
+    let step = task.steps.get(index)?;
+    let parent = canvas?.parents.get(&step.id)?;
+    let candidate = task.steps.get(index.checked_sub(1)?)?;
+    (candidate.id == *parent && matches!(candidate.action, Action::ForEach { .. }))
+        .then(|| candidate.id.clone())
+}
+
+#[cfg(test)]
+fn composer_step_is_loop_body_child(
+    task: &Task,
+    index: usize,
+    canvas: Option<&ComposerCanvas>,
+) -> bool {
+    composer_parent_loop_id(task, index, canvas).is_some()
+}
+
+#[cfg(test)]
+fn composer_parent_accepts_new_child(task: &Task, parent_id: &str) -> bool {
+    task.steps
+        .iter()
+        .position(|step| step.id == parent_id)
+        .is_none_or(|index| {
+            !matches!(task.steps[index].action, Action::ForEach { .. })
+                || index + 1 == task.steps.len()
+        })
+}
+
+fn composer_canvas_edge_is_visible(task: &Task, child_id: &str, parent_id: &str) -> bool {
+    if parent_id == "start" {
+        return true;
+    }
+    let Some(parent_index) = task.steps.iter().position(|step| step.id == parent_id) else {
+        return false;
+    };
+    if !matches!(task.steps[parent_index].action, Action::ForEach { .. }) {
+        return task.steps.iter().any(|step| step.id == child_id);
+    }
+    let Some(child_index) = task.steps.iter().position(|step| step.id == child_id) else {
+        return false;
+    };
+    child_index == parent_index + 1
+        && composer_step_has_loop_membership(&task.steps[child_index], parent_id)
+}
+
+fn binding_references_loop_item(binding: &Binding, loop_id: &str) -> bool {
+    let references_loop = |field: &FieldRef| {
+        matches!(
+            &field.scope,
+            ContextScope::LoopItem { step_id } if step_id == loop_id
+        )
+    };
+    match binding {
+        Binding::Field { field } => references_loop(field),
+        Binding::Interpolated { parts } => parts
+            .iter()
+            .any(|part| matches!(part, TemplatePart::Field { field } if references_loop(field))),
+        Binding::Literal { .. } | Binding::Template { .. } => false,
+    }
+}
+
+fn composer_step_has_loop_membership(step: &Step, loop_id: &str) -> bool {
+    match &step.action {
+        Action::ForEachGitCloneIfMissing { loop_step, .. } => loop_step == loop_id,
+        Action::GitInspect { .. } => step
+            .bindings
+            .get("repo")
+            .is_some_and(|binding| binding_references_loop_item(binding, loop_id)),
+        _ => step
+            .bindings
+            .values()
+            .any(|binding| binding_references_loop_item(binding, loop_id)),
+    }
+}
+
+fn validate_composer_canvas(task: &Task, canvas: &ComposerCanvas) -> Result<(), String> {
+    if let Some(graph) = &task.graph {
+        validate_graph_for_ui(task, graph)?;
+        let valid = graph_node_ids(graph);
+        if let Some(stale) = canvas
+            .positions
+            .keys()
+            .find(|id| id.as_str() != "start" && !valid.contains(id.as_str()))
+        {
+            return Err(format!(
+                "канвас сценария {} содержит позицию неизвестного узла {stale}",
+                task.id
+            ));
+        }
+        return Ok(());
+    }
+    for (child_id, parent_id) in &canvas.parents {
+        let Some(child_index) = task.steps.iter().position(|step| step.id == *child_id) else {
+            return Err(format!(
+                "канвас сценария {} ссылается на неизвестный дочерний блок {child_id}",
+                task.id
+            ));
+        };
+        if parent_id == "start" {
+            continue;
+        }
+        let Some(parent_index) = task.steps.iter().position(|step| step.id == *parent_id) else {
+            return Err(format!(
+                "канвас сценария {} ссылается на неизвестный родительский блок {parent_id}",
+                task.id
+            ));
+        };
+        if !matches!(task.steps[parent_index].action, Action::ForEach { .. }) {
+            continue;
+        }
+        if child_index != parent_index + 1 {
+            return Err(format!(
+                "блок {child_id} нарисован дочерним для For each {parent_id}, но не идёт сразу после него"
+            ));
+        }
+        if !composer_step_has_loop_membership(&task.steps[child_index], parent_id) {
+            return Err(format!(
+                "дочерний блок {child_id} должен использовать структурный контекст текущего элемента For each {parent_id}"
+            ));
+        }
+    }
+    for loop_step in task
+        .steps
+        .iter()
+        .filter(|step| matches!(step.action, Action::ForEach { .. }))
+    {
+        let children = canvas
+            .parents
+            .iter()
+            .filter(|(_, parent)| *parent == &loop_step.id)
+            .count();
+        if children != 1 {
+            return Err(format!(
+                "For each {} должен иметь ровно один непосредственный дочерний блок, найдено: {children}",
+                loop_step.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_project_for_editing(project: &ScenarioProject) -> Result<(), String> {
+    // Deserialization already performs the one-way v1 -> v3 import. Editing
+    // must never repair or mutate Task.steps as a shadow authoring model. A
+    // graph may itself be invalid here: the inspector is the place where a
+    // loaded draft is diagnosed and explicitly repaired.
+    if project.id.trim().is_empty() || project.name.trim().is_empty() {
+        return Err("У проекта должны быть заполнены ID и название.".into());
+    }
+
+    fn visit(entries: &[ProjectEntry], ids: &mut BTreeSet<String>) -> Result<(), String> {
+        for entry in entries {
+            match entry {
+                ProjectEntry::Group { id, name, entries } => {
+                    if id.trim().is_empty() || name.trim().is_empty() {
+                        return Err("У каждой группы должны быть заполнены ID и название.".into());
+                    }
+                    visit(entries, ids)?;
+                }
+                ProjectEntry::Scenario { task } => {
+                    if task.id.trim().is_empty()
+                        || task.id.contains('/')
+                        || task.name.trim().is_empty()
+                        || task.description.trim().is_empty()
+                    {
+                        return Err(
+                            "У каждого сценария должны быть корректные ID, название и описание."
+                                .into(),
+                        );
+                    }
+                    if task.graph.is_none() || !task.steps.is_empty() || !task.scenarios.is_empty()
+                    {
+                        return Err(format!(
+                            "Сценарий «{}» должен быть импортирован в WorkflowGraph v3 перед редактированием.",
+                            task.name
+                        ));
+                    }
+                    if !ids.insert(task.id.clone()) {
+                        return Err(format!("Повторяется ID сценария «{}».", task.id));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    visit(&project.entries, &mut BTreeSet::new())
+}
+
+#[cfg(test)]
+fn composer_bind_git_inspect_to_parent_loop(task: &Task, parent: &str, child: &mut Step) -> bool {
+    if !matches!(child.action, Action::GitInspect { .. })
+        || !task
+            .steps
+            .last()
+            .is_some_and(|step| step.id == parent && matches!(step.action, Action::ForEach { .. }))
+    {
+        return false;
+    }
+    let Some(loop_source) = composer_loop_sources(task, task.steps.len())
+        .into_iter()
+        .find(|source| source.step_id == parent)
+    else {
+        return false;
+    };
+    let input_schema = definition_for_action(&child.action).input_schema;
+    let Some(expected) = input_schema.field("repo") else {
+        return false;
+    };
+    if !composer_insert_default_loop_binding(&mut child.bindings, "repo", &loop_source, expected) {
+        return false;
+    }
+    if let Some(suffix) = composer_loop_destination_suffixes(&loop_source)
+        .into_iter()
+        .next()
+    {
+        child.bindings.insert(
+            "dest".into(),
+            composer_loop_destination_binding(&loop_source, "$HOME/Developer", &suffix),
+        );
+    }
+    true
+}
+
+#[cfg(test)]
+fn composer_condition_fields_scoped(
+    task: &Task,
+    before_index: usize,
+    canvas: Option<&ComposerCanvas>,
+) -> Vec<ComposerConditionField> {
     let mut fields = Vec::new();
-    for step in task.steps.iter().take(before_index) {
+    for (index, step) in task.steps.iter().enumerate().take(before_index) {
+        if matches!(step.action, Action::ForEach { .. })
+            || composer_step_is_loop_body_child(task, index, canvas)
+        {
+            continue;
+        }
         let definition = definition_for_action(&step.action);
         collect_condition_fields(
             &step.id,
@@ -348,6 +915,7 @@ fn composer_condition_fields(task: &Task, before_index: usize) -> Vec<ComposerCo
     fields
 }
 
+#[cfg(test)]
 fn collect_condition_fields(
     step_id: &str,
     schema: &ObjectSchema,
@@ -396,6 +964,7 @@ fn collect_condition_fields(
     }
 }
 
+#[cfg(test)]
 fn condition_type_contains_secret(
     value_type: &ContextType,
     inherited_sensitivity: Sensitivity,
@@ -781,6 +1350,32 @@ fn build_composer_condition_rule(rule: &ComposerConditionRule) -> ExpressionV1 {
     }
 }
 
+fn condition_read_only_summary(expression: &ExpressionV1) -> String {
+    const MAX_CHARS: usize = 480;
+    let source = serde_yaml::to_string(expression)
+        .unwrap_or_else(|error| format!("<condition serialization failed: {error}>"));
+    let mut chars = source.trim().chars();
+    let summary = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{summary}\n…")
+    } else {
+        summary
+    }
+}
+
+fn default_graph_if_condition(fields: &[ComposerConditionField]) -> ExpressionV1 {
+    default_condition_field(fields).map_or(
+        ExpressionV1::Literal {
+            value: ExpressionValue::Bool(true),
+        },
+        |field| {
+            build_composer_condition_rule(&ComposerConditionRule::Clause(default_simple_condition(
+                field,
+            )))
+        },
+    )
+}
+
 fn composer_condition_rule_supported(
     rule: &ComposerConditionRule,
     fields: &[ComposerConditionField],
@@ -905,6 +1500,7 @@ fn item_alias_for_array_path(path: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn project_item_type(item_type: &ContextType, fields: &[String]) -> ContextType {
     if fields.is_empty() {
         return item_type.clone();
@@ -919,6 +1515,7 @@ fn project_item_type(item_type: &ContextType, fields: &[String]) -> ContextType 
     ContextType::object(projected)
 }
 
+#[cfg(test)]
 fn item_object_fields(item_type: &ContextType) -> Vec<(String, FieldSchema)> {
     match item_type {
         ContextType::Object { schema } => schema
@@ -930,6 +1527,8 @@ fn item_object_fields(item_type: &ContextType) -> Vec<(String, FieldSchema)> {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn clone_item_field_names(fields: &[(String, FieldSchema)]) -> Vec<String> {
     fields
         .iter()
@@ -946,6 +1545,7 @@ fn clone_item_field_names(fields: &[(String, FieldSchema)]) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn composer_context_options(
     source: &ComposerLoopSource,
     expected: &ContextType,
@@ -973,6 +1573,7 @@ fn composer_context_options(
         .collect()
 }
 
+#[cfg(test)]
 fn composer_destination_options(
     source: &ComposerLoopSource,
     expected: &ContextType,
@@ -1004,6 +1605,7 @@ fn composer_destination_options(
     options
 }
 
+#[cfg(test)]
 fn collect_bindable_fields(
     value_type: &ContextType,
     prefix: &str,
@@ -1028,6 +1630,448 @@ fn collect_bindable_fields(
     }
 }
 
+#[cfg(test)]
+fn composer_indexed_field_options(
+    source: &ComposerArraySource,
+    expected: &FieldSchema,
+) -> Vec<ComposerBindableField> {
+    composer_typed_field_options(&source.item_type, expected)
+}
+
+#[cfg(test)]
+fn composer_loop_field_options(
+    source: &ComposerLoopSource,
+    expected: &FieldSchema,
+) -> Vec<ComposerBindableField> {
+    composer_typed_field_options(&source.item_type, expected)
+}
+
+#[cfg(test)]
+fn composer_typed_field_options(
+    item_type: &ContextType,
+    expected: &FieldSchema,
+) -> Vec<ComposerBindableField> {
+    let mut fields = Vec::new();
+    collect_bindable_field_details(item_type, "", true, false, Sensitivity::Public, &mut fields);
+    fields.retain(|field| {
+        expected.value_type.is_assignable_from(&field.value_type)
+            && (!expected.required || field.required)
+            && (expected.nullable || !field.nullable)
+            && (!field.sensitivity.is_secret() || expected.sensitivity.is_secret())
+    });
+    fields
+}
+
+fn collect_bindable_field_details(
+    value_type: &ContextType,
+    prefix: &str,
+    inherited_required: bool,
+    inherited_nullable: bool,
+    inherited_sensitivity: Sensitivity,
+    output: &mut Vec<ComposerBindableField>,
+) {
+    match value_type {
+        ContextType::Object { schema } => {
+            for (name, field) in &schema.fields {
+                let path = join_context_path(prefix, name);
+                let required = inherited_required && field.required;
+                let nullable = inherited_nullable || field.nullable;
+                let sensitivity = inherited_sensitivity.combine(field.sensitivity);
+                match &field.value_type {
+                    ContextType::Object { .. } => collect_bindable_field_details(
+                        &field.value_type,
+                        &path,
+                        required,
+                        nullable,
+                        sensitivity,
+                        output,
+                    ),
+                    ContextType::Array { .. } => {}
+                    _ => output.push(ComposerBindableField {
+                        path,
+                        value_type: field.value_type.clone(),
+                        required,
+                        nullable,
+                        sensitivity,
+                    }),
+                }
+            }
+        }
+        ContextType::Array { .. } => {}
+        _ => output.push(ComposerBindableField {
+            path: prefix.into(),
+            value_type: value_type.clone(),
+            required: inherited_required,
+            nullable: inherited_nullable,
+            sensitivity: inherited_sensitivity,
+        }),
+    }
+}
+
+#[cfg(test)]
+fn composer_indexed_binding(
+    source: &ComposerArraySource,
+    index: usize,
+    field_path: &str,
+) -> Binding {
+    let mut reference = FieldRef::step(&source.step_id);
+    for segment in source.path.split('.').filter(|segment| !segment.is_empty()) {
+        reference = reference.field(segment);
+    }
+    reference = reference.index(index);
+    for segment in field_path.split('.').filter(|segment| !segment.is_empty()) {
+        reference = reference.field(segment);
+    }
+    Binding::field(reference)
+}
+
+#[cfg(test)]
+fn composer_indexed_binding_selection(
+    binding: &Binding,
+    sources: &[ComposerArraySource],
+) -> Option<ComposerIndexedBinding> {
+    let Binding::Field { field } = binding else {
+        return None;
+    };
+    let ContextScope::Step { step_id } = &field.scope else {
+        return None;
+    };
+    for source in sources.iter().filter(|source| source.step_id == *step_id) {
+        let array_segments = source
+            .path
+            .split('.')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        if field.segments.len() <= array_segments.len() {
+            continue;
+        }
+        let prefix_matches = array_segments.iter().enumerate().all(|(index, expected)| {
+            matches!(
+                field.segments.get(index),
+                Some(ContextPathSegment::Field { name }) if name == expected
+            )
+        });
+        if !prefix_matches {
+            continue;
+        }
+        let Some(ContextPathSegment::Index { index }) = field.segments.get(array_segments.len())
+        else {
+            continue;
+        };
+        let mut field_names = Vec::new();
+        let mut supported = true;
+        for segment in field.segments.iter().skip(array_segments.len() + 1) {
+            match segment {
+                ContextPathSegment::Field { name } => field_names.push(name.clone()),
+                ContextPathSegment::Index { .. } => {
+                    supported = false;
+                    break;
+                }
+            }
+        }
+        if supported {
+            return Some(ComposerIndexedBinding {
+                source_step: source.step_id.clone(),
+                array_path: source.path.clone(),
+                index: *index,
+                field_path: field_names.join("."),
+            });
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+fn composer_indexed_binding_preview(selection: &ComposerIndexedBinding, target: &str) -> String {
+    let field = if selection.field_path.is_empty() {
+        String::new()
+    } else {
+        format!(".{}", selection.field_path)
+    };
+    format!(
+        "{}.{}[{}]{} → {}",
+        selection.source_step,
+        selection.array_path,
+        selection.index.saturating_add(1),
+        field,
+        target
+    )
+}
+
+#[cfg(test)]
+fn composer_loop_field_ref(source: &ComposerLoopSource, field_path: &str) -> FieldRef {
+    let mut reference = FieldRef::loop_item(&source.step_id);
+    for segment in field_path.split('.').filter(|segment| !segment.is_empty()) {
+        reference = reference.field(segment);
+    }
+    reference
+}
+
+#[cfg(test)]
+fn composer_loop_binding(source: &ComposerLoopSource, field_path: &str) -> Binding {
+    Binding::field(composer_loop_field_ref(source, field_path))
+}
+
+#[cfg(test)]
+fn composer_insert_default_loop_binding(
+    bindings: &mut BTreeMap<String, Binding>,
+    target: &str,
+    source: &ComposerLoopSource,
+    expected: &FieldSchema,
+) -> bool {
+    if bindings.contains_key(target) {
+        return false;
+    }
+    let Some(field) = composer_loop_field_options(source, expected)
+        .into_iter()
+        .next()
+    else {
+        return false;
+    };
+    bindings.insert(target.into(), composer_loop_binding(source, &field.path));
+    true
+}
+
+#[cfg(test)]
+fn composer_loop_destination_suffixes(
+    source: &ComposerLoopSource,
+) -> Vec<ComposerLoopDestinationSuffix> {
+    let mut fields = Vec::new();
+    collect_bindable_field_details(
+        &source.item_type,
+        "",
+        true,
+        false,
+        Sensitivity::Public,
+        &mut fields,
+    );
+    let repository_names = fields
+        .into_iter()
+        .filter(|field| {
+            field.required
+                && !field.nullable
+                && !field.sensitivity.is_secret()
+                && matches!(
+                    field.value_type,
+                    ContextType::String {
+                        format: Some(SemanticFormat::RepositoryName)
+                    }
+                )
+        })
+        .map(|field| field.path)
+        .collect::<BTreeSet<_>>();
+
+    let mut suffixes = Vec::new();
+    if repository_names.contains("full_name") {
+        suffixes.push(ComposerLoopDestinationSuffix::FullName {
+            field_path: "full_name".into(),
+        });
+    }
+    if repository_names.contains("owner") && repository_names.contains("name") {
+        suffixes.push(ComposerLoopDestinationSuffix::OwnerName {
+            owner_path: "owner".into(),
+            name_path: "name".into(),
+        });
+    }
+    suffixes
+}
+
+#[cfg(test)]
+fn composer_destination_root_literal(root: &str) -> String {
+    let root = root.trim();
+    if root.is_empty() {
+        String::new()
+    } else if root == "/" || root.ends_with('/') {
+        root.into()
+    } else {
+        format!("{root}/")
+    }
+}
+
+#[cfg(test)]
+fn composer_destination_root_error(root: &str) -> Option<&'static str> {
+    let root = root.trim();
+    if root.is_empty() {
+        return Some("Укажите абсолютный базовый каталог.");
+    }
+    if root.contains('\0') {
+        return Some("Базовый каталог не должен содержать NUL.");
+    }
+    let path = if root == "$HOME" {
+        Path::new("")
+    } else if let Some(path) = root.strip_prefix("$HOME/") {
+        Path::new(path)
+    } else if Path::new(root).is_absolute() {
+        Path::new(root)
+    } else {
+        return Some("Используйте абсолютный путь либо $HOME/…");
+    };
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Some("Базовый каталог не должен содержать '..'.");
+    }
+    None
+}
+
+#[cfg(test)]
+fn composer_loop_destination_binding(
+    source: &ComposerLoopSource,
+    root: &str,
+    suffix: &ComposerLoopDestinationSuffix,
+) -> Binding {
+    let mut parts = vec![TemplatePart::literal(composer_destination_root_literal(
+        root,
+    ))];
+    match suffix {
+        ComposerLoopDestinationSuffix::FullName { field_path } => {
+            parts.push(TemplatePart::field(composer_loop_field_ref(
+                source, field_path,
+            )));
+        }
+        ComposerLoopDestinationSuffix::OwnerName {
+            owner_path,
+            name_path,
+        } => {
+            parts.push(TemplatePart::field(composer_loop_field_ref(
+                source, owner_path,
+            )));
+            parts.push(TemplatePart::literal("/"));
+            parts.push(TemplatePart::field(composer_loop_field_ref(
+                source, name_path,
+            )));
+        }
+    }
+    Binding::interpolated(parts)
+}
+
+#[cfg(test)]
+fn composer_loop_destination_binding_selection(
+    binding: &Binding,
+    source: &ComposerLoopSource,
+) -> Option<ComposerLoopDestinationBinding> {
+    let Binding::Interpolated { parts } = binding else {
+        return None;
+    };
+    let Some(TemplatePart::Literal { value }) = parts.first() else {
+        return None;
+    };
+    let root: String = if value.is_empty() {
+        String::new()
+    } else if value == "/" {
+        "/".into()
+    } else {
+        value.strip_suffix('/')?.to_owned()
+    };
+    composer_loop_destination_suffixes(source)
+        .into_iter()
+        .find_map(|suffix| {
+            (composer_loop_destination_binding(source, &root, &suffix) == *binding).then_some(
+                ComposerLoopDestinationBinding {
+                    root: root.clone(),
+                    suffix,
+                },
+            )
+        })
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn composer_loop_destination_suffix_label(
+    source: &ComposerLoopSource,
+    suffix: &ComposerLoopDestinationSuffix,
+) -> String {
+    match suffix {
+        ComposerLoopDestinationSuffix::FullName { field_path } => {
+            format!("{}.{}", source.item, field_path)
+        }
+        ComposerLoopDestinationSuffix::OwnerName {
+            owner_path,
+            name_path,
+        } => format!(
+            "{}.{} / {}.{}",
+            source.item, owner_path, source.item, name_path
+        ),
+    }
+}
+
+#[cfg(test)]
+fn composer_loop_destination_preview(
+    source: &ComposerLoopSource,
+    selection: &ComposerLoopDestinationBinding,
+) -> String {
+    let root = composer_destination_root_literal(&selection.root);
+    match &selection.suffix {
+        ComposerLoopDestinationSuffix::FullName { field_path } => {
+            format!("{root}{{{{{}.{field_path}}}}} → dest", source.item)
+        }
+        ComposerLoopDestinationSuffix::OwnerName {
+            owner_path,
+            name_path,
+        } => format!(
+            "{root}{{{{{}.{owner_path}}}}}/{{{{{}.{name_path}}}}} → dest",
+            source.item, source.item
+        ),
+    }
+}
+
+#[cfg(test)]
+fn composer_loop_binding_selection(
+    binding: &Binding,
+    sources: &[ComposerLoopSource],
+) -> Option<ComposerLoopBinding> {
+    let Binding::Field { field } = binding else {
+        return None;
+    };
+    let ContextScope::LoopItem { step_id } = &field.scope else {
+        return None;
+    };
+    if !sources.iter().any(|source| source.step_id == *step_id) {
+        return None;
+    }
+    let mut field_names = Vec::new();
+    for segment in &field.segments {
+        match segment {
+            ContextPathSegment::Field { name } => field_names.push(name.clone()),
+            ContextPathSegment::Index { .. } => return None,
+        }
+    }
+    Some(ComposerLoopBinding {
+        loop_step: step_id.clone(),
+        field_path: field_names.join("."),
+    })
+}
+
+#[cfg(test)]
+fn composer_indexed_binding_for_loop(
+    binding: &Binding,
+    loop_source: &ComposerLoopSource,
+    array_sources: &[ComposerArraySource],
+) -> Option<ComposerLoopBinding> {
+    let indexed = composer_indexed_binding_selection(binding, array_sources)?;
+    (indexed.source_step == loop_source.source_step && indexed.array_path == loop_source.array_path)
+        .then_some(ComposerLoopBinding {
+            loop_step: loop_source.step_id.clone(),
+            field_path: indexed.field_path,
+        })
+}
+
+#[cfg(test)]
+fn composer_loop_binding_preview(
+    source: &ComposerLoopSource,
+    selection: &ComposerLoopBinding,
+    target: &str,
+) -> String {
+    let field = if selection.field_path.is_empty() {
+        String::new()
+    } else {
+        format!(".{}", selection.field_path)
+    };
+    format!("{}{field} → {target}", source.item)
+}
+
+#[cfg(test)]
 impl ComposerBlockKind {
     const ALL: [Self; 12] = [
         Self::GithubListRepositories,
@@ -1060,6 +2104,2786 @@ impl ComposerBlockKind {
             Self::BrewInstall => ActionKind::BrewInstall,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+enum ComposerGraphCard {
+    Action(Box<Step>),
+    ForEach {
+        item_alias: String,
+        body_empty: bool,
+    },
+    If,
+    Switch,
+    Join,
+}
+
+#[derive(Debug, Clone)]
+struct ComposerGraphVisualNode {
+    id: String,
+    scope: Option<ComposerGraphNestedScope>,
+    card: ComposerGraphCard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerGraphEdgeKind {
+    Flow,
+    Iteration,
+    Then,
+    Else,
+    Case,
+    Default,
+}
+
+#[derive(Debug, Clone)]
+struct ComposerGraphVisualEdge {
+    from: String,
+    to: String,
+    kind: ComposerGraphEdgeKind,
+    port: Option<EdgePort>,
+}
+
+#[derive(Debug, Clone)]
+struct ComposerGraphBindingOption {
+    label: String,
+    binding: Binding,
+    value_type: ContextType,
+    required: bool,
+    nullable: bool,
+    sensitivity: Sensitivity,
+}
+
+fn graph_node_ids(graph: &WorkflowGraph) -> BTreeSet<String> {
+    fn visit(graph: &WorkflowGraph, ids: &mut BTreeSet<String>) {
+        for node in &graph.nodes {
+            ids.insert(node.id().to_owned());
+            match node {
+                GraphNode::ForEach(node) => visit(&node.body, ids),
+                GraphNode::If(node) => {
+                    visit(&node.then_graph, ids);
+                    if let Some(graph) = &node.else_graph {
+                        visit(graph, ids);
+                    }
+                }
+                GraphNode::Switch(node) => {
+                    for case in &node.cases {
+                        visit(&case.graph, ids);
+                    }
+                    if let Some(graph) = &node.default {
+                        visit(graph, ids);
+                    }
+                }
+                GraphNode::Action(_) | GraphNode::Join(_) => {}
+            }
+        }
+    }
+
+    let mut ids = BTreeSet::new();
+    visit(graph, &mut ids);
+    ids
+}
+
+fn graph_node<'a>(graph: &'a WorkflowGraph, id: &str) -> Option<&'a GraphNode> {
+    for node in &graph.nodes {
+        if node.id() == id {
+            return Some(node);
+        }
+        let found = match node {
+            GraphNode::ForEach(node) => graph_node(&node.body, id),
+            GraphNode::If(node) => graph_node(&node.then_graph, id).or_else(|| {
+                node.else_graph
+                    .as_deref()
+                    .and_then(|graph| graph_node(graph, id))
+            }),
+            GraphNode::Switch(node) => node
+                .cases
+                .iter()
+                .find_map(|case| graph_node(&case.graph, id))
+                .or_else(|| {
+                    node.default
+                        .as_deref()
+                        .and_then(|graph| graph_node(graph, id))
+                }),
+            GraphNode::Action(_) | GraphNode::Join(_) => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+fn graph_node_mut<'a>(graph: &'a mut WorkflowGraph, id: &str) -> Option<&'a mut GraphNode> {
+    for node in &mut graph.nodes {
+        if node.id() == id {
+            return Some(node);
+        }
+        let found = match node {
+            GraphNode::ForEach(node) => graph_node_mut(&mut node.body, id),
+            GraphNode::If(node) => graph_node_mut(&mut node.then_graph, id).or_else(|| {
+                node.else_graph
+                    .as_deref_mut()
+                    .and_then(|graph| graph_node_mut(graph, id))
+            }),
+            GraphNode::Switch(node) => node
+                .cases
+                .iter_mut()
+                .find_map(|case| graph_node_mut(&mut case.graph, id))
+                .or_else(|| {
+                    node.default
+                        .as_deref_mut()
+                        .and_then(|graph| graph_node_mut(graph, id))
+                }),
+            GraphNode::Action(_) | GraphNode::Join(_) => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+fn graph_for_each_body_mut<'a>(
+    graph: &'a mut WorkflowGraph,
+    loop_id: &str,
+) -> Option<&'a mut WorkflowGraph> {
+    let GraphNode::ForEach(node) = graph_node_mut(graph, loop_id)? else {
+        return None;
+    };
+    Some(&mut node.body)
+}
+
+fn graph_nested_scope_mut<'a>(
+    graph: &'a mut WorkflowGraph,
+    scope: &ComposerGraphNestedScope,
+) -> Option<&'a mut WorkflowGraph> {
+    match scope {
+        ComposerGraphNestedScope::ForEachBody { owner_id } => {
+            graph_for_each_body_mut(graph, owner_id)
+        }
+        ComposerGraphNestedScope::IfThen { owner_id } => {
+            let GraphNode::If(node) = graph_node_mut(graph, owner_id)? else {
+                return None;
+            };
+            Some(&mut node.then_graph)
+        }
+        ComposerGraphNestedScope::IfElse { owner_id } => {
+            let GraphNode::If(node) = graph_node_mut(graph, owner_id)? else {
+                return None;
+            };
+            Some(node.else_graph.get_or_insert_with(Default::default))
+        }
+        ComposerGraphNestedScope::SwitchCase { owner_id, case_id } => {
+            let GraphNode::Switch(node) = graph_node_mut(graph, owner_id)? else {
+                return None;
+            };
+            node.cases
+                .iter_mut()
+                .find(|case| case.id == *case_id)
+                .map(|case| case.graph.as_mut())
+        }
+        ComposerGraphNestedScope::SwitchDefault { owner_id } => {
+            let GraphNode::Switch(node) = graph_node_mut(graph, owner_id)? else {
+                return None;
+            };
+            Some(node.default.get_or_insert_with(Default::default))
+        }
+    }
+}
+
+fn graph_nested_scope<'a>(
+    graph: &'a WorkflowGraph,
+    scope: &ComposerGraphNestedScope,
+) -> Option<&'a WorkflowGraph> {
+    match scope {
+        ComposerGraphNestedScope::ForEachBody { owner_id } => {
+            let GraphNode::ForEach(node) = graph_node(graph, owner_id)? else {
+                return None;
+            };
+            Some(&node.body)
+        }
+        ComposerGraphNestedScope::IfThen { owner_id } => {
+            let GraphNode::If(node) = graph_node(graph, owner_id)? else {
+                return None;
+            };
+            Some(&node.then_graph)
+        }
+        ComposerGraphNestedScope::IfElse { owner_id } => {
+            let GraphNode::If(node) = graph_node(graph, owner_id)? else {
+                return None;
+            };
+            node.else_graph.as_deref()
+        }
+        ComposerGraphNestedScope::SwitchCase { owner_id, case_id } => {
+            let GraphNode::Switch(node) = graph_node(graph, owner_id)? else {
+                return None;
+            };
+            node.cases
+                .iter()
+                .find(|case| case.id == *case_id)
+                .map(|case| case.graph.as_ref())
+        }
+        ComposerGraphNestedScope::SwitchDefault { owner_id } => {
+            let GraphNode::Switch(node) = graph_node(graph, owner_id)? else {
+                return None;
+            };
+            node.default.as_deref()
+        }
+    }
+}
+
+fn graph_local_scope<'a>(graph: &'a WorkflowGraph, node_id: &str) -> Option<&'a WorkflowGraph> {
+    if graph.nodes.iter().any(|node| node.id() == node_id) {
+        return Some(graph);
+    }
+    for node in &graph.nodes {
+        let found = match node {
+            GraphNode::ForEach(node) => graph_local_scope(&node.body, node_id),
+            GraphNode::If(node) => graph_local_scope(&node.then_graph, node_id).or_else(|| {
+                node.else_graph
+                    .as_deref()
+                    .and_then(|graph| graph_local_scope(graph, node_id))
+            }),
+            GraphNode::Switch(node) => node
+                .cases
+                .iter()
+                .find_map(|case| graph_local_scope(&case.graph, node_id))
+                .or_else(|| {
+                    node.default
+                        .as_deref()
+                        .and_then(|graph| graph_local_scope(graph, node_id))
+                }),
+            GraphNode::Action(_) | GraphNode::Join(_) => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+fn graph_local_scope_mut<'a>(
+    graph: &'a mut WorkflowGraph,
+    node_id: &str,
+) -> Option<&'a mut WorkflowGraph> {
+    if graph.nodes.iter().any(|node| node.id() == node_id) {
+        return Some(graph);
+    }
+    for node in &mut graph.nodes {
+        let found = match node {
+            GraphNode::ForEach(node) => graph_local_scope_mut(&mut node.body, node_id),
+            GraphNode::If(node) => {
+                graph_local_scope_mut(&mut node.then_graph, node_id).or_else(|| {
+                    node.else_graph
+                        .as_deref_mut()
+                        .and_then(|graph| graph_local_scope_mut(graph, node_id))
+                })
+            }
+            GraphNode::Switch(node) => node
+                .cases
+                .iter_mut()
+                .find_map(|case| graph_local_scope_mut(&mut case.graph, node_id))
+                .or_else(|| {
+                    node.default
+                        .as_deref_mut()
+                        .and_then(|graph| graph_local_scope_mut(graph, node_id))
+                }),
+            GraphNode::Action(_) | GraphNode::Join(_) => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+fn graph_set_incoming_edge(
+    graph: &mut WorkflowGraph,
+    target_id: &str,
+    source_id: &str,
+    port: Option<EdgePort>,
+) -> Result<(), String> {
+    let scope =
+        graph_local_scope(graph, target_id).ok_or_else(|| format!("узел {target_id} не найден"))?;
+    let source = scope
+        .nodes
+        .iter()
+        .find(|node| node.id() == source_id)
+        .ok_or_else(|| format!("узел-источник {source_id} не найден в этой ветви"))?;
+    if let Some(port) = &port {
+        if !graph_node_output_ports(source).contains(port) {
+            return Err(format!("порт {port:?} недоступен для узла {source_id}"));
+        }
+        let mut reachable = BTreeSet::from([target_id.to_owned()]);
+        let mut pending = vec![target_id.to_owned()];
+        while let Some(node) = pending.pop() {
+            for next in scope
+                .edges
+                .iter()
+                .filter(|edge| edge.from.node == node)
+                .map(|edge| edge.to.node.clone())
+            {
+                if reachable.insert(next.clone()) {
+                    pending.push(next);
+                }
+            }
+        }
+        if reachable.contains(source_id) {
+            return Err(format!(
+                "Нельзя подключить {source_id} к {target_id}: связь создаст цикл."
+            ));
+        }
+    }
+    let scope = graph_local_scope_mut(graph, target_id)
+        .ok_or_else(|| format!("узел {target_id} не найден"))?;
+    scope
+        .edges
+        .retain(|edge| !(edge.from.node == source_id && edge.to.node == target_id));
+    if let Some(port) = port {
+        scope.edges.push(GraphEdge::new(source_id, port, target_id));
+        scope.entries.retain(|entry| entry != target_id);
+    }
+    Ok(())
+}
+
+fn graph_visual_model(
+    graph: &WorkflowGraph,
+) -> (Vec<ComposerGraphVisualNode>, Vec<ComposerGraphVisualEdge>) {
+    fn visit(
+        graph: &WorkflowGraph,
+        scope: Option<ComposerGraphNestedScope>,
+        nodes: &mut Vec<ComposerGraphVisualNode>,
+        edges: &mut Vec<ComposerGraphVisualEdge>,
+    ) {
+        for node in &graph.nodes {
+            let card = match node {
+                GraphNode::Action(node) => ComposerGraphCard::Action(Box::new(node.step.clone())),
+                GraphNode::ForEach(node) => ComposerGraphCard::ForEach {
+                    item_alias: node.item_alias.clone(),
+                    body_empty: node.body.nodes.is_empty(),
+                },
+                GraphNode::If(_) => ComposerGraphCard::If,
+                GraphNode::Switch(_) => ComposerGraphCard::Switch,
+                GraphNode::Join(_) => ComposerGraphCard::Join,
+            };
+            nodes.push(ComposerGraphVisualNode {
+                id: node.id().to_owned(),
+                scope: scope.clone(),
+                card,
+            });
+        }
+        for edge in &graph.edges {
+            edges.push(ComposerGraphVisualEdge {
+                from: edge.from.node.clone(),
+                to: edge.to.node.clone(),
+                kind: ComposerGraphEdgeKind::Flow,
+                port: Some(edge.from.port.clone()),
+            });
+        }
+        if let Some(scope) = &scope {
+            for entry in &graph.entries {
+                edges.push(ComposerGraphVisualEdge {
+                    from: scope.owner_id().to_owned(),
+                    to: entry.clone(),
+                    kind: match scope {
+                        ComposerGraphNestedScope::ForEachBody { .. } => {
+                            ComposerGraphEdgeKind::Iteration
+                        }
+                        ComposerGraphNestedScope::IfThen { .. } => ComposerGraphEdgeKind::Then,
+                        ComposerGraphNestedScope::IfElse { .. } => ComposerGraphEdgeKind::Else,
+                        ComposerGraphNestedScope::SwitchCase { .. } => ComposerGraphEdgeKind::Case,
+                        ComposerGraphNestedScope::SwitchDefault { .. } => {
+                            ComposerGraphEdgeKind::Default
+                        }
+                    },
+                    port: None,
+                });
+            }
+        }
+        for node in &graph.nodes {
+            match node {
+                GraphNode::ForEach(node) => {
+                    visit(
+                        &node.body,
+                        Some(ComposerGraphNestedScope::ForEachBody {
+                            owner_id: node.id.clone(),
+                        }),
+                        nodes,
+                        edges,
+                    );
+                }
+                GraphNode::If(node) => {
+                    visit(
+                        &node.then_graph,
+                        Some(ComposerGraphNestedScope::IfThen {
+                            owner_id: node.id.clone(),
+                        }),
+                        nodes,
+                        edges,
+                    );
+                    if let Some(graph) = &node.else_graph {
+                        visit(
+                            graph,
+                            Some(ComposerGraphNestedScope::IfElse {
+                                owner_id: node.id.clone(),
+                            }),
+                            nodes,
+                            edges,
+                        );
+                    }
+                }
+                GraphNode::Switch(node) => {
+                    for case in &node.cases {
+                        visit(
+                            &case.graph,
+                            Some(ComposerGraphNestedScope::SwitchCase {
+                                owner_id: node.id.clone(),
+                                case_id: case.id.clone(),
+                            }),
+                            nodes,
+                            edges,
+                        );
+                    }
+                    if let Some(graph) = &node.default {
+                        visit(
+                            graph,
+                            Some(ComposerGraphNestedScope::SwitchDefault {
+                                owner_id: node.id.clone(),
+                            }),
+                            nodes,
+                            edges,
+                        );
+                    }
+                }
+                GraphNode::Action(_) | GraphNode::Join(_) => {}
+            }
+        }
+    }
+
+    let mut nodes = Vec::new();
+    let mut edges = graph
+        .entries
+        .iter()
+        .map(|entry| ComposerGraphVisualEdge {
+            from: "start".into(),
+            to: entry.clone(),
+            kind: ComposerGraphEdgeKind::Flow,
+            port: None,
+        })
+        .collect::<Vec<_>>();
+    visit(graph, None, &mut nodes, &mut edges);
+    (nodes, edges)
+}
+
+fn default_graph_canvas(graph: &WorkflowGraph) -> ComposerCanvas {
+    let (nodes, edges) = graph_visual_model(graph);
+    let mut canvas = ComposerCanvas::default();
+    canvas
+        .positions
+        .insert("start".into(), CanvasPoint { x: 80.0, y: 250.0 });
+    for (index, node) in nodes.iter().enumerate() {
+        let parent_id = edges
+            .iter()
+            .find(|edge| edge.to == node.id)
+            .map(|edge| edge.from.as_str())
+            .unwrap_or("start");
+        let parent = canvas
+            .positions
+            .get(parent_id)
+            .copied()
+            .unwrap_or(CanvasPoint { x: 80.0, y: 250.0 });
+        let iteration = edges
+            .iter()
+            .any(|edge| edge.to == node.id && edge.kind == ComposerGraphEdgeKind::Iteration);
+        canvas.positions.insert(
+            node.id.clone(),
+            CanvasPoint {
+                x: parent.x + 286.0,
+                y: parent.y
+                    + if iteration {
+                        158.0
+                    } else {
+                        branch_offset(index)
+                    },
+            },
+        );
+    }
+    canvas
+}
+
+fn graph_action_output_array(
+    graph: &WorkflowGraph,
+    node_id: &str,
+) -> Option<(Binding, String, ContextType)> {
+    let GraphNode::Action(node) = graph_node(graph, node_id)? else {
+        return None;
+    };
+    let definition = definition_for_action(&node.step.action);
+    let mut arrays = Vec::new();
+    collect_schema_arrays(&definition.output_schema, "", &mut arrays);
+    let (path, item_type) = arrays.into_iter().next()?;
+    let mut field = FieldRef::step(node_id);
+    for segment in path.split('.').filter(|segment| !segment.is_empty()) {
+        field = field.field(segment);
+    }
+    Some((
+        Binding::field(field),
+        item_alias_for_array_path(&path),
+        item_type,
+    ))
+}
+
+fn graph_loop_item_type(graph: &WorkflowGraph, loop_id: &str) -> Option<ContextType> {
+    let GraphNode::ForEach(node) = graph_node(graph, loop_id)? else {
+        return None;
+    };
+    let Binding::Field { field } = &node.collection else {
+        return None;
+    };
+    match graph_field_context_type(graph, field, 0)? {
+        ContextType::Array { items } => Some(*items),
+        _ => None,
+    }
+}
+
+fn graph_field_context_type(
+    graph: &WorkflowGraph,
+    field: &FieldRef,
+    depth: usize,
+) -> Option<ContextType> {
+    if depth > 32 {
+        return None;
+    }
+    let root = match &field.scope {
+        ContextScope::Step { step_id } => {
+            let GraphNode::Action(source) = graph_node(graph, step_id)? else {
+                return None;
+            };
+            ContextType::object(definition_for_action(&source.step.action).output_schema)
+        }
+        ContextScope::LoopItem { step_id } => {
+            graph_loop_item_type_at_depth(graph, step_id, depth + 1)?
+        }
+        ContextScope::Scenario => return None,
+    };
+    context_type_at_path(&root, &field.segments)
+}
+
+fn graph_loop_item_type_at_depth(
+    graph: &WorkflowGraph,
+    loop_id: &str,
+    depth: usize,
+) -> Option<ContextType> {
+    let GraphNode::ForEach(node) = graph_node(graph, loop_id)? else {
+        return None;
+    };
+    let Binding::Field { field } = &node.collection else {
+        return None;
+    };
+    match graph_field_context_type(graph, field, depth)? {
+        ContextType::Array { items } => Some(*items),
+        _ => None,
+    }
+}
+
+fn context_type_at_path(
+    root: &ContextType,
+    segments: &[ContextPathSegment],
+) -> Option<ContextType> {
+    if segments.is_empty() {
+        return Some(root.clone());
+    }
+    match (root, &segments[0]) {
+        (ContextType::Object { schema }, _) => schema
+            .resolve_owned(segments)
+            .map(|resolved| resolved.value_type),
+        (ContextType::Array { items }, ContextPathSegment::Index { .. }) => {
+            context_type_at_path(items, &segments[1..])
+        }
+        _ => None,
+    }
+}
+
+fn loop_item_field(item_type: &ContextType, loop_id: &str, name: &str) -> Option<FieldRef> {
+    context_type_at_path(item_type, &[ContextPathSegment::field(name)])?;
+    Some(FieldRef::loop_item(loop_id).field(name))
+}
+
+/// Git blocks created inside a repository loop must consume the current item,
+/// not the same prototype destination on every iteration. Keep these defaults
+/// structural so renames and graph validation can still follow the references.
+fn apply_loop_git_bindings(
+    step: &Step,
+    bindings: &mut BTreeMap<String, Binding>,
+    loop_id: &str,
+    item_type: &ContextType,
+) {
+    if !matches!(
+        step.action.kind(),
+        ActionKind::GitClone
+            | ActionKind::GitInspect
+            | ActionKind::GitCloneIfMissing
+            | ActionKind::GitFetch
+            | ActionKind::GitFastForward
+    ) {
+        return;
+    }
+
+    if let Some(repo) = loop_item_field(item_type, loop_id, "https_url")
+        .or_else(|| loop_item_field(item_type, loop_id, "ssh_url"))
+    {
+        bindings.insert("repo".into(), Binding::field(repo));
+    }
+
+    let destination = if let Some(full_name) = loop_item_field(item_type, loop_id, "full_name") {
+        Some(Binding::interpolated([
+            TemplatePart::literal("$HOME/Developer/"),
+            TemplatePart::field(full_name),
+        ]))
+    } else {
+        loop_item_field(item_type, loop_id, "owner").and_then(|owner| {
+            loop_item_field(item_type, loop_id, "name").map(|name| {
+                Binding::interpolated([
+                    TemplatePart::literal("$HOME/Developer/"),
+                    TemplatePart::field(owner),
+                    TemplatePart::literal("/"),
+                    TemplatePart::field(name),
+                ])
+            })
+        })
+    };
+    if let Some(destination) = destination {
+        bindings.insert("dest".into(), destination);
+    }
+
+    if let Some(expected) = definition_for_action(&step.action)
+        .input_schema
+        .field("branch")
+    {
+        if let Some(field) = unique_exact_loop_binding_field(item_type, expected)
+            .filter(|field| field.path == "default_branch")
+        {
+            bindings.insert(
+                "branch".into(),
+                Binding::field(FieldRef::loop_item(loop_id).field(field.path)),
+            );
+        }
+    }
+}
+
+fn graph_make_node(
+    graph: &WorkflowGraph,
+    kind: ComposerGraphBlockKind,
+    id: String,
+    parent_id: Option<&str>,
+    owner_loop: Option<&str>,
+) -> GraphNode {
+    if matches!(kind, ComposerGraphBlockKind::ForEach) {
+        let (collection, item_alias_base, _) = parent_id
+            .and_then(|parent| graph_action_output_array(graph, parent))
+            .unwrap_or_else(|| {
+                (
+                    Binding::literal(serde_json::json!([])),
+                    "item".into(),
+                    ContextType::Any,
+                )
+            });
+        let item_alias = first_free_loop_alias(graph, &item_alias_base, None);
+        let index_alias = first_free_loop_alias(graph, &format!("{item_alias}_index"), None);
+        return GraphNode::ForEach(ForEachNode {
+            id,
+            collection,
+            item_alias,
+            index_alias: Some(index_alias),
+            concurrency: 1,
+            on_error: LoopFailurePolicy::Stop,
+            body: Box::new(WorkflowGraph::default()),
+        });
+    }
+
+    if matches!(kind, ComposerGraphBlockKind::If) {
+        return GraphNode::If(IfNode {
+            id,
+            condition: ExpressionV1::Literal {
+                value: ExpressionValue::Bool(true),
+            },
+            then_graph: Box::new(WorkflowGraph::default()),
+            else_graph: None,
+        });
+    }
+    if matches!(kind, ComposerGraphBlockKind::Switch) {
+        return GraphNode::Switch(SwitchNode {
+            id,
+            selector: Binding::literal(""),
+            cases: vec![SwitchCase {
+                id: "case-1".into(),
+                values: vec![serde_json::json!("value")],
+                graph: Box::new(WorkflowGraph::default()),
+            }],
+            default: None,
+        });
+    }
+    if matches!(kind, ComposerGraphBlockKind::Join) {
+        return GraphNode::Join(JoinNode {
+            id,
+            mode: JoinMode::All,
+        });
+    }
+
+    let ComposerGraphBlockKind::Action(kind) = kind else {
+        unreachable!("control nodes handled above")
+    };
+    let step = default_step(kind, id).expect("palette contains only graph action kinds");
+    let mut bindings = BTreeMap::new();
+    if let Some(loop_id) = owner_loop {
+        if let Some(item_type) = graph_loop_item_type(graph, loop_id) {
+            apply_loop_git_bindings(&step, &mut bindings, loop_id, &item_type);
+        }
+    }
+    GraphNode::Action(Box::new(ActionNode { step, bindings }))
+}
+
+/// Conservative convenience binding for a freshly-created loop child.
+///
+/// A plain string input must never consume a semantically refined repository
+/// name, URL, or branch merely because it is technically assignable. Automatic
+/// selection is safe only when exactly one field has the same declared type
+/// and satisfies the input's presence, nullability, and sensitivity contract.
+fn unique_exact_loop_binding_field(
+    item_type: &ContextType,
+    expected: &FieldSchema,
+) -> Option<ComposerBindableField> {
+    let mut fields = Vec::new();
+    collect_bindable_field_details(item_type, "", true, false, Sensitivity::Public, &mut fields);
+    let mut compatible = fields.into_iter().filter(|field| {
+        expected.value_type == field.value_type
+            && (!expected.required || field.required)
+            && (expected.nullable || !field.nullable)
+            && (!field.sensitivity.is_secret() || expected.sensitivity.is_secret())
+    });
+    let field = compatible.next()?;
+    compatible.next().is_none().then_some(field)
+}
+
+fn graph_loop_aliases(graph: &WorkflowGraph, exclude_node: Option<&str>) -> BTreeSet<String> {
+    fn visit(graph: &WorkflowGraph, exclude_node: Option<&str>, aliases: &mut BTreeSet<String>) {
+        for node in &graph.nodes {
+            match node {
+                GraphNode::ForEach(node) => {
+                    if Some(node.id.as_str()) != exclude_node {
+                        aliases.insert(node.item_alias.clone());
+                        if let Some(alias) = &node.index_alias {
+                            aliases.insert(alias.clone());
+                        }
+                    }
+                    visit(&node.body, exclude_node, aliases);
+                }
+                GraphNode::If(node) => {
+                    visit(&node.then_graph, exclude_node, aliases);
+                    if let Some(graph) = &node.else_graph {
+                        visit(graph, exclude_node, aliases);
+                    }
+                }
+                GraphNode::Switch(node) => {
+                    for case in &node.cases {
+                        visit(&case.graph, exclude_node, aliases);
+                    }
+                    if let Some(graph) = &node.default {
+                        visit(graph, exclude_node, aliases);
+                    }
+                }
+                GraphNode::Action(_) | GraphNode::Join(_) => {}
+            }
+        }
+    }
+
+    let mut aliases = BTreeSet::new();
+    visit(graph, exclude_node, &mut aliases);
+    aliases
+}
+
+fn first_free_loop_alias(graph: &WorkflowGraph, base: &str, exclude_node: Option<&str>) -> String {
+    let used = graph_loop_aliases(graph, exclude_node);
+    if !used.contains(base) {
+        return base.into();
+    }
+    (2usize..)
+        .map(|ordinal| format!("{base}_{ordinal}"))
+        .find(|candidate| !used.contains(candidate))
+        .expect("unbounded loop alias sequence has a free value")
+}
+
+fn graph_insert_composer_block(
+    graph: &mut WorkflowGraph,
+    attach: &ComposerGraphAttach,
+    source_port: Option<EdgePort>,
+    kind: ComposerGraphBlockKind,
+) -> Result<String, String> {
+    if let Some(message) = graph_attach_blocker(graph, attach) {
+        return Err(message);
+    }
+    let base_id = match kind {
+        ComposerGraphBlockKind::Action(kind) => kind.id(),
+        ComposerGraphBlockKind::ForEach => "for-each",
+        ComposerGraphBlockKind::If => "if",
+        ComposerGraphBlockKind::Switch => "switch",
+        ComposerGraphBlockKind::Join => "join",
+    };
+    let ids = graph_node_ids(graph);
+    let mut suffix = ids.len() + 1;
+    let id = loop {
+        let candidate = format!("{base_id}-{suffix}");
+        if !ids.contains(&candidate) {
+            break candidate;
+        }
+        suffix += 1;
+    };
+    let (parent_id, owner_loop) = match attach {
+        ComposerGraphAttach::RootStart => (None, None),
+        ComposerGraphAttach::RootAfter { node_id } => (Some(node_id.as_str()), None),
+        ComposerGraphAttach::NestedStart { scope } => (
+            None,
+            match scope {
+                ComposerGraphNestedScope::ForEachBody { owner_id } => Some(owner_id.as_str()),
+                _ => None,
+            },
+        ),
+        ComposerGraphAttach::NestedAfter { scope, node_id } => (
+            Some(node_id.as_str()),
+            match scope {
+                ComposerGraphNestedScope::ForEachBody { owner_id } => Some(owner_id.as_str()),
+                _ => None,
+            },
+        ),
+    };
+    let incoming = match attach {
+        ComposerGraphAttach::RootStart | ComposerGraphAttach::NestedStart { .. } => None,
+        ComposerGraphAttach::RootAfter { node_id } => {
+            let source = graph
+                .nodes
+                .iter()
+                .find(|node| node.id() == node_id)
+                .ok_or_else(|| format!("родительский блок {node_id} не найден"))?;
+            let available_ports = graph_node_output_ports(source);
+            let port = source_port.unwrap_or_else(|| graph_node_flow_port(source));
+            if !available_ports.contains(&port) {
+                return Err(format!(
+                    "порт {} недоступен для блока {node_id}",
+                    graph_edge_port_label(&port)
+                ));
+            }
+            Some((node_id.clone(), port))
+        }
+        ComposerGraphAttach::NestedAfter { scope, node_id } => {
+            let target = graph_nested_scope(graph, scope)
+                .ok_or_else(|| format!("вложенная область {} не найдена", scope.owner_id()))?;
+            let source = target
+                .nodes
+                .iter()
+                .find(|node| node.id() == node_id)
+                .ok_or_else(|| format!("родительский блок {node_id} не найден"))?;
+            let available_ports = graph_node_output_ports(source);
+            let port = source_port.unwrap_or_else(|| graph_node_flow_port(source));
+            if !available_ports.contains(&port) {
+                return Err(format!(
+                    "порт {} недоступен для блока {node_id}",
+                    graph_edge_port_label(&port)
+                ));
+            }
+            Some((node_id.clone(), port))
+        }
+    };
+    let node = graph_make_node(graph, kind, id.clone(), parent_id, owner_loop);
+    let target = match attach {
+        ComposerGraphAttach::RootStart | ComposerGraphAttach::RootAfter { .. } => graph,
+        ComposerGraphAttach::NestedStart { scope }
+        | ComposerGraphAttach::NestedAfter { scope, .. } => graph_nested_scope_mut(graph, scope)
+            .ok_or_else(|| format!("вложенная область {} не найдена", scope.owner_id()))?,
+    };
+    target.nodes.push(node);
+    match attach {
+        ComposerGraphAttach::RootStart | ComposerGraphAttach::NestedStart { .. } => {
+            target.entries.push(id.clone());
+        }
+        ComposerGraphAttach::RootAfter { .. } | ComposerGraphAttach::NestedAfter { .. } => {
+            let (source_id, port) = incoming.expect("after attachment has an incoming edge");
+            target.edges.push(GraphEdge::new(source_id, port, &id));
+        }
+    }
+    Ok(id)
+}
+
+fn graph_node_flow_port(node: &GraphNode) -> EdgePort {
+    match node {
+        GraphNode::Action(_) => EdgePort::Success,
+        GraphNode::ForEach(_) | GraphNode::If(_) | GraphNode::Switch(_) | GraphNode::Join(_) => {
+            EdgePort::Completed
+        }
+    }
+}
+
+fn graph_node_output_ports(node: &GraphNode) -> Vec<EdgePort> {
+    match node {
+        GraphNode::Action(_) => vec![EdgePort::Success, EdgePort::Failure, EdgePort::Always],
+        GraphNode::ForEach(_) => {
+            vec![EdgePort::Completed, EdgePort::Empty, EdgePort::Failure]
+        }
+        GraphNode::If(_) | GraphNode::Switch(_) | GraphNode::Join(_) => {
+            vec![EdgePort::Completed, EdgePort::Failure]
+        }
+    }
+}
+
+fn graph_attach_blocker(graph: &WorkflowGraph, attach: &ComposerGraphAttach) -> Option<String> {
+    let source_id = match attach {
+        ComposerGraphAttach::RootAfter { node_id }
+        | ComposerGraphAttach::NestedAfter { node_id, .. } => node_id,
+        ComposerGraphAttach::RootStart | ComposerGraphAttach::NestedStart { .. } => return None,
+    };
+    match graph_node(graph, source_id)? {
+        GraphNode::ForEach(node) if node.body.nodes.is_empty() => Some(format!(
+            "Цикл «{}» пока пуст. Сначала добавьте блок через «＋ Для каждого item»; выход «После цикла» станет доступен после этого.",
+            node.item_alias
+        )),
+        GraphNode::If(node) => {
+            let mut missing = Vec::new();
+            if node.then_graph.nodes.is_empty() {
+                missing.push("«Тогда»");
+            }
+            if node
+                .else_graph
+                .as_deref()
+                .is_some_and(|graph| graph.nodes.is_empty())
+            {
+                missing.push("«Иначе»");
+            }
+            (!missing.is_empty()).then(|| {
+                format!(
+                    "У блока «Если / иначе» не заполнены ветки: {}. Сначала добавьте действие в каждую указанную ветку; выход «После условия» станет доступен после этого.",
+                    missing.join(", ")
+                )
+            })
+        }
+        GraphNode::Switch(node) => {
+            let mut missing = node
+                .cases
+                .iter()
+                .filter(|case| case.graph.nodes.is_empty())
+                .map(|case| format!("вариант «{}»", case.id))
+                .collect::<Vec<_>>();
+            if node
+                .default
+                .as_deref()
+                .is_some_and(|graph| graph.nodes.is_empty())
+            {
+                missing.push("ветка «По умолчанию»".into());
+            }
+            (!missing.is_empty()).then(|| {
+                format!(
+                    "У блока «Выбор по значению» не заполнены ветки: {}. Сначала добавьте действие в каждую указанную ветку; выход «После выбора» станет доступен после этого.",
+                    missing.join(", ")
+                )
+            })
+        }
+        GraphNode::Join(_) => {
+            let scope = graph_local_scope(graph, source_id)?;
+            let incoming = scope
+                .edges
+                .iter()
+                .filter(|edge| {
+                    edge.to.node == source_id.as_str()
+                        && matches!(edge.to.port, EdgePort::Input)
+                        && scope.nodes.iter().any(|candidate| {
+                            candidate.id() == edge.from.node
+                                && graph_node_output_ports(candidate).contains(&edge.from.port)
+                        })
+                })
+                .count();
+            (incoming < 2).then(|| {
+                format!(
+                    "У блока «Объединение ветвей» только {incoming} корректных входящих связей. Подключите минимум две ветки перед добавлением следующего блока."
+                )
+            })
+        }
+        GraphNode::Action(_) | GraphNode::ForEach(_) => None,
+    }
+}
+
+fn graph_node_label(graph: &WorkflowGraph, node_id: &str) -> String {
+    match graph_node(graph, node_id) {
+        Some(GraphNode::Action(node)) => node.step.name.clone(),
+        Some(GraphNode::ForEach(node)) => format!("Для каждого {}", node.item_alias),
+        Some(GraphNode::If(_)) => "Если / иначе".into(),
+        Some(GraphNode::Switch(_)) => "Выбор по значению".into(),
+        Some(GraphNode::Join(_)) => "Объединение ветвей".into(),
+        None => node_id.to_owned(),
+    }
+}
+
+fn graph_owner_id_from_path(path: &str) -> Option<&str> {
+    let start = path.rfind("node[")? + "node[".len();
+    let rest = &path[start..];
+    let end = rest.find(']')?;
+    Some(&rest[..end])
+}
+
+fn graph_switch_case_id_from_path(graph: &WorkflowGraph, path: &str) -> Option<String> {
+    let owner = graph_owner_id_from_path(path)?;
+    let start = path.rfind(".cases[")? + ".cases[".len();
+    let index = path[start..].split_once(']')?.0.parse::<usize>().ok()?;
+    let GraphNode::Switch(node) = graph_node(graph, owner)? else {
+        return None;
+    };
+    node.cases.get(index).map(|case| case.id.clone())
+}
+
+fn graph_validation_message(graph: &WorkflowGraph, error: &GraphValidationError) -> String {
+    use GraphValidationErrorKind as Kind;
+
+    let node_label = |node: &str| graph_node_label(graph, node);
+    match &error.kind {
+        Kind::EmptyGraph | Kind::EmptyEntries if error.path.ends_with(".body") => {
+            let owner = graph_owner_id_from_path(&error.path).unwrap_or("цикл");
+            format!(
+                "Цикл «{}» пуст. Добавьте действие через «＋ Для каждого item».",
+                node_label(owner)
+            )
+        }
+        Kind::EmptyGraph | Kind::EmptyEntries if error.path.ends_with(".then") => {
+            let owner = graph_owner_id_from_path(&error.path).unwrap_or("условие");
+            format!(
+                "Ветка «Тогда» блока «{}» пуста. Добавьте в неё действие.",
+                node_label(owner)
+            )
+        }
+        Kind::EmptyGraph | Kind::EmptyEntries if error.path.ends_with(".else") => {
+            let owner = graph_owner_id_from_path(&error.path).unwrap_or("условие");
+            format!(
+                "Ветка «Иначе» блока «{}» пуста. Добавьте в неё действие или удалите необязательную ветку.",
+                node_label(owner)
+            )
+        }
+        Kind::EmptyGraph | Kind::EmptyEntries
+            if error.path.contains(".cases[") && error.path.ends_with("].graph") =>
+        {
+            let owner = graph_owner_id_from_path(&error.path).unwrap_or("выбор");
+            let case = graph_switch_case_id_from_path(graph, &error.path)
+                .unwrap_or_else(|| "неизвестный".into());
+            format!(
+                "Вариант «{case}» блока «{}» пуст. Добавьте в него действие.",
+                node_label(owner)
+            )
+        }
+        Kind::EmptyGraph | Kind::EmptyEntries if error.path.ends_with(".default") => {
+            let owner = graph_owner_id_from_path(&error.path).unwrap_or("выбор");
+            format!(
+                "Ветка «По умолчанию» блока «{}» пуста. Добавьте в неё действие или удалите необязательную ветку.",
+                node_label(owner)
+            )
+        }
+        Kind::EmptyGraph => "В сценарии пока нет блоков.".into(),
+        Kind::EmptyEntries => {
+            "Нет начального блока: соедините первый блок с «Началом сценария».".into()
+        }
+        Kind::InvalidAction { node, .. }
+            if matches!(
+                graph_node(graph, node),
+                Some(GraphNode::Action(action))
+                    if matches!(action.step.action, Action::GithubListRepositories)
+            ) =>
+        {
+            format!(
+                "У блока «{}» недопустимая политика безопасности. Для него нужны: аутентификация — «Нет», повышение прав — «Запрещено», опасная операция — выключена.",
+                node_label(node)
+            )
+        }
+        Kind::InvalidAction { node, .. } => format!(
+            "Проверьте обязательные параметры и политики блока «{}».",
+            node_label(node)
+        ),
+        Kind::ForEachCollectionNotArray { node, .. } => format!(
+            "В блоке «{}» выбрано не поле-массив. Выберите коллекцию с пометкой [].",
+            node_label(node)
+        ),
+        Kind::InvalidConcurrency { node } => format!(
+            "В блоке «{}» параллельность должна быть от 1 до 64.",
+            node_label(node)
+        ),
+        Kind::InvalidAlias { node, .. }
+        | Kind::ShadowedAlias { node, .. }
+        | Kind::DuplicateAlias { node, .. } => format!(
+            "В блоке «{}» задайте уникальное корректное имя текущего элемента.",
+            node_label(node)
+        ),
+        Kind::UnknownBindingField { node, field } => format!(
+            "У блока «{}» нет входа «{field}». Выберите другой вход или удалите старую привязку.",
+            node_label(node)
+        ),
+        Kind::BindingTypeMismatch { node, field, .. } => format!(
+            "Поле «{field}» блока «{}» получает значение несовместимого типа.",
+            node_label(node)
+        ),
+        Kind::BindingMayBeMissing { node, field } => format!(
+            "Поле «{field}» блока «{}» связано с необязательным значением.",
+            node_label(node)
+        ),
+        Kind::BindingMayBeNull { node, field } => format!(
+            "Поле «{field}» блока «{}» не принимает null.",
+            node_label(node)
+        ),
+        Kind::InvalidBindingValue { node, field, .. } => format!(
+            "Некорректное значение входа «{field}» в блоке «{}».",
+            node_label(node)
+        ),
+        Kind::SecretBindingFlow { node, field } => format!(
+            "Секрет нельзя передать в публичный вход «{field}» блока «{}».",
+            node_label(node)
+        ),
+        Kind::UnknownContextField {
+            consumer,
+            producer,
+            field,
+        } => format!(
+            "Блок «{}» запрашивает отсутствующее поле «{field}» у блока «{}».",
+            node_label(consumer),
+            node_label(producer)
+        ),
+        Kind::ContextNotVisible { consumer, producer }
+        | Kind::UnknownContextStep { consumer, producer } => format!(
+            "Контекст блока «{}» недоступен блоку «{}» в этой ветви.",
+            node_label(producer),
+            node_label(consumer)
+        ),
+        Kind::LoopContextNotVisible {
+            consumer,
+            loop_node,
+        } => format!(
+            "Текущий item цикла «{}» доступен только блокам внутри цикла; сейчас его использует «{}».",
+            node_label(loop_node),
+            node_label(consumer)
+        ),
+        Kind::UnreachableNode { node } => format!(
+            "Блок «{}» не соединён с началом или предыдущим блоком.",
+            node_label(node)
+        ),
+        Kind::UnknownEntry { node } | Kind::UnknownEndpoint { node } => {
+            format!("Связь указывает на удалённый блок «{node}».")
+        }
+        Kind::Cycle { .. } => "Связи образуют бесконечный цикл; удалите обратную связь.".into(),
+        Kind::JoinNeedsMultipleInputs { node, .. } => format!(
+            "Блоку «{}» нужны как минимум две входящие ветви.",
+            node_label(node)
+        ),
+        _ => format!(
+            "Проверьте структуру, входы и связи в области «{}».",
+            error.path
+        ),
+    }
+}
+
+fn validate_graph_for_ui(task: &Task, graph: &WorkflowGraph) -> Result<(), String> {
+    graph.validate().map_err(|errors| {
+        let mut messages = Vec::new();
+        for error in errors {
+            let message = graph_validation_message(graph, &error);
+            if !messages.contains(&message) {
+                messages.push(message);
+            }
+        }
+        format!(
+            "Сценарий «{}» пока не готов:\n• {}",
+            task.name,
+            messages.join("\n• ")
+        )
+    })
+}
+
+fn graph_edge_port_label(port: &EdgePort) -> &'static str {
+    match port {
+        EdgePort::Input => "вход",
+        EdgePort::Success => "успех",
+        EdgePort::Failure => "ошибка",
+        EdgePort::Always => "всегда",
+        EdgePort::Completed => "после цикла",
+        EdgePort::Empty => "пустая коллекция",
+    }
+}
+
+fn graph_reachable_nodes(graph: &WorkflowGraph, ignored_node: Option<&str>) -> BTreeSet<String> {
+    let mut reachable = graph
+        .entries
+        .iter()
+        .filter(|entry| Some(entry.as_str()) != ignored_node)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut pending = reachable.iter().cloned().collect::<Vec<_>>();
+    while let Some(source) = pending.pop() {
+        for target in graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.from.node == source
+                    && Some(edge.from.node.as_str()) != ignored_node
+                    && Some(edge.to.node.as_str()) != ignored_node
+            })
+            .map(|edge| edge.to.node.clone())
+        {
+            if reachable.insert(target.clone()) {
+                pending.push(target);
+            }
+        }
+    }
+    reachable
+}
+
+fn graph_removal_blockers(graph: &WorkflowGraph, id: &str) -> Vec<String> {
+    let before = graph_reachable_nodes(graph, None);
+    let after = graph_reachable_nodes(graph, Some(id));
+    before
+        .difference(&after)
+        .filter(|node_id| node_id.as_str() != id)
+        .cloned()
+        .collect()
+}
+
+fn binding_references_graph_node(binding: &Binding, node_id: &str) -> bool {
+    let matches = |field: &FieldRef| match &field.scope {
+        ContextScope::Step { step_id } | ContextScope::LoopItem { step_id } => step_id == node_id,
+        ContextScope::Scenario => false,
+    };
+    match binding {
+        Binding::Field { field } => matches(field),
+        Binding::Interpolated { parts } => parts
+            .iter()
+            .any(|part| matches!(part, TemplatePart::Field { field } if matches(field))),
+        Binding::Literal { .. } | Binding::Template { .. } => false,
+    }
+}
+
+fn expression_references_graph_node(expression: &ExpressionV1, node_id: &str) -> bool {
+    let mut found = false;
+    expression.visit_context_references(|field| {
+        found |= match &field.scope {
+            ContextScope::Step { step_id } | ContextScope::LoopItem { step_id } => {
+                step_id == node_id
+            }
+            ContextScope::Scenario => false,
+        };
+    });
+    found
+}
+
+fn step_condition_references_graph_node(condition: &StepCondition, node_id: &str) -> bool {
+    match condition {
+        StepCondition::ExitCode { step, .. } => step == node_id,
+        StepCondition::Expression { rule, .. } => expression_references_graph_node(rule, node_id),
+        StepCondition::All { conditions } | StepCondition::Any { conditions } => conditions
+            .iter()
+            .any(|condition| step_condition_references_graph_node(condition, node_id)),
+        StepCondition::Not { condition } => {
+            step_condition_references_graph_node(condition, node_id)
+        }
+        StepCondition::Path { .. } => false,
+    }
+}
+
+fn graph_node_reference_users(graph: &WorkflowGraph, node_id: &str) -> Vec<String> {
+    fn visit(graph: &WorkflowGraph, removed_id: &str, users: &mut BTreeSet<String>) {
+        for node in &graph.nodes {
+            if node.id() == removed_id {
+                // Nested scopes owned by the removed control node disappear
+                // with it, so references inside that same subtree are not
+                // external users. Non-empty scopes are blocked separately.
+                continue;
+            }
+            let referenced = match node {
+                GraphNode::Action(node) => {
+                    node.bindings
+                        .values()
+                        .chain(node.step.bindings.values())
+                        .any(|binding| binding_references_graph_node(binding, removed_id))
+                        || [node.step.when.as_ref(), node.step.require.as_ref()]
+                            .into_iter()
+                            .flatten()
+                            .any(|condition| {
+                                step_condition_references_graph_node(condition, removed_id)
+                            })
+                }
+                GraphNode::ForEach(node) => {
+                    binding_references_graph_node(&node.collection, removed_id)
+                }
+                GraphNode::If(node) => {
+                    expression_references_graph_node(&node.condition, removed_id)
+                }
+                GraphNode::Switch(node) => {
+                    binding_references_graph_node(&node.selector, removed_id)
+                }
+                GraphNode::Join(_) => false,
+            };
+            if referenced {
+                users.insert(node.id().to_owned());
+            }
+            match node {
+                GraphNode::ForEach(node) => visit(&node.body, removed_id, users),
+                GraphNode::If(node) => {
+                    visit(&node.then_graph, removed_id, users);
+                    if let Some(graph) = &node.else_graph {
+                        visit(graph, removed_id, users);
+                    }
+                }
+                GraphNode::Switch(node) => {
+                    for case in &node.cases {
+                        visit(&case.graph, removed_id, users);
+                    }
+                    if let Some(graph) = &node.default {
+                        visit(graph, removed_id, users);
+                    }
+                }
+                GraphNode::Action(_) | GraphNode::Join(_) => {}
+            }
+        }
+    }
+
+    let mut users = BTreeSet::new();
+    visit(graph, node_id, &mut users);
+    users.into_iter().collect()
+}
+
+fn graph_node_has_nested_content(node: &GraphNode) -> bool {
+    match node {
+        GraphNode::ForEach(node) => !graph_scope_is_empty(&node.body),
+        GraphNode::If(node) => {
+            !graph_scope_is_empty(&node.then_graph)
+                || node
+                    .else_graph
+                    .as_deref()
+                    .is_some_and(|graph| !graph_scope_is_empty(graph))
+        }
+        GraphNode::Switch(node) => {
+            node.cases
+                .iter()
+                .any(|case| !graph_scope_is_empty(&case.graph))
+                || node
+                    .default
+                    .as_deref()
+                    .is_some_and(|graph| !graph_scope_is_empty(graph))
+        }
+        GraphNode::Action(_) | GraphNode::Join(_) => false,
+    }
+}
+
+fn graph_scope_is_empty(graph: &WorkflowGraph) -> bool {
+    graph.nodes.is_empty()
+        && graph.edges.is_empty()
+        && graph.entries.is_empty()
+        && graph.exits.is_empty()
+}
+
+fn graph_remove_optional_scope(
+    graph: &mut WorkflowGraph,
+    scope: &ComposerGraphNestedScope,
+) -> Result<bool, String> {
+    let (label, branch) = match scope {
+        ComposerGraphNestedScope::IfElse { owner_id } => {
+            let GraphNode::If(node) =
+                graph_node(graph, owner_id).ok_or_else(|| format!("узел {owner_id} не найден"))?
+            else {
+                return Err(format!("узел {owner_id} не является IF"));
+            };
+            ("Иначе", node.else_graph.as_deref())
+        }
+        ComposerGraphNestedScope::SwitchDefault { owner_id } => {
+            let GraphNode::Switch(node) =
+                graph_node(graph, owner_id).ok_or_else(|| format!("узел {owner_id} не найден"))?
+            else {
+                return Err(format!("узел {owner_id} не является SWITCH"));
+            };
+            ("По умолчанию", node.default.as_deref())
+        }
+        _ => return Err("Эту обязательную ветку нельзя удалить.".into()),
+    };
+    let Some(branch) = branch else {
+        return Ok(false);
+    };
+    if !graph_scope_is_empty(branch) {
+        return Err(format!(
+            "Ветка «{label}» не пуста. Сначала удалите или перенесите блоки из неё."
+        ));
+    }
+
+    match scope {
+        ComposerGraphNestedScope::IfElse { owner_id } => {
+            let GraphNode::If(node) = graph_node_mut(graph, owner_id)
+                .ok_or_else(|| format!("узел {owner_id} не найден"))?
+            else {
+                return Err(format!("узел {owner_id} не является IF"));
+            };
+            node.else_graph = None;
+        }
+        ComposerGraphNestedScope::SwitchDefault { owner_id } => {
+            let GraphNode::Switch(node) = graph_node_mut(graph, owner_id)
+                .ok_or_else(|| format!("узел {owner_id} не найден"))?
+            else {
+                return Err(format!("узел {owner_id} не является SWITCH"));
+            };
+            node.default = None;
+        }
+        _ => unreachable!("optional scope kind checked above"),
+    }
+    Ok(true)
+}
+
+fn graph_remove_switch_case(
+    graph: &mut WorkflowGraph,
+    switch_id: &str,
+    case_id: &str,
+) -> Result<bool, String> {
+    let GraphNode::Switch(node) =
+        graph_node(graph, switch_id).ok_or_else(|| format!("узел {switch_id} не найден"))?
+    else {
+        return Err(format!("узел {switch_id} не является SWITCH"));
+    };
+    let Some(case) = node.cases.iter().find(|case| case.id == case_id) else {
+        return Ok(false);
+    };
+    if node.cases.len() == 1 {
+        return Err("SWITCH должен содержать хотя бы один case.".into());
+    }
+    if !graph_scope_is_empty(&case.graph) {
+        return Err(format!(
+            "Вариант «{case_id}» не пуст. Сначала удалите или перенесите блоки из него."
+        ));
+    }
+
+    let GraphNode::Switch(node) =
+        graph_node_mut(graph, switch_id).ok_or_else(|| format!("узел {switch_id} не найден"))?
+    else {
+        return Err(format!("узел {switch_id} не является SWITCH"));
+    };
+    let Some(index) = node.cases.iter().position(|case| case.id == case_id) else {
+        return Ok(false);
+    };
+    node.cases.remove(index);
+    Ok(true)
+}
+
+fn graph_remove_composer_node(graph: &mut WorkflowGraph, id: &str) -> Result<bool, String> {
+    if let Some(index) = graph.nodes.iter().position(|node| node.id() == id) {
+        if graph_node_has_nested_content(&graph.nodes[index]) {
+            return Err(
+                "Сначала удалите или перенесите блоки из вложенных ветвей; обычное удаление не удаляет ветку каскадно."
+                    .into(),
+            );
+        }
+        let reference_users = graph_node_reference_users(graph, id);
+        if !reference_users.is_empty() {
+            return Err(format!(
+                "Сначала удалите привязки и условия, которые ссылаются на этот блок: {}",
+                reference_users.join(", ")
+            ));
+        }
+        let blockers = graph_removal_blockers(graph, id);
+        if !blockers.is_empty() {
+            return Err(format!(
+                "Сначала удалите или переподключите downstream-блоки: {}",
+                blockers.join(", ")
+            ));
+        }
+        graph.nodes.remove(index);
+        graph
+            .edges
+            .retain(|edge| edge.from.node != id && edge.to.node != id);
+        graph.entries.retain(|entry| entry != id);
+        graph.exits.retain(|exit| exit.from.node != id);
+        return Ok(true);
+    }
+
+    for node in &mut graph.nodes {
+        let removed = match node {
+            GraphNode::ForEach(node) => graph_remove_composer_node(&mut node.body, id),
+            GraphNode::If(node) => {
+                if graph_remove_composer_node(&mut node.then_graph, id)? {
+                    Ok(true)
+                } else if let Some(graph) = node.else_graph.as_deref_mut() {
+                    graph_remove_composer_node(graph, id)
+                } else {
+                    Ok(false)
+                }
+            }
+            GraphNode::Switch(node) => {
+                let mut removed = false;
+                for case in &mut node.cases {
+                    if graph_remove_composer_node(&mut case.graph, id)? {
+                        removed = true;
+                        break;
+                    }
+                }
+                if removed {
+                    Ok(true)
+                } else if let Some(graph) = node.default.as_deref_mut() {
+                    graph_remove_composer_node(graph, id)
+                } else {
+                    Ok(false)
+                }
+            }
+            GraphNode::Action(_) | GraphNode::Join(_) => Ok(false),
+        };
+        if removed? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn graph_local_dominators(graph: &WorkflowGraph, node_id: &str) -> BTreeSet<String> {
+    let all = graph
+        .nodes
+        .iter()
+        .map(|node| node.id().to_owned())
+        .collect::<BTreeSet<_>>();
+    if !all.contains(node_id) {
+        return BTreeSet::new();
+    }
+    let entries = graph.entries.iter().cloned().collect::<BTreeSet<_>>();
+    let mut dominators = all
+        .iter()
+        .map(|node| {
+            let initial = if entries.contains(node) {
+                BTreeSet::from([node.clone()])
+            } else {
+                all.clone()
+            };
+            (node.clone(), initial)
+        })
+        .collect::<BTreeMap<_, _>>();
+    loop {
+        let mut changed = false;
+        for node in all.iter().filter(|node| !entries.contains(*node)) {
+            let predecessors = graph
+                .edges
+                .iter()
+                .filter(|edge| edge.to.node == *node)
+                .map(|edge| edge.from.node.as_str())
+                .collect::<Vec<_>>();
+            let mut next = if let Some(first) = predecessors.first() {
+                dominators.get(*first).cloned().unwrap_or_default()
+            } else {
+                BTreeSet::new()
+            };
+            for predecessor in predecessors.iter().skip(1) {
+                let candidate = dominators.get(*predecessor).cloned().unwrap_or_default();
+                next.retain(|id| candidate.contains(id));
+            }
+            next.insert(node.clone());
+            if dominators.get(node) != Some(&next) {
+                dominators.insert(node.clone(), next);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut result = dominators.remove(node_id).unwrap_or_default();
+    result.remove(node_id);
+    result
+}
+
+fn graph_binding_options(
+    graph: &WorkflowGraph,
+    consumer_id: &str,
+    expected: &FieldSchema,
+) -> Vec<ComposerGraphBindingOption> {
+    fn push_action_sources(
+        graph: &WorkflowGraph,
+        ids: &BTreeSet<String>,
+        output: &mut Vec<ComposerGraphBindingOption>,
+    ) {
+        for source_id in ids {
+            let Some(GraphNode::Action(node)) =
+                graph.nodes.iter().find(|node| node.id() == source_id)
+            else {
+                continue;
+            };
+            let definition = definition_for_action(&node.step.action);
+            let root = ContextType::object(definition.output_schema);
+            let mut fields = Vec::new();
+            collect_bindable_field_details(
+                &root,
+                "",
+                true,
+                false,
+                Sensitivity::Public,
+                &mut fields,
+            );
+            for field in fields {
+                let reference = field
+                    .path
+                    .split('.')
+                    .filter(|segment| !segment.is_empty())
+                    .fold(FieldRef::step(source_id), |reference, segment| {
+                        reference.field(segment)
+                    });
+                output.push(ComposerGraphBindingOption {
+                    label: format!(
+                        "{}.{} · {}",
+                        source_id,
+                        field.path,
+                        context_type_label(&field.value_type, field.nullable, !field.required)
+                    ),
+                    binding: Binding::field(reference),
+                    value_type: field.value_type,
+                    required: field.required,
+                    nullable: field.nullable,
+                    sensitivity: field.sensitivity,
+                });
+            }
+        }
+    }
+
+    fn find_scope(
+        root: &WorkflowGraph,
+        graph: &WorkflowGraph,
+        consumer_id: &str,
+        inherited: &[ComposerGraphBindingOption],
+    ) -> Option<Vec<ComposerGraphBindingOption>> {
+        if graph.nodes.iter().any(|node| node.id() == consumer_id) {
+            let mut output = inherited.to_vec();
+            let ancestors = graph_local_dominators(graph, consumer_id);
+            push_action_sources(graph, &ancestors, &mut output);
+            return Some(output);
+        }
+        for node in &graph.nodes {
+            match node {
+                GraphNode::ForEach(node) => {
+                    let mut nested = inherited.to_vec();
+                    let outer_ancestors = graph_local_dominators(graph, &node.id);
+                    push_action_sources(graph, &outer_ancestors, &mut nested);
+                    if let Some(item_type) = graph_loop_item_type(root, &node.id) {
+                        let mut fields = Vec::new();
+                        collect_bindable_field_details(
+                            &item_type,
+                            "",
+                            true,
+                            false,
+                            Sensitivity::Public,
+                            &mut fields,
+                        );
+                        for field in fields {
+                            let reference = field
+                                .path
+                                .split('.')
+                                .filter(|segment| !segment.is_empty())
+                                .fold(FieldRef::loop_item(&node.id), |reference, segment| {
+                                    reference.field(segment)
+                                });
+                            nested.push(ComposerGraphBindingOption {
+                                label: format!(
+                                    "{} (item).{} · {}",
+                                    node.item_alias,
+                                    field.path,
+                                    context_type_label(
+                                        &field.value_type,
+                                        field.nullable,
+                                        !field.required
+                                    )
+                                ),
+                                binding: Binding::field(reference),
+                                value_type: field.value_type,
+                                required: field.required,
+                                nullable: field.nullable,
+                                sensitivity: field.sensitivity,
+                            });
+                        }
+                    }
+                    if let Some(found) = find_scope(root, &node.body, consumer_id, &nested) {
+                        return Some(found);
+                    }
+                }
+                GraphNode::If(node) => {
+                    let mut nested = inherited.to_vec();
+                    let outer = graph_local_dominators(graph, &node.id);
+                    push_action_sources(graph, &outer, &mut nested);
+                    if let Some(found) = find_scope(root, &node.then_graph, consumer_id, &nested) {
+                        return Some(found);
+                    }
+                    if let Some(found) = node
+                        .else_graph
+                        .as_deref()
+                        .and_then(|graph| find_scope(root, graph, consumer_id, &nested))
+                    {
+                        return Some(found);
+                    }
+                }
+                GraphNode::Switch(node) => {
+                    let mut nested = inherited.to_vec();
+                    let outer = graph_local_dominators(graph, &node.id);
+                    push_action_sources(graph, &outer, &mut nested);
+                    for case in &node.cases {
+                        if let Some(found) = find_scope(root, &case.graph, consumer_id, &nested) {
+                            return Some(found);
+                        }
+                    }
+                    if let Some(found) = node
+                        .default
+                        .as_deref()
+                        .and_then(|graph| find_scope(root, graph, consumer_id, &nested))
+                    {
+                        return Some(found);
+                    }
+                }
+                GraphNode::Action(_) | GraphNode::Join(_) => {}
+            }
+        }
+        None
+    }
+
+    let mut options = find_scope(graph, graph, consumer_id, &[]).unwrap_or_default();
+    options.retain(|option| {
+        expected.value_type.is_assignable_from(&option.value_type)
+            && (!expected.required || option.required)
+            && (expected.nullable || !option.nullable)
+            && (!option.sensitivity.is_secret() || expected.sensitivity.is_secret())
+    });
+    options.sort_by(|left, right| left.label.cmp(&right.label));
+    options.dedup_by(|left, right| left.binding == right.binding);
+    options
+}
+
+fn graph_condition_fields(graph: &WorkflowGraph, consumer_id: &str) -> Vec<ComposerConditionField> {
+    let expected = FieldSchema::optional(ContextType::Any).nullable();
+    graph_binding_options(graph, consumer_id, &expected)
+        .into_iter()
+        .filter_map(|option| {
+            let Binding::Field { field } = option.binding else {
+                return None;
+            };
+            Some(ComposerConditionField {
+                reference: field,
+                label: option.label,
+                value_type: option.value_type,
+                required: option.required,
+                nullable: option.nullable,
+            })
+        })
+        .collect()
+}
+
+fn graph_array_options(
+    graph: &WorkflowGraph,
+    consumer_id: &str,
+) -> Vec<(String, Binding, String, ContextType)> {
+    type ArrayOption = (String, Binding, String, ContextType);
+
+    fn push_action_arrays(
+        graph: &WorkflowGraph,
+        source_ids: &BTreeSet<String>,
+        output: &mut Vec<ArrayOption>,
+    ) {
+        for source_id in source_ids {
+            let Some(GraphNode::Action(node)) =
+                graph.nodes.iter().find(|node| node.id() == source_id)
+            else {
+                continue;
+            };
+            let definition = definition_for_action(&node.step.action);
+            let mut arrays = Vec::new();
+            collect_schema_arrays(&definition.output_schema, "", &mut arrays);
+            for (path, item_type) in arrays {
+                let reference = path
+                    .split('.')
+                    .filter(|segment| !segment.is_empty())
+                    .fold(FieldRef::step(source_id), |reference, segment| {
+                        reference.field(segment)
+                    });
+                output.push((
+                    format!("{source_id}.{path}[]"),
+                    Binding::field(reference),
+                    item_alias_for_array_path(&path),
+                    item_type,
+                ));
+            }
+        }
+    }
+
+    fn push_loop_item_arrays(
+        root: &WorkflowGraph,
+        node: &ForEachNode,
+        output: &mut Vec<ArrayOption>,
+    ) {
+        let Some(item_type) = graph_loop_item_type(root, &node.id) else {
+            return;
+        };
+        let mut arrays = Vec::new();
+        match item_type {
+            ContextType::Array { items } => arrays.push((String::new(), *items)),
+            ContextType::Object { schema } => collect_schema_arrays(&schema, "", &mut arrays),
+            _ => return,
+        }
+        for (path, nested_item_type) in arrays {
+            let reference = path
+                .split('.')
+                .filter(|segment| !segment.is_empty())
+                .fold(FieldRef::loop_item(&node.id), |reference, segment| {
+                    reference.field(segment)
+                });
+            let label = if path.is_empty() {
+                format!("{} (item)[]", node.item_alias)
+            } else {
+                format!("{} (item).{path}[]", node.item_alias)
+            };
+            output.push((
+                label,
+                Binding::field(reference),
+                item_alias_for_array_path(&path),
+                nested_item_type,
+            ));
+        }
+    }
+
+    fn find_options(
+        root: &WorkflowGraph,
+        current: &WorkflowGraph,
+        consumer_id: &str,
+        inherited: &[ArrayOption],
+    ) -> Option<Vec<ArrayOption>> {
+        if current.nodes.iter().any(|node| node.id() == consumer_id) {
+            let mut output = inherited.to_vec();
+            push_action_arrays(
+                current,
+                &graph_local_dominators(current, consumer_id),
+                &mut output,
+            );
+            return Some(output);
+        }
+        for node in &current.nodes {
+            let mut nested = inherited.to_vec();
+            push_action_arrays(
+                current,
+                &graph_local_dominators(current, node.id()),
+                &mut nested,
+            );
+            match node {
+                GraphNode::ForEach(node) => {
+                    push_loop_item_arrays(root, node, &mut nested);
+                    if let Some(found) = find_options(root, &node.body, consumer_id, &nested) {
+                        return Some(found);
+                    }
+                }
+                GraphNode::If(node) => {
+                    if let Some(found) = find_options(root, &node.then_graph, consumer_id, &nested)
+                    {
+                        return Some(found);
+                    }
+                    if let Some(found) = node
+                        .else_graph
+                        .as_deref()
+                        .and_then(|graph| find_options(root, graph, consumer_id, &nested))
+                    {
+                        return Some(found);
+                    }
+                }
+                GraphNode::Switch(node) => {
+                    for case in &node.cases {
+                        if let Some(found) = find_options(root, &case.graph, consumer_id, &nested) {
+                            return Some(found);
+                        }
+                    }
+                    if let Some(found) = node
+                        .default
+                        .as_deref()
+                        .and_then(|graph| find_options(root, graph, consumer_id, &nested))
+                    {
+                        return Some(found);
+                    }
+                }
+                GraphNode::Action(_) | GraphNode::Join(_) => {}
+            }
+        }
+        None
+    }
+
+    let mut options = find_options(graph, graph, consumer_id, &[]).unwrap_or_default();
+    options.sort_by(|left, right| left.0.cmp(&right.0));
+    options.dedup_by(|left, right| left.1 == right.1);
+    options
+}
+
+fn literal_prototype_for_field(field: &FieldSchema, path: &str) -> serde_json::Value {
+    if let Some(value) = field.allowed_values.first() {
+        return value.clone();
+    }
+    literal_prototype_for_type(&field.value_type, path)
+}
+
+fn literal_prototype_for_type(value_type: &ContextType, path: &str) -> serde_json::Value {
+    match value_type {
+        ContextType::Any => serde_json::Value::String(String::new()),
+        ContextType::Null => serde_json::Value::Null,
+        ContextType::Boolean => serde_json::Value::Bool(false),
+        ContextType::Integer => serde_json::json!(1),
+        ContextType::Number => serde_json::json!(1.0),
+        ContextType::String { format } => serde_json::Value::String(match format {
+            Some(SemanticFormat::Path) => "$HOME/example".into(),
+            Some(SemanticFormat::FilePath) => "$HOME/example.txt".into(),
+            Some(SemanticFormat::DirectoryPath) => "$HOME/Developer".into(),
+            Some(SemanticFormat::Url) => "https://example.com".into(),
+            Some(SemanticFormat::GitUrl) => "https://github.com/owner/repository.git".into(),
+            Some(SemanticFormat::SecretRef) => "profile".into(),
+            Some(SemanticFormat::Sha256) => "0".repeat(64),
+            Some(SemanticFormat::DateTime) => "2026-01-01T00:00:00Z".into(),
+            Some(SemanticFormat::Duration) => "1s".into(),
+            Some(SemanticFormat::Email) => "user@example.com".into(),
+            Some(SemanticFormat::Hostname) => "example.com".into(),
+            Some(SemanticFormat::IpAddress) => "127.0.0.1".into(),
+            Some(SemanticFormat::Uuid) => "00000000-0000-0000-0000-000000000000".into(),
+            Some(SemanticFormat::GitRef) => "main".into(),
+            Some(SemanticFormat::RepositoryName) => "owner/repository".into(),
+            Some(SemanticFormat::Identifier) => "value".into(),
+            None if path.ends_with("version") => "1.0".into(),
+            None if path.ends_with("app_name") => "Application.app".into(),
+            None => "value".into(),
+        }),
+        ContextType::Array { .. } => serde_json::json!([]),
+        ContextType::Object { schema } => {
+            let mut object = serde_json::Map::new();
+            let has_required = schema.fields.values().any(|field| field.required);
+            for (name, field) in &schema.fields {
+                if field.required || (!has_required && object.is_empty()) {
+                    let child_path = join_context_path(path, name);
+                    object.insert(
+                        name.clone(),
+                        literal_prototype_for_field(field, &child_path),
+                    );
+                }
+            }
+            serde_json::Value::Object(object)
+        }
+    }
+}
+
+fn step_input_default_value(step: &Step, target: &str) -> Option<serde_json::Value> {
+    let mut value = serde_json::to_value(step).ok()?;
+    for segment in target.split('.') {
+        value = value.as_object()?.get(segment)?.clone();
+    }
+    Some(value)
+}
+
+fn manual_input_initial_value(step: &Step, target: &str, field: &FieldSchema) -> serde_json::Value {
+    step_input_default_value(step, target)
+        .filter(|value| !value.is_null() && validate_literal_binding(value, field).is_ok())
+        .unwrap_or_else(|| literal_prototype_for_field(field, target))
+}
+
+fn literal_value_label(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn apply_literal_policy_implications(step: &mut Step, target: &str, value: &serde_json::Value) {
+    if target == "shell"
+        && value.as_str() == Some("allow")
+        && matches!(step.action, Action::RunCommand { .. })
+    {
+        // Shell mode is represented by a typed input binding while the safety
+        // marker is step metadata. Keep the authored node valid immediately
+        // after the user selects the constrained `allow` value.
+        step.dangerous = true;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphSwitchScalarKind {
+    Null,
+    Boolean,
+    Integer,
+    Number,
+    String,
+}
+
+impl GraphSwitchScalarKind {
+    const ALL: [Self; 5] = [
+        Self::Null,
+        Self::Boolean,
+        Self::Integer,
+        Self::Number,
+        Self::String,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Null => "null",
+            Self::Boolean => "bool",
+            Self::Integer => "integer",
+            Self::Number => "number",
+            Self::String => "string",
+        }
+    }
+
+    fn from_context_type(value_type: &ContextType) -> Option<Self> {
+        match value_type {
+            ContextType::Null => Some(Self::Null),
+            ContextType::Boolean => Some(Self::Boolean),
+            ContextType::Integer => Some(Self::Integer),
+            ContextType::Number => Some(Self::Number),
+            ContextType::String { .. } => Some(Self::String),
+            ContextType::Any | ContextType::Array { .. } | ContextType::Object { .. } => None,
+        }
+    }
+
+    fn from_value(value: &serde_json::Value) -> Option<Self> {
+        match value {
+            serde_json::Value::Null => Some(Self::Null),
+            serde_json::Value::Bool(_) => Some(Self::Boolean),
+            serde_json::Value::Number(value) if value.is_i64() || value.is_u64() => {
+                Some(Self::Integer)
+            }
+            serde_json::Value::Number(_) => Some(Self::Number),
+            serde_json::Value::String(_) => Some(Self::String),
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+        }
+    }
+
+    fn default_value(self, ordinal: usize) -> serde_json::Value {
+        match self {
+            Self::Null => serde_json::Value::Null,
+            Self::Boolean => serde_json::Value::Bool(ordinal.is_multiple_of(2)),
+            Self::Integer => serde_json::json!(ordinal as i64),
+            Self::Number => serde_json::json!(ordinal as f64),
+            Self::String => serde_json::json!(format!("value-{ordinal}")),
+        }
+    }
+
+    fn accepts(self, value: &serde_json::Value) -> bool {
+        match self {
+            // Integer case literals are valid for a numeric selector too.
+            Self::Number => matches!(Self::from_value(value), Some(Self::Integer | Self::Number)),
+            _ => Self::from_value(value) == Some(self),
+        }
+    }
+}
+
+#[cfg(test)]
+fn graph_switch_selector_kind(
+    selector: &Binding,
+    options: &[ComposerGraphBindingOption],
+) -> Option<GraphSwitchScalarKind> {
+    graph_switch_selector_contract(selector, options).map(|(kind, _)| kind)
+}
+
+fn graph_switch_selector_contract(
+    selector: &Binding,
+    options: &[ComposerGraphBindingOption],
+) -> Option<(GraphSwitchScalarKind, bool)> {
+    match selector {
+        Binding::Literal { value } => {
+            GraphSwitchScalarKind::from_value(value).map(|kind| (kind, false))
+        }
+        Binding::Field { .. } => options
+            .iter()
+            .find(|option| option.binding == *selector)
+            .and_then(|option| {
+                GraphSwitchScalarKind::from_context_type(&option.value_type)
+                    .map(|kind| (kind, option.nullable))
+            }),
+        Binding::Template { .. } | Binding::Interpolated { .. } => {
+            Some((GraphSwitchScalarKind::String, false))
+        }
+    }
+}
+
+fn graph_switch_case_value_compatible(
+    selector_kind: GraphSwitchScalarKind,
+    selector_nullable: bool,
+    value: &serde_json::Value,
+) -> bool {
+    (selector_nullable && value.is_null()) || selector_kind.accepts(value)
+}
+
+fn first_free_switch_case_id(cases: &[SwitchCase]) -> String {
+    let used = cases
+        .iter()
+        .map(|case| case.id.as_str())
+        .collect::<BTreeSet<_>>();
+    (1usize..)
+        .map(|ordinal| format!("case-{ordinal}"))
+        .find(|candidate| !used.contains(candidate.as_str()))
+        .expect("unbounded case id sequence has a free value")
+}
+
+fn first_free_switch_value_from_used(
+    kind: GraphSwitchScalarKind,
+    used: &[serde_json::Value],
+) -> Option<serde_json::Value> {
+    let available = |candidate: &serde_json::Value| !used.iter().any(|value| value == candidate);
+    match kind {
+        GraphSwitchScalarKind::Null => {
+            available(&serde_json::Value::Null).then_some(serde_json::Value::Null)
+        }
+        GraphSwitchScalarKind::Boolean => [false, true]
+            .into_iter()
+            .map(serde_json::Value::Bool)
+            .find(available),
+        GraphSwitchScalarKind::Integer => (1usize..)
+            .map(|ordinal| serde_json::json!(ordinal as i64))
+            .find(available),
+        GraphSwitchScalarKind::Number => (1usize..)
+            .map(|ordinal| serde_json::json!(ordinal as f64 + 0.5))
+            .find(available),
+        GraphSwitchScalarKind::String => (1usize..)
+            .map(|ordinal| serde_json::json!(format!("value-{ordinal}")))
+            .find(available),
+    }
+}
+
+fn first_free_switch_case_value(
+    kind: GraphSwitchScalarKind,
+    cases: &[SwitchCase],
+) -> Option<serde_json::Value> {
+    let used = cases
+        .iter()
+        .flat_map(|case| case.values.iter().cloned())
+        .collect::<Vec<_>>();
+    first_free_switch_value_from_used(kind, &used)
+}
+
+fn graph_input_fields(schema: &ObjectSchema) -> Vec<(String, FieldSchema)> {
+    fn visit(
+        schema: &ObjectSchema,
+        prefix: &str,
+        inherited_required: bool,
+        inherited_sensitivity: Sensitivity,
+        output: &mut Vec<(String, FieldSchema)>,
+    ) {
+        for (name, field) in &schema.fields {
+            let target = join_context_path(prefix, name);
+            let required = inherited_required && field.required;
+            let sensitivity = inherited_sensitivity.combine(field.sensitivity);
+            match &field.value_type {
+                ContextType::Object { schema }
+                    if !schema.fields.is_empty()
+                        && ((field.required && !field.nullable)
+                            || schema.fields.values().all(|child| !child.required)) =>
+                {
+                    visit(schema, &target, required, sensitivity, output)
+                }
+                _ => output.push((
+                    target,
+                    FieldSchema {
+                        value_type: field.value_type.clone(),
+                        required,
+                        // Input bindings materialize optional/nullable parent
+                        // objects. Only the leaf controls whether writing null
+                        // is valid; this mirrors resolve_input_target_owned.
+                        nullable: field.nullable,
+                        description: field.description.clone(),
+                        sensitivity,
+                        allowed_values: field.allowed_values.clone(),
+                    },
+                )),
+            }
+        }
+    }
+
+    let mut fields = Vec::new();
+    visit(schema, "", true, Sensitivity::Public, &mut fields);
+    fields
+}
+
+fn paint_graph_literal_editor(
+    ui: &mut egui::Ui,
+    widget_id: (&str, &str),
+    value: &mut serde_json::Value,
+) -> bool {
+    match value {
+        serde_json::Value::String(value) => ui
+            .add(egui::TextEdit::singleline(value).desired_width(ui.available_width()))
+            .changed(),
+        serde_json::Value::Bool(value) => ui.checkbox(value, "").changed(),
+        serde_json::Value::Number(value) if value.is_i64() || value.is_u64() => {
+            let mut integer = value.as_i64().unwrap_or_default();
+            let changed = ui.add(egui::DragValue::new(&mut integer)).changed();
+            if changed {
+                *value = serde_json::Number::from(integer);
+            }
+            changed
+        }
+        serde_json::Value::Number(value) => {
+            let mut number = value.as_f64().unwrap_or_default();
+            let changed = ui.add(egui::DragValue::new(&mut number)).changed();
+            if changed {
+                if let Some(parsed) = serde_json::Number::from_f64(number) {
+                    *value = parsed;
+                }
+            }
+            changed
+        }
+        serde_json::Value::Null => {
+            ui.label(RichText::new("null").monospace().size(9.0).color(MUTED));
+            false
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            let key = Id::new(("graph-json-literal", widget_id.0, widget_id.1));
+            let error_key = Id::new(("graph-json-literal-error", widget_id.0, widget_id.1));
+            let initial = serde_json::to_string_pretty(value).unwrap_or_default();
+            let mut source = ui
+                .data_mut(|data| data.get_temp::<String>(key))
+                .unwrap_or(initial);
+            let response = ui.add(
+                egui::TextEdit::multiline(&mut source)
+                    .font(egui::TextStyle::Monospace)
+                    .char_limit(16 * 1024)
+                    .desired_rows(4)
+                    .desired_width(ui.available_width()),
+            );
+            ui.data_mut(|data| data.insert_temp(key, source.clone()));
+            let mut changed = false;
+            if response.changed() {
+                match serde_json::from_str(&source) {
+                    Ok(parsed) => {
+                        *value = parsed;
+                        changed = true;
+                        ui.data_mut(|data| data.remove::<String>(error_key));
+                    }
+                    Err(error) => {
+                        ui.data_mut(|data| {
+                            data.insert_temp(error_key, format!("JSON: {error}"));
+                        });
+                    }
+                }
+            }
+            if let Some(error) = ui.data_mut(|data| data.get_temp::<String>(error_key)) {
+                ui.add(egui::Label::new(RichText::new(error).size(8.0).color(ORANGE)).truncate());
+            }
+            changed
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwitchCaseHeaderAction {
+    MoveUp,
+    MoveDown,
+    Remove,
+    OpenBranch,
+}
+
+fn paint_switch_case_header(
+    ui: &mut egui::Ui,
+    case_id: &str,
+    index: usize,
+    case_count: usize,
+    branch_empty: bool,
+) -> Option<SwitchCaseHeaderAction> {
+    let mut action = None;
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        if ui.button("＋ В ветку").clicked() {
+            action = Some(SwitchCaseHeaderAction::OpenBranch);
+        }
+        if ui
+            .add_enabled(case_count > 1 && branch_empty, egui::Button::new("Удалить"))
+            .on_disabled_hover_text(if case_count == 1 {
+                "SWITCH должен содержать хотя бы один case."
+            } else {
+                "Сначала удалите или перенесите блоки из ветки case."
+            })
+            .clicked()
+        {
+            action = Some(SwitchCaseHeaderAction::Remove);
+        }
+        if ui
+            .add_enabled(index + 1 < case_count, egui::Button::new("↓"))
+            .clicked()
+        {
+            action = Some(SwitchCaseHeaderAction::MoveDown);
+        }
+        if ui.add_enabled(index > 0, egui::Button::new("↑")).clicked() {
+            action = Some(SwitchCaseHeaderAction::MoveUp);
+        }
+        ui.add(
+            egui::Label::new(RichText::new(case_id).monospace().size(9.0).color(PURPLE)).truncate(),
+        );
+    });
+    action
+}
+
+fn paint_switch_case_value_row(
+    ui: &mut egui::Ui,
+    widget_id: (&str, &str),
+    value_index: usize,
+    value_count: usize,
+    value: &mut serde_json::Value,
+    selector_contract: Option<(GraphSwitchScalarKind, bool)>,
+    used_case_values: &mut Vec<serde_json::Value>,
+) -> (bool, bool) {
+    let (node_id, case_id) = widget_id;
+    let selector_kind = selector_contract.map(|(kind, _)| kind);
+    let selector_nullable = selector_contract.is_some_and(|(_, nullable)| nullable);
+    let compatible = selector_kind
+        .is_none_or(|kind| graph_switch_case_value_compatible(kind, selector_nullable, value));
+    let mut remove = false;
+    let mut replace = false;
+    let mut changed = false;
+    let widget_key = format!("{case_id}-{value_index}");
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        if ui
+            .add_enabled(value_count > 1, egui::Button::new("−"))
+            .clicked()
+        {
+            remove = true;
+        }
+        if !compatible && ui.button("Заменить").clicked() {
+            replace = true;
+        }
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!("Значение {}", value_index + 1))
+                        .size(8.0)
+                        .color(MUTED),
+                )
+                .truncate(),
+            );
+            if compatible {
+                changed |= paint_graph_literal_editor(ui, (node_id, &widget_key), value);
+            } else if let Some(kind) = selector_kind {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("несовместимо с {}", kind.label()))
+                            .size(8.0)
+                            .color(ORANGE),
+                    )
+                    .truncate(),
+                );
+            }
+        });
+    });
+    if replace {
+        if let Some(kind) = selector_kind {
+            if let Some(replacement) = first_free_switch_value_from_used(kind, used_case_values) {
+                *value = replacement.clone();
+                used_case_values.push(replacement);
+                changed = true;
+            }
+        }
+    }
+    (changed, remove)
+}
+
+fn paint_join_source_row(
+    ui: &mut egui::Ui,
+    join_id: &str,
+    source: &GraphNode,
+    existing: Option<EdgePort>,
+) -> Option<Option<EdgePort>> {
+    let mut change = None;
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        if let Some(mut port) = existing.clone() {
+            egui::ComboBox::from_id_salt(("join-source-port", join_id, source.id()))
+                .selected_text(graph_edge_port_label(&port))
+                .truncate()
+                .width(ui.available_width().min(112.0))
+                .show_ui(ui, |ui| {
+                    for candidate in graph_node_output_ports(source) {
+                        if ui
+                            .selectable_value(
+                                &mut port,
+                                candidate.clone(),
+                                graph_edge_port_label(&candidate),
+                            )
+                            .changed()
+                        {
+                            change = Some(Some(candidate));
+                        }
+                    }
+                });
+        }
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            let mut connected = existing.is_some();
+            let checkbox_changed = ui.checkbox(&mut connected, "").changed();
+            let label_clicked = ui
+                .add(
+                    egui::Label::new(RichText::new(source.id()).monospace().size(8.0))
+                        .truncate()
+                        .sense(Sense::click()),
+                )
+                .clicked();
+            if label_clicked {
+                connected = !connected;
+            }
+            if checkbox_changed || label_clicked {
+                change = Some(connected.then(|| graph_node_flow_port(source)));
+            }
+        });
+    });
+    change
+}
+
+fn auth_policy_label(policy: AuthPolicy) -> &'static str {
+    match policy {
+        AuthPolicy::None => "Нет",
+        AuthPolicy::GitCredential => "Git credentials",
+        AuthPolicy::Sudo => "Sudo",
+    }
+}
+
+fn graph_step_policy_issues(step: &Step, capabilities: &BlockPolicyCapabilities) -> Vec<String> {
+    let mut issues = Vec::new();
+    if !capabilities.allows_auth(step.auth) {
+        issues.push(format!(
+            "Аутентификация «{}» недоступна этому блоку.",
+            auth_policy_label(step.auth)
+        ));
+    }
+    if !capabilities.allow_elevation && !matches!(step.allow_elevation, ElevationPolicy::Forbidden)
+    {
+        issues.push("Повышение прав должно быть запрещено.".into());
+    }
+    if !capabilities.allows_dangerous(step.dangerous) {
+        issues.push(match capabilities.dangerous {
+            PolicyRequirement::Forbidden => "Блок нельзя помечать опасной операцией.".into(),
+            PolicyRequirement::Required => {
+                "Для этого блока обязательна отметка «Опасная операция».".into()
+            }
+            PolicyRequirement::Optional => unreachable!("optional dangerous policy accepts both"),
+        });
+    }
+    issues
+}
+
+fn reset_graph_step_policy(step: &mut Step, capabilities: &BlockPolicyCapabilities) {
+    if !capabilities.allows_auth(step.auth) {
+        step.auth = AuthPolicy::None;
+    }
+    if !capabilities.allow_elevation {
+        step.allow_elevation = ElevationPolicy::Forbidden;
+    }
+    step.dangerous = match capabilities.dangerous {
+        PolicyRequirement::Forbidden => false,
+        PolicyRequirement::Optional => step.dangerous,
+        PolicyRequirement::Required => true,
+    };
+}
+
+fn paint_graph_action_editor(
+    ui: &mut egui::Ui,
+    node: &mut ActionNode,
+    options: &BTreeMap<String, Vec<ComposerGraphBindingOption>>,
+    dark: bool,
+) -> bool {
+    let mut changed = false;
+    ui.label(RichText::new("Название блока").size(9.0).color(MUTED));
+    changed |= ui
+        .add(egui::TextEdit::singleline(&mut node.step.name).desired_width(ui.available_width()))
+        .changed();
+    ui.label(RichText::new("ID блока").size(9.0).color(MUTED));
+    ui.add(
+        egui::Label::new(
+            RichText::new(&node.step.id)
+                .monospace()
+                .size(9.0)
+                .color(PURPLE),
+        )
+        .truncate(),
+    );
+    ui.add(
+        egui::Label::new(
+            RichText::new("ID стабилен: связи и контекст адресуют узел по нему.")
+                .size(8.0)
+                .color(MUTED),
+        )
+        .wrap(),
+    );
+    ui.add_space(8.0);
+    section_label(ui, "ВХОДЫ ПО СХЕМЕ");
+    let definition = definition_for_action(&node.step.action);
+    if definition.input_schema.fields.is_empty() {
+        ui.label(
+            RichText::new("У блока нет входных параметров.")
+                .size(9.0)
+                .color(MUTED),
+        );
+    }
+    for (target, field) in graph_input_fields(&definition.input_schema) {
+        ui.add_space(5.0);
+        ui.vertical(|ui| {
+            ui.add(
+                egui::Label::new(RichText::new(&target).monospace().size(9.0).color(PURPLE))
+                    .truncate(),
+            );
+            ui.add(
+                egui::Label::new(
+                    RichText::new(context_type_label(
+                        &field.value_type,
+                        field.nullable,
+                        !field.required,
+                    ))
+                    .monospace()
+                    .size(8.0)
+                    .color(MUTED),
+                )
+                .truncate(),
+            );
+        });
+        let compatible = options.get(&target).map(Vec::as_slice).unwrap_or_default();
+        let current = node.bindings.get(&target).cloned();
+        let manual_initial = manual_input_initial_value(&node.step, &target, &field);
+        let selected_label = match &current {
+            None if field.required => "Значение блока по умолчанию".to_owned(),
+            None => "Не задавать · оставить default".to_owned(),
+            Some(Binding::Literal {
+                value: serde_json::Value::Null,
+            }) if field.nullable => "Явно null".to_owned(),
+            Some(Binding::Literal { .. }) => "Вручную".to_owned(),
+            Some(binding) => compatible
+                .iter()
+                .find(|option| option.binding == *binding)
+                .map(|option| option.label.clone())
+                .unwrap_or_else(|| "Привязка из YAML".into()),
+        };
+        egui::ComboBox::from_id_salt(("graph-input", &node.step.id, &target))
+            .selected_text(selected_label)
+            .truncate()
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(
+                        current.is_none(),
+                        if field.required {
+                            "Значение блока по умолчанию"
+                        } else {
+                            "Не задавать · оставить default"
+                        },
+                    )
+                    .clicked()
+                {
+                    node.bindings.remove(&target);
+                    changed = true;
+                    ui.close();
+                }
+                if ui
+                    .selectable_label(
+                        matches!(current.as_ref(), Some(Binding::Literal { .. })),
+                        "Вручную",
+                    )
+                    .clicked()
+                {
+                    node.bindings
+                        .insert(target.clone(), Binding::literal(manual_initial.clone()));
+                    changed = true;
+                    ui.close();
+                }
+                if field.nullable
+                    && ui
+                        .selectable_label(
+                            matches!(
+                                current.as_ref(),
+                                Some(Binding::Literal {
+                                    value: serde_json::Value::Null
+                                })
+                            ),
+                            "Явно null",
+                        )
+                        .clicked()
+                {
+                    node.bindings
+                        .insert(target.clone(), Binding::literal(serde_json::Value::Null));
+                    changed = true;
+                    ui.close();
+                }
+                for option in compatible {
+                    if ui
+                        .selectable_label(current.as_ref() == Some(&option.binding), &option.label)
+                        .clicked()
+                    {
+                        node.bindings.insert(target.clone(), option.binding.clone());
+                        changed = true;
+                        ui.close();
+                    }
+                }
+            });
+        let mut enum_literal_changed = false;
+        let mut selected_literal = None;
+        if let Some(Binding::Literal { value }) = node.bindings.get_mut(&target) {
+            if field.allowed_values.is_empty() {
+                changed |= paint_graph_literal_editor(ui, (&node.step.id, &target), value);
+            } else {
+                egui::ComboBox::from_id_salt(("graph-enum-literal", &node.step.id, &target))
+                    .selected_text(literal_value_label(value))
+                    .truncate()
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for allowed in &field.allowed_values {
+                            let option_changed = ui
+                                .selectable_value(
+                                    value,
+                                    allowed.clone(),
+                                    literal_value_label(allowed),
+                                )
+                                .changed();
+                            enum_literal_changed |= option_changed;
+                            changed |= option_changed;
+                        }
+                    });
+                selected_literal = Some(value.clone());
+            }
+            if let Err(error) = validate_literal_binding(value, &field) {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("Некорректное значение: {error}"))
+                            .size(8.0)
+                            .color(ORANGE),
+                    )
+                    .truncate(),
+                );
+            }
+        } else if compatible.is_empty() && current.is_some() {
+            ui.label(
+                RichText::new("Текущая привязка не входит в видимый типизированный контекст.")
+                    .size(8.0)
+                    .color(ORANGE),
+            );
+        }
+        if enum_literal_changed {
+            if let Some(value) = &selected_literal {
+                apply_literal_policy_implications(&mut node.step, &target, value);
+            }
+        }
+    }
+    ui.add_space(8.0);
+    section_label(ui, "ПОЛИТИКИ ШАГА");
+    let policy_issues = graph_step_policy_issues(&node.step, &definition.policy);
+    if !policy_issues.is_empty() {
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!(
+                    "Сохранённые политики недопустимы:\n• {}",
+                    policy_issues.join("\n• ")
+                ))
+                .size(8.0)
+                .color(ORANGE),
+            )
+            .truncate(),
+        );
+        if ui
+            .button("Сбросить политики к безопасным")
+            .on_hover_text("Изменение произойдёт только после этого клика.")
+            .clicked()
+        {
+            reset_graph_step_policy(&mut node.step, &definition.policy);
+            changed = true;
+        }
+        ui.add_space(5.0);
+    }
+    ui.label(RichText::new("Аутентификация").size(9.0).color(MUTED));
+    egui::ComboBox::from_id_salt(("graph-step-auth", &node.step.id))
+        .selected_text(auth_policy_label(node.step.auth))
+        .truncate()
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            changed |= ui
+                .selectable_value(&mut node.step.auth, AuthPolicy::None, "Нет")
+                .changed();
+            if definition.policy.allow_git_credentials {
+                changed |= ui
+                    .selectable_value(
+                        &mut node.step.auth,
+                        AuthPolicy::GitCredential,
+                        "Git credentials",
+                    )
+                    .changed();
+            }
+            if definition.policy.allow_sudo {
+                changed |= ui
+                    .selectable_value(&mut node.step.auth, AuthPolicy::Sudo, "Sudo")
+                    .changed();
+            }
+        });
+    ui.label(RichText::new("Повышение прав").size(9.0).color(MUTED));
+    if definition.policy.allow_elevation {
+        egui::ComboBox::from_id_salt(("graph-step-elevation", &node.step.id))
+            .selected_text(match node.step.allow_elevation {
+                ElevationPolicy::Forbidden => "Запрещено",
+                ElevationPolicy::Allow => "Разрешено",
+            })
+            .truncate()
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(
+                        &mut node.step.allow_elevation,
+                        ElevationPolicy::Forbidden,
+                        "Запрещено",
+                    )
+                    .changed();
+                changed |= ui
+                    .selectable_value(
+                        &mut node.step.allow_elevation,
+                        ElevationPolicy::Allow,
+                        "Разрешено",
+                    )
+                    .changed();
+            });
+    } else {
+        ui.label(
+            RichText::new("Запрещено для этого блока")
+                .size(8.0)
+                .color(MUTED),
+        );
+    }
+    match definition.policy.dangerous {
+        PolicyRequirement::Optional => {
+            changed |= ui
+                .checkbox(&mut node.step.dangerous, "Опасная операция")
+                .changed();
+        }
+        PolicyRequirement::Forbidden => {
+            ui.label(
+                RichText::new("Опасная операция: запрещено для этого блока")
+                    .size(8.0)
+                    .color(MUTED),
+            );
+        }
+        PolicyRequirement::Required => {
+            ui.label(
+                RichText::new("Опасная операция: обязательная защита включена")
+                    .size(8.0)
+                    .color(MUTED),
+            );
+        }
+    }
+    if let Err(error) = node.step.validate() {
+        ui.add(
+            egui::Label::new(
+                RichText::new(if definition.policy.accepts(&node.step) {
+                    format!("Проверьте обязательные параметры блока: {error}")
+                } else {
+                    "Политика блока требует исправления кнопкой выше.".into()
+                })
+                .size(8.0)
+                .color(ORANGE),
+            )
+            .truncate(),
+        );
+    }
+    ui.add_space(8.0);
+    ui.add(
+        egui::Label::new(
+            RichText::new(format!(
+                "{} · schema v{}",
+                definition.kind.id(),
+                definition.schema_version
+            ))
+            .monospace()
+            .size(8.0)
+            .color(if changed { PURPLE } else { text(dark) }),
+        )
+        .truncate(),
+    );
+    changed
 }
 
 struct GithubPickerState {
@@ -1129,6 +4953,9 @@ struct ScenarioApp {
     load_error: Option<String>,
     selected_task: usize,
     selected_step: Option<usize>,
+    /// Stable graph-node selection for graph-native custom scenarios. Legacy
+    /// library tasks retain `selected_step` because their reports are linear.
+    selected_node: Option<String>,
     channel: ReleaseChannel,
     allow_shell: bool,
     allow_elevation: bool,
@@ -1145,7 +4972,10 @@ struct ScenarioApp {
     selected_project_scenario: Option<Vec<usize>>,
     selected_project_group: Vec<usize>,
     block_picker_parent: Option<String>,
+    graph_picker_attach: Option<ComposerGraphAttach>,
+    graph_picker_port: Option<EdgePort>,
     block_picker_search: String,
+    readonly_canvas_views: BTreeMap<String, CanvasView>,
 }
 
 impl ScenarioApp {
@@ -1171,6 +5001,7 @@ impl ScenarioApp {
             load_error,
             selected_task,
             selected_step: Some(0),
+            selected_node: None,
             channel: ReleaseChannel::Release,
             allow_shell: false,
             allow_elevation: false,
@@ -1187,7 +5018,10 @@ impl ScenarioApp {
             selected_project_scenario: None,
             selected_project_group: Vec::new(),
             block_picker_parent: None,
+            graph_picker_attach: None,
+            graph_picker_port: None,
             block_picker_search: String::new(),
+            readonly_canvas_views: BTreeMap::new(),
         }
     }
 
@@ -1249,7 +5083,7 @@ impl ScenarioApp {
             trust: TrustRequirement::ExternalAllowed,
             scenarios: Vec::new(),
             resolved_scenarios: Vec::new(),
-            graph: None,
+            graph: Some(WorkflowGraph::default()),
             steps: Vec::new(),
         };
         self.custom_project = Some(ScenarioProject {
@@ -1268,20 +5102,97 @@ impl ScenarioApp {
         self.selected_project_scenario = Some(vec![0, 0]);
         self.selected_project_group = vec![0];
         self.selected_step = None;
+        self.selected_node = None;
         self.github_picker.open = false;
         self.github_picker.selected_ids.clear();
         self.invalidate_plan();
     }
 
+    /// Retained only for tests that exercise the schema-v1 import helpers.
+    /// Production authoring is exclusively routed through `add_graph_composer_block`.
+    #[cfg(test)]
+    #[allow(dead_code)]
     fn add_composer_block(&mut self, kind: ComposerBlockKind) {
+        if self
+            .selected_task()
+            .is_some_and(|task| task.graph.is_some())
+        {
+            let attach = self
+                .graph_picker_attach
+                .clone()
+                .unwrap_or(ComposerGraphAttach::RootStart);
+            let source_port = self.graph_picker_port.clone();
+            let selected_path = self.selected_project_scenario.clone();
+            let Some(task) = self
+                .custom_project
+                .as_mut()
+                .and_then(|project| project.scenario_mut(selected_path.as_deref()?))
+            else {
+                return;
+            };
+            let task_id = task.id.clone();
+            let Some(graph) = task.graph.as_mut() else {
+                return;
+            };
+            let graph_kind = if matches!(kind, ComposerBlockKind::ForEach) {
+                ComposerGraphBlockKind::ForEach
+            } else {
+                ComposerGraphBlockKind::Action(kind.action_kind())
+            };
+            match graph_insert_composer_block(graph, &attach, source_port, graph_kind) {
+                Ok(id) => {
+                    self.selected_node = Some(id.clone());
+                    self.selected_step = None;
+                    if let Some(project) = self.custom_project.as_mut() {
+                        let canvas = project.canvases.entry(task_id).or_default();
+                        let parent_id = match &attach {
+                            ComposerGraphAttach::RootStart => "start",
+                            ComposerGraphAttach::RootAfter { node_id }
+                            | ComposerGraphAttach::NestedAfter { node_id, .. } => node_id,
+                            ComposerGraphAttach::NestedStart { scope } => scope.owner_id(),
+                        };
+                        let parent = canvas
+                            .positions
+                            .get(parent_id)
+                            .copied()
+                            .unwrap_or(CanvasPoint { x: 80.0, y: 250.0 });
+                        let iteration_offset = matches!(
+                            attach,
+                            ComposerGraphAttach::NestedStart { .. }
+                                | ComposerGraphAttach::NestedAfter { .. }
+                        );
+                        canvas.positions.insert(
+                            id,
+                            CanvasPoint {
+                                x: parent.x + 286.0,
+                                y: parent.y + if iteration_offset { 158.0 } else { 0.0 },
+                            },
+                        );
+                    }
+                }
+                Err(error) => self.file_message = Some((true, error)),
+            }
+            self.graph_picker_attach = None;
+            self.graph_picker_port = None;
+            self.block_picker_parent = None;
+            self.block_picker_search.clear();
+            self.invalidate_plan();
+            return;
+        }
+
         let parent = self
             .block_picker_parent
             .clone()
             .unwrap_or_else(|| "start".into());
+        let selected_path = self.selected_project_scenario.clone();
+        let composer_canvas = self.custom_project.as_ref().and_then(|project| {
+            let task = project.scenario(selected_path.as_deref()?)?;
+            project.canvases.get(&task.id).cloned()
+        });
         let Some(task) = self
             .custom_project
             .as_mut()
-            .and_then(|project| project.scenario_mut(self.selected_project_scenario.as_deref()?))
+            .and_then(|project| project.scenario_mut(selected_path.as_deref()?))
         else {
             return;
         };
@@ -1296,9 +5207,10 @@ impl ScenarioApp {
         };
         let mut new_step = composer_step(kind, id.clone());
         if matches!(kind, ComposerBlockKind::ForEach) {
-            let source = composer_array_sources(task, task.steps.len())
-                .into_iter()
-                .find(|source| source.step_id == parent);
+            let source =
+                composer_array_sources_scoped(task, task.steps.len(), composer_canvas.as_ref())
+                    .into_iter()
+                    .find(|source| source.step_id == parent);
             if let (
                 Some(source),
                 Action::ForEach {
@@ -1317,6 +5229,8 @@ impl ScenarioApp {
                     .map(|(name, _)| name)
                     .collect();
             }
+        } else if matches!(kind, ComposerBlockKind::GitInspect) {
+            composer_bind_git_inspect_to_parent_loop(task, &parent, &mut new_step);
         } else if matches!(kind, ComposerBlockKind::GitCloneIfMissing)
             && task
                 .steps
@@ -1356,15 +5270,116 @@ impl ScenarioApp {
             );
         }
         self.block_picker_parent = None;
+        self.graph_picker_attach = None;
+        self.graph_picker_port = None;
         self.block_picker_search.clear();
         self.invalidate_plan();
     }
 
-    fn open_block_picker(&mut self, parent: impl Into<String>) {
+    fn add_graph_composer_block(&mut self, kind: ComposerGraphBlockKind) {
+        let attach = self
+            .graph_picker_attach
+            .clone()
+            .unwrap_or(ComposerGraphAttach::RootStart);
+        let source_port = self.graph_picker_port.clone();
+        let selected_path = self.selected_project_scenario.clone();
+        let Some(task) = self
+            .custom_project
+            .as_mut()
+            .and_then(|project| project.scenario_mut(selected_path.as_deref()?))
+        else {
+            return;
+        };
+        let task_id = task.id.clone();
+        let Some(graph) = task.graph.as_mut() else {
+            return;
+        };
+        let mut continue_with_loop_body = None;
+        match graph_insert_composer_block(graph, &attach, source_port, kind) {
+            Ok(id) => {
+                if matches!(kind, ComposerGraphBlockKind::ForEach) {
+                    continue_with_loop_body = Some(ComposerGraphAttach::NestedStart {
+                        scope: ComposerGraphNestedScope::ForEachBody {
+                            owner_id: id.clone(),
+                        },
+                    });
+                }
+                self.selected_node = Some(id.clone());
+                self.selected_step = None;
+                if let Some(project) = self.custom_project.as_mut() {
+                    let canvas = project.canvases.entry(task_id).or_default();
+                    let parent_id = match &attach {
+                        ComposerGraphAttach::RootStart => "start",
+                        ComposerGraphAttach::RootAfter { node_id }
+                        | ComposerGraphAttach::NestedAfter { node_id, .. } => node_id,
+                        ComposerGraphAttach::NestedStart { scope } => scope.owner_id(),
+                    };
+                    let parent = canvas
+                        .positions
+                        .get(parent_id)
+                        .copied()
+                        .unwrap_or(CanvasPoint { x: 80.0, y: 250.0 });
+                    let iteration_offset = matches!(
+                        attach,
+                        ComposerGraphAttach::NestedStart { .. }
+                            | ComposerGraphAttach::NestedAfter { .. }
+                    );
+                    canvas.positions.insert(
+                        id,
+                        CanvasPoint {
+                            x: parent.x + 286.0,
+                            y: parent.y + if iteration_offset { 158.0 } else { 0.0 },
+                        },
+                    );
+                }
+            }
+            Err(error) => self.file_message = Some((true, error)),
+        }
+        self.graph_picker_attach = None;
+        self.graph_picker_port = None;
+        self.block_picker_parent = None;
+        self.block_picker_search.clear();
+        self.invalidate_plan();
+        if let Some(attach) = continue_with_loop_body {
+            self.open_graph_block_picker(attach);
+        }
+    }
+
+    fn open_graph_block_picker(&mut self, attach: ComposerGraphAttach) {
         if self.running || self.custom_project.is_none() {
             return;
         }
-        self.block_picker_parent = Some(parent.into());
+        if let Some(message) = self
+            .selected_task()
+            .and_then(|task| task.graph.as_ref())
+            .and_then(|graph| graph_attach_blocker(graph, &attach))
+        {
+            self.file_message = Some((true, message));
+            return;
+        }
+        let label = match &attach {
+            ComposerGraphAttach::RootStart => "start".to_owned(),
+            ComposerGraphAttach::RootAfter { node_id } => node_id.clone(),
+            ComposerGraphAttach::NestedStart { scope } => match scope {
+                ComposerGraphNestedScope::ForEachBody { .. } => {
+                    format!("{} · для каждого item", scope.owner_id())
+                }
+                _ => format!("{} · ветка", scope.owner_id()),
+            },
+            ComposerGraphAttach::NestedAfter { node_id, .. } => node_id.clone(),
+        };
+        self.graph_picker_port = self
+            .selected_task()
+            .and_then(|task| task.graph.as_ref())
+            .and_then(|graph| match &attach {
+                ComposerGraphAttach::RootAfter { node_id }
+                | ComposerGraphAttach::NestedAfter { node_id, .. } => {
+                    graph_node(graph, node_id).map(graph_node_flow_port)
+                }
+                ComposerGraphAttach::RootStart | ComposerGraphAttach::NestedStart { .. } => None,
+            });
+        self.block_picker_parent = Some(label);
+        self.graph_picker_attach = Some(attach);
         self.block_picker_search.clear();
     }
 
@@ -1378,51 +5393,62 @@ impl ScenarioApp {
             .entry("start".into())
             .or_insert(CanvasPoint { x: 80.0, y: 250.0 });
 
-        let valid_ids = task
-            .steps
+        let Some(graph) = &task.graph else {
+            // Task.steps is accepted only by the YAML importer. It is never a
+            // second authoring model for the canvas.
+            canvas.parents.clear();
+            return;
+        };
+        let (nodes, edges) = graph_visual_model(graph);
+        let valid_ids = nodes
             .iter()
-            .map(|step| step.id.as_str())
+            .map(|node| node.id.as_str())
             .collect::<BTreeSet<_>>();
         canvas
             .positions
             .retain(|id, _| id == "start" || valid_ids.contains(id.as_str()));
-        canvas.parents.retain(|child, parent| {
-            valid_ids.contains(child.as_str())
-                && (parent == "start" || valid_ids.contains(parent.as_str()))
-        });
-
-        let mut previous = "start".to_owned();
-        for step in &task.steps {
-            canvas
-                .parents
-                .entry(step.id.clone())
-                .or_insert_with(|| previous.clone());
-            if !canvas.positions.contains_key(&step.id) {
-                let parent = canvas
-                    .parents
-                    .get(&step.id)
-                    .cloned()
-                    .unwrap_or_else(|| previous.clone());
-                let parent_position = canvas
-                    .positions
-                    .get(&parent)
-                    .copied()
-                    .unwrap_or(CanvasPoint { x: 80.0, y: 250.0 });
-                let sibling_index = canvas
-                    .parents
-                    .iter()
-                    .filter(|(child, candidate)| child.as_str() != step.id && **candidate == parent)
-                    .count();
-                canvas.positions.insert(
-                    step.id.clone(),
-                    CanvasPoint {
-                        x: parent_position.x + 286.0,
-                        y: (parent_position.y + branch_offset(sibling_index)).max(40.0),
-                    },
-                );
+        canvas.parents.clear();
+        for (index, node) in nodes.iter().enumerate() {
+            if canvas.positions.contains_key(&node.id) {
+                continue;
             }
-            previous = step.id.clone();
+            let parent_id = edges
+                .iter()
+                .find(|edge| edge.to == node.id)
+                .map(|edge| edge.from.as_str())
+                .unwrap_or("start");
+            let parent = canvas
+                .positions
+                .get(parent_id)
+                .copied()
+                .unwrap_or(CanvasPoint { x: 80.0, y: 250.0 });
+            let iteration = edges
+                .iter()
+                .any(|edge| edge.to == node.id && edge.kind == ComposerGraphEdgeKind::Iteration);
+            canvas.positions.insert(
+                node.id.clone(),
+                CanvasPoint {
+                    x: parent.x + 286.0,
+                    y: parent.y
+                        + if iteration {
+                            158.0
+                        } else {
+                            branch_offset(index)
+                        },
+                },
+            );
         }
+    }
+
+    fn set_composer_canvas_view(&mut self, task_id: &str, view: CanvasView) {
+        let Some(canvas) = self
+            .custom_project
+            .as_mut()
+            .and_then(|project| project.canvases.get_mut(task_id))
+        else {
+            return;
+        };
+        canvas.view = view.sanitized();
     }
 
     fn drag_composer_node(&mut self, task_id: &str, node_id: &str, delta: Vec2) {
@@ -1441,58 +5467,44 @@ impl ScenarioApp {
         position.y = (position.y + delta.y).max(210.0);
     }
 
-    fn move_composer_step(&mut self, from: usize, to: usize) {
+    fn remove_composer_node(&mut self, node_id: &str) {
+        let selected_path = self.selected_project_scenario.clone();
         let Some(task) = self
             .custom_project
             .as_mut()
-            .and_then(|project| project.scenario_mut(self.selected_project_scenario.as_deref()?))
+            .and_then(|project| project.scenario_mut(selected_path.as_deref()?))
         else {
             return;
         };
-        if from >= task.steps.len() || to >= task.steps.len() || from == to {
-            return;
-        }
-        let step = task.steps.remove(from);
-        task.steps.insert(to, step);
-        self.selected_step = Some(to);
-        self.invalidate_plan();
-    }
-
-    fn remove_composer_step(&mut self, index: usize) {
-        let Some(task) = self
-            .custom_project
-            .as_mut()
-            .and_then(|project| project.scenario_mut(self.selected_project_scenario.as_deref()?))
-        else {
+        let Some(graph) = task.graph.as_mut() else {
             return;
         };
-        if index >= task.steps.len() {
-            return;
+        let removed_ids = graph_node(graph, node_id)
+            .map(|node| {
+                let mut nested = WorkflowGraph::default();
+                nested.nodes.push(node.clone());
+                graph_node_ids(&nested)
+            })
+            .unwrap_or_default();
+        match graph_remove_composer_node(graph, node_id) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                self.file_message = Some((true, error));
+                return;
+            }
         }
-        let removed_id = task.steps[index].id.clone();
         let task_id = task.id.clone();
-        task.steps.remove(index);
-        self.selected_step = if task.steps.is_empty() {
-            None
-        } else {
-            Some(index.min(task.steps.len() - 1))
-        };
         if let Some(canvas) = self
             .custom_project
             .as_mut()
             .and_then(|project| project.canvases.get_mut(&task_id))
         {
-            let parent = canvas
-                .parents
-                .remove(&removed_id)
-                .unwrap_or_else(|| "start".into());
-            canvas.positions.remove(&removed_id);
-            for child_parent in canvas.parents.values_mut() {
-                if *child_parent == removed_id {
-                    *child_parent = parent.clone();
-                }
+            for id in removed_ids {
+                canvas.positions.remove(&id);
             }
         }
+        self.selected_node = None;
         self.invalidate_plan();
     }
 
@@ -1534,7 +5546,7 @@ impl ScenarioApp {
                 trust: TrustRequirement::ExternalAllowed,
                 scenarios: Vec::new(),
                 resolved_scenarios: Vec::new(),
-                graph: None,
+                graph: Some(WorkflowGraph::default()),
                 steps: Vec::new(),
             }),
         });
@@ -1542,6 +5554,7 @@ impl ScenarioApp {
         scenario_path.push(entries.len() - 1);
         self.selected_project_scenario = Some(scenario_path);
         self.selected_step = None;
+        self.selected_node = None;
         self.invalidate_plan();
     }
 
@@ -1560,7 +5573,8 @@ impl ScenarioApp {
         let mut scenario_path = path;
         scenario_path.push(entries.len() - 1);
         self.selected_project_scenario = Some(scenario_path);
-        self.selected_step = Some(0);
+        self.selected_step = None;
+        self.selected_node = Some("list-repositories".into());
         self.invalidate_plan();
     }
 
@@ -1672,6 +5686,13 @@ impl ScenarioApp {
 
     fn build_plan(&mut self) {
         self.report_applied = false;
+        if let Some(project) = &self.custom_project {
+            if let Err(error) = validate_project(project) {
+                self.report = None;
+                self.plan_error = Some(error);
+                return;
+            }
+        }
         let task = match self.resolved_selected_task() {
             Ok(task) => task,
             Err(error) => {
@@ -1707,6 +5728,13 @@ impl ScenarioApp {
     fn start_run(&mut self, ctx: &egui::Context) {
         self.report = None;
         self.report_applied = false;
+        if let Some(project) = &self.custom_project {
+            if let Err(error) = validate_project(project) {
+                self.plan_error = Some(error);
+                self.confirm_run = false;
+                return;
+            }
+        }
         let task = match self.resolved_selected_task() {
             Ok(task) => task,
             Err(error) => {
@@ -1848,7 +5876,9 @@ impl ScenarioApp {
             .with_context(|| format!("не удалось прочитать {}", path.display()))
             .and_then(|yaml| load_project_yaml(&yaml))
             .and_then(|project| {
-                validate_project(&project).map_err(anyhow::Error::msg)?;
+                // Canvas scope errors remain editable after load; full
+                // validation still blocks plan, run, and save until fixed.
+                validate_project_for_editing(&project).map_err(anyhow::Error::msg)?;
                 Ok(project)
             });
         let mut project = match loaded {
@@ -1866,13 +5896,18 @@ impl ScenarioApp {
             .as_ref()
             .map(|path| path[..path.len().saturating_sub(1)].to_vec())
             .unwrap_or_default();
-        self.selected_step = selected.and_then(|path| {
+        let selected_task = selected.as_ref().and_then(|path| {
             self.custom_project
                 .as_ref()
-                .and_then(|project| project.scenario(&path))
-                .is_some_and(|task| !task.steps.is_empty())
-                .then_some(0)
+                .and_then(|project| project.scenario(path))
         });
+        self.selected_node = selected_task
+            .and_then(|task| task.graph.as_ref())
+            .and_then(|graph| graph.nodes.first())
+            .map(|node| node.id().to_owned());
+        self.selected_step = selected_task
+            .is_some_and(|task| task.graph.is_none() && !task.steps.is_empty())
+            .then_some(0);
         self.load_error = None;
         self.file_message = Some((false, format!("Проект загружен: {}", path.display())));
     }
@@ -1881,9 +5916,22 @@ impl ScenarioApp {
         let Some(parent) = self.block_picker_parent.clone() else {
             return;
         };
+        let source_ports = self
+            .graph_picker_attach
+            .as_ref()
+            .and_then(|attach| match attach {
+                ComposerGraphAttach::RootAfter { node_id }
+                | ComposerGraphAttach::NestedAfter { node_id, .. } => self
+                    .selected_task()
+                    .and_then(|task| task.graph.as_ref())
+                    .and_then(|graph| graph_node(graph, node_id))
+                    .map(graph_node_output_ports),
+                ComposerGraphAttach::RootStart | ComposerGraphAttach::NestedStart { .. } => None,
+            })
+            .unwrap_or_default();
         let picker_height = (ctx.content_rect().height() - 96.0).clamp(540.0, 760.0);
         let list_height = picker_height - 118.0;
-        let mut selected = None;
+        let mut selected_graph = None;
         let mut close = false;
         egui::Modal::new(Id::new("composer-block-picker"))
             .frame(
@@ -1917,6 +5965,32 @@ impl ScenarioApp {
                     });
                 });
                 ui.add_space(12.0);
+                if !source_ports.is_empty() {
+                    ui.label(
+                        RichText::new("Выход исходного блока")
+                            .size(9.0)
+                            .color(MUTED),
+                    );
+                    let mut selected = self
+                        .graph_picker_port
+                        .clone()
+                        .filter(|port| source_ports.contains(port))
+                        .unwrap_or_else(|| source_ports[0].clone());
+                    egui::ComboBox::from_id_salt("composer-block-source-port")
+                        .selected_text(graph_edge_port_label(&selected))
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for port in &source_ports {
+                                ui.selectable_value(
+                                    &mut selected,
+                                    port.clone(),
+                                    graph_edge_port_label(port),
+                                );
+                            }
+                        });
+                    self.graph_picker_port = Some(selected);
+                    ui.add_space(8.0);
+                }
                 ui.add(
                     egui::TextEdit::singleline(&mut self.block_picker_search)
                         .hint_text("Поиск доступного блока…")
@@ -1928,8 +6002,33 @@ impl ScenarioApp {
                     .id_salt("composer-block-picker-list")
                     .max_height(list_height)
                     .show(ui, |ui| {
-                        for kind in ComposerBlockKind::ALL {
-                            let definition = block_definition(kind.action_kind());
+                        let graph_controls = [
+                            (ComposerGraphBlockKind::ForEach, "Для каждого элемента"),
+                            (ComposerGraphBlockKind::If, "Если / иначе"),
+                            (ComposerGraphBlockKind::Switch, "Выбор по значению"),
+                            (ComposerGraphBlockKind::Join, "Объединить ветви"),
+                        ]
+                        .into_iter()
+                        .map(|(kind, title)| {
+                            let mut definition = block_definition(ActionKind::ForEach);
+                            definition.title = title.into();
+                            definition.category = "Логика".into();
+                            (kind, definition)
+                        });
+                        let graph_definitions = graph_controls
+                            .chain(
+                                ActionKind::ALL
+                                    .into_iter()
+                                    .filter(|kind| kind.is_graph_action())
+                                    .map(|kind| {
+                                        (
+                                            ComposerGraphBlockKind::Action(kind),
+                                            block_definition(kind),
+                                        )
+                                    }),
+                            )
+                            .collect::<Vec<_>>();
+                        for (graph_kind, definition) in graph_definitions {
                             let context_lines = schema_context_lines(&definition.output_schema);
                             let context_search = context_lines.join(" ");
                             if !query.is_empty()
@@ -1977,7 +6076,7 @@ impl ScenarioApp {
                                                     .size(8.0)
                                                     .color(PURPLE),
                                             )
-                                            .wrap(),
+                                            .truncate(),
                                         );
                                     }
                                     if context_lines.len() > 4 {
@@ -1995,7 +6094,7 @@ impl ScenarioApp {
                                 .response
                                 .interact(Sense::click());
                             if response.clicked() {
-                                selected = Some(kind);
+                                selected_graph = Some(graph_kind);
                             }
                             ui.add_space(6.0);
                         }
@@ -2003,8 +6102,10 @@ impl ScenarioApp {
             });
         if close {
             self.block_picker_parent = None;
-        } else if let Some(kind) = selected {
-            self.add_composer_block(kind);
+            self.graph_picker_attach = None;
+            self.graph_picker_port = None;
+        } else if let Some(kind) = selected_graph {
+            self.add_graph_composer_block(kind);
         }
     }
 }
@@ -2098,6 +6199,11 @@ fn paint_project_group_tree(
 }
 
 fn validate_project(project: &ScenarioProject) -> Result<(), String> {
+    validate_project_structure(project)?;
+    validate_project_canvases(&project.entries, &project.canvases)
+}
+
+fn validate_project_structure(project: &ScenarioProject) -> Result<(), String> {
     if project.id.trim().is_empty() {
         return Err("project id must not be empty".into());
     }
@@ -2106,6 +6212,27 @@ fn validate_project(project: &ScenarioProject) -> Result<(), String> {
     }
     let mut ids = BTreeSet::new();
     validate_project_entries(&project.entries, &mut ids)
+}
+
+fn validate_project_canvases(
+    entries: &[ProjectEntry],
+    canvases: &BTreeMap<String, ComposerCanvas>,
+) -> Result<(), String> {
+    for entry in entries {
+        match entry {
+            ProjectEntry::Group { entries, .. } => {
+                validate_project_canvases(entries, canvases)?;
+            }
+            ProjectEntry::Scenario { task } => {
+                if let Some(canvas) = canvases.get(&task.id) {
+                    validate_composer_canvas(task, canvas)?;
+                } else if let Some(graph) = &task.graph {
+                    validate_graph_for_ui(task, graph)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_project_entries(
@@ -2121,6 +6248,9 @@ fn validate_project_entries(
                 validate_project_entries(entries, scenario_ids)?;
             }
             ProjectEntry::Scenario { task } => {
+                if let Some(graph) = &task.graph {
+                    validate_graph_for_ui(task, graph)?;
+                }
                 task.validate()?;
                 if !scenario_ids.insert(task.id.clone()) {
                     return Err(format!(
@@ -2248,8 +6378,8 @@ impl ScenarioApp {
                             .task_pack
                             .as_ref()
                             .and_then(|pack| pack.resolve(&task.id).ok())
-                            .map(|resolved| resolved.steps.len())
-                            .unwrap_or(task.steps.len());
+                            .map(|resolved| task_action_steps(&resolved).len())
+                            .unwrap_or_else(|| task_action_steps(task).len());
                         let structure = if task.is_template() {
                             format!(
                                 "{} · {} сценариев · {} шагов",
@@ -2303,8 +6433,9 @@ impl ScenarioApp {
     }
 
     fn left_library(&mut self, root: &mut egui::Ui) {
+        let (library_width, _) = workspace_panel_widths(root.max_rect().width());
         egui::Panel::left("library")
-            .exact_size(270.0)
+            .exact_size(library_width)
             .resizable(false)
             .frame(
                 Frame::new()
@@ -2384,6 +6515,7 @@ impl ScenarioApp {
                     self.selected_project_scenario = None;
                     self.selected_project_group.clear();
                     self.selected_step = Some(0);
+                    self.selected_node = None;
                     self.invalidate_plan();
                 }
             });
@@ -2465,7 +6597,17 @@ impl ScenarioApp {
                 if let Some(entries) = project_group_entries(&project, &path) {
                     let mut prefix = path;
                     self.selected_project_scenario = first_scenario_path(entries, &mut prefix);
-                    self.selected_step = Some(0);
+                    let selected_task = self
+                        .selected_project_scenario
+                        .as_ref()
+                        .and_then(|path| project.scenario(path));
+                    self.selected_node = selected_task
+                        .and_then(|task| task.graph.as_ref())
+                        .and_then(|graph| graph.nodes.first())
+                        .map(|node| node.id().to_owned());
+                    self.selected_step = selected_task
+                        .is_some_and(|task| task.graph.is_none() && !task.steps.is_empty())
+                        .then_some(0);
                     self.invalidate_plan();
                 }
             }
@@ -2473,8 +6615,9 @@ impl ScenarioApp {
     }
 
     fn right_inspector(&mut self, root: &mut egui::Ui) {
+        let (_, inspector_width) = workspace_panel_widths(root.max_rect().width());
         egui::Panel::right("inspector")
-            .exact_size(360.0)
+            .exact_size(inspector_width)
             .resizable(false)
             .frame(
                 Frame::new()
@@ -2486,7 +6629,9 @@ impl ScenarioApp {
                 ui.label(RichText::new("ИНСПЕКТОР").strong().size(10.0).color(MUTED));
                 ui.add_space(6.0);
                 if self.custom_project.is_some() {
-                    self.composer_inspector(ui);
+                    bounded_inspector_scroll(ui, "composer-inspector-scroll", |ui| {
+                        self.composer_inspector(ui);
+                    });
                     return;
                 }
                 let Some(task) = self.selected_task().cloned() else {
@@ -2526,19 +6671,26 @@ impl ScenarioApp {
                         None
                     })
                     .unwrap_or_default();
-                ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.label(
-                        RichText::new(&task.name)
-                            .strong()
-                            .size(18.0)
-                            .color(text(self.dark)),
-                    );
+                bounded_inspector_scroll(ui, "library-inspector-scroll", |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&task.name)
+                                .strong()
+                                .size(18.0)
+                                .color(text(self.dark)),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(&task.name);
                     ui.add_space(5.0);
-                    ui.label(
-                        RichText::new(&task.id)
-                            .monospace()
-                            .size(9.0)
-                            .color(MUTED),
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&task.id)
+                                .monospace()
+                                .size(9.0)
+                                .color(MUTED),
+                        )
+                        .truncate(),
                     );
                     if task.is_template() {
                         ui.label(
@@ -2547,7 +6699,7 @@ impl ScenarioApp {
                                 task.scenarios.len(),
                                 resolved_task
                                     .as_ref()
-                                    .map(|resolved| resolved.steps.len())
+                                    .map(|resolved| task_action_steps(resolved).len())
                                     .unwrap_or_default()
                             ))
                             .strong()
@@ -2556,18 +6708,20 @@ impl ScenarioApp {
                         );
                     }
                     ui.add_space(10.0);
+                    let task_description = if task.description.trim().is_empty() {
+                        "Подробное описание для этого сценария пока не задано."
+                    } else {
+                        &task.description
+                    };
                     ui.add(
                         egui::Label::new(
-                            RichText::new(if task.description.trim().is_empty() {
-                                "Подробное описание для этого сценария пока не задано."
-                            } else {
-                                &task.description
-                            })
+                            RichText::new(task_description)
                             .size(10.0)
                             .color(text(self.dark)),
                         )
-                        .wrap(),
-                    );
+                        .truncate(),
+                    )
+                    .on_hover_text(task_description);
                     ui.add_space(14.0);
 
                     if let Some(error) = &resolution_error {
@@ -2700,8 +6854,9 @@ impl ScenarioApp {
                                             .size(9.0)
                                             .color(text(self.dark)),
                                     )
-                                    .wrap(),
-                                );
+                                    .truncate(),
+                                )
+                                .on_hover_text(summary);
                             });
                             ui.add_space(4.0);
                         }
@@ -2863,17 +7018,19 @@ impl ScenarioApp {
                                             .last()
                                             .map(|log| log.message.as_str())
                                             .unwrap_or(&step.summary);
+                                        let report_line = format!(
+                                            "{}: {}",
+                                            step.step_name, result
+                                        );
                                         ui.add(
                                             egui::Label::new(
-                                                RichText::new(format!(
-                                                    "{}: {}",
-                                                    step.step_name, result
-                                                ))
+                                                RichText::new(&report_line)
                                                 .size(9.0)
                                                 .color(text(self.dark)),
                                             )
-                                            .wrap(),
-                                        );
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(report_line);
                                     }
                                 } else {
                                     ui.label(
@@ -2914,8 +7071,9 @@ impl ScenarioApp {
                                         .size(9.0)
                                         .color(text(self.dark)),
                                 )
-                                .wrap(),
-                            );
+                                .truncate(),
+                            )
+                            .on_hover_text(&group.description);
                             ui.add_space(8.0);
                             for summary in &group.step_summaries {
                                 ui.horizontal_top(|ui| {
@@ -2926,17 +7084,47 @@ impl ScenarioApp {
                                                 .size(9.0)
                                                 .color(MUTED),
                                         )
-                                        .wrap(),
-                                    );
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(summary);
                                 });
                             }
                         }
                     } else {
-                        section_label(ui, "ВЫБРАННЫЙ ШАГ");
-                        if let Some(step) = self.selected_step.and_then(|step_index| {
+                        section_label(ui, "ВЫБРАННЫЙ УЗЕЛ");
+                        if let Some(node) = self.selected_node.as_deref().and_then(|node_id| {
                             resolved_task
                                 .as_ref()
-                                .and_then(|resolved| resolved.steps.get(step_index))
+                                .and_then(|resolved| resolved.graph.as_ref())
+                                .and_then(|graph| graph_node(graph, node_id))
+                        }) {
+                            match node {
+                                GraphNode::Action(node) => paint_step_inspector(
+                                    ui,
+                                    &node.step,
+                                    preview_options.as_ref(),
+                                    self.dark,
+                                ),
+                                GraphNode::ForEach(node) => graph_control_summary(
+                                    ui,
+                                    "FOR EACH",
+                                    &node.id,
+                                    self.dark,
+                                ),
+                                GraphNode::If(node) => {
+                                    graph_control_summary(ui, "IF", &node.id, self.dark)
+                                }
+                                GraphNode::Switch(node) => {
+                                    graph_control_summary(ui, "SWITCH", &node.id, self.dark)
+                                }
+                                GraphNode::Join(node) => {
+                                    graph_control_summary(ui, "JOIN", &node.id, self.dark)
+                                }
+                            }
+                        } else if let Some(step) = self.selected_step.and_then(|step_index| {
+                            resolved_task
+                                .as_ref()
+                                .and_then(|resolved| task_action_steps(resolved).get(step_index).copied())
                         }) {
                             paint_step_inspector(ui, step, preview_options.as_ref(), self.dark);
                         }
@@ -2947,11 +7135,14 @@ impl ScenarioApp {
 
     fn composer_inspector(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
-        let mut move_to = None;
-        let mut remove = None;
-        let selected = self.selected_step;
+        let mut remove_node = None;
+        let mut remove_optional_scope = None;
+        let mut remove_switch_case = None;
+        let mut open_graph_attach = None;
+        let mut incoming_edge_changes = Vec::new();
+        let selected_node = self.selected_node.clone();
+        let selected_path = self.selected_project_scenario.clone();
         {
-            let selected_path = self.selected_project_scenario.clone();
             let Some(task) = self
                 .custom_project
                 .as_mut()
@@ -2968,71 +7159,660 @@ impl ScenarioApp {
             ui.add_space(10.0);
             section_label(ui, "СЦЕНАРИЙ");
             ui.label(RichText::new("Название").size(9.0).color(MUTED));
-            changed |= ui.text_edit_singleline(&mut task.name).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(&mut task.name).desired_width(ui.available_width()))
+                .changed();
             ui.label(RichText::new("ID").size(9.0).color(MUTED));
-            changed |= ui.text_edit_singleline(&mut task.id).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(&mut task.id).desired_width(ui.available_width()))
+                .changed();
             ui.label(RichText::new("Описание").size(9.0).color(MUTED));
             changed |= ui
-                .add(egui::TextEdit::multiline(&mut task.description).desired_rows(3))
+                .add(
+                    egui::TextEdit::multiline(&mut task.description)
+                        .desired_rows(3)
+                        .desired_width(ui.available_width()),
+                )
                 .changed();
             ui.add_space(12.0);
 
             section_label(ui, "ВЫБРАННЫЙ БЛОК");
-            if let Some(index) = selected.filter(|index| *index < task.steps.len()) {
-                let step_count = task.steps.len();
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(index > 0, egui::Button::new("← Раньше"))
-                        .clicked()
-                    {
-                        move_to = Some(index - 1);
-                    }
-                    if ui
-                        .add_enabled(index + 1 < step_count, egui::Button::new("Позже →"))
-                        .clicked()
-                    {
-                        move_to = Some(index + 1);
-                    }
-                    if ui.button("Удалить").clicked() {
-                        remove = Some(index);
-                    }
-                });
-                ui.add_space(8.0);
-                let array_sources = composer_array_sources(task, index);
-                let loop_sources = composer_loop_sources(task, index);
-                let condition_fields = composer_condition_fields(task, index);
-                changed |= paint_composer_step_editor(
-                    ui,
-                    &mut task.steps[index],
-                    &array_sources,
-                    &loop_sources,
-                    self.dark,
-                );
-                ui.add_space(12.0);
-                changed |= paint_composer_conditions(
-                    ui,
-                    &mut task.steps[index],
-                    &condition_fields,
-                    self.dark,
-                );
-                ui.add_space(12.0);
-                section_label(ui, "ВЫХОДНОЙ КОНТЕКСТ");
-                for line in composer_step_context_lines(task, index) {
-                    ui.add(
-                        egui::Label::new(RichText::new(line).monospace().size(8.0).color(PURPLE))
-                            .wrap(),
+            if let (Some(graph_snapshot), Some(node_id)) =
+                (task.graph.clone(), selected_node.as_deref())
+            {
+                if graph_node(&graph_snapshot, node_id).is_none() {
+                    ui.label(
+                        RichText::new("Выбранный узел больше не существует.")
+                            .size(9.0)
+                            .color(ORANGE),
                     );
+                } else {
+                    ui.horizontal(|ui| {
+                        if ui.button("Удалить").clicked() {
+                            remove_node = Some(node_id.to_owned());
+                        }
+                    });
+                    ui.add_space(8.0);
+                    let action_options = match graph_node(&graph_snapshot, node_id) {
+                        Some(GraphNode::Action(node)) => {
+                            let definition = definition_for_action(&node.step.action);
+                            graph_input_fields(&definition.input_schema)
+                                .into_iter()
+                                .map(|(target, field)| {
+                                    (
+                                        target,
+                                        graph_binding_options(&graph_snapshot, node_id, &field),
+                                    )
+                                })
+                                .collect::<BTreeMap<_, _>>()
+                        }
+                        _ => BTreeMap::new(),
+                    };
+                    let condition_fields = graph_condition_fields(&graph_snapshot, node_id);
+                    let control_binding_options = graph_binding_options(
+                        &graph_snapshot,
+                        node_id,
+                        &FieldSchema::optional(ContextType::Any).nullable(),
+                    );
+                    let array_options = graph_array_options(&graph_snapshot, node_id);
+                    let selected_scope = graph_visual_model(&graph_snapshot)
+                        .0
+                        .into_iter()
+                        .find(|node| node.id == node_id)
+                        .and_then(|node| node.scope);
+                    let Some(graph) = task.graph.as_mut() else {
+                        return;
+                    };
+                    let Some(node) = graph_node_mut(graph, node_id) else {
+                        return;
+                    };
+                    match node {
+                        GraphNode::Action(node) => {
+                            changed |=
+                                paint_graph_action_editor(ui, node, &action_options, self.dark);
+                            ui.add_space(12.0);
+                            changed |= paint_composer_conditions(
+                                ui,
+                                &mut node.step,
+                                &condition_fields,
+                                self.dark,
+                            );
+                            ui.add_space(12.0);
+                            section_label(ui, "ВЫХОДНОЙ КОНТЕКСТ");
+                            for line in schema_context_lines(
+                                &definition_for_action(&node.step.action).output_schema,
+                            ) {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(line).monospace().size(8.0).color(PURPLE),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                        }
+                        GraphNode::ForEach(node) => {
+                            ui.label(RichText::new("ID блока").size(9.0).color(MUTED));
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&node.id).monospace().size(9.0).color(PURPLE),
+                                )
+                                .truncate(),
+                            );
+                            ui.label(RichText::new("Коллекция").size(9.0).color(MUTED));
+                            egui::ComboBox::from_id_salt(("foreach-collection", &node.id))
+                                .selected_text(binding_label(&node.collection))
+                                .truncate()
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    for (label, binding, alias, _) in &array_options {
+                                        if ui
+                                            .selectable_label(node.collection == *binding, label)
+                                            .clicked()
+                                        {
+                                            node.collection = binding.clone();
+                                            node.item_alias = first_free_loop_alias(
+                                                &graph_snapshot,
+                                                alias,
+                                                Some(&node.id),
+                                            );
+                                            changed = true;
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            if array_options.is_empty() {
+                                ui.label(
+                                    RichText::new(
+                                        "В доминирующем контексте нет типизированного массива.",
+                                    )
+                                    .size(8.0)
+                                    .color(ORANGE),
+                                );
+                            }
+                            ui.label(
+                                RichText::new("Имя текущего элемента")
+                                    .size(9.0)
+                                    .color(MUTED),
+                            );
+                            changed |= ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut node.item_alias)
+                                        .desired_width(ui.available_width()),
+                                )
+                                .changed();
+                            let mut publish_index = node.index_alias.is_some();
+                            if ui
+                                .checkbox(&mut publish_index, "Публиковать индекс итерации")
+                                .changed()
+                            {
+                                node.index_alias = publish_index.then(|| {
+                                    first_free_loop_alias(
+                                        &graph_snapshot,
+                                        &format!("{}_index", node.item_alias),
+                                        Some(&node.id),
+                                    )
+                                });
+                                changed = true;
+                            }
+                            if let Some(index_alias) = &mut node.index_alias {
+                                ui.label(
+                                    RichText::new("Имя индекса итерации").size(9.0).color(MUTED),
+                                );
+                                changed |= ui
+                                    .add(
+                                        egui::TextEdit::singleline(index_alias)
+                                            .desired_width(ui.available_width()),
+                                    )
+                                    .changed();
+                            }
+                            ui.label(RichText::new("Параллельность").size(9.0).color(MUTED));
+                            changed |= ui
+                                .add(egui::DragValue::new(&mut node.concurrency).range(1..=64))
+                                .changed();
+                            let mut continue_on_error =
+                                matches!(node.on_error, LoopFailurePolicy::Continue);
+                            if ui
+                                .checkbox(&mut continue_on_error, "Продолжать после ошибки")
+                                .changed()
+                            {
+                                node.on_error = if continue_on_error {
+                                    LoopFailurePolicy::Continue
+                                } else {
+                                    LoopFailurePolicy::Stop
+                                };
+                                changed = true;
+                            }
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(
+                                        egui::Button::new("＋ Для каждого item")
+                                            .fill(if node.body.nodes.is_empty() {
+                                                PURPLE
+                                            } else {
+                                                panel(self.dark)
+                                            }),
+                                    )
+                                    .on_hover_text(
+                                        "Этот блок выполнится отдельно для каждого элемента коллекции.",
+                                    )
+                                    .clicked()
+                                {
+                                    open_graph_attach = Some(ComposerGraphAttach::NestedStart {
+                                        scope: ComposerGraphNestedScope::ForEachBody {
+                                            owner_id: node.id.clone(),
+                                        },
+                                    });
+                                }
+                                if ui
+                                    .add_enabled(
+                                        !node.body.nodes.is_empty(),
+                                        egui::Button::new("＋ После цикла"),
+                                    )
+                                    .on_disabled_hover_text(
+                                        "Сначала добавьте хотя бы один блок для каждого item.",
+                                    )
+                                    .on_hover_text(
+                                        "Этот блок выполнится один раз после завершения всех итераций.",
+                                    )
+                                    .clicked()
+                                {
+                                    open_graph_attach = Some(selected_scope.clone().map_or_else(
+                                        || ComposerGraphAttach::RootAfter {
+                                            node_id: node.id.clone(),
+                                        },
+                                        |scope| ComposerGraphAttach::NestedAfter {
+                                            scope,
+                                            node_id: node.id.clone(),
+                                        },
+                                    ));
+                                }
+                            });
+                            ui.label(
+                                RichText::new(if node.body.nodes.is_empty() {
+                                    "Цикл пока пуст: добавьте действие через «Для каждого item»."
+                                        .to_owned()
+                                } else {
+                                    format!(
+                                        "В итерации: {} блоков. «После цикла» — отдельный однократный выход.",
+                                        node.body.nodes.len()
+                                    )
+                                })
+                                .size(8.0)
+                                .color(if node.body.nodes.is_empty() { ORANGE } else { MUTED }),
+                            );
+                            ui.add_space(12.0);
+                            section_label(ui, "КОНТЕКСТ ИТЕРАЦИИ");
+                            if let Some(item_type) = graph_loop_item_type(&graph_snapshot, &node.id)
+                            {
+                                let mut lines = Vec::new();
+                                collect_context_type_lines(
+                                    &item_type,
+                                    &node.item_alias,
+                                    &mut lines,
+                                );
+                                for line in lines {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(line).monospace().size(8.0).color(PURPLE),
+                                        )
+                                        .truncate(),
+                                    );
+                                }
+                            }
+                        }
+                        GraphNode::If(node) => {
+                            graph_control_summary(ui, "IF", &node.id, self.dark);
+                            let mut editable =
+                                composer_condition_rule(&node.condition).filter(|rule| {
+                                    composer_condition_rule_supported(rule, &condition_fields)
+                                });
+                            if let Some(rule) = editable.as_mut() {
+                                if paint_composer_condition_rule_editor(
+                                    ui,
+                                    &format!("if-{}", node.id),
+                                    rule,
+                                    &condition_fields,
+                                    self.dark,
+                                ) {
+                                    node.condition = build_composer_condition_rule(rule);
+                                    changed = true;
+                                }
+                            } else if let ExpressionV1::Literal {
+                                value: ExpressionValue::Bool(value),
+                            } = &mut node.condition
+                            {
+                                changed |= ui.checkbox(value, "Литеральное условие").changed();
+                            } else {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(
+                                            "Условие использует выражение, которое визуальный редактор не поддерживает. Оно сохранено без изменений.",
+                                        )
+                                        .size(8.0)
+                                        .color(ORANGE),
+                                    )
+                                    .wrap(),
+                                );
+                                Frame::new()
+                                    .fill(code_surface(self.dark))
+                                    .corner_radius(6)
+                                    .inner_margin(Margin::same(7))
+                                    .show(ui, |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(condition_read_only_summary(
+                                                    &node.condition,
+                                                ))
+                                                .monospace()
+                                                .size(8.0)
+                                                .color(text(self.dark)),
+                                            )
+                                            .truncate(),
+                                        );
+                                    });
+                                if ui
+                                    .button("Заменить условие типизированным правилом")
+                                    .clicked()
+                                {
+                                    node.condition = default_graph_if_condition(&condition_fields);
+                                    changed = true;
+                                }
+                            }
+                            ui.horizontal(|ui| {
+                                if ui.button("＋ Ветка then").clicked() {
+                                    open_graph_attach = Some(ComposerGraphAttach::NestedStart {
+                                        scope: ComposerGraphNestedScope::IfThen {
+                                            owner_id: node.id.clone(),
+                                        },
+                                    });
+                                }
+                                if ui.button("＋ Ветка else").clicked() {
+                                    open_graph_attach = Some(ComposerGraphAttach::NestedStart {
+                                        scope: ComposerGraphNestedScope::IfElse {
+                                            owner_id: node.id.clone(),
+                                        },
+                                    });
+                                }
+                            });
+                            if let Some(else_graph) = node.else_graph.as_deref() {
+                                let empty = graph_scope_is_empty(else_graph);
+                                if ui
+                                    .add_enabled(empty, egui::Button::new("Удалить ветку Иначе"))
+                                    .on_disabled_hover_text(
+                                        "Сначала удалите или перенесите блоки из ветки «Иначе».",
+                                    )
+                                    .clicked()
+                                {
+                                    remove_optional_scope =
+                                        Some(ComposerGraphNestedScope::IfElse {
+                                            owner_id: node.id.clone(),
+                                        });
+                                }
+                            }
+                        }
+                        GraphNode::Switch(node) => {
+                            graph_control_summary(ui, "SWITCH", &node.id, self.dark);
+                            ui.label(RichText::new("Selector").size(9.0).color(MUTED));
+                            egui::ComboBox::from_id_salt(("switch-selector", &node.id))
+                                .selected_text(binding_label(&node.selector))
+                                .truncate()
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(
+                                            matches!(&node.selector, Binding::Literal { .. }),
+                                            "Литеральное значение",
+                                        )
+                                        .clicked()
+                                    {
+                                        node.selector = Binding::literal("");
+                                        changed = true;
+                                        ui.close();
+                                    }
+                                    for option in control_binding_options.iter().filter(|option| {
+                                        GraphSwitchScalarKind::from_context_type(&option.value_type)
+                                            .is_some()
+                                    }) {
+                                        if ui
+                                            .selectable_label(
+                                                node.selector == option.binding,
+                                                &option.label,
+                                            )
+                                            .clicked()
+                                        {
+                                            node.selector = option.binding.clone();
+                                            changed = true;
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            if let Binding::Literal { value } = &mut node.selector {
+                                if let Some(mut kind) = GraphSwitchScalarKind::from_value(value) {
+                                    let before = kind;
+                                    egui::ComboBox::from_id_salt((
+                                        "switch-selector-type",
+                                        &node.id,
+                                    ))
+                                    .selected_text(kind.label())
+                                    .truncate()
+                                    .width(ui.available_width())
+                                    .show_ui(ui, |ui| {
+                                        for candidate in GraphSwitchScalarKind::ALL {
+                                            ui.selectable_value(
+                                                &mut kind,
+                                                candidate,
+                                                candidate.label(),
+                                            );
+                                        }
+                                    });
+                                    if kind != before {
+                                        *value = kind.default_value(0);
+                                        changed = true;
+                                    }
+                                } else {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(
+                                                "Составной selector сохранён без автоматического преобразования.",
+                                            )
+                                            .size(8.0)
+                                            .color(ORANGE),
+                                        )
+                                        .wrap(),
+                                    );
+                                }
+                                changed |= paint_graph_literal_editor(
+                                    ui,
+                                    (&node.id, "switch-selector-literal"),
+                                    value,
+                                );
+                            }
+                            let selector_contract = graph_switch_selector_contract(
+                                &node.selector,
+                                &control_binding_options,
+                            );
+                            let selector_kind = selector_contract.map(|(kind, _)| kind);
+                            let selector_nullable =
+                                selector_contract.is_some_and(|(_, nullable)| nullable);
+                            let null_case_exists = node
+                                .cases
+                                .iter()
+                                .any(|case| case.values.iter().any(serde_json::Value::is_null));
+                            let next_scalar_value = selector_kind
+                                .and_then(|kind| first_free_switch_case_value(kind, &node.cases));
+                            let scalar_slots_full = matches!(
+                                selector_kind,
+                                Some(GraphSwitchScalarKind::Boolean | GraphSwitchScalarKind::Null)
+                            ) && next_scalar_value.is_none();
+                            let mut used_case_values = node
+                                .cases
+                                .iter()
+                                .flat_map(|case| case.values.iter().cloned())
+                                .collect::<Vec<_>>();
+                            let mut case_action = None;
+                            let case_count = node.cases.len();
+                            for (index, case) in node.cases.iter_mut().enumerate() {
+                                ui.add_space(6.0);
+                                if let Some(action) = paint_switch_case_header(
+                                    ui,
+                                    &case.id,
+                                    index,
+                                    case_count,
+                                    graph_scope_is_empty(&case.graph),
+                                ) {
+                                    if action == SwitchCaseHeaderAction::OpenBranch {
+                                        open_graph_attach =
+                                            Some(ComposerGraphAttach::NestedStart {
+                                                scope: ComposerGraphNestedScope::SwitchCase {
+                                                    owner_id: node.id.clone(),
+                                                    case_id: case.id.clone(),
+                                                },
+                                            });
+                                    } else {
+                                        case_action = Some((action, index));
+                                    }
+                                }
+                                let mut remove_value = None;
+                                let value_count = case.values.len();
+                                for (value_index, value) in case.values.iter_mut().enumerate() {
+                                    let (value_changed, remove) = paint_switch_case_value_row(
+                                        ui,
+                                        (&node.id, &case.id),
+                                        value_index,
+                                        value_count,
+                                        value,
+                                        selector_contract,
+                                        &mut used_case_values,
+                                    );
+                                    changed |= value_changed;
+                                    if remove {
+                                        remove_value = Some(value_index);
+                                    }
+                                }
+                                if let Some(value_index) = remove_value {
+                                    case.values.remove(value_index);
+                                    changed = true;
+                                }
+                                if ui
+                                    .add_enabled(
+                                        first_free_switch_value_from_used(
+                                            selector_kind.unwrap_or(GraphSwitchScalarKind::String),
+                                            &used_case_values,
+                                        )
+                                        .is_some(),
+                                        egui::Button::new("＋ Значение case"),
+                                    )
+                                    .clicked()
+                                {
+                                    let kind =
+                                        selector_kind.unwrap_or(GraphSwitchScalarKind::String);
+                                    if let Some(value) =
+                                        first_free_switch_value_from_used(kind, &used_case_values)
+                                    {
+                                        case.values.push(value.clone());
+                                        used_case_values.push(value);
+                                        changed = true;
+                                    }
+                                }
+                                if case.values.is_empty() {
+                                    ui.label(
+                                        RichText::new(
+                                            "Case должен содержать хотя бы одно значение",
+                                        )
+                                        .size(8.0)
+                                        .color(ORANGE),
+                                    );
+                                }
+                            }
+                            if let Some((action, index)) = case_action {
+                                match action {
+                                    SwitchCaseHeaderAction::MoveUp => {
+                                        node.cases.swap(index, index - 1)
+                                    }
+                                    SwitchCaseHeaderAction::MoveDown => {
+                                        node.cases.swap(index, index + 1)
+                                    }
+                                    SwitchCaseHeaderAction::Remove => {
+                                        remove_switch_case =
+                                            Some((node.id.clone(), node.cases[index].id.clone()));
+                                    }
+                                    SwitchCaseHeaderAction::OpenBranch => {
+                                        unreachable!("open branch is handled before mutating cases")
+                                    }
+                                }
+                                changed |= action != SwitchCaseHeaderAction::Remove;
+                            }
+                            if ui
+                                .add_enabled(!scalar_slots_full, egui::Button::new("＋ Case"))
+                                .clicked()
+                            {
+                                let kind = selector_kind.unwrap_or(GraphSwitchScalarKind::String);
+                                let case_id = first_free_switch_case_id(&node.cases);
+                                if let Some(value) = first_free_switch_case_value(kind, &node.cases)
+                                {
+                                    node.cases.push(SwitchCase {
+                                        id: case_id,
+                                        values: vec![value],
+                                        graph: Box::new(WorkflowGraph::default()),
+                                    });
+                                    changed = true;
+                                }
+                            }
+                            if selector_nullable
+                                && !null_case_exists
+                                && ui.button("＋ Case со значением null").clicked()
+                            {
+                                let case_id = first_free_switch_case_id(&node.cases);
+                                node.cases.push(SwitchCase {
+                                    id: case_id,
+                                    values: vec![serde_json::Value::Null],
+                                    graph: Box::new(WorkflowGraph::default()),
+                                });
+                                changed = true;
+                            }
+                            if ui.button("＋ Default ветка").clicked() {
+                                open_graph_attach = Some(ComposerGraphAttach::NestedStart {
+                                    scope: ComposerGraphNestedScope::SwitchDefault {
+                                        owner_id: node.id.clone(),
+                                    },
+                                });
+                            }
+                            if let Some(default) = node.default.as_deref() {
+                                let empty = graph_scope_is_empty(default);
+                                if ui
+                                    .add_enabled(
+                                        empty,
+                                        egui::Button::new("Удалить ветку По умолчанию"),
+                                    )
+                                    .on_disabled_hover_text(
+                                        "Сначала удалите или перенесите блоки из ветки «По умолчанию».",
+                                    )
+                                    .clicked()
+                                {
+                                    remove_optional_scope = Some(
+                                        ComposerGraphNestedScope::SwitchDefault {
+                                            owner_id: node.id.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        GraphNode::Join(node) => {
+                            graph_control_summary(ui, "JOIN", &node.id, self.dark);
+                            egui::ComboBox::from_id_salt(("join-mode", &node.id))
+                                .selected_text(format!("{:?}", node.mode))
+                                .truncate()
+                                .show_ui(ui, |ui| {
+                                    changed |= ui
+                                        .selectable_value(&mut node.mode, JoinMode::All, "Все")
+                                        .changed();
+                                    changed |= ui
+                                        .selectable_value(&mut node.mode, JoinMode::Any, "Любой")
+                                        .changed();
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut node.mode,
+                                            JoinMode::FirstSuccessful,
+                                            "Первый успешный",
+                                        )
+                                        .changed();
+                                });
+                            ui.label(RichText::new("Входящие ветви").size(9.0).color(MUTED));
+                            if let Some(scope) = graph_local_scope(&graph_snapshot, &node.id) {
+                                for source in scope.nodes.iter().filter(|source| {
+                                    source.id() != node.id
+                                        && !matches!(source, GraphNode::Join(other) if other.id == node.id)
+                                }) {
+                                    let existing = scope
+                                        .edges
+                                        .iter()
+                                        .find(|edge| {
+                                            edge.from.node == source.id()
+                                                && edge.to.node == node.id
+                                        })
+                                        .map(|edge| edge.from.port.clone());
+                                    if let Some(port) =
+                                        paint_join_source_row(ui, &node.id, source, existing)
+                                    {
+                                        incoming_edge_changes.push((
+                                            node.id.clone(),
+                                            source.id().to_owned(),
+                                            port,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-                ui.label(
-                    RichText::new(
-                        "Поля контекста доступны условиям и следующим блокам по ID этого блока.",
-                    )
-                    .size(8.0)
-                    .color(MUTED),
-                );
             } else {
                 ui.label(
-                    RichText::new("Выберите блок на канвасе или добавьте его из палитры слева.")
+                    RichText::new(if task.graph.is_some() {
+                        "Выберите узел на канвасе или добавьте его из палитры слева."
+                    } else {
+                        "Legacy Task.steps доступен только импортеру; сохраните сценарий как WorkflowGraph v3."
+                    })
                         .size(9.0)
                         .color(MUTED),
                 );
@@ -3041,13 +7821,49 @@ impl ScenarioApp {
         if changed {
             self.invalidate_plan();
         }
-        if let Some(target) = move_to {
-            if let Some(index) = selected {
-                self.move_composer_step(index, target);
+        if let Some(node_id) = remove_node {
+            self.remove_composer_node(&node_id);
+        }
+        if remove_optional_scope.is_some() || remove_switch_case.is_some() {
+            let selected_path = self.selected_project_scenario.clone();
+            if let Some(graph) = self
+                .custom_project
+                .as_mut()
+                .and_then(|project| project.scenario_mut(selected_path.as_deref()?))
+                .and_then(|task| task.graph.as_mut())
+            {
+                let result = if let Some(scope) = remove_optional_scope {
+                    graph_remove_optional_scope(graph, &scope)
+                } else if let Some((switch_id, case_id)) = remove_switch_case {
+                    graph_remove_switch_case(graph, &switch_id, &case_id)
+                } else {
+                    Ok(false)
+                };
+                match result {
+                    Ok(true) => self.invalidate_plan(),
+                    Ok(false) => {}
+                    Err(error) => self.file_message = Some((true, error)),
+                }
             }
         }
-        if let Some(index) = remove {
-            self.remove_composer_step(index);
+        if let Some(attach) = open_graph_attach {
+            self.open_graph_block_picker(attach);
+        }
+        if !incoming_edge_changes.is_empty() {
+            let selected_path = self.selected_project_scenario.clone();
+            if let Some(graph) = self
+                .custom_project
+                .as_mut()
+                .and_then(|project| project.scenario_mut(selected_path.as_deref()?))
+                .and_then(|task| task.graph.as_mut())
+            {
+                for (target, source, port) in incoming_edge_changes {
+                    if let Err(error) = graph_set_incoming_edge(graph, &target, &source, port) {
+                        self.file_message = Some((true, error));
+                    }
+                }
+                self.invalidate_plan();
+            }
         }
 
         let is_github_repository_scenario = self
@@ -3099,17 +7915,23 @@ impl ScenarioApp {
 
         ui.add_space(14.0);
         let validation = self
-            .selected_task()
-            .ok_or_else(|| "сценарий не выбран".to_owned())
-            .and_then(|task| task.validate());
+            .custom_project
+            .as_ref()
+            .ok_or_else(|| "проект не выбран".to_owned())
+            .and_then(validate_project);
         match &validation {
-            Ok(()) => ui.label(
-                RichText::new("Сценарий корректен и готов к сохранению.")
-                    .size(9.0)
-                    .color(CYAN),
-            ),
-            Err(error) => ui.label(RichText::new(error).size(9.0).color(ORANGE)),
-        };
+            Ok(()) => {
+                ui.label(
+                    RichText::new("Сценарий корректен и готов к сохранению.")
+                        .size(9.0)
+                        .color(CYAN),
+                );
+            }
+            Err(error) => {
+                section_label(ui, "НУЖНО ИСПРАВИТЬ");
+                error_box(ui, error, self.dark);
+            }
+        }
         ui.add_space(8.0);
         if ui
             .add_enabled(
@@ -3193,6 +8015,397 @@ impl ScenarioApp {
         }
     }
 
+    fn graph_composer_canvas(
+        &mut self,
+        ui: &mut egui::Ui,
+        task: &Task,
+        graph: &WorkflowGraph,
+        canvas: &ComposerCanvas,
+        editable: bool,
+    ) {
+        let (nodes, edges) = graph_visual_model(graph);
+        let node_size = Vec2::new(232.0, 116.0);
+        let world_bounds = graph_canvas_world_bounds(canvas, node_size);
+        let readonly_view_key = task.id.clone();
+        let mut view = if editable {
+            canvas.view.sanitized()
+        } else {
+            self.readonly_canvas_views
+                .get(&readonly_view_key)
+                .copied()
+                .unwrap_or(canvas.view)
+                .sanitized()
+        };
+
+        let mut zoom_out = false;
+        let mut reset_view = false;
+        let mut zoom_in = false;
+        let mut fit_view = false;
+        Frame::new()
+            .fill(panel(self.dark))
+            .inner_margin(Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("КАНВАС")
+                            .strong()
+                            .size(9.0)
+                            .color(MUTED),
+                    )
+                    .on_hover_text(
+                        "Перетаскивание фона или средней кнопкой — перемещение. ⌘/Ctrl + колесо или pinch — масштаб.",
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        fit_view = ui
+                            .small_button("Вписать")
+                            .on_hover_text("Показать весь граф")
+                            .clicked();
+                        zoom_in = ui
+                            .small_button("+")
+                            .on_hover_text("Увеличить масштаб")
+                            .clicked();
+                        reset_view = ui
+                            .small_button(format!("{:.0}%", view.zoom * 100.0))
+                            .on_hover_text("Сбросить перемещение и масштаб")
+                            .clicked();
+                        zoom_out = ui
+                            .small_button("−")
+                            .on_hover_text("Уменьшить масштаб")
+                            .clicked();
+                    });
+                });
+            });
+        ui.add_space(4.0);
+
+        let viewport = ui.available_rect_before_wrap();
+        if reset_view {
+            view = CanvasView::default();
+        } else if fit_view {
+            view = CanvasView::fit(world_bounds, viewport, CANVAS_FIT_PADDING);
+        } else if zoom_out {
+            view.zoom_about(viewport, viewport.center(), 1.0 / CANVAS_ZOOM_STEP);
+        } else if zoom_in {
+            view.zoom_about(viewport, viewport.center(), CANVAS_ZOOM_STEP);
+        }
+
+        let mut scene_rect = view.visible_world_rect(viewport);
+        let gestures_enabled =
+            self.block_picker_parent.is_none() && !self.github_picker.open && !self.confirm_run;
+        // A dedicated interaction inside the transformed layer owns blank
+        // canvas drags. It is registered before the smaller card hit zones,
+        // so cards reliably win without the full-scene parent racing them.
+        let mut background_drag = None;
+        let mut space_pan_delta = Vec2::ZERO;
+        let mut child_consumed_drag = false;
+        let scene = egui::Scene::new()
+            .zoom_range(CANVAS_MIN_ZOOM..=CANVAS_MAX_ZOOM)
+            .max_inner_size(Vec2::splat(100_000.0))
+            .sense(Sense::hover())
+            .drag_pan_buttons(egui::DragPanButtons::empty());
+        scene.show(ui, &mut scene_rect, |ui| {
+            let painter = ui.painter().clone();
+            let bounds = ui.clip_rect();
+            background_drag = Some(ui.interact(
+                bounds,
+                Id::new(("graph-canvas-background", task.id.as_str())),
+                if gestures_enabled {
+                    Sense::click_and_drag()
+                } else {
+                    Sense::hover()
+                },
+            ));
+            paint_grid(&painter, bounds, self.dark);
+            let space_down = ui.input(|input| input.key_down(egui::Key::Space));
+            let positions = canvas
+                .positions
+                .iter()
+                .map(|(id, point)| (id.clone(), Pos2::new(point.x, point.y)))
+                .collect::<BTreeMap<_, _>>();
+            for edge in &edges {
+                let (Some(from), Some(to)) = (positions.get(&edge.from), positions.get(&edge.to))
+                else {
+                    continue;
+                };
+                paint_graph_connector(
+                    &painter,
+                    *from + Vec2::new(node_size.x, node_size.y * 0.5),
+                    *to + Vec2::new(0.0, node_size.y * 0.5),
+                    edge.kind,
+                    edge.port.as_ref(),
+                );
+            }
+
+            if let Some(position) = positions.get("start") {
+                let rect = Rect::from_min_size(*position, node_size);
+                let drag = ui.interact(
+                    rect,
+                    Id::new(("graph-start", task.id.as_str())),
+                    Sense::click_and_drag(),
+                );
+                if drag.dragged_by(egui::PointerButton::Middle) {
+                    child_consumed_drag = true;
+                    space_pan_delta += drag.drag_delta();
+                } else if drag.dragged_by(egui::PointerButton::Primary) {
+                    child_consumed_drag = true;
+                    if space_down || !editable {
+                        space_pan_delta += drag.drag_delta();
+                    } else {
+                        self.drag_composer_node(&task.id, "start", drag.drag_delta());
+                    }
+                }
+                painter.rect_filled(rect, 13.0, panel(self.dark));
+                painter.rect_stroke(rect, 13.0, Stroke::new(2.0, CYAN), StrokeKind::Inside);
+                painter.text(
+                    rect.left_top() + Vec2::new(18.0, 22.0),
+                    Align2::LEFT_TOP,
+                    "СТАРТ",
+                    FontId::proportional(10.0),
+                    CYAN,
+                );
+                painter.text(
+                    rect.left_top() + Vec2::new(18.0, 48.0),
+                    Align2::LEFT_TOP,
+                    "Начало сценария",
+                    FontId::proportional(17.0),
+                    text(self.dark),
+                );
+                let plus_rect = Rect::from_center_size(
+                    Pos2::new(rect.right() - 20.0, rect.center().y),
+                    Vec2::splat(30.0),
+                );
+                if editable {
+                    paint_graph_plus(&painter, plus_rect, "+");
+                }
+                if editable
+                    && ui
+                        .interact(
+                            plus_rect,
+                            Id::new(("graph-start-plus", task.id.as_str())),
+                            Sense::click(),
+                        )
+                        .clicked_by(egui::PointerButton::Primary)
+                {
+                    self.open_graph_block_picker(ComposerGraphAttach::RootStart);
+                }
+            }
+
+            for (index, node) in nodes.iter().enumerate() {
+                let Some(position) = positions.get(&node.id) else {
+                    continue;
+                };
+                let rect = Rect::from_min_size(*position, node_size);
+                let interaction = ui.interact(
+                    rect,
+                    Id::new(("graph-node", task.id.as_str(), node.id.as_str())),
+                    Sense::click_and_drag(),
+                );
+                if interaction.clicked_by(egui::PointerButton::Primary) {
+                    self.selected_node = Some(node.id.clone());
+                    self.selected_step = None;
+                }
+                if interaction.dragged_by(egui::PointerButton::Middle) {
+                    child_consumed_drag = true;
+                    space_pan_delta += interaction.drag_delta();
+                } else if interaction.dragged_by(egui::PointerButton::Primary) {
+                    child_consumed_drag = true;
+                    if space_down || !editable {
+                        space_pan_delta += interaction.drag_delta();
+                    } else {
+                        self.drag_composer_node(&task.id, &node.id, interaction.drag_delta());
+                    }
+                }
+                let status = self.report.as_ref().and_then(|report| {
+                    report
+                        .steps
+                        .iter()
+                        .find(|step| step.step_id == node.id)
+                        .map(|step| &step.status)
+                });
+                match &node.card {
+                    ComposerGraphCard::Action(step) => paint_step_node(
+                        &painter,
+                        rect,
+                        step,
+                        index,
+                        self.selected_node.as_deref() == Some(node.id.as_str()),
+                        status,
+                        self.dark,
+                    ),
+                    card => paint_graph_control_node(
+                        &painter,
+                        rect,
+                        &node.id,
+                        card,
+                        self.selected_node.as_deref() == Some(node.id.as_str()),
+                        status,
+                        self.dark,
+                    ),
+                }
+
+                if !editable {
+                    continue;
+                }
+
+                match &node.card {
+                    ComposerGraphCard::ForEach { body_empty, .. } => {
+                        let body_rect = Rect::from_center_size(
+                            Pos2::new(rect.right() - 18.0, rect.top() + 38.0),
+                            Vec2::splat(28.0),
+                        );
+                        let completed_rect = Rect::from_center_size(
+                            Pos2::new(rect.right() - 18.0, rect.bottom() - 28.0),
+                            Vec2::splat(28.0),
+                        );
+                        painter.text(
+                            body_rect.left_center() - Vec2::new(8.0, 0.0),
+                            Align2::RIGHT_CENTER,
+                            "для item",
+                            FontId::proportional(8.0),
+                            CYAN,
+                        );
+                        painter.text(
+                            completed_rect.left_center() - Vec2::new(8.0, 0.0),
+                            Align2::RIGHT_CENTER,
+                            "после",
+                            FontId::proportional(8.0),
+                            if *body_empty { MUTED } else { PURPLE },
+                        );
+                        paint_graph_plus(&painter, body_rect, "∀");
+                        if *body_empty {
+                            painter.circle_filled(completed_rect.center(), 12.0, panel(self.dark));
+                            painter.circle_stroke(
+                                completed_rect.center(),
+                                12.0,
+                                Stroke::new(1.0, MUTED),
+                            );
+                            painter.text(
+                                completed_rect.center(),
+                                Align2::CENTER_CENTER,
+                                "–",
+                                FontId::proportional(16.0),
+                                MUTED,
+                            );
+                        } else {
+                            paint_graph_plus(&painter, completed_rect, "+");
+                        }
+                        if ui
+                            .interact(
+                                body_rect,
+                                Id::new(("graph-loop-body-plus", node.id.as_str())),
+                                Sense::click(),
+                            )
+                            .on_hover_text("Добавить в тело: один item на итерацию")
+                            .clicked_by(egui::PointerButton::Primary)
+                        {
+                            self.open_graph_block_picker(ComposerGraphAttach::NestedStart {
+                                scope: ComposerGraphNestedScope::ForEachBody {
+                                    owner_id: node.id.clone(),
+                                },
+                            });
+                        }
+                        let completed = ui.interact(
+                            completed_rect,
+                            Id::new(("graph-loop-completed-plus", node.id.as_str())),
+                            if *body_empty {
+                                Sense::hover()
+                            } else {
+                                Sense::click()
+                            },
+                        );
+                        let completed = if *body_empty {
+                            completed.on_hover_text(
+                                "Сначала добавьте хотя бы один блок для каждого item.",
+                            )
+                        } else {
+                            completed
+                                .on_hover_text("Добавить один блок после завершения всех итераций")
+                        };
+                        if !*body_empty && completed.clicked_by(egui::PointerButton::Primary) {
+                            let attach = node.scope.clone().map_or_else(
+                                || ComposerGraphAttach::RootAfter {
+                                    node_id: node.id.clone(),
+                                },
+                                |scope| ComposerGraphAttach::NestedAfter {
+                                    scope,
+                                    node_id: node.id.clone(),
+                                },
+                            );
+                            self.open_graph_block_picker(attach);
+                        }
+                    }
+                    _ => {
+                        let plus_rect = Rect::from_center_size(
+                            Pos2::new(rect.right() - 18.0, rect.center().y),
+                            Vec2::splat(28.0),
+                        );
+                        paint_graph_plus(&painter, plus_rect, "+");
+                        if ui
+                            .interact(
+                                plus_rect,
+                                Id::new(("graph-node-plus", node.id.as_str())),
+                                Sense::click(),
+                            )
+                            .clicked_by(egui::PointerButton::Primary)
+                        {
+                            let attach = node.scope.clone().map_or_else(
+                                || ComposerGraphAttach::RootAfter {
+                                    node_id: node.id.clone(),
+                                },
+                                |scope| ComposerGraphAttach::NestedAfter {
+                                    scope,
+                                    node_id: node.id.clone(),
+                                },
+                            );
+                            self.open_graph_block_picker(attach);
+                        }
+                    }
+                }
+            }
+
+            painter.text(
+                Pos2::new(80.0, 92.0),
+                Align2::LEFT_TOP,
+                "WORKFLOW GRAPH",
+                FontId::proportional(10.0),
+                MUTED,
+            );
+            painter.text(
+                Pos2::new(80.0, 112.0),
+                Align2::LEFT_TOP,
+                &task.name,
+                FontId::proportional(26.0),
+                text(self.dark),
+            );
+            painter.text(
+                Pos2::new(80.0, 150.0),
+                Align2::LEFT_TOP,
+                format!("{} узлов · {} связей", nodes.len(), edges.len()),
+                FontId::proportional(10.0),
+                MUTED,
+            );
+        });
+        if space_pan_delta != Vec2::ZERO {
+            scene_rect = scene_rect.translate(-space_pan_delta);
+        } else if let Some(background_drag) = background_drag.filter(|background_drag| {
+            gestures_enabled
+                && !child_consumed_drag
+                && (background_drag.dragged_by(egui::PointerButton::Primary)
+                    || background_drag.dragged_by(egui::PointerButton::Middle))
+        }) {
+            // This response lives in the Scene layer, so egui has already
+            // converted its per-frame drag delta to world coordinates.
+            scene_rect = scene_rect.translate(-background_drag.drag_delta());
+        }
+        let updated_view = CanvasView::from_visible_world_rect(scene_rect, viewport);
+        if editable {
+            self.set_composer_canvas_view(&task.id, updated_view);
+        } else {
+            self.readonly_canvas_views
+                .insert(readonly_view_key, updated_view);
+        }
+    }
+
     fn canvas(&mut self, root: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(Frame::new().fill(canvas(self.dark)))
@@ -3241,6 +8454,23 @@ impl ScenarioApp {
                     .as_ref()
                     .and_then(|project| project.canvases.get(&task.id))
                     .cloned();
+                if is_composer {
+                    if let (Some(graph), Some(canvas)) = (&task.graph, composer_canvas.as_ref()) {
+                        self.graph_composer_canvas(ui, &task, graph, canvas, true);
+                        return;
+                    }
+                    error_box(
+                        ui,
+                        "Сценарий не импортирован в WorkflowGraph v3; Task.steps нельзя редактировать на канвасе.",
+                        self.dark,
+                    );
+                    return;
+                }
+                if let Some(graph) = &task.graph {
+                    let canvas = default_graph_canvas(graph);
+                    self.graph_composer_canvas(ui, &task, graph, &canvas, false);
+                    return;
+                }
                 let node_count = if task.is_template() {
                     groups.len()
                 } else {
@@ -3301,6 +8531,7 @@ impl ScenarioApp {
                                 .collect::<BTreeMap<_, _>>();
                             paint_composer_connectors(
                                 &painter,
+                                &task,
                                 &position_map,
                                 &canvas.parents,
                                 node_size,
@@ -3338,93 +8569,18 @@ impl ScenarioApp {
                                 report_offset += group.step_count;
                             }
                         } else {
-                            let step_positions = if is_composer {
-                                if let Some(position) = positions.first() {
-                                    let rect = Rect::from_min_size(*position, node_size);
-                                    let drag = ui.interact(
-                                        rect,
-                                        Id::new(("scenario-start", task.id.as_str())),
-                                        Sense::click_and_drag(),
-                                    );
-                                    if drag.dragged() {
-                                        let delta = ui.ctx().input(|input| input.pointer.delta());
-                                        self.drag_composer_node(&task.id, "start", delta);
-                                    }
-                                    painter.rect_filled(rect, 13.0, panel(self.dark));
-                                    painter.rect_stroke(
-                                        rect,
-                                        13.0,
-                                        Stroke::new(2.0, CYAN),
-                                        StrokeKind::Inside,
-                                    );
-                                    painter.text(
-                                        rect.left_top() + Vec2::new(18.0, 22.0),
-                                        Align2::LEFT_TOP,
-                                        "СТАРТ",
-                                        FontId::proportional(10.0),
-                                        CYAN,
-                                    );
-                                    painter.text(
-                                        rect.left_top() + Vec2::new(18.0, 48.0),
-                                        Align2::LEFT_TOP,
-                                        "Начало сценария",
-                                        FontId::proportional(17.0),
-                                        text(self.dark),
-                                    );
-                                    painter.text(
-                                        rect.left_top() + Vec2::new(18.0, 78.0),
-                                        Align2::LEFT_TOP,
-                                        "Контекст проекта",
-                                        FontId::monospace(9.0),
-                                        MUTED,
-                                    );
-                                    let plus_rect = Rect::from_center_size(
-                                        Pos2::new(rect.right() - 20.0, rect.center().y),
-                                        Vec2::splat(30.0),
-                                    );
-                                    painter.circle_filled(plus_rect.center(), 14.0, PURPLE);
-                                    painter.text(
-                                        plus_rect.center(),
-                                        Align2::CENTER_CENTER,
-                                        "+",
-                                        FontId::proportional(21.0),
-                                        Color32::WHITE,
-                                    );
-                                    if ui
-                                        .interact(
-                                            plus_rect,
-                                            Id::new(("scenario-start-plus", task.id.as_str())),
-                                            Sense::click(),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.open_block_picker("start");
-                                    }
-                                }
-                                &positions[1..]
-                            } else {
-                                positions.as_slice()
-                            };
                             for (index, (step, position)) in
-                                resolved.steps.iter().zip(step_positions.iter()).enumerate()
+                                resolved.steps.iter().zip(positions.iter()).enumerate()
                             {
                                 let rect = Rect::from_min_size(*position, node_size);
                                 let selected = self.selected_step == Some(index);
                                 let interaction = ui.interact(
                                     rect,
                                     Id::new(("scenario-step", task.id.as_str(), index)),
-                                    if is_composer {
-                                        Sense::click_and_drag()
-                                    } else {
-                                        Sense::click()
-                                    },
+                                    Sense::click(),
                                 );
                                 if interaction.clicked() {
                                     self.selected_step = Some(index);
-                                }
-                                if is_composer && interaction.dragged() {
-                                    let delta = ui.ctx().input(|input| input.pointer.delta());
-                                    self.drag_composer_node(&task.id, &step.id, delta);
                                 }
                                 paint_step_node(
                                     &painter,
@@ -3438,30 +8594,6 @@ impl ScenarioApp {
                                         .map(|report| &report.status),
                                     self.dark,
                                 );
-                                if is_composer {
-                                    let plus_rect = Rect::from_center_size(
-                                        Pos2::new(rect.right() - 18.0, rect.center().y),
-                                        Vec2::splat(28.0),
-                                    );
-                                    painter.circle_filled(plus_rect.center(), 12.0, PURPLE);
-                                    painter.text(
-                                        plus_rect.center(),
-                                        Align2::CENTER_CENTER,
-                                        "+",
-                                        FontId::proportional(18.0),
-                                        Color32::WHITE,
-                                    );
-                                    if ui
-                                        .interact(
-                                            plus_rect,
-                                            Id::new(("scenario-step-plus", step.id.as_str())),
-                                            Sense::click(),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.open_block_picker(step.id.clone());
-                                    }
-                                }
                             }
                         }
 
@@ -3924,10 +9056,16 @@ fn default_github_destination_root() -> String {
 }
 
 fn github_repository_composer_task(ordinal: usize) -> Task {
-    let steps = vec![composer_step(
-        ComposerBlockKind::GithubListRepositories,
-        "list-repositories".into(),
-    )];
+    let step = default_step(ActionKind::GithubListRepositories, "list-repositories")
+        .expect("GitHub repository discovery is a graph action");
+    let graph = WorkflowGraph {
+        entries: vec![step.id.clone()],
+        nodes: vec![GraphNode::Action(Box::new(ActionNode {
+            step,
+            bindings: BTreeMap::new(),
+        }))],
+        ..WorkflowGraph::default()
+    };
     Task {
         id: format!("github-repositories-{ordinal}"),
         name: "Получить репозитории GitHub".into(),
@@ -3936,8 +9074,8 @@ fn github_repository_composer_task(ordinal: usize) -> Task {
         trust: TrustRequirement::ExternalAllowed,
         scenarios: Vec::new(),
         resolved_scenarios: Vec::new(),
-        graph: None,
-        steps,
+        graph: Some(graph),
+        steps: Vec::new(),
     }
 }
 
@@ -3969,7 +9107,7 @@ fn materialize_github_repositories(
     }
 
     let source_steps = github_picker_source_steps(&task)
-        .map(<[Step]>::to_vec)
+        .map(|steps| steps.into_iter().cloned().collect::<Vec<_>>())
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "сценарий {} должен состоять из атомарных шагов git-inspect, git-clone-if-missing, git-fetch и git-fast-forward",
@@ -4081,23 +9219,97 @@ fn materialize_github_repositories(
         }
     }
 
-    task.steps.splice(.., generated_steps);
+    let mut nodes = Vec::with_capacity(generated_steps.len());
+    let mut edges = Vec::with_capacity(generated_steps.len().saturating_sub(1));
+    for (index, step) in generated_steps.into_iter().enumerate() {
+        if let Some(previous) = nodes.last().map(GraphNode::id) {
+            edges.push(GraphEdge::new(previous, EdgePort::Success, &step.id));
+        }
+        nodes.push(GraphNode::Action(Box::new(ActionNode {
+            step,
+            bindings: BTreeMap::new(),
+        })));
+        debug_assert_eq!(nodes.len(), index + 1);
+    }
+    task.steps.clear();
+    task.graph = Some(WorkflowGraph {
+        entries: nodes
+            .first()
+            .map(|node| vec![node.id().to_owned()])
+            .unwrap_or_default(),
+        nodes,
+        edges,
+        ..WorkflowGraph::default()
+    });
     task.validate().map_err(anyhow::Error::msg)?;
     Ok(task)
 }
 
-fn github_picker_source_steps(task: &Task) -> Option<&[Step]> {
-    match task.steps.as_slice() {
-        [inspect, clone, fetch, update]
-            if matches!(inspect.action, Action::GitInspect { .. })
-                && matches!(clone.action, Action::GitCloneIfMissing { .. })
-                && matches!(fetch.action, Action::GitFetch { .. })
-                && matches!(update.action, Action::GitFastForward { .. }) =>
-        {
-            Some(task.steps.as_slice())
-        }
-        _ => None,
+fn github_picker_source_steps(task: &Task) -> Option<Vec<&Step>> {
+    const PICKER_TEMPLATE_ID: &str = "github-repositories";
+    if task.id != PICKER_TEMPLATE_ID
+        || !matches!(task.trust, TrustRequirement::BundledOnly)
+        || !task.steps.is_empty()
+    {
+        return None;
     }
+    let graph = task.graph.as_ref()?;
+    if graph.entries.len() != 1
+        || graph.nodes.len() != 4
+        || graph.edges.len() != 3
+        || !graph.exits.is_empty()
+        || !graph
+            .nodes
+            .iter()
+            .all(|node| matches!(node, GraphNode::Action(_)))
+    {
+        return None;
+    }
+
+    let expected = [
+        ActionKind::GitInspect,
+        ActionKind::GitCloneIfMissing,
+        ActionKind::GitFetch,
+        ActionKind::GitFastForward,
+    ];
+    let mut current = graph.entries[0].as_str();
+    let mut visited = BTreeSet::new();
+    let mut steps = Vec::with_capacity(expected.len());
+    for (index, expected_kind) in expected.into_iter().enumerate() {
+        if !visited.insert(current.to_owned()) {
+            return None;
+        }
+        let GraphNode::Action(action) = graph.nodes.iter().find(|node| node.id() == current)?
+        else {
+            return None;
+        };
+        if !action.bindings.is_empty()
+            || !action.step.bindings.is_empty()
+            || definition_for_action(&action.step.action).kind != expected_kind
+        {
+            return None;
+        }
+        steps.push(&action.step);
+        let outgoing = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.from.node == current)
+            .collect::<Vec<_>>();
+        if index + 1 == expected.len() {
+            if !outgoing.is_empty() {
+                return None;
+            }
+        } else {
+            let [edge] = outgoing.as_slice() else {
+                return None;
+            };
+            if edge.from.port != EdgePort::Success {
+                return None;
+            }
+            current = edge.to.node.as_str();
+        }
+    }
+    (visited.len() == graph.nodes.len()).then_some(steps)
 }
 
 fn validate_github_repository_identity(repository: &GithubRepository) -> anyhow::Result<()> {
@@ -4148,6 +9360,7 @@ fn github_step_slug(repository: &GithubRepository) -> String {
     format!("{}-{}", slug.trim_matches('-'), hex::encode(&digest[..16]))
 }
 
+#[cfg(test)]
 fn composer_block_id(kind: ComposerBlockKind) -> &'static str {
     match kind {
         ComposerBlockKind::GithubListRepositories => "list-github-repositories",
@@ -4165,6 +9378,7 @@ fn composer_block_id(kind: ComposerBlockKind) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn composer_step_context_lines(task: &Task, index: usize) -> Vec<String> {
     let Some(step) = task.steps.get(index) else {
         return Vec::new();
@@ -4181,7 +9395,7 @@ fn composer_step_context_lines(task: &Task, index: usize) -> Vec<String> {
         return lines;
     };
 
-    lines.retain(|line| !line.starts_with("loop.items[]"));
+    lines.clear();
     let Some(source) = composer_array_sources(task, index)
         .into_iter()
         .find(|source| source.step_id == *source_step && source.path == *array_path)
@@ -4286,6 +9500,7 @@ fn semantic_format_label(format: SemanticFormat) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn composer_step(kind: ComposerBlockKind, id: String) -> Step {
     let repository = "https://github.com/owner/repository.git".to_owned();
     let destination = "$HOME/Developer/owner/repository".to_owned();
@@ -4345,6 +9560,7 @@ fn composer_step(kind: ComposerBlockKind, id: String) -> Step {
     Step {
         id,
         name: block_definition(kind.action_kind()).title,
+        bindings: BTreeMap::new(),
         auth: AuthPolicy::None,
         check: None,
         dangerous: false,
@@ -4356,13 +9572,48 @@ fn composer_step(kind: ComposerBlockKind, id: String) -> Step {
 }
 
 fn describe_task_steps(task: &Task, options: &RunOptions) -> Vec<String> {
-    task.steps
-        .iter()
+    task_action_steps(task)
+        .into_iter()
         .map(|step| {
             describe_step(step, options)
                 .unwrap_or_else(|error| format!("{}: не удалось описать шаг: {error:#}", step.id))
         })
         .collect()
+}
+
+fn task_action_steps(task: &Task) -> Vec<&Step> {
+    fn visit<'a>(graph: &'a WorkflowGraph, output: &mut Vec<&'a Step>) {
+        for node in &graph.nodes {
+            match node {
+                GraphNode::Action(node) => output.push(&node.step),
+                GraphNode::ForEach(node) => visit(&node.body, output),
+                GraphNode::If(node) => {
+                    visit(&node.then_graph, output);
+                    if let Some(graph) = &node.else_graph {
+                        visit(graph, output);
+                    }
+                }
+                GraphNode::Switch(node) => {
+                    for case in &node.cases {
+                        visit(&case.graph, output);
+                    }
+                    if let Some(graph) = &node.default {
+                        visit(graph, output);
+                    }
+                }
+                GraphNode::Join(_) => {}
+            }
+        }
+    }
+
+    if !task.steps.is_empty() {
+        return task.steps.iter().collect();
+    }
+    let mut steps = Vec::new();
+    if let Some(graph) = &task.graph {
+        visit(graph, &mut steps);
+    }
+    steps
 }
 
 fn scenario_groups(
@@ -4391,7 +9642,7 @@ fn scenario_groups(
                 } else {
                     scenario.description.clone()
                 },
-                step_count: resolved.steps.len(),
+                step_count: task_action_steps(&resolved).len(),
                 step_summaries: describe_task_steps(&resolved, options),
             })
         })
@@ -4403,9 +9654,10 @@ fn scenario_groups(
 
     if let Some(configured) = configured {
         let base = pack.resolve(&template.id)?;
-        if configured.steps.len() != base.steps.len() {
-            let source_step_id = base
-                .steps
+        let configured_steps = task_action_steps(configured);
+        let base_steps = task_action_steps(&base);
+        if configured_steps.len() != base_steps.len() {
+            let source_step_id = base_steps
                 .iter()
                 .find(|step| {
                     matches!(
@@ -4440,7 +9692,7 @@ fn scenario_groups(
                 })?;
             group.step_count = group
                 .step_count
-                .checked_add(configured.steps.len() - base.steps.len())
+                .checked_add(configured_steps.len() - base_steps.len())
                 .ok_or_else(|| anyhow::anyhow!("configured scenario group is too large"))?;
         }
 
@@ -4449,7 +9701,7 @@ fn scenario_groups(
             let end = offset
                 .checked_add(group.step_count)
                 .ok_or_else(|| anyhow::anyhow!("configured scenario group offset overflow"))?;
-            let steps = configured.steps.get(offset..end).ok_or_else(|| {
+            let steps = configured_steps.get(offset..end).ok_or_else(|| {
                 anyhow::anyhow!(
                     "configured task {} does not match scenario group {}",
                     configured.id,
@@ -4466,11 +9718,11 @@ fn scenario_groups(
                 .collect();
             offset = end;
         }
-        if offset != configured.steps.len() {
+        if offset != configured_steps.len() {
             anyhow::bail!(
                 "configured task {} has {} ungrouped step(s)",
                 configured.id,
-                configured.steps.len() - offset
+                configured_steps.len() - offset
             );
         }
     }
@@ -4478,19 +9730,30 @@ fn scenario_groups(
     Ok(groups)
 }
 
+fn paint_bounded_code_lines(ui: &mut egui::Ui, source: &str, size: f32, color: Color32) {
+    for line in source.split('\n') {
+        ui.add(
+            egui::Label::new(RichText::new(line).monospace().size(size).color(color)).truncate(),
+        );
+    }
+}
+
 fn paint_step_inspector(ui: &mut egui::Ui, step: &Step, options: Option<&RunOptions>, dark: bool) {
-    ui.label(
-        RichText::new(step_title(step))
-            .strong()
-            .size(14.0)
-            .color(text(dark)),
+    ui.add(
+        egui::Label::new(
+            RichText::new(step_title(step))
+                .strong()
+                .size(14.0)
+                .color(text(dark)),
+        )
+        .truncate(),
     );
-    ui.label(RichText::new(&step.id).monospace().size(9.0).color(MUTED));
+    ui.add(egui::Label::new(RichText::new(&step.id).monospace().size(9.0).color(MUTED)).truncate());
     if let Some(options) = options {
         let summary = describe_step(step, options)
             .unwrap_or_else(|error| format!("Не удалось описать шаг: {error:#}"));
         ui.add_space(8.0);
-        ui.add(egui::Label::new(RichText::new(summary).size(9.0).color(PURPLE)).wrap());
+        ui.add(egui::Label::new(RichText::new(summary).size(9.0).color(PURPLE)).truncate());
     }
     ui.add_space(8.0);
     let yaml = serde_yaml::to_string(step).unwrap_or_else(|error| format!("Ошибка: {error}"));
@@ -4499,7 +9762,7 @@ fn paint_step_inspector(ui: &mut egui::Ui, step: &Step, options: Option<&RunOpti
         .corner_radius(8)
         .inner_margin(Margin::same(9))
         .show(ui, |ui| {
-            ui.label(RichText::new(yaml).monospace().size(9.0).color(text(dark)));
+            paint_bounded_code_lines(ui, &yaml, 9.0, text(dark));
         });
 }
 
@@ -4861,6 +10124,7 @@ fn paint_simple_condition_editor(
         .unwrap_or_else(|| format!("Недоступно: {}", field_ref_label(&rule.field)));
     egui::ComboBox::from_id_salt((editor_id, "field"))
         .selected_text(selected_label)
+        .truncate()
         .width(ui.available_width())
         .show_ui(ui, |ui| {
             for field in fields {
@@ -4912,6 +10176,7 @@ fn paint_simple_condition_editor(
     }
     egui::ComboBox::from_id_salt((editor_id, "operator"))
         .selected_text(rule.operator.label())
+        .truncate()
         .width(ui.available_width())
         .show_ui(ui, |ui| {
             for operator in &operators {
@@ -4987,6 +10252,7 @@ fn paint_condition_literal(
         ui.label(RichText::new("Тип значения").size(8.0).color(MUTED));
         egui::ComboBox::from_id_salt((editor_id, "literal-kind"))
             .selected_text(selected_kind.label())
+            .truncate()
             .width(ui.available_width())
             .show_ui(ui, |ui| {
                 for kind in &kinds {
@@ -5081,6 +10347,7 @@ fn paint_indeterminate_policy(
         ui.label(RichText::new(label).size(8.0).color(MUTED));
         egui::ComboBox::from_id_salt((editor_id, policy_id))
             .selected_text(indeterminate_policy_label(*value))
+            .truncate()
             .show_ui(ui, |ui| {
                 for policy in [
                     IndeterminatePolicy::Fail,
@@ -5115,10 +10382,7 @@ fn paint_condition_yaml(ui: &mut egui::Ui, yaml: &str, dark: bool) {
         .corner_radius(7)
         .inner_margin(Margin::same(7))
         .show(ui, |ui| {
-            ui.add(
-                egui::Label::new(RichText::new(yaml).monospace().size(8.0).color(text(dark)))
-                    .wrap(),
-            );
+            paint_bounded_code_lines(ui, yaml, 8.0, text(dark));
         });
 }
 
@@ -5140,11 +10404,14 @@ fn field_ref_label(reference: &FieldRef) -> String {
     label
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn paint_composer_step_editor(
     ui: &mut egui::Ui,
     step: &mut Step,
     array_sources: &[ComposerArraySource],
     loop_sources: &[ComposerLoopSource],
+    parent_loop_source: Option<&ComposerLoopSource>,
     dark: bool,
 ) -> bool {
     let mut changed = false;
@@ -5298,12 +10565,15 @@ fn paint_composer_step_editor(
                         }
                     });
             }
-            ui.label(
-                RichText::new(format!(
-                    "В дочернем блоке используйте {{{{{item}.field}}}} — например, {{{{{item}.https_url}}}}."
-                ))
-                .size(9.0)
-                .color(PURPLE),
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!(
+                        "Контекст итерации — только дочернему блоку: {{{{{item}.field}}}} (например, {{{{{item}.https_url}}}})."
+                    ))
+                    .size(9.0)
+                    .color(PURPLE),
+                )
+                .wrap(),
             );
         }
         Action::ForEachGitCloneIfMissing {
@@ -5421,8 +10691,32 @@ fn paint_composer_step_editor(
             changed |= composer_git_auth(ui, &mut step.auth);
         }
         Action::GitInspect { repo, dest } => {
-            changed |= composer_text_field(ui, "Repository URL", repo);
-            changed |= composer_text_field(ui, "Локальная папка", dest);
+            section_label(ui, "ВХОДНОЙ КОНТЕКСТ");
+            changed |= composer_input_editor(
+                ui,
+                &editor_step_id,
+                "repo",
+                "Repository URL",
+                repo,
+                input_schema.field("repo"),
+                array_sources,
+                parent_loop_source,
+                &mut step.bindings,
+                dark,
+            );
+            ui.add_space(7.0);
+            changed |= composer_input_editor(
+                ui,
+                &editor_step_id,
+                "dest",
+                "Локальная папка",
+                dest,
+                input_schema.field("dest"),
+                array_sources,
+                parent_loop_source,
+                &mut step.bindings,
+                dark,
+            );
         }
         Action::GitCloneIfMissing { repo, dest, branch } => {
             changed |= composer_text_field(ui, "Repository URL", repo);
@@ -5498,11 +10792,881 @@ fn paint_composer_step_editor(
     changed
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn composer_text_field(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
     ui.label(RichText::new(label).size(9.0).color(MUTED));
     ui.text_edit_singleline(value).changed()
 }
 
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+#[allow(dead_code)]
+fn composer_input_editor(
+    ui: &mut egui::Ui,
+    step_id: &str,
+    target: &str,
+    label: &str,
+    manual_value: &mut String,
+    expected: Option<&FieldSchema>,
+    array_sources: &[ComposerArraySource],
+    parent_loop_source: Option<&ComposerLoopSource>,
+    bindings: &mut BTreeMap<String, Binding>,
+    dark: bool,
+) -> bool {
+    if let Some(loop_source) = parent_loop_source {
+        return composer_loop_input_editor(
+            ui,
+            step_id,
+            target,
+            label,
+            manual_value,
+            expected,
+            loop_source,
+            array_sources,
+            bindings,
+            dark,
+        );
+    }
+    composer_indexed_input_editor(
+        ui,
+        step_id,
+        target,
+        label,
+        manual_value,
+        expected,
+        array_sources,
+        bindings,
+        dark,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+#[allow(dead_code)]
+fn composer_loop_input_editor(
+    ui: &mut egui::Ui,
+    step_id: &str,
+    target: &str,
+    label: &str,
+    manual_value: &mut String,
+    expected: Option<&FieldSchema>,
+    loop_source: &ComposerLoopSource,
+    array_sources: &[ComposerArraySource],
+    bindings: &mut BTreeMap<String, Binding>,
+    dark: bool,
+) -> bool {
+    ui.label(RichText::new(label).size(9.0).color(MUTED));
+    let Some(expected) = expected else {
+        ui.label(
+            RichText::new("У блока нет типизированного контракта для этого входа.")
+                .size(8.0)
+                .color(ORANGE),
+        );
+        return false;
+    };
+
+    if target == "dest" {
+        return composer_loop_destination_input_editor(
+            ui,
+            step_id,
+            target,
+            manual_value,
+            loop_source,
+            bindings,
+            dark,
+        );
+    }
+
+    let fields = composer_loop_field_options(loop_source, expected);
+    let membership_required = target == "repo";
+    let existing = bindings.get(target).cloned();
+    let loop_sources = std::slice::from_ref(loop_source);
+    let parsed_loop = existing
+        .as_ref()
+        .and_then(|binding| composer_loop_binding_selection(binding, loop_sources));
+    // Projects created before loop-item bindings existed may contain an array
+    // index here. Detect it only when the canvas proves this consumer is the
+    // immediate child and the indexed array is exactly the loop collection,
+    // but require an explicit click because the semantic rewrite is material.
+    let indexed_migration = existing
+        .as_ref()
+        .and_then(|binding| composer_indexed_binding_for_loop(binding, loop_source, array_sources));
+    let mut selection = parsed_loop;
+    let mut supported = selection.as_ref().is_some_and(|selection| {
+        selection.loop_step == loop_source.step_id
+            && fields
+                .iter()
+                .any(|field| field.path == selection.field_path)
+    });
+    let mut changed = false;
+    if membership_required && existing.is_none() {
+        let Some(field) = fields.first() else {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Текущий элемент цикла не содержит обязательного поля Repository URL.",
+                    )
+                    .size(8.0)
+                    .color(ORANGE),
+                )
+                .wrap(),
+            );
+            return false;
+        };
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Repository URL ещё не привязан. Для дочернего блока For each нужен текущий элемент цикла.",
+                )
+                .size(8.0)
+                .color(ORANGE),
+            )
+            .wrap(),
+        );
+        if ui.button("Использовать текущий элемент цикла").clicked()
+        {
+            changed |=
+                composer_insert_default_loop_binding(bindings, target, loop_source, expected);
+            selection = Some(ComposerLoopBinding {
+                loop_step: loop_source.step_id.clone(),
+                field_path: field.path.clone(),
+            });
+            supported = true;
+        } else {
+            return false;
+        }
+    }
+    if let Some(migration) = indexed_migration.filter(|migration| {
+        fields
+            .iter()
+            .any(|field| field.path == migration.field_path)
+    }) {
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Сохранена привязка к номеру элемента массива. Дочерний блок For each должен получать текущий элемент каждой итерации.",
+                )
+                .size(8.0)
+                .color(ORANGE),
+            )
+            .wrap(),
+        );
+        if ui.button("Использовать текущий элемент цикла").clicked()
+        {
+            bindings.insert(
+                target.into(),
+                composer_loop_binding(loop_source, &migration.field_path),
+            );
+            selection = Some(migration);
+            supported = true;
+            changed = true;
+        } else {
+            return false;
+        }
+    }
+
+    if let Some(binding) = existing.as_ref().filter(|_| !supported) {
+        ui.label(
+            RichText::new("Привязка задана в YAML и не поддерживается этим визуальным редактором.")
+                .size(8.0)
+                .color(ORANGE),
+        );
+        let binding_text = match binding {
+            Binding::Field { field } => field_ref_label(field),
+            _ => serde_yaml::to_string(binding)
+                .unwrap_or_else(|_| "не удалось показать привязку".into())
+                .trim()
+                .to_owned(),
+        };
+        Frame::new()
+            .fill(code_surface(dark))
+            .corner_radius(7)
+            .inner_margin(Margin::same(7))
+            .show(ui, |ui| {
+                paint_bounded_code_lines(ui, &binding_text, 8.0, text(dark));
+            });
+        if membership_required {
+            let Some(field) = fields.first() else {
+                return changed;
+            };
+            if ui.button("Использовать текущий элемент цикла").clicked()
+            {
+                selection = Some(ComposerLoopBinding {
+                    loop_step: loop_source.step_id.clone(),
+                    field_path: field.path.clone(),
+                });
+                bindings.insert(
+                    target.into(),
+                    composer_loop_binding(loop_source, &field.path),
+                );
+                supported = true;
+                changed = true;
+            } else {
+                return changed;
+            }
+        } else {
+            if ui.small_button("Заменить ручным вводом").clicked() {
+                bindings.remove(target);
+                return true;
+            }
+            return changed;
+        }
+    }
+
+    let mut use_context = supported || membership_required;
+    let was_context = use_context;
+    ui.label(RichText::new("Источник значения").size(8.0).color(MUTED));
+    if membership_required {
+        Frame::new()
+            .fill(code_surface(dark))
+            .corner_radius(7)
+            .inner_margin(Margin::same(7))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new("Текущий элемент цикла (обязательно)")
+                        .size(8.0)
+                        .color(PURPLE),
+                );
+            });
+    } else {
+        egui::ComboBox::from_id_salt(("loop-input-mode", step_id, target))
+            .selected_text(if use_context {
+                "Текущий элемент цикла"
+            } else {
+                "Вручную"
+            })
+            .width(ui.available_width())
+            .truncate()
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut use_context, false, "Вручную");
+                ui.add_enabled_ui(!fields.is_empty(), |ui| {
+                    ui.selectable_value(&mut use_context, true, "Текущий элемент цикла");
+                });
+            });
+    }
+
+    if use_context != was_context {
+        if use_context {
+            if let Some(field) = fields.first() {
+                selection = Some(ComposerLoopBinding {
+                    loop_step: loop_source.step_id.clone(),
+                    field_path: field.path.clone(),
+                });
+                bindings.insert(
+                    target.into(),
+                    composer_loop_binding(loop_source, &field.path),
+                );
+                changed = true;
+            }
+        } else {
+            selection = None;
+            bindings.remove(target);
+            changed = true;
+        }
+    }
+
+    if !use_context {
+        changed |= ui.text_edit_singleline(manual_value).changed();
+        if fields.is_empty() {
+            ui.add(
+                egui::Label::new(
+                    RichText::new("В текущем элементе цикла нет поля совместимого типа.")
+                        .size(8.0)
+                        .color(MUTED),
+                )
+                .wrap(),
+            );
+        }
+        return changed;
+    }
+
+    let Some(mut selection) = selection else {
+        ui.label(
+            RichText::new("Не удалось прочитать привязку к текущему элементу цикла.")
+                .size(8.0)
+                .color(ORANGE),
+        );
+        return changed;
+    };
+
+    ui.label(
+        RichText::new("Текущий элемент цикла")
+            .size(8.0)
+            .color(MUTED),
+    );
+    let loop_label = format!(
+        "{} → {}",
+        truncate(&loop_source.step_name, 28),
+        loop_source.item
+    );
+    Frame::new()
+        .fill(code_surface(dark))
+        .corner_radius(7)
+        .inner_margin(Margin::same(7))
+        .show(ui, |ui| {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&loop_label)
+                        .monospace()
+                        .size(8.0)
+                        .color(PURPLE),
+                )
+                .truncate(),
+            )
+            .on_hover_text(format!(
+                "{} ({}) → {}",
+                loop_source.step_name, loop_source.step_id, loop_source.item
+            ));
+        });
+
+    ui.label(
+        RichText::new("Поле текущего элемента")
+            .size(8.0)
+            .color(MUTED),
+    );
+    let field_label = fields
+        .iter()
+        .find(|field| field.path == selection.field_path)
+        .map(|field| {
+            let name = if field.path.is_empty() {
+                "Элемент целиком"
+            } else {
+                &field.path
+            };
+            format!(
+                "{} · {}",
+                name,
+                context_type_label(&field.value_type, field.nullable, !field.required)
+            )
+        })
+        .unwrap_or_else(|| "Поле не выбрано".into());
+    let field_response = egui::ComboBox::from_id_salt(("loop-input-field", step_id, target))
+        .selected_text(field_label.clone())
+        .width(ui.available_width())
+        .truncate()
+        .show_ui(ui, |ui| {
+            for field in &fields {
+                let name = if field.path.is_empty() {
+                    "Элемент целиком"
+                } else {
+                    &field.path
+                };
+                let label = format!(
+                    "{} · {}",
+                    name,
+                    context_type_label(&field.value_type, field.nullable, !field.required)
+                );
+                if ui
+                    .add(
+                        egui::Button::selectable(field.path == selection.field_path, label)
+                            .truncate()
+                            .min_size(Vec2::new(ui.available_width(), 0.0)),
+                    )
+                    .clicked()
+                {
+                    selection.field_path = field.path.clone();
+                    changed = true;
+                    ui.close();
+                }
+            }
+        });
+    field_response.response.on_hover_text(field_label);
+
+    if changed {
+        bindings.insert(
+            target.into(),
+            composer_loop_binding(loop_source, &selection.field_path),
+        );
+    }
+    let preview = composer_loop_binding_preview(loop_source, &selection, target);
+    ui.add(
+        egui::Label::new(RichText::new(&preview).monospace().size(8.0).color(PURPLE)).truncate(),
+    )
+    .on_hover_text(format!(
+        "{} → {target}",
+        field_ref_label(&composer_loop_field_ref(loop_source, &selection.field_path))
+    ));
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "На каждой итерации блок получает один текущий элемент, а не весь массив.",
+            )
+            .size(8.0)
+            .color(MUTED),
+        )
+        .wrap(),
+    );
+    changed
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+#[allow(dead_code)]
+fn composer_loop_destination_input_editor(
+    ui: &mut egui::Ui,
+    step_id: &str,
+    target: &str,
+    manual_value: &mut String,
+    loop_source: &ComposerLoopSource,
+    bindings: &mut BTreeMap<String, Binding>,
+    dark: bool,
+) -> bool {
+    let suffixes = composer_loop_destination_suffixes(loop_source);
+    let existing = bindings.get(target).cloned();
+    let mut selection = existing
+        .as_ref()
+        .and_then(|binding| composer_loop_destination_binding_selection(binding, loop_source));
+
+    if let Some(binding) = existing.as_ref().filter(|_| selection.is_none()) {
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Привязка локальной папки задана в YAML и не поддерживается этим визуальным редактором.",
+                )
+                .size(8.0)
+                .color(ORANGE),
+            )
+            .wrap(),
+        );
+        let binding_text = serde_yaml::to_string(binding)
+            .unwrap_or_else(|_| "не удалось показать привязку".into())
+            .trim()
+            .to_owned();
+        Frame::new()
+            .fill(code_surface(dark))
+            .corner_radius(7)
+            .inner_margin(Margin::same(7))
+            .show(ui, |ui| {
+                paint_bounded_code_lines(ui, &binding_text, 8.0, text(dark));
+            });
+        let mut changed = false;
+        ui.horizontal_wrapped(|ui| {
+            if let Some(suffix) = suffixes.first() {
+                if ui.button("Путь текущего репозитория").clicked() {
+                    bindings.insert(
+                        target.into(),
+                        composer_loop_destination_binding(loop_source, "$HOME/Developer", suffix),
+                    );
+                    changed = true;
+                }
+            }
+            if ui.small_button("Заменить ручным вводом").clicked() {
+                bindings.remove(target);
+                changed = true;
+            }
+        });
+        return changed;
+    }
+
+    let mut use_context = selection.is_some();
+    let was_context = use_context;
+    ui.label(RichText::new("Источник значения").size(8.0).color(MUTED));
+    egui::ComboBox::from_id_salt(("loop-destination-mode", step_id, target))
+        .selected_text(if use_context {
+            "По текущему репозиторию"
+        } else {
+            "Вручную"
+        })
+        .width(ui.available_width())
+        .truncate()
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut use_context, false, "Вручную");
+            ui.add_enabled_ui(!suffixes.is_empty(), |ui| {
+                ui.selectable_value(&mut use_context, true, "По текущему репозиторию");
+            });
+        });
+
+    let mut changed = false;
+    if use_context != was_context {
+        if use_context {
+            if let Some(suffix) = suffixes.first() {
+                let next = ComposerLoopDestinationBinding {
+                    root: "$HOME/Developer".into(),
+                    suffix: suffix.clone(),
+                };
+                bindings.insert(
+                    target.into(),
+                    composer_loop_destination_binding(loop_source, &next.root, &next.suffix),
+                );
+                selection = Some(next);
+                changed = true;
+            }
+        } else {
+            bindings.remove(target);
+            selection = None;
+            changed = true;
+        }
+    }
+
+    if !use_context {
+        changed |= ui.text_edit_singleline(manual_value).changed();
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Один и тот же локальный путь будет использован для каждого репозитория в цикле.",
+                )
+                .size(8.0)
+                .color(ORANGE),
+            )
+            .wrap(),
+        );
+        if suffixes.is_empty() {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Для динамического пути добавьте full_name либо owner и name в поля контекста For each.",
+                    )
+                    .size(8.0)
+                    .color(MUTED),
+                )
+                .wrap(),
+            );
+        }
+        return changed;
+    }
+
+    let Some(mut selection) = selection else {
+        ui.label(
+            RichText::new("Не удалось прочитать путь текущего репозитория.")
+                .size(8.0)
+                .color(ORANGE),
+        );
+        return changed;
+    };
+
+    ui.label(RichText::new("Базовый каталог").size(8.0).color(MUTED));
+    if ui.text_edit_singleline(&mut selection.root).changed() {
+        changed = true;
+    }
+    if let Some(error) = composer_destination_root_error(&selection.root) {
+        ui.label(RichText::new(error).size(8.0).color(ORANGE));
+    }
+
+    ui.label(RichText::new("Подпапка репозитория").size(8.0).color(MUTED));
+    let suffix_label = composer_loop_destination_suffix_label(loop_source, &selection.suffix);
+    egui::ComboBox::from_id_salt(("loop-destination-suffix", step_id, target))
+        .selected_text(&suffix_label)
+        .width(ui.available_width())
+        .truncate()
+        .show_ui(ui, |ui| {
+            for suffix in &suffixes {
+                let label = composer_loop_destination_suffix_label(loop_source, suffix);
+                if ui
+                    .selectable_label(*suffix == selection.suffix, label)
+                    .clicked()
+                {
+                    selection.suffix = suffix.clone();
+                    changed = true;
+                    ui.close();
+                }
+            }
+        })
+        .response
+        .on_hover_text(suffix_label);
+
+    if changed {
+        bindings.insert(
+            target.into(),
+            composer_loop_destination_binding(loop_source, &selection.root, &selection.suffix),
+        );
+    }
+    let preview = composer_loop_destination_preview(loop_source, &selection);
+    ui.add(
+        egui::Label::new(RichText::new(&preview).monospace().size(8.0).color(PURPLE)).truncate(),
+    )
+    .on_hover_text(preview);
+    ui.add(
+        egui::Label::new(
+            RichText::new("На каждой итерации путь собирается для одного текущего репозитория.")
+                .size(8.0)
+                .color(MUTED),
+        )
+        .wrap(),
+    );
+    changed
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+#[allow(dead_code)]
+fn composer_indexed_input_editor(
+    ui: &mut egui::Ui,
+    step_id: &str,
+    target: &str,
+    label: &str,
+    manual_value: &mut String,
+    expected: Option<&FieldSchema>,
+    array_sources: &[ComposerArraySource],
+    bindings: &mut BTreeMap<String, Binding>,
+    dark: bool,
+) -> bool {
+    ui.label(RichText::new(label).size(9.0).color(MUTED));
+    let Some(expected) = expected else {
+        ui.label(
+            RichText::new("У блока нет типизированного контракта для этого входа.")
+                .size(8.0)
+                .color(ORANGE),
+        );
+        return false;
+    };
+
+    let compatible_sources = array_sources
+        .iter()
+        .filter_map(|source| {
+            let fields = composer_indexed_field_options(source, expected);
+            (!fields.is_empty()).then_some((source, fields))
+        })
+        .collect::<Vec<_>>();
+    let existing = bindings.get(target).cloned();
+    let parsed = existing
+        .as_ref()
+        .and_then(|binding| composer_indexed_binding_selection(binding, array_sources));
+    let supported = parsed.as_ref().filter(|selection| {
+        selection.index < COMPOSER_MAX_ARRAY_ORDINAL
+            && compatible_sources.iter().any(|(source, fields)| {
+                source.step_id == selection.source_step
+                    && source.path == selection.array_path
+                    && fields
+                        .iter()
+                        .any(|field| field.path == selection.field_path)
+            })
+    });
+
+    if let Some(binding) = existing.as_ref().filter(|_| supported.is_none()) {
+        ui.label(
+            RichText::new("Привязка задана в YAML и не поддерживается этим визуальным редактором.")
+                .size(8.0)
+                .color(ORANGE),
+        );
+        let binding_text = match binding {
+            Binding::Field { field } => field_ref_label(field),
+            _ => serde_yaml::to_string(binding)
+                .unwrap_or_else(|_| "не удалось показать привязку".into())
+                .trim()
+                .to_owned(),
+        };
+        Frame::new()
+            .fill(code_surface(dark))
+            .corner_radius(7)
+            .inner_margin(Margin::same(7))
+            .show(ui, |ui| {
+                paint_bounded_code_lines(ui, &binding_text, 8.0, text(dark));
+            });
+        if ui.small_button("Заменить ручным вводом").clicked() {
+            bindings.remove(target);
+            return true;
+        }
+        return false;
+    }
+
+    let mut use_context = supported.is_some();
+    let was_context = use_context;
+    ui.label(RichText::new("Источник значения").size(8.0).color(MUTED));
+    egui::ComboBox::from_id_salt(("input-mode", step_id, target))
+        .selected_text(if use_context {
+            "Из контекста"
+        } else {
+            "Вручную"
+        })
+        .width(ui.available_width())
+        .truncate()
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut use_context, false, "Вручную");
+            ui.add_enabled_ui(!compatible_sources.is_empty(), |ui| {
+                ui.selectable_value(&mut use_context, true, "Из контекста");
+            });
+        });
+
+    let mut changed = false;
+    if use_context != was_context {
+        if use_context {
+            if let Some((source, fields)) = compatible_sources.first() {
+                bindings.insert(
+                    target.into(),
+                    composer_indexed_binding(source, 0, &fields[0].path),
+                );
+                changed = true;
+            }
+        } else {
+            bindings.remove(target);
+            changed = true;
+        }
+    }
+
+    if !use_context {
+        changed |= ui.text_edit_singleline(manual_value).changed();
+        if compatible_sources.is_empty() {
+            ui.label(
+                RichText::new("В предыдущих массивах нет поля совместимого типа.")
+                    .size(8.0)
+                    .color(MUTED),
+            );
+        }
+        return changed;
+    }
+
+    let Some(mut selection) = bindings
+        .get(target)
+        .and_then(|binding| composer_indexed_binding_selection(binding, array_sources))
+    else {
+        ui.label(
+            RichText::new("Не удалось прочитать выбранную контекстную привязку.")
+                .size(8.0)
+                .color(ORANGE),
+        );
+        return changed;
+    };
+
+    ui.label(
+        RichText::new("Массив предыдущего блока")
+            .size(8.0)
+            .color(MUTED),
+    );
+    let source_label = compatible_sources
+        .iter()
+        .find(|(source, _)| {
+            source.step_id == selection.source_step && source.path == selection.array_path
+        })
+        .map(|(source, _)| {
+            format!(
+                "{} ({}) → {}[]",
+                truncate(&source.step_name, 24),
+                source.step_id,
+                source.path
+            )
+        })
+        .unwrap_or_else(|| "Источник не выбран".into());
+    let source_response = egui::ComboBox::from_id_salt(("indexed-input-source", step_id, target))
+        .selected_text(source_label.clone())
+        .width(ui.available_width())
+        .truncate()
+        .show_ui(ui, |ui| {
+            for (source, fields) in &compatible_sources {
+                let selected =
+                    source.step_id == selection.source_step && source.path == selection.array_path;
+                let label = format!(
+                    "{} ({}) → {}[]",
+                    truncate(&source.step_name, 24),
+                    source.step_id,
+                    source.path
+                );
+                if ui
+                    .add(
+                        egui::Button::selectable(selected, label)
+                            .truncate()
+                            .min_size(Vec2::new(ui.available_width(), 0.0)),
+                    )
+                    .clicked()
+                {
+                    selection.source_step = source.step_id.clone();
+                    selection.array_path = source.path.clone();
+                    selection.field_path = fields[0].path.clone();
+                    changed = true;
+                    ui.close();
+                }
+            }
+        });
+    source_response.response.on_hover_text(source_label);
+
+    ui.label(RichText::new("Номер элемента (с 1)").size(8.0).color(MUTED));
+    let mut ordinal = selection.index.saturating_add(1);
+    if ui
+        .add(
+            egui::DragValue::new(&mut ordinal)
+                .range(1..=COMPOSER_MAX_ARRAY_ORDINAL)
+                .speed(1),
+        )
+        .changed()
+    {
+        selection.index = ordinal.saturating_sub(1);
+        changed = true;
+    }
+
+    let selected_source = compatible_sources.iter().find(|(source, _)| {
+        source.step_id == selection.source_step && source.path == selection.array_path
+    });
+    let selected_fields = selected_source
+        .map(|(_, fields)| fields.as_slice())
+        .unwrap_or_default();
+    ui.label(RichText::new("Поле элемента").size(8.0).color(MUTED));
+    let field_label = selected_fields
+        .iter()
+        .find(|field| field.path == selection.field_path)
+        .map(|field| {
+            let name = if field.path.is_empty() {
+                "Элемент целиком"
+            } else {
+                &field.path
+            };
+            format!(
+                "{} · {}",
+                name,
+                context_type_label(&field.value_type, field.nullable, !field.required)
+            )
+        })
+        .unwrap_or_else(|| "Поле не выбрано".into());
+    let field_response = egui::ComboBox::from_id_salt(("indexed-input-field", step_id, target))
+        .selected_text(field_label.clone())
+        .width(ui.available_width())
+        .truncate()
+        .show_ui(ui, |ui| {
+            for field in selected_fields {
+                let name = if field.path.is_empty() {
+                    "Элемент целиком"
+                } else {
+                    &field.path
+                };
+                let label = format!(
+                    "{} · {}",
+                    name,
+                    context_type_label(&field.value_type, field.nullable, !field.required)
+                );
+                if ui
+                    .add(
+                        egui::Button::selectable(field.path == selection.field_path, label)
+                            .truncate()
+                            .min_size(Vec2::new(ui.available_width(), 0.0)),
+                    )
+                    .clicked()
+                {
+                    selection.field_path = field.path.clone();
+                    changed = true;
+                    ui.close();
+                }
+            }
+        });
+    field_response.response.on_hover_text(field_label);
+
+    if changed {
+        if let Some((source, _)) = selected_source {
+            bindings.insert(
+                target.into(),
+                composer_indexed_binding(source, selection.index, &selection.field_path),
+            );
+        }
+    }
+    let preview = composer_indexed_binding_preview(&selection, target);
+    ui.add(
+        egui::Label::new(RichText::new(&preview).monospace().size(8.0).color(PURPLE)).truncate(),
+    )
+    .on_hover_text(preview);
+    ui.add(
+        egui::Label::new(
+            RichText::new(format!(
+                "Длина массива определяется только при запуске. Если в нём меньше {} элементов, входной контекст отсутствует и выполнение остановится (Missing).",
+                selection.index.saturating_add(1)
+            ))
+            .size(8.0)
+            .color(ORANGE),
+        )
+        .wrap(),
+    );
+    changed
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
 fn composer_binding_selector(
     ui: &mut egui::Ui,
     step_id: &str,
@@ -5540,6 +11704,8 @@ fn composer_binding_selector(
     changed
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn composer_git_auth(ui: &mut egui::Ui, auth: &mut AuthPolicy) -> bool {
     let mut enabled = matches!(auth, AuthPolicy::GitCredential);
     if ui
@@ -5589,6 +11755,182 @@ fn paint_connector(painter: &egui::Painter, from: Pos2, to: Pos2) {
     painter.circle_stroke(to, 11.0, Stroke::new(2.0, translucent(PURPLE, 80)));
 }
 
+fn paint_graph_connector(
+    painter: &egui::Painter,
+    from: Pos2,
+    to: Pos2,
+    kind: ComposerGraphEdgeKind,
+    port: Option<&EdgePort>,
+) {
+    let color = match kind {
+        ComposerGraphEdgeKind::Flow => PURPLE,
+        ComposerGraphEdgeKind::Iteration => CYAN,
+        ComposerGraphEdgeKind::Then => CYAN,
+        ComposerGraphEdgeKind::Else => ORANGE,
+        ComposerGraphEdgeKind::Case => BLUE,
+        ComposerGraphEdgeKind::Default => MUTED,
+    };
+    let bend = ((to.x - from.x).abs() * 0.46).max(34.0);
+    let direction = if to.x >= from.x { 1.0 } else { -1.0 };
+    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+        [
+            from,
+            from + Vec2::new(bend * direction, 0.0),
+            to - Vec2::new(bend * direction, 0.0),
+            to,
+        ],
+        false,
+        Color32::TRANSPARENT,
+        Stroke::new(4.0, translucent(color, 125)),
+    ));
+    painter.circle_filled(from, 6.0, color);
+    painter.circle_filled(to, 6.0, color);
+    let label = match kind {
+        ComposerGraphEdgeKind::Flow => port.map(|port| graph_edge_port_label(port).to_owned()),
+        ComposerGraphEdgeKind::Iteration => Some("для item".into()),
+        ComposerGraphEdgeKind::Then => Some("да".into()),
+        ComposerGraphEdgeKind::Else => Some("нет".into()),
+        ComposerGraphEdgeKind::Case => Some("вариант".into()),
+        ComposerGraphEdgeKind::Default => Some("иначе".into()),
+    };
+    if let Some(label) = label {
+        painter.text(
+            from.lerp(to, 0.5) + Vec2::new(0.0, -12.0),
+            Align2::CENTER_BOTTOM,
+            label,
+            FontId::monospace(8.0),
+            color,
+        );
+    }
+}
+
+fn paint_graph_plus(painter: &egui::Painter, rect: Rect, label: &str) {
+    painter.circle_filled(rect.center(), 12.0, PURPLE);
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(16.0),
+        Color32::WHITE,
+    );
+}
+
+fn paint_graph_control_node(
+    painter: &egui::Painter,
+    rect: Rect,
+    id: &str,
+    card_kind: &ComposerGraphCard,
+    selected: bool,
+    status: Option<&StepStatus>,
+    dark: bool,
+) {
+    let (eyebrow, title, icon, accent) = match card_kind {
+        ComposerGraphCard::ForEach { item_alias, .. } => {
+            ("ЦИКЛ", format!("Для каждого {item_alias}"), "∀", CYAN)
+        }
+        ComposerGraphCard::If => ("УСЛОВИЕ", "Если / иначе".into(), "?", ORANGE),
+        ComposerGraphCard::Switch => ("ВЫБОР", "Switch".into(), "≡", ORANGE),
+        ComposerGraphCard::Join => ("СЛИЯНИЕ", "Join".into(), "⋈", BLUE),
+        ComposerGraphCard::Action(_) => unreachable!("actions use paint_step_node"),
+    };
+    painter.rect_filled(
+        rect.translate(Vec2::new(0.0, 7.0)),
+        CornerRadius::same(14),
+        translucent(Color32::BLACK, 22),
+    );
+    painter.rect(
+        rect,
+        CornerRadius::same(14),
+        card(dark),
+        Stroke::new(
+            if selected { 2.0 } else { 1.0 },
+            if selected { PURPLE } else { line(dark) },
+        ),
+        StrokeKind::Outside,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(rect.min, Pos2::new(rect.left() + 7.0, rect.bottom())),
+        CornerRadius::same(14),
+        accent,
+    );
+    let icon_rect = Rect::from_min_size(rect.min + Vec2::new(20.0, 20.0), Vec2::new(38.0, 38.0));
+    painter.rect_filled(
+        icon_rect,
+        CornerRadius::same(9),
+        translucent(accent, if dark { 54 } else { 28 }),
+    );
+    painter.text(
+        icon_rect.center(),
+        Align2::CENTER_CENTER,
+        icon,
+        FontId::proportional(15.0),
+        accent,
+    );
+    painter.text(
+        rect.min + Vec2::new(70.0, 18.0),
+        Align2::LEFT_TOP,
+        eyebrow,
+        FontId::proportional(8.0),
+        MUTED,
+    );
+    painter.text(
+        rect.min + Vec2::new(70.0, 36.0),
+        Align2::LEFT_TOP,
+        truncate(&title, 23),
+        FontId::proportional(13.0),
+        text(dark),
+    );
+    painter.text(
+        rect.min + Vec2::new(20.0, 78.0),
+        Align2::LEFT_TOP,
+        truncate(id, 27),
+        FontId::monospace(9.0),
+        MUTED,
+    );
+    paint_status_badge(painter, rect, status);
+}
+
+fn graph_control_summary(ui: &mut egui::Ui, kind: &str, id: &str, dark: bool) {
+    ui.label(RichText::new(kind).strong().size(10.0).color(CYAN));
+    ui.label(RichText::new("ID блока").size(9.0).color(MUTED));
+    ui.label(RichText::new(id).monospace().size(9.0).color(PURPLE));
+    ui.label(
+        RichText::new("Управляющий узел хранит ветви непосредственно в WorkflowGraph.")
+            .size(8.0)
+            .color(text(dark)),
+    );
+}
+
+fn binding_label(binding: &Binding) -> String {
+    match binding {
+        Binding::Field { field } => field_ref_label(field),
+        Binding::Literal { value } => serde_json::to_string(value).unwrap_or_else(|_| "?".into()),
+        Binding::Interpolated { .. } => "interpolated expression".into(),
+        Binding::Template { template } => template.clone(),
+    }
+}
+
+fn collect_context_type_lines(value_type: &ContextType, path: &str, lines: &mut Vec<String>) {
+    match value_type {
+        ContextType::Object { schema } => {
+            for (name, field) in &schema.fields {
+                let child = join_context_path(path, name);
+                collect_context_type_lines(&field.value_type, &child, lines);
+            }
+        }
+        ContextType::Array { items } => {
+            lines.push(format!(
+                "{path}[] : {}",
+                context_type_label(items, false, false)
+            ));
+        }
+        _ => lines.push(format!(
+            "{path} : {}",
+            context_type_label(value_type, false, false)
+        )),
+    }
+}
+
 fn paint_connectors(painter: &egui::Painter, positions: &[Pos2], node_size: Vec2) {
     for pair in positions.windows(2) {
         let from = pair[0] + Vec2::new(node_size.x, node_size.y * 0.5);
@@ -5599,11 +11941,15 @@ fn paint_connectors(painter: &egui::Painter, positions: &[Pos2], node_size: Vec2
 
 fn paint_composer_connectors(
     painter: &egui::Painter,
+    task: &Task,
     positions: &BTreeMap<String, Pos2>,
     parents: &BTreeMap<String, String>,
     node_size: Vec2,
 ) {
     for (child, parent) in parents {
+        if !composer_canvas_edge_is_visible(task, child, parent) {
+            continue;
+        }
         let (Some(from), Some(to)) = (positions.get(parent), positions.get(child)) else {
             continue;
         };
@@ -5873,7 +12219,7 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, dark: bool) {
         Color32::from_rgba_unmultiplied(70, 67, 58, 14)
     };
     let step = 32.0;
-    let mut x = rect.left();
+    let mut x = (rect.left() / step).floor() * step;
     while x <= rect.right() {
         painter.line_segment(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
@@ -5881,7 +12227,7 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, dark: bool) {
         );
         x += step;
     }
-    let mut y = rect.top();
+    let mut y = (rect.top() / step).floor() * step;
     while y <= rect.bottom() {
         painter.line_segment(
             [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
@@ -6161,6 +12507,28 @@ fn section_label(ui: &mut egui::Ui, label: &str) {
     ui.add_space(5.0);
 }
 
+fn paint_composer_output_json(ui: &mut egui::Ui, step_id: &str, json: &str, dark: bool) {
+    let outer_width = ui.available_width().max(0.0);
+    ScrollArea::vertical()
+        .id_salt(("composer-step-output", step_id))
+        .max_width(outer_width)
+        .max_height(240.0)
+        .horizontal_scroll_offset(0.0)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let content_width = ui.available_width().max(0.0);
+            ui.set_width(content_width);
+            Frame::new()
+                .fill(code_surface(dark))
+                .corner_radius(8)
+                .inner_margin(Margin::same(8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width().max(0.0));
+                    paint_bounded_code_lines(ui, json, 8.0, text(dark));
+                });
+        });
+}
+
 fn paint_composer_run_report(
     ui: &mut egui::Ui,
     report: &RunReport,
@@ -6212,23 +12580,16 @@ fn paint_composer_run_report(
                 text(dark)
             },
         ))
-        .wrap(),
-    );
+        .truncate(),
+    )
+    .on_hover_text(&step.summary);
 
     if !step.logs.is_empty() {
         egui::CollapsingHeader::new(format!("Логи блока · {}", step.logs.len()))
             .default_open(matches!(&step.status, StepStatus::Failed))
             .show(ui, |ui| {
                 for log in &step.logs {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&log.message)
-                                .monospace()
-                                .size(8.0)
-                                .color(MUTED),
-                        )
-                        .wrap(),
-                    );
+                    paint_bounded_code_lines(ui, &log.message, 8.0, MUTED);
                 }
             });
     }
@@ -6239,23 +12600,7 @@ fn paint_composer_run_report(
         egui::CollapsingHeader::new("Выходной контекст JSON")
             .default_open(false)
             .show(ui, |ui| {
-                ScrollArea::vertical()
-                    .id_salt(("composer-step-output", &step.step_id))
-                    .max_height(240.0)
-                    .show(ui, |ui| {
-                        Frame::new()
-                            .fill(code_surface(dark))
-                            .corner_radius(8)
-                            .inner_margin(Margin::same(8))
-                            .show(ui, |ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(json).monospace().size(8.0).color(text(dark)),
-                                    )
-                                    .wrap(),
-                                );
-                            });
-                    });
+                paint_composer_output_json(ui, &step.step_id, &json, dark);
             });
     }
 }
@@ -6282,7 +12627,9 @@ fn error_box(ui: &mut egui::Ui, error: &str, dark: bool) {
         .corner_radius(9)
         .inner_margin(Margin::same(10))
         .show(ui, |ui| {
-            ui.label(RichText::new(error).size(9.0).color(red));
+            for line in error.split('\n') {
+                ui.add(egui::Label::new(RichText::new(line).size(9.0).color(red)).truncate());
+            }
         });
 }
 
@@ -6458,6 +12805,934 @@ fn line(dark: bool) -> Color32 {
 mod tests {
     use super::*;
 
+    /// Legacy linear fixture retained only to exercise the import-only UI
+    /// compatibility helpers. Production authoring uses
+    /// `github_repository_composer_task`, which is graph-native.
+    fn legacy_github_repository_composer_task(ordinal: usize) -> Task {
+        Task {
+            id: format!("github-repositories-{ordinal}"),
+            name: "Получить репозитории GitHub".into(),
+            description: "Legacy test fixture".into(),
+            platform: ppduster::rules::Platform::Macos,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            graph: None,
+            steps: vec![composer_step(
+                ComposerBlockKind::GithubListRepositories,
+                "list-repositories".into(),
+            )],
+        }
+    }
+
+    fn composer_project_with_canvas(task: Task, canvas: ComposerCanvas) -> ScenarioProject {
+        ScenarioProject {
+            id: "test-project".into(),
+            name: "Test project".into(),
+            description: String::new(),
+            canvases: BTreeMap::from([(task.id.clone(), canvas)]),
+            entries: vec![ProjectEntry::Scenario {
+                task: Box::new(task),
+            }],
+        }
+    }
+
+    fn composer_app_for_test(project: ScenarioProject) -> ScenarioApp {
+        ScenarioApp {
+            task_pack: None,
+            load_error: None,
+            selected_task: 0,
+            selected_step: None,
+            selected_node: None,
+            channel: ReleaseChannel::Release,
+            allow_shell: false,
+            allow_elevation: false,
+            report: None,
+            report_applied: false,
+            plan_error: None,
+            dark: true,
+            confirm_run: false,
+            running: false,
+            run_receiver: None,
+            github_picker: GithubPickerState::default(),
+            file_message: None,
+            custom_project: Some(project),
+            selected_project_scenario: Some(vec![0]),
+            selected_project_group: Vec::new(),
+            block_picker_parent: None,
+            graph_picker_attach: None,
+            graph_picker_port: None,
+            block_picker_search: String::new(),
+            readonly_canvas_views: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn compact_workspace_keeps_canvas_and_inspector_usable() {
+        let viewport_width = 1012.0;
+        let (library_width, inspector_width) = workspace_panel_widths(viewport_width);
+        let canvas_width = viewport_width - library_width - inspector_width;
+
+        assert!(library_width <= 230.0);
+        assert!(inspector_width >= 340.0);
+        assert!(canvas_width >= 440.0);
+
+        assert_eq!(
+            workspace_panel_widths(WIDE_VIEWPORT_WIDTH),
+            (WIDE_LIBRARY_WIDTH, WIDE_INSPECTOR_WIDTH)
+        );
+    }
+
+    fn assert_pos_close(actual: Pos2, expected: Pos2) {
+        assert!(
+            actual.distance(expected) < 0.001,
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn canvas_view_transforms_round_trip_and_scale_drag_deltas() {
+        let viewport = Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(800.0, 600.0));
+        let view = CanvasView {
+            pan: CanvasPoint { x: 40.0, y: -20.0 },
+            zoom: 2.0,
+        };
+        let world = Pos2::new(12.0, 30.0);
+        let screen = view.world_to_screen(viewport, world);
+
+        assert_pos_close(screen, Pos2::new(164.0, 90.0));
+        assert_pos_close(view.screen_to_world(viewport, screen), world);
+        assert_eq!(
+            view.screen_rect(viewport, Rect::from_min_size(world, Vec2::new(20.0, 10.0)))
+                .size(),
+            Vec2::new(40.0, 20.0)
+        );
+        let world_after_drag = view.screen_to_world(viewport, screen + Vec2::new(20.0, -10.0));
+        assert_pos_close(world_after_drag, world + Vec2::new(10.0, -5.0));
+
+        let half_scale = CanvasView {
+            zoom: 0.5,
+            ..CanvasView::default()
+        };
+        let origin = half_scale.screen_to_world(viewport, viewport.min);
+        let after = half_scale.screen_to_world(viewport, viewport.min + Vec2::new(20.0, -10.0));
+        assert_pos_close(after, origin + Vec2::new(40.0, -20.0));
+    }
+
+    #[test]
+    fn canvas_zoom_keeps_anchor_fixed_and_clamps() {
+        let viewport = Rect::from_min_size(Pos2::new(20.0, 30.0), Vec2::new(900.0, 600.0));
+        let anchor = Pos2::new(410.0, 275.0);
+        let mut view = CanvasView {
+            pan: CanvasPoint { x: -75.0, y: 34.0 },
+            zoom: 0.8,
+        };
+        let anchor_world = view.screen_to_world(viewport, anchor);
+
+        view.zoom_about(viewport, anchor, 100.0);
+        assert_eq!(view.zoom, CANVAS_MAX_ZOOM);
+        assert_pos_close(view.world_to_screen(viewport, anchor_world), anchor);
+
+        view.zoom_about(viewport, anchor, 0.0001);
+        assert_eq!(view.zoom, CANVAS_MIN_ZOOM);
+        assert_pos_close(view.world_to_screen(viewport, anchor_world), anchor);
+    }
+
+    #[test]
+    fn canvas_pan_and_fit_are_viewport_relative() {
+        let viewport = Rect::from_min_size(Pos2::new(200.0, 80.0), Vec2::new(1000.0, 600.0));
+        let content = Rect::from_min_size(Pos2::new(100.0, 120.0), Vec2::new(600.0, 300.0));
+        let view = CanvasView::fit(content, viewport, 50.0);
+        let fitted = view.screen_rect(viewport, content);
+        let safe = viewport.shrink(50.0);
+
+        assert!((view.zoom - 1.5).abs() < 0.001);
+        assert!(safe.contains_rect(fitted));
+        assert_pos_close(fitted.center(), viewport.center());
+
+        let before = view.world_to_screen(viewport, content.min);
+        let mut panned = view;
+        panned.pan_by(Vec2::new(35.0, -18.0));
+        assert_pos_close(
+            panned.world_to_screen(viewport, content.min),
+            before + Vec2::new(35.0, -18.0),
+        );
+    }
+
+    #[test]
+    fn canvas_view_serde_is_backward_compatible_and_skips_defaults() {
+        let legacy: ComposerCanvas = serde_yaml::from_str(
+            r#"
+positions:
+  start: { x: 80.0, y: 250.0 }
+"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.view, CanvasView::default());
+
+        let default_yaml = serde_yaml::to_string(&legacy).unwrap();
+        assert!(!default_yaml.contains("view:"));
+
+        let expected = CanvasView {
+            pan: CanvasPoint {
+                x: -135.5,
+                y: 42.25,
+            },
+            zoom: 1.75,
+        };
+        let canvas = ComposerCanvas {
+            view: expected,
+            ..legacy
+        };
+        let yaml = serde_yaml::to_string(&canvas).unwrap();
+        let decoded: ComposerCanvas = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(decoded.view, expected);
+    }
+
+    #[test]
+    fn canvas_scene_zoom_is_cursor_anchored_headlessly() {
+        fn input(size: Vec2, events: Vec<egui::Event>) -> egui::RawInput {
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                events,
+                ..Default::default()
+            }
+        }
+
+        fn paint_scene(ui: &mut egui::Ui, scene_rect: &mut Rect, viewport: &mut Rect) {
+            *viewport = ui.available_rect_before_wrap();
+            egui::Scene::new()
+                .zoom_range(CANVAS_MIN_ZOOM..=CANVAS_MAX_ZOOM)
+                .show(ui, scene_rect, |ui| {
+                    let rect =
+                        Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(300.0, 200.0));
+                    ui.painter().rect_filled(rect, 0.0, Color32::WHITE);
+                    ui.interact(rect, Id::new("scene-probe"), Sense::click());
+                });
+        }
+
+        let ctx = egui::Context::default();
+        let size = Vec2::new(800.0, 600.0);
+        let anchor = Pos2::new(420.0, 310.0);
+        let mut viewport = Rect::ZERO;
+        let mut scene_rect = Rect::from_min_size(Pos2::ZERO, size);
+
+        let mut output = ctx.run_ui(input(size, vec![egui::Event::PointerMoved(anchor)]), |ui| {
+            paint_scene(ui, &mut scene_rect, &mut viewport)
+        });
+        output.textures_delta.clear();
+        let before = CanvasView::from_visible_world_rect(scene_rect, viewport)
+            .screen_to_world(viewport, anchor);
+
+        let mut output = ctx.run_ui(
+            input(
+                size,
+                vec![egui::Event::PointerMoved(anchor), egui::Event::Zoom(1.5)],
+            ),
+            |ui| paint_scene(ui, &mut scene_rect, &mut viewport),
+        );
+        output.textures_delta.clear();
+        let after_view = CanvasView::from_visible_world_rect(scene_rect, viewport);
+        let after = after_view.screen_to_world(viewport, anchor);
+
+        assert_pos_close(after, before);
+        assert!((after_view.zoom - 1.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn canvas_scene_separates_scaled_node_drag_from_background_pan() {
+        fn input(size: Vec2, events: Vec<egui::Event>) -> egui::RawInput {
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                events,
+                ..Default::default()
+            }
+        }
+
+        fn button(pos: Pos2, pressed: bool) -> egui::Event {
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            }
+        }
+
+        fn frame(
+            ctx: &egui::Context,
+            size: Vec2,
+            scene_rect: &mut Rect,
+            node: &mut Pos2,
+            events: Vec<egui::Event>,
+        ) {
+            let mut output = ctx.run_ui(input(size, events), |ui| {
+                let mut child_consumed_drag = false;
+                let mut background = None;
+                egui::Scene::new()
+                    .zoom_range(CANVAS_MIN_ZOOM..=CANVAS_MAX_ZOOM)
+                    .sense(Sense::hover())
+                    .drag_pan_buttons(egui::DragPanButtons::empty())
+                    .show(ui, scene_rect, |ui| {
+                        background = Some(ui.interact(
+                            ui.clip_rect(),
+                            Id::new("drag-background"),
+                            Sense::click_and_drag(),
+                        ));
+                        let rect = Rect::from_min_size(*node, Vec2::new(100.0, 60.0));
+                        let response = ui.interact(rect, Id::new("drag-node"), Sense::drag());
+                        if response.dragged_by(egui::PointerButton::Primary) {
+                            child_consumed_drag = true;
+                            *node += response.drag_delta();
+                        }
+                    });
+                if let Some(background) = background.filter(|background| {
+                    !child_consumed_drag && background.dragged_by(egui::PointerButton::Primary)
+                }) {
+                    *scene_rect = scene_rect.translate(-background.drag_delta());
+                }
+            });
+            output.textures_delta.clear();
+        }
+
+        let size = Vec2::new(800.0, 600.0);
+        let initial_scene = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0));
+
+        let ctx = egui::Context::default();
+        let mut scene_rect = initial_scene;
+        let mut node = Pos2::new(100.0, 100.0);
+        let node_start = Pos2::new(250.0, 240.0);
+        let node_end = node_start + Vec2::new(40.0, 20.0);
+        frame(
+            &ctx,
+            size,
+            &mut scene_rect,
+            &mut node,
+            vec![egui::Event::PointerMoved(node_start)],
+        );
+        frame(
+            &ctx,
+            size,
+            &mut scene_rect,
+            &mut node,
+            vec![button(node_start, true)],
+        );
+        frame(
+            &ctx,
+            size,
+            &mut scene_rect,
+            &mut node,
+            vec![egui::Event::PointerMoved(node_end)],
+        );
+        frame(
+            &ctx,
+            size,
+            &mut scene_rect,
+            &mut node,
+            vec![button(node_end, false)],
+        );
+
+        assert_pos_close(node, Pos2::new(120.0, 110.0));
+        assert_pos_close(scene_rect.min, initial_scene.min);
+        assert_pos_close(scene_rect.max, initial_scene.max);
+
+        let ctx = egui::Context::default();
+        let mut scene_rect = initial_scene;
+        let mut node = Pos2::new(100.0, 100.0);
+        let background_start = Pos2::new(700.0, 500.0);
+        let background_end = background_start + Vec2::new(40.0, 20.0);
+        frame(
+            &ctx,
+            size,
+            &mut scene_rect,
+            &mut node,
+            vec![egui::Event::PointerMoved(background_start)],
+        );
+        frame(
+            &ctx,
+            size,
+            &mut scene_rect,
+            &mut node,
+            vec![button(background_start, true)],
+        );
+        frame(
+            &ctx,
+            size,
+            &mut scene_rect,
+            &mut node,
+            vec![egui::Event::PointerMoved(background_end)],
+        );
+        frame(
+            &ctx,
+            size,
+            &mut scene_rect,
+            &mut node,
+            vec![button(background_end, false)],
+        );
+
+        assert_pos_close(node, Pos2::new(100.0, 100.0));
+        assert_pos_close(scene_rect.min, Pos2::new(-20.0, -10.0));
+        assert_pos_close(scene_rect.max, Pos2::new(380.0, 290.0));
+    }
+
+    #[test]
+    fn graph_composer_canvas_drags_real_node_at_zoom_without_moving_view() {
+        fn input(size: Vec2, events: Vec<egui::Event>) -> egui::RawInput {
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                events,
+                ..Default::default()
+            }
+        }
+
+        fn button(pos: Pos2, pressed: bool) -> egui::Event {
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            }
+        }
+
+        fn render(
+            ctx: &egui::Context,
+            app: &mut ScenarioApp,
+            size: Vec2,
+            events: Vec<egui::Event>,
+        ) {
+            let task = app.selected_task().expect("selected graph task").clone();
+            let graph = task.graph.as_ref().expect("v3 graph").clone();
+            let canvas = app
+                .custom_project
+                .as_ref()
+                .and_then(|project| project.canvases.get(&task.id))
+                .expect("composer canvas")
+                .clone();
+            let mut output = ctx.run_ui(input(size, events), |ui| {
+                app.graph_composer_canvas(ui, &task, &graph, &canvas, true);
+            });
+            output.textures_delta.clear();
+        }
+
+        let task = github_repository_composer_task(1);
+        let task_id = task.id.clone();
+        let graph = task.graph.as_ref().unwrap();
+        let node_id = graph.nodes[0].id().to_owned();
+        let mut canvas = default_graph_canvas(graph);
+        canvas.view = CanvasView {
+            zoom: 1.2,
+            ..CanvasView::default()
+        };
+        let initial_position = canvas.positions[&node_id];
+        let initial_view = canvas.view;
+        let project = composer_project_with_canvas(task, canvas);
+        let mut app = composer_app_for_test(project);
+        let ctx = egui::Context::default();
+        configure_styles(&ctx, egui::ThemePreference::Dark);
+        let size = Vec2::new(1200.0, 800.0);
+        let response_id = Id::new(("graph-node", task_id.as_str(), node_id.as_str()));
+
+        // Warm up egui's previous-pass hit map, then prove that the actual
+        // production card hit rectangle carries the Scene transform.
+        render(&ctx, &mut app, size, Vec::new());
+        let response = ctx
+            .read_response(response_id)
+            .expect("graph card response after warmup");
+        let screen_rect = ctx
+            .layer_transform_to_global(response.layer_id)
+            .expect("Scene layer transform")
+            * response.rect;
+        assert!(
+            (screen_rect.width() - 232.0 * 1.2).abs() < 0.1,
+            "unexpected response rect {:?}",
+            screen_rect
+        );
+        assert!(
+            (screen_rect.height() - 116.0 * 1.2).abs() < 0.1,
+            "unexpected response rect {:?}",
+            screen_rect
+        );
+        let start = screen_rect.center();
+
+        render(&ctx, &mut app, size, vec![egui::Event::PointerMoved(start)]);
+        assert!(
+            ctx.read_response(response_id)
+                .is_some_and(|response| response.contains_pointer()),
+            "pointer must hit the transformed production card"
+        );
+        render(&ctx, &mut app, size, vec![button(start, true)]);
+        let midway = start + Vec2::new(36.0, 18.0);
+        render(
+            &ctx,
+            &mut app,
+            size,
+            vec![egui::Event::PointerMoved(midway)],
+        );
+        let end = start + Vec2::new(72.0, 36.0);
+        render(&ctx, &mut app, size, vec![egui::Event::PointerMoved(end)]);
+        render(&ctx, &mut app, size, vec![button(end, false)]);
+
+        let saved = &app.custom_project.as_ref().unwrap().canvases[&task_id];
+        let moved = saved.positions[&node_id];
+        assert!((moved.x - (initial_position.x + 60.0)).abs() < 0.1);
+        assert!((moved.y - (initial_position.y + 30.0)).abs() < 0.1);
+        assert_eq!(saved.view, initial_view, "node drag must not pan the view");
+    }
+
+    #[test]
+    fn canvas_scene_pans_over_nodes_with_middle_or_space_primary_without_double_delta() {
+        fn input(size: Vec2, events: Vec<egui::Event>) -> egui::RawInput {
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                events,
+                ..Default::default()
+            }
+        }
+
+        fn pointer(pos: Pos2, button: egui::PointerButton, pressed: bool) -> egui::Event {
+            egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            }
+        }
+
+        fn space(pressed: bool) -> egui::Event {
+            egui::Event::Key {
+                key: egui::Key::Space,
+                physical_key: Some(egui::Key::Space),
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }
+        }
+
+        fn frame(ctx: &egui::Context, size: Vec2, scene_rect: &mut Rect, events: Vec<egui::Event>) {
+            let mut captured_pan = Vec2::ZERO;
+            let mut output = ctx.run_ui(input(size, events), |ui| {
+                let mut child_consumed_drag = false;
+                let mut background = None;
+                egui::Scene::new()
+                    .zoom_range(CANVAS_MIN_ZOOM..=CANVAS_MAX_ZOOM)
+                    .sense(Sense::hover())
+                    .drag_pan_buttons(egui::DragPanButtons::empty())
+                    .show(ui, scene_rect, |ui| {
+                        background = Some(ui.interact(
+                            ui.clip_rect(),
+                            Id::new("pan-over-node-background"),
+                            Sense::click_and_drag(),
+                        ));
+                        let response = ui.interact(
+                            Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(100.0, 60.0)),
+                            Id::new("pan-over-node"),
+                            Sense::click_and_drag(),
+                        );
+                        let space_down = ui.input(|input| input.key_down(egui::Key::Space));
+                        if response.dragged_by(egui::PointerButton::Middle)
+                            || (space_down && response.dragged_by(egui::PointerButton::Primary))
+                        {
+                            child_consumed_drag = true;
+                            captured_pan += response.drag_delta();
+                        }
+                    });
+                if let Some(background) = background.filter(|background| {
+                    !child_consumed_drag
+                        && (background.dragged_by(egui::PointerButton::Primary)
+                            || background.dragged_by(egui::PointerButton::Middle))
+                }) {
+                    captured_pan += background.drag_delta();
+                }
+            });
+            if captured_pan != Vec2::ZERO {
+                *scene_rect = scene_rect.translate(-captured_pan);
+            }
+            output.textures_delta.clear();
+        }
+
+        let size = Vec2::new(800.0, 600.0);
+        let initial = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0));
+        let start = Pos2::new(250.0, 240.0);
+        let end = start + Vec2::new(40.0, 20.0);
+
+        for (button, use_space) in [
+            (egui::PointerButton::Middle, false),
+            (egui::PointerButton::Primary, true),
+        ] {
+            let ctx = egui::Context::default();
+            let mut scene_rect = initial;
+            let mut hover_events = vec![egui::Event::PointerMoved(start)];
+            if use_space {
+                hover_events.push(space(true));
+            }
+            frame(&ctx, size, &mut scene_rect, hover_events);
+            frame(
+                &ctx,
+                size,
+                &mut scene_rect,
+                vec![pointer(start, button, true)],
+            );
+            frame(
+                &ctx,
+                size,
+                &mut scene_rect,
+                vec![egui::Event::PointerMoved(end)],
+            );
+            let mut release_events = vec![pointer(end, button, false)];
+            if use_space {
+                release_events.push(space(false));
+            }
+            frame(&ctx, size, &mut scene_rect, release_events);
+
+            assert_pos_close(scene_rect.min, Pos2::new(-20.0, -10.0));
+            assert_pos_close(scene_rect.max, Pos2::new(380.0, 290.0));
+        }
+    }
+
+    #[test]
+    fn canvas_scene_render_stays_clipped_at_supported_viewports_and_zoom_extremes() {
+        let sizes = [
+            Vec2::new(1012.0, 680.0),
+            Vec2::new(1560.0, 720.0),
+            Vec2::new(1920.0, 1080.0),
+        ];
+        let zooms = [CANVAS_MIN_ZOOM, 1.0, CANVAS_MAX_ZOOM];
+
+        for size in sizes {
+            for zoom in zooms {
+                let ctx = egui::Context::default();
+                let screen = Rect::from_min_size(Pos2::ZERO, size);
+                let view = CanvasView {
+                    pan: CanvasPoint {
+                        x: -317.0,
+                        y: 143.0,
+                    },
+                    zoom,
+                };
+                let mut scene_rect = view.visible_world_rect(screen);
+                let mut viewport = Rect::ZERO;
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        viewport = ui.available_rect_before_wrap();
+                        egui::Scene::new()
+                            .zoom_range(CANVAS_MIN_ZOOM..=CANVAS_MAX_ZOOM)
+                            .show(ui, &mut scene_rect, |ui| {
+                                let visible = ui.clip_rect();
+                                paint_grid(ui.painter(), visible, true);
+                                ui.painter().rect_filled(
+                                    visible.expand(400.0),
+                                    0.0,
+                                    Color32::from_rgb(7, 11, 13),
+                                );
+                            });
+                    },
+                );
+
+                assert!(
+                    !output.shapes.is_empty(),
+                    "scene produced no shapes at {size:?}, zoom {zoom}"
+                );
+                for clipped in &output.shapes {
+                    let visible_shape = clipped
+                        .shape
+                        .visual_bounding_rect()
+                        .intersect(clipped.clip_rect);
+                    if visible_shape.is_positive() {
+                        assert!(
+                            viewport.expand(0.01).contains_rect(visible_shape),
+                            "shape escaped {viewport:?} at {size:?}, zoom {zoom}: {visible_shape:?}"
+                        );
+                    }
+                    assert!(
+                        viewport.expand(0.01).contains_rect(clipped.clip_rect),
+                        "clip escaped {viewport:?} at {size:?}, zoom {zoom}: {:?}",
+                        clipped.clip_rect
+                    );
+                }
+                let round_trip = CanvasView::from_visible_world_rect(scene_rect, viewport);
+                assert!((round_trip.zoom - zoom).abs() < 0.001);
+                output.textures_delta.clear();
+            }
+        }
+    }
+
+    #[test]
+    fn inspector_render_contains_long_schema_bindings_after_stale_horizontal_scroll() {
+        #[derive(Clone, Copy)]
+        struct InspectorProbe {
+            panel: Rect,
+            inner: Rect,
+            content: Rect,
+            clip: Rect,
+            content_size: Vec2,
+            offset: Vec2,
+        }
+
+        fn input(size: Vec2) -> egui::RawInput {
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                ..Default::default()
+            }
+        }
+
+        fn render(size: Vec2) -> (egui::FullOutput, InspectorProbe) {
+            let ctx = egui::Context::default();
+            configure_styles(&ctx, egui::ThemePreference::Dark);
+            let huge_token = format!(
+                "github.repositories[].https_url/путь/{}",
+                "репозиторий_с_юникодом_и_без_пробелов".repeat(80)
+            );
+
+            // Reproduce the persisted horizontal offset that caused the
+            // inspector to start mid-string after an older wide layout.
+            let mut seeded_offset = 0.0;
+            let mut seed_output = ctx.run_ui(input(size), |root| {
+                let (_, inspector_width) = workspace_panel_widths(size.x);
+                egui::Panel::right("inspector-containment-panel")
+                    .exact_size(inspector_width)
+                    .resizable(false)
+                    .show(root, |ui| {
+                        let output = ScrollArea::both()
+                            .id_salt("inspector-containment-scroll")
+                            .horizontal_scroll_offset(900.0)
+                            .show(ui, |ui| {
+                                ui.add(egui::Label::new(&huge_token).extend());
+                            });
+                        seeded_offset = output.state.offset.x;
+                    });
+            });
+            seed_output.textures_delta.clear();
+            assert!(seeded_offset > 0.0, "test must seed a stale x offset");
+
+            let mut step = default_step(ActionKind::GitClone, format!("clone-{huge_token}"))
+                .expect("git clone default");
+            step.name = format!("Клонировать {huge_token}");
+            let repo = Binding::field(
+                FieldRef::loop_item("for-each-repositories-with-a-very-long-owner-id")
+                    .field("https_url"),
+            );
+            let dest = Binding::interpolated([
+                TemplatePart::literal("$HOME/Developer/"),
+                TemplatePart::field(
+                    FieldRef::loop_item("for-each-repositories-with-a-very-long-owner-id")
+                        .field("full_name"),
+                ),
+            ]);
+            let mut node = ActionNode {
+                step,
+                bindings: BTreeMap::from([
+                    ("repo".into(), repo.clone()),
+                    ("dest".into(), dest.clone()),
+                ]),
+            };
+            let option = |label: String, binding: Binding, value_type: ContextType| {
+                ComposerGraphBindingOption {
+                    label,
+                    binding,
+                    value_type,
+                    required: true,
+                    nullable: false,
+                    sensitivity: Sensitivity::Public,
+                }
+            };
+            let options = BTreeMap::from([
+                (
+                    "repo".into(),
+                    vec![option(
+                        format!("Текущий элемент цикла → {huge_token}"),
+                        repo,
+                        ContextType::String {
+                            format: Some(SemanticFormat::GitUrl),
+                        },
+                    )],
+                ),
+                (
+                    "dest".into(),
+                    vec![option(
+                        format!("Интерполяция папки → {huge_token}"),
+                        dest,
+                        ContextType::String {
+                            format: Some(SemanticFormat::DirectoryPath),
+                        },
+                    )],
+                ),
+            ]);
+            let source = GraphNode::Action(Box::new(ActionNode {
+                step: default_step(ActionKind::InspectPath, format!("source-{huge_token}"))
+                    .expect("inspect path default"),
+                bindings: BTreeMap::new(),
+            }));
+            let huge_case_id = format!("case-{huge_token}");
+            let mut huge_case_value = serde_json::Value::String(huge_token.clone());
+            let mut used_case_values = vec![huge_case_value.clone()];
+            let structured_output = StepOutput::Structured(StructuredStepOutput {
+                schema_id: "ppduster.test.huge-output@1".into(),
+                value: serde_json::json!({
+                    "unicode": huge_token.clone(),
+                    "nested": { "path": format!("/tmp/{huge_token}") },
+                }),
+            });
+            let report = RunReport {
+                task_id: format!("task-{huge_token}"),
+                task_name: format!("Сценарий {huge_token}"),
+                task_description: huge_token.clone(),
+                scenarios: Vec::new(),
+                plans: Vec::new(),
+                outcomes: Vec::new(),
+                steps: vec![StepReport {
+                    step_id: format!("report-step-{huge_token}"),
+                    step_name: format!("Блок {huge_token}"),
+                    summary: format!("Результат {huge_token}"),
+                    status: StepStatus::Failed,
+                    prerequisites: Vec::new(),
+                    logs: vec![StepLogEntry {
+                        step_id: format!("report-step-{huge_token}"),
+                        message: format!("log::{huge_token}\njson::{huge_token}"),
+                    }],
+                    output: Some(structured_output),
+                }],
+                context: ContextStore::default(),
+                errors: vec![format!("runtime-error::{huge_token}")],
+            };
+            let report_json = serde_json::to_string_pretty(
+                report.steps[0].output.as_ref().expect("structured output"),
+            )
+            .expect("serialize structured output");
+
+            let mut probe = None;
+            let mut output = ctx.run_ui(input(size), |root| {
+                let (_, inspector_width) = workspace_panel_widths(size.x);
+                let panel = egui::Panel::right("inspector-containment-panel")
+                    .exact_size(inspector_width)
+                    .resizable(false)
+                    .frame(
+                        Frame::new()
+                            .fill(surface(true))
+                            .stroke(Stroke::new(1.0, line(true)))
+                            .inner_margin(Margin::same(16)),
+                    )
+                    .show(root, |ui| {
+                        ui.label(RichText::new("ИНСПЕКТОР").strong().size(10.0).color(MUTED));
+                        let scroll =
+                            bounded_inspector_scroll(ui, "inspector-containment-scroll", |ui| {
+                                paint_graph_action_editor(ui, &mut node, &options, true);
+                                section_label(ui, "SWITCH · ДЛИННЫЙ CASE");
+                                let _ = paint_switch_case_header(ui, &huge_case_id, 1, 2, true);
+                                let _ = paint_switch_case_value_row(
+                                    ui,
+                                    ("switch-huge", &huge_case_id),
+                                    0,
+                                    2,
+                                    &mut huge_case_value,
+                                    Some((GraphSwitchScalarKind::String, false)),
+                                    &mut used_case_values,
+                                );
+                                section_label(ui, "JOIN · ДЛИННЫЙ SOURCE");
+                                let _ = paint_join_source_row(
+                                    ui,
+                                    "join-huge",
+                                    &source,
+                                    Some(EdgePort::Success),
+                                );
+                                section_label(ui, "RUNTIME · UNICODE JSON/LOG");
+                                paint_composer_run_report(ui, &report, Some(0), true, true);
+                                // The production JSON section is collapsed by
+                                // default. Render the same bounded body here so
+                                // this geometry regression always exercises it.
+                                paint_composer_output_json(
+                                    ui,
+                                    &report.steps[0].step_id,
+                                    &report_json,
+                                    true,
+                                );
+                                section_label(ui, "ВЫХОДНОЙ КОНТЕКСТ");
+                                for line in schema_context_lines(
+                                    &definition_for_action(&node.step.action).output_schema,
+                                ) {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format!("{line}::{huge_token}"))
+                                                .monospace()
+                                                .size(8.0)
+                                                .color(PURPLE),
+                                        )
+                                        .truncate(),
+                                    );
+                                }
+                                // Exercise a code field with one huge unbroken
+                                // Unicode/path token under the inspector clip.
+                                Frame::new().fill(code_surface(true)).show(ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&huge_token).monospace().size(8.0),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
+                                (ui.min_rect(), ui.clip_rect())
+                            });
+                        let (content, clip) = scroll.inner;
+                        (
+                            scroll.inner_rect,
+                            content,
+                            clip,
+                            scroll.content_size,
+                            scroll.state.offset,
+                        )
+                    });
+                let (inner, content, clip, content_size, offset) = panel.inner;
+                probe = Some(InspectorProbe {
+                    panel: panel.response.rect,
+                    inner,
+                    content,
+                    clip,
+                    content_size,
+                    offset,
+                });
+            });
+            output.textures_delta.clear();
+            (output, probe.expect("inspector probe"))
+        }
+
+        for size in [
+            Vec2::new(1560.0, 720.0),
+            Vec2::new(1012.0, 680.0),
+            Vec2::new(1920.0, 1080.0),
+        ] {
+            let (output, probe) = render(size);
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let tolerance = 1.0;
+            assert!(screen.expand(tolerance).contains_rect(probe.panel));
+            assert!(probe.panel.expand(tolerance).contains_rect(probe.inner));
+            assert!(probe.panel.expand(tolerance).contains_rect(probe.clip));
+            assert!(probe.content.left() >= probe.inner.left() - tolerance);
+            assert!(probe.content.right() <= probe.inner.right() + tolerance);
+            assert!(probe.content_size.x <= probe.inner.width() + tolerance);
+            assert!((probe.content.left() - probe.inner.left()).abs() <= tolerance);
+            assert_eq!(probe.offset.x, 0.0, "stale horizontal offset must be reset");
+
+            // `content` is the union of all response allocations in the
+            // bounded inspector UI. Visible paint bounds and their effective
+            // clips must likewise stay in the fixed right panel.
+            for clipped in output.shapes {
+                let visible = clipped
+                    .shape
+                    .visual_bounding_rect()
+                    .intersect(clipped.clip_rect);
+                if visible.is_positive() && visible.intersects(probe.panel) {
+                    assert!(
+                        probe.panel.expand(tolerance).contains_rect(visible),
+                        "paint escaped inspector at {size:?}: {visible:?} outside {:?}",
+                        probe.panel
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn bundled_scenarios_are_available_to_the_ui() {
         let pack = load_tasks().unwrap();
@@ -6485,10 +13760,11 @@ mod tests {
 
     #[test]
     fn gui_capability_checks_actions_inside_graph_tasks() {
-        let mut task = github_repository_composer_task(1);
+        let mut task = legacy_github_repository_composer_task(1);
         let unsupported = Step {
             id: "script".into(),
             name: "Script".into(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: true,
@@ -6528,6 +13804,55 @@ mod tests {
     }
 
     #[test]
+    fn join_source_port_editing_preserves_explicit_graph_ports() {
+        let source = default_step(ActionKind::GitInspect, "source").unwrap();
+        let other = default_step(ActionKind::InspectPath, "other").unwrap();
+        let mut graph = WorkflowGraph {
+            entries: vec!["source".into(), "other".into()],
+            nodes: vec![
+                GraphNode::Action(Box::new(ActionNode {
+                    step: source,
+                    bindings: BTreeMap::new(),
+                })),
+                GraphNode::Action(Box::new(ActionNode {
+                    step: other,
+                    bindings: BTreeMap::new(),
+                })),
+                GraphNode::Join(JoinNode {
+                    id: "join".into(),
+                    mode: JoinMode::All,
+                }),
+            ],
+            edges: vec![
+                GraphEdge::new("source", EdgePort::Failure, "join"),
+                GraphEdge::new("other", EdgePort::Success, "join"),
+            ],
+            ..WorkflowGraph::default()
+        };
+
+        graph_set_incoming_edge(&mut graph, "join", "source", Some(EdgePort::Always)).unwrap();
+        assert!(graph.edges.iter().any(|edge| {
+            edge.from.node == "source"
+                && edge.from.port == EdgePort::Always
+                && edge.to.node == "join"
+        }));
+        assert!(!graph
+            .edges
+            .iter()
+            .any(|edge| { edge.from.node == "source" && edge.from.port == EdgePort::Failure }));
+
+        graph_set_incoming_edge(&mut graph, "join", "source", None).unwrap();
+        assert!(!graph
+            .edges
+            .iter()
+            .any(|edge| edge.from.node == "source" && edge.to.node == "join"));
+        assert!(graph
+            .edges
+            .iter()
+            .any(|edge| edge.from.node == "other" && edge.to.node == "join"));
+    }
+
+    #[test]
     fn template_canvas_uses_direct_scenario_groups() {
         let pack = load_tasks().unwrap();
         let template = pack.get("macos-developer-workstation").unwrap();
@@ -6540,13 +13865,13 @@ mod tests {
         assert_eq!(groups.len(), template.scenarios.len());
         assert_eq!(
             groups.iter().map(|group| group.step_count).sum::<usize>(),
-            resolved.steps.len()
+            task_action_steps(&resolved).len()
         );
         assert!(groups.iter().all(|group| !group.description.is_empty()));
         assert!(groups
             .iter()
             .all(|group| group.step_summaries.len() == group.step_count));
-        assert!(resolved.steps.len() > groups.len());
+        assert!(task_action_steps(&resolved).len() > groups.len());
     }
 
     #[test]
@@ -6555,7 +13880,7 @@ mod tests {
         let resolved = pack.resolve("macos-developer-workstation").unwrap();
         let summaries = describe_task_steps(&resolved, &RunOptions::default());
 
-        assert_eq!(summaries.len(), resolved.steps.len());
+        assert_eq!(summaries.len(), task_action_steps(&resolved).len());
         assert!(summaries.iter().all(|summary| !summary.trim().is_empty()));
     }
 
@@ -6573,40 +13898,41 @@ mod tests {
             materialize_github_repositories(task, &repositories, &selected_ids, "/tmp/workspaces")
                 .unwrap();
 
-        assert_eq!(configured.steps.len(), 8);
-        assert!(configured.steps[0]
+        assert!(configured.steps.is_empty());
+        let configured_steps = task_action_steps(&configured);
+        assert_eq!(configured_steps.len(), 8);
+        assert!(configured_steps[0]
             .id
             .starts_with("inspect-repository/acme-api-"));
-        assert!(configured.steps[4]
+        assert!(configured_steps[4]
             .id
             .starts_with("inspect-repository/zeta-api-"));
-        assert_ne!(configured.steps[0].id, configured.steps[1].id);
-        assert!(configured
-            .steps
+        assert_ne!(configured_steps[0].id, configured_steps[1].id);
+        assert!(configured_steps
             .iter()
             .all(|step| matches!(step.auth, AuthPolicy::None)));
         assert!(matches!(
-            &configured.steps[0].action,
+            &configured_steps[0].action,
             Action::GitInspect { repo, dest }
                 if repo == "https://github.com/acme/api.git"
                     && dest == "/tmp/workspaces/acme/api"
         ));
         assert!(matches!(
-            &configured.steps[1].action,
+            &configured_steps[1].action,
             Action::GitCloneIfMissing { repo, dest, branch }
                 if repo == "https://github.com/acme/api.git"
                     && dest == "/tmp/workspaces/acme/api"
                     && branch.as_deref() == Some("main")
         ));
         assert!(matches!(
-            &configured.steps[2].action,
+            &configured_steps[2].action,
             Action::GitFetch { repo, dest, branch }
                 if repo == "https://github.com/acme/api.git"
                     && dest == "/tmp/workspaces/acme/api"
                     && branch == "main"
         ));
         assert!(matches!(
-            &configured.steps[3].action,
+            &configured_steps[3].action,
             Action::GitFastForward { repo, dest, branch }
                 if repo == "https://github.com/acme/api.git"
                     && dest == "/tmp/workspaces/acme/api"
@@ -6714,25 +14040,19 @@ mod tests {
         }
 
         task.validate().unwrap();
+        let task = task.into_v3().unwrap();
         let yaml = serde_yaml::to_string(&TaskFile { task }).unwrap();
         let reparsed: TaskFile = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(reparsed.task.steps.len(), 4);
+        assert!(reparsed.task.steps.is_empty());
+        let actions = task_action_steps(&reparsed.task);
+        assert_eq!(actions.len(), 4);
+        assert!(matches!(actions[0].action, Action::GitInspect { .. }));
         assert!(matches!(
-            reparsed.task.steps[0].action,
-            Action::GitInspect { .. }
-        ));
-        assert!(matches!(
-            reparsed.task.steps[1].action,
+            actions[1].action,
             Action::GitCloneIfMissing { .. }
         ));
-        assert!(matches!(
-            reparsed.task.steps[2].action,
-            Action::GitFetch { .. }
-        ));
-        assert!(matches!(
-            reparsed.task.steps[3].action,
-            Action::GitFastForward { .. }
-        ));
+        assert!(matches!(actions[2].action, Action::GitFetch { .. }));
+        assert!(matches!(actions[3].action, Action::GitFastForward { .. }));
     }
 
     #[test]
@@ -6751,6 +14071,7 @@ mod tests {
                 "inspect".into(),
             )],
         };
+        let task = task.into_v3().unwrap();
         let project = ScenarioProject {
             id: "workstation".into(),
             name: "Workstation".into(),
@@ -6780,6 +14101,8 @@ mod tests {
 
     #[test]
     fn project_round_trips_canvas_positions_and_multiple_children() {
+        let inspect_a = composer_step(ComposerBlockKind::InspectPath, "inspect-a".into());
+        let inspect_b = composer_step(ComposerBlockKind::InspectPath, "inspect-b".into());
         let task = Task {
             id: "branched-scenario".into(),
             name: "Branched scenario".into(),
@@ -6788,11 +14111,21 @@ mod tests {
             trust: TrustRequirement::ExternalAllowed,
             scenarios: Vec::new(),
             resolved_scenarios: Vec::new(),
-            graph: None,
-            steps: vec![
-                composer_step(ComposerBlockKind::InspectPath, "inspect-a".into()),
-                composer_step(ComposerBlockKind::InspectPath, "inspect-b".into()),
-            ],
+            graph: Some(WorkflowGraph {
+                entries: vec!["inspect-a".into(), "inspect-b".into()],
+                nodes: vec![
+                    GraphNode::Action(Box::new(ActionNode {
+                        step: inspect_a,
+                        bindings: BTreeMap::new(),
+                    })),
+                    GraphNode::Action(Box::new(ActionNode {
+                        step: inspect_b,
+                        bindings: BTreeMap::new(),
+                    })),
+                ],
+                ..WorkflowGraph::default()
+            }),
+            steps: Vec::new(),
         };
         let project = ScenarioProject {
             id: "branched-project".into(),
@@ -6813,6 +14146,7 @@ mod tests {
                         ("inspect-a".into(), "start".into()),
                         ("inspect-b".into(), "start".into()),
                     ]),
+                    view: CanvasView::default(),
                 },
             )]),
         };
@@ -6821,9 +14155,12 @@ mod tests {
         let reparsed = load_project_yaml(&yaml).unwrap();
         let canvas = &reparsed.canvases["branched-scenario"];
 
-        assert_eq!(canvas.parents["inspect-a"], "start");
-        assert_eq!(canvas.parents["inspect-b"], "start");
+        assert!(canvas.parents.is_empty());
         assert_eq!(canvas.positions["inspect-b"].y, 330.0);
+        let graph = reparsed.scenario(&[0]).unwrap().graph.as_ref().unwrap();
+        assert_eq!(graph.entries, ["inspect-a", "inspect-b"]);
+        assert!(graph.edges.is_empty());
+        assert!(!yaml.contains("parents:"));
     }
 
     #[test]
@@ -6853,22 +14190,20 @@ project:
 
     #[test]
     fn project_loader_wraps_legacy_single_scenario_files() {
-        let task = Task {
-            id: "legacy".into(),
-            name: "Legacy".into(),
-            description: "A legacy standalone scenario.".into(),
-            platform: ppduster::rules::Platform::Macos,
-            trust: TrustRequirement::ExternalAllowed,
-            scenarios: Vec::new(),
-            resolved_scenarios: Vec::new(),
-            graph: None,
-            steps: vec![composer_step(
-                ComposerBlockKind::CreateDirectory,
-                "create".into(),
-            )],
-        };
-        let yaml = serde_yaml::to_string(&TaskFile { task }).unwrap();
-        let project = load_project_yaml(&yaml).unwrap();
+        let yaml = r#"
+task:
+  id: legacy
+  name: Legacy
+  description: A legacy standalone scenario.
+  platform: macos
+  trust: external-allowed
+  steps:
+    - id: create
+      name: Create directory
+      type: create-directory
+      path: /tmp/ppduster-example
+"#;
+        let project = load_project_yaml(yaml).unwrap();
         let path = first_scenario_path(&project.entries, &mut Vec::new()).unwrap();
 
         assert_eq!(project.scenario(&path).unwrap().id, "legacy");
@@ -6895,7 +14230,7 @@ project:
 
     #[test]
     fn foreach_projection_preserves_only_selected_typed_fields() {
-        let mut task = github_repository_composer_task(1);
+        let mut task = legacy_github_repository_composer_task(1);
         let source = composer_array_sources(&task, 1).remove(0);
         let projected = project_item_type(&source.item_type, &["https_url".into(), "name".into()]);
         let fields = item_object_fields(&projected);
@@ -6941,7 +14276,7 @@ project:
 
     #[test]
     fn foreach_array_selector_discovers_typed_upstream_arrays() {
-        let mut task = github_repository_composer_task(1);
+        let mut task = legacy_github_repository_composer_task(1);
         let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
         let Action::ForEach {
             source_step,
@@ -6977,6 +14312,8 @@ project:
         assert_eq!(loop_sources.len(), 1);
         assert_eq!(loop_sources[0].step_id, "loop");
         assert_eq!(loop_sources[0].step_name, "Для каждого элемента");
+        assert_eq!(loop_sources[0].source_step, "list-repositories");
+        assert_eq!(loop_sources[0].array_path, "github.repositories");
         assert_eq!(loop_sources[0].item, "repository");
         assert_eq!(loop_sources[0].fields, *fields);
 
@@ -7020,11 +14357,630 @@ project:
     }
 
     #[test]
+    fn foreach_child_repository_input_uses_structural_loop_item_reference() {
+        let mut task = legacy_github_repository_composer_task(1);
+        let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        loop_step.action = Action::ForEach {
+            source_step: "list-repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: vec!["https_url".into(), "ssh_url".into(), "name".into()],
+        };
+        task.steps.push(loop_step);
+        let source = composer_loop_sources(&task, 2).remove(0);
+        let inspect = composer_step(ComposerBlockKind::GitInspect, "inspect".into());
+        let input_schema = definition_for_action(&inspect.action).input_schema;
+        let fields = composer_loop_field_options(&source, input_schema.field("repo").unwrap());
+
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["https_url", "ssh_url"]
+        );
+        let binding = composer_loop_binding(&source, "https_url");
+        assert_eq!(
+            binding,
+            Binding::field(FieldRef::loop_item("loop").field("https_url"))
+        );
+        assert!(!matches!(
+            &binding,
+            Binding::Field { field }
+                if field
+                    .segments
+                    .iter()
+                    .any(|segment| matches!(segment, ContextPathSegment::Index { .. }))
+        ));
+        let selection =
+            composer_loop_binding_selection(&binding, std::slice::from_ref(&source)).unwrap();
+        assert_eq!(selection.loop_step, "loop");
+        assert_eq!(selection.field_path, "https_url");
+        assert_eq!(
+            composer_loop_binding_preview(&source, &selection, "repo"),
+            "repository.https_url → repo"
+        );
+    }
+
+    #[test]
+    fn loop_destination_binding_prefers_full_name_and_falls_back_to_owner_name() {
+        let mut task = legacy_github_repository_composer_task(1);
+        let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        loop_step.action = Action::ForEach {
+            source_step: "list-repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: vec!["full_name".into(), "owner".into(), "name".into()],
+        };
+        task.steps.push(loop_step);
+        let source = composer_loop_sources(&task, 2).remove(0);
+        let suffixes = composer_loop_destination_suffixes(&source);
+
+        assert_eq!(
+            suffixes,
+            vec![
+                ComposerLoopDestinationSuffix::FullName {
+                    field_path: "full_name".into(),
+                },
+                ComposerLoopDestinationSuffix::OwnerName {
+                    owner_path: "owner".into(),
+                    name_path: "name".into(),
+                },
+            ]
+        );
+        let binding = composer_loop_destination_binding(
+            &source,
+            "$HOME/Developer",
+            suffixes.first().unwrap(),
+        );
+        assert_eq!(
+            binding,
+            Binding::interpolated([
+                TemplatePart::literal("$HOME/Developer/"),
+                TemplatePart::field(FieldRef::loop_item("loop").field("full_name")),
+            ])
+        );
+        let selection = composer_loop_destination_binding_selection(&binding, &source).unwrap();
+        assert_eq!(selection.root, "$HOME/Developer");
+        assert_eq!(selection.suffix, suffixes[0]);
+        assert_eq!(
+            composer_loop_destination_preview(&source, &selection),
+            "$HOME/Developer/{{repository.full_name}} → dest"
+        );
+        let empty_root = composer_loop_destination_binding(&source, "", &suffixes[0]);
+        assert_eq!(
+            composer_loop_destination_binding_selection(&empty_root, &source)
+                .unwrap()
+                .root,
+            ""
+        );
+
+        let Action::ForEach { fields, .. } = &mut task.steps[1].action else {
+            unreachable!()
+        };
+        *fields = vec!["owner".into(), "name".into()];
+        let fallback = composer_loop_sources(&task, 2).remove(0);
+        assert_eq!(
+            composer_loop_destination_suffixes(&fallback),
+            vec![ComposerLoopDestinationSuffix::OwnerName {
+                owner_path: "owner".into(),
+                name_path: "name".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn loop_destination_root_validation_is_fail_closed() {
+        assert_eq!(composer_destination_root_error("$HOME"), None);
+        assert_eq!(composer_destination_root_error("$HOME/Developer"), None);
+        assert_eq!(
+            composer_destination_root_error("/Users/example/Developer"),
+            None
+        );
+        assert_eq!(
+            composer_destination_root_error("Developer"),
+            Some("Используйте абсолютный путь либо $HOME/…")
+        );
+        assert_eq!(
+            composer_destination_root_error("$HOME/Developer/../Documents"),
+            Some("Базовый каталог не должен содержать '..'.")
+        );
+        assert_eq!(
+            composer_destination_root_error("$HOME/Developer\0escape"),
+            Some("Базовый каталог не должен содержать NUL.")
+        );
+    }
+
+    #[test]
+    fn new_git_inspect_child_defaults_to_current_loop_item() {
+        let mut task = legacy_github_repository_composer_task(1);
+        let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        loop_step.action = Action::ForEach {
+            source_step: "list-repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: vec!["https_url".into(), "ssh_url".into(), "full_name".into()],
+        };
+        task.steps.push(loop_step);
+        let mut inspect = composer_step(ComposerBlockKind::GitInspect, "inspect".into());
+
+        assert!(composer_bind_git_inspect_to_parent_loop(
+            &task,
+            "loop",
+            &mut inspect
+        ));
+        assert_eq!(
+            inspect.bindings.get("repo"),
+            Some(&Binding::field(
+                FieldRef::loop_item("loop").field("https_url")
+            ))
+        );
+        assert_eq!(
+            inspect.bindings.get("dest"),
+            Some(&Binding::interpolated([
+                TemplatePart::literal("$HOME/Developer/"),
+                TemplatePart::field(FieldRef::loop_item("loop").field("full_name")),
+            ]))
+        );
+
+        task.steps.push(composer_step(
+            ComposerBlockKind::InspectPath,
+            "intervening".into(),
+        ));
+        let mut non_child = composer_step(ComposerBlockKind::GitInspect, "non-child".into());
+        assert!(!composer_bind_git_inspect_to_parent_loop(
+            &task,
+            "loop",
+            &mut non_child
+        ));
+        assert!(non_child.bindings.is_empty());
+    }
+
+    #[test]
+    fn loop_item_repository_binding_round_trips_and_lowers_to_valid_graph() {
+        let mut task = legacy_github_repository_composer_task(1);
+        let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        loop_step.action = Action::ForEach {
+            source_step: "list-repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: vec!["https_url".into(), "ssh_url".into(), "full_name".into()],
+        };
+        task.steps.push(loop_step);
+        let mut inspect = composer_step(ComposerBlockKind::GitInspect, "inspect".into());
+        assert!(composer_bind_git_inspect_to_parent_loop(
+            &task,
+            "loop",
+            &mut inspect
+        ));
+        task.steps.push(inspect);
+
+        let task = task.into_v3().unwrap();
+        let yaml = serde_yaml::to_string(&TaskFile { task }).unwrap();
+        let decoded = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+        assert!(decoded.steps.is_empty());
+        let expected_dest = Binding::interpolated([
+            TemplatePart::literal("$HOME/Developer/"),
+            TemplatePart::field(FieldRef::loop_item("loop").field("full_name")),
+        ]);
+        decoded.validate().unwrap();
+        let graph = decoded
+            .graph
+            .as_ref()
+            .expect("legacy Task.steps must deserialize into WorkflowGraph v3");
+        graph.validate().unwrap();
+
+        let GraphNode::ForEach(loop_node) = &graph.nodes[1] else {
+            panic!("expected the immediate consumer to lower into a for-each body")
+        };
+        let GraphNode::Action(consumer) = &loop_node.body.nodes[0] else {
+            panic!("expected GitInspect in the for-each body")
+        };
+        assert_eq!(
+            consumer.bindings.get("repo"),
+            Some(&Binding::field(
+                FieldRef::loop_item("loop").field("https_url")
+            ))
+        );
+        assert_eq!(consumer.bindings.get("dest"), Some(&expected_dest));
+    }
+
+    #[test]
+    fn legacy_unbound_loop_child_is_rejected_during_v3_import() {
+        let mut task = legacy_github_repository_composer_task(1);
+        let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        loop_step.action = Action::ForEach {
+            source_step: "list-repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: vec!["https_url".into(), "ssh_url".into()],
+        };
+        task.steps.push(loop_step);
+        task.steps.push(composer_step(
+            ComposerBlockKind::GitInspect,
+            "inspect".into(),
+        ));
+        let error = task.into_v3().unwrap_err().to_string();
+        assert!(error.contains("cannot be migrated safely") || error.contains("cannot be lowered"));
+        assert!(error.contains("does not structurally reference loop item"));
+    }
+
+    #[test]
+    fn indexed_loop_child_requires_explicit_migration_before_validation() {
+        let mut task = legacy_github_repository_composer_task(1);
+        let array_source = composer_array_sources(&task, 1).remove(0);
+        let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        loop_step.action = Action::ForEach {
+            source_step: "list-repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: vec!["https_url".into(), "ssh_url".into()],
+        };
+        task.steps.push(loop_step);
+        let mut inspect = composer_step(ComposerBlockKind::GitInspect, "inspect".into());
+        let indexed = composer_indexed_binding(&array_source, 2, "https_url");
+        inspect.bindings.insert("repo".into(), indexed.clone());
+        task.steps.push(inspect);
+        let canvas = ComposerCanvas {
+            parents: BTreeMap::from([
+                ("list-repositories".into(), "start".into()),
+                ("loop".into(), "list-repositories".into()),
+                ("inspect".into(), "loop".into()),
+            ]),
+            ..ComposerCanvas::default()
+        };
+        let mut project = composer_project_with_canvas(task, canvas);
+
+        assert_eq!(
+            project.scenario(&[0]).unwrap().steps[2]
+                .bindings
+                .get("repo"),
+            Some(&indexed)
+        );
+        assert!(validate_project_structure(&project).is_err());
+        assert!(validate_project_for_editing(&project).is_err());
+        assert!(validate_project(&project).is_err());
+
+        let task = project.scenario_mut(&[0]).unwrap();
+        task.steps[2].bindings.insert(
+            "repo".into(),
+            Binding::field(FieldRef::loop_item("loop").field("https_url")),
+        );
+        validate_project(&project).unwrap();
+    }
+
+    #[test]
+    fn scoped_discovery_hides_loop_and_body_outputs_from_downstream() {
+        let mut task = legacy_github_repository_composer_task(1);
+        let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        loop_step.action = Action::ForEach {
+            source_step: "list-repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: Vec::new(),
+        };
+        task.steps.push(loop_step);
+        task.steps.push(composer_step(
+            ComposerBlockKind::GithubListRepositories,
+            "body-output".into(),
+        ));
+        task.steps.push(composer_step(
+            ComposerBlockKind::InspectPath,
+            "downstream".into(),
+        ));
+        let canvas = ComposerCanvas {
+            parents: BTreeMap::from([
+                ("list-repositories".into(), "start".into()),
+                ("loop".into(), "list-repositories".into()),
+                ("body-output".into(), "loop".into()),
+                ("downstream".into(), "body-output".into()),
+            ]),
+            ..ComposerCanvas::default()
+        };
+
+        assert!(composer_array_sources(&task, 4)
+            .iter()
+            .any(|source| source.step_id == "body-output"));
+        assert!(!composer_array_sources_scoped(&task, 4, Some(&canvas))
+            .iter()
+            .any(|source| source.step_id == "body-output"));
+        assert!(composer_condition_fields_scoped(&task, 4, None)
+            .iter()
+            .any(|field| matches!(
+                &field.reference.scope,
+                ContextScope::Step { step_id } if step_id == "body-output"
+            )));
+        assert!(!composer_condition_fields_scoped(&task, 4, Some(&canvas))
+            .iter()
+            .any(|field| matches!(
+                &field.reference.scope,
+                ContextScope::Step { step_id } if step_id == "body-output"
+            )));
+        assert!(!composer_step_context_lines(&task, 1)
+            .iter()
+            .any(|line| line.starts_with("loop.")));
+    }
+
+    #[test]
+    fn non_immediate_loop_children_are_not_connectable_or_valid() {
+        let mut task = legacy_github_repository_composer_task(1);
+        let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        loop_step.action = Action::ForEach {
+            source_step: "list-repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: Vec::new(),
+        };
+        task.steps.push(loop_step);
+        assert!(composer_parent_accepts_new_child(&task, "loop"));
+
+        task.steps.push(composer_step(
+            ComposerBlockKind::InspectPath,
+            "intervening".into(),
+        ));
+        let mut inspect = composer_step(ComposerBlockKind::GitInspect, "inspect".into());
+        inspect.bindings.insert(
+            "repo".into(),
+            Binding::field(FieldRef::loop_item("loop").field("https_url")),
+        );
+        task.steps.push(inspect);
+        let canvas = ComposerCanvas {
+            parents: BTreeMap::from([
+                ("list-repositories".into(), "start".into()),
+                ("loop".into(), "list-repositories".into()),
+                ("intervening".into(), "start".into()),
+                ("inspect".into(), "loop".into()),
+            ]),
+            ..ComposerCanvas::default()
+        };
+
+        assert!(!composer_parent_accepts_new_child(&task, "loop"));
+        assert!(!composer_canvas_edge_is_visible(&task, "inspect", "loop"));
+        assert!(validate_composer_canvas(&task, &canvas)
+            .unwrap_err()
+            .contains("не идёт сразу после"));
+    }
+
+    #[test]
+    fn canvas_validation_rejects_stale_edges_and_unbound_loops() {
+        let mut task = legacy_github_repository_composer_task(1);
+        let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        loop_step.action = Action::ForEach {
+            source_step: "list-repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: Vec::new(),
+        };
+        task.steps.push(loop_step);
+
+        let stale_child = ComposerCanvas {
+            parents: BTreeMap::from([("ghost".into(), "start".into())]),
+            ..ComposerCanvas::default()
+        };
+        assert!(validate_composer_canvas(&task, &stale_child)
+            .unwrap_err()
+            .contains("неизвестный дочерний блок"));
+
+        let stale_parent = ComposerCanvas {
+            parents: BTreeMap::from([("list-repositories".into(), "ghost".into())]),
+            ..ComposerCanvas::default()
+        };
+        assert!(validate_composer_canvas(&task, &stale_parent)
+            .unwrap_err()
+            .contains("неизвестный родительский блок"));
+
+        let no_child = ComposerCanvas {
+            parents: BTreeMap::from([
+                ("list-repositories".into(), "start".into()),
+                ("loop".into(), "list-repositories".into()),
+            ]),
+            ..ComposerCanvas::default()
+        };
+        assert!(validate_composer_canvas(&task, &no_child)
+            .unwrap_err()
+            .contains("ровно один непосредственный дочерний блок"));
+    }
+
+    #[test]
+    fn loop_item_ui_is_available_only_for_immediate_canvas_child() {
+        let mut task = legacy_github_repository_composer_task(1);
+        let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        loop_step.action = Action::ForEach {
+            source_step: "list-repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: Vec::new(),
+        };
+        task.steps.push(loop_step);
+        task.steps.push(composer_step(
+            ComposerBlockKind::GitInspect,
+            "inspect".into(),
+        ));
+        let direct_canvas = ComposerCanvas {
+            parents: BTreeMap::from([("inspect".into(), "loop".into())]),
+            ..ComposerCanvas::default()
+        };
+        assert_eq!(
+            composer_parent_loop_id(&task, 2, Some(&direct_canvas)).as_deref(),
+            Some("loop")
+        );
+
+        task.steps.insert(
+            2,
+            composer_step(ComposerBlockKind::InspectPath, "intervening".into()),
+        );
+        assert_eq!(
+            composer_parent_loop_id(&task, 3, Some(&direct_canvas)),
+            None
+        );
+
+        let sibling_canvas = ComposerCanvas {
+            parents: BTreeMap::from([("inspect".into(), "start".into())]),
+            ..ComposerCanvas::default()
+        };
+        task.steps.remove(2);
+        assert_eq!(
+            composer_parent_loop_id(&task, 2, Some(&sibling_canvas)),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_indexed_binding_is_only_offered_as_an_explicit_loop_migration() {
+        let mut task = legacy_github_repository_composer_task(1);
+        let array_source = composer_array_sources(&task, 1).remove(0);
+        let mut loop_step = composer_step(ComposerBlockKind::ForEach, "loop".into());
+        loop_step.action = Action::ForEach {
+            source_step: "list-repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: Vec::new(),
+        };
+        task.steps.push(loop_step);
+        let loop_source = composer_loop_sources(&task, 2).remove(0);
+        let original = composer_indexed_binding(&array_source, 2, "https_url");
+
+        assert_eq!(
+            composer_indexed_binding_for_loop(
+                &original,
+                &loop_source,
+                std::slice::from_ref(&array_source),
+            ),
+            Some(ComposerLoopBinding {
+                loop_step: "loop".into(),
+                field_path: "https_url".into(),
+            })
+        );
+        assert_eq!(
+            original,
+            composer_indexed_binding(&array_source, 2, "https_url"),
+            "detecting the migration must not rewrite persisted semantics"
+        );
+    }
+
+    #[test]
+    fn indexed_repository_input_maps_third_item_to_zero_based_field_ref() {
+        let task = legacy_github_repository_composer_task(1);
+        let source = composer_array_sources(&task, 1).remove(0);
+        let inspect = composer_step(ComposerBlockKind::GitInspect, "inspect".into());
+        let input_schema = definition_for_action(&inspect.action).input_schema;
+        let expected = input_schema.field("repo").unwrap();
+        let fields = composer_indexed_field_options(&source, expected);
+
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["https_url", "ssh_url"]
+        );
+
+        let binding = composer_indexed_binding(&source, 2, "https_url");
+        assert_eq!(
+            binding,
+            Binding::field(
+                FieldRef::step("list-repositories")
+                    .field("github")
+                    .field("repositories")
+                    .index(2)
+                    .field("https_url")
+            )
+        );
+        let selection =
+            composer_indexed_binding_selection(&binding, std::slice::from_ref(&source)).unwrap();
+        assert_eq!(selection.index, 2);
+        assert_eq!(selection.field_path, "https_url");
+        assert_eq!(
+            composer_indexed_binding_preview(&selection, "repo"),
+            "list-repositories.github.repositories[3].https_url → repo"
+        );
+    }
+
+    #[test]
+    fn indexed_input_picker_filters_fields_by_input_contract() {
+        let task = legacy_github_repository_composer_task(1);
+        let source = composer_array_sources(&task, 1).remove(0);
+        let inspect = composer_step(ComposerBlockKind::GitInspect, "inspect".into());
+        let input_schema = definition_for_action(&inspect.action).input_schema;
+
+        let repository_fields =
+            composer_indexed_field_options(&source, input_schema.field("repo").unwrap());
+        assert_eq!(repository_fields.len(), 2);
+        assert!(repository_fields.iter().all(|field| matches!(
+            field.value_type,
+            ContextType::String {
+                format: Some(SemanticFormat::GitUrl)
+            }
+        )));
+        assert!(
+            composer_indexed_field_options(&source, input_schema.field("dest").unwrap()).is_empty()
+        );
+    }
+
+    #[test]
+    fn indexed_input_picker_rejects_optional_nullable_and_secret_fields() {
+        let git_url = ContextType::string(SemanticFormat::GitUrl);
+        let item_type = ContextType::object(
+            ObjectSchema::new("test.repository@1")
+                .with_field("required", FieldSchema::required(git_url.clone()))
+                .with_field("optional", FieldSchema::optional(git_url.clone()))
+                .with_field(
+                    "nullable",
+                    FieldSchema::required(git_url.clone()).nullable(),
+                )
+                .with_field(
+                    "secret",
+                    FieldSchema::required(git_url.clone()).sensitive(Sensitivity::Secret),
+                ),
+        );
+        let source = ComposerArraySource {
+            step_id: "source".into(),
+            step_name: "Source".into(),
+            path: "repositories".into(),
+            item: "repository".into(),
+            item_type,
+        };
+        let expected = FieldSchema::required(git_url);
+
+        assert_eq!(
+            composer_indexed_field_options(&source, &expected)
+                .into_iter()
+                .map(|field| field.path)
+                .collect::<Vec<_>>(),
+            vec!["required"]
+        );
+    }
+
+    #[test]
+    fn step_binding_serde_preserves_indexed_repository_selection() {
+        let mut task = legacy_github_repository_composer_task(1);
+        let source = composer_array_sources(&task, 1).remove(0);
+        let mut inspect = composer_step(ComposerBlockKind::GitInspect, "inspect".into());
+        inspect.bindings.insert(
+            "repo".into(),
+            composer_indexed_binding(&source, 2, "ssh_url"),
+        );
+        let expected = inspect.bindings["repo"].clone();
+        task.steps.push(inspect);
+
+        let task = task.into_v3().unwrap();
+        let yaml = serde_yaml::to_string(&TaskFile { task }).unwrap();
+        let decoded = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
+        assert!(decoded.steps.is_empty());
+        let GraphNode::Action(inspect) = &decoded.graph.as_ref().unwrap().nodes[1] else {
+            panic!("expected imported inspect action")
+        };
+        assert_eq!(inspect.bindings.get("repo"), Some(&expected));
+        decoded.validate().unwrap();
+    }
+
+    #[test]
     fn array_selector_recursively_discovers_non_github_arrays() {
-        let mut task = github_repository_composer_task(1);
+        let mut task = legacy_github_repository_composer_task(1);
         task.steps[0] = Step {
             id: "run-script".into(),
             name: "Run a script".into(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: true,
@@ -7051,7 +15007,7 @@ project:
 
     #[test]
     fn condition_picker_exposes_only_previous_step_schemas() {
-        let mut task = github_repository_composer_task(1);
+        let mut task = legacy_github_repository_composer_task(1);
         task.steps.push(composer_step(
             ComposerBlockKind::InspectPath,
             "inspect-path".into(),
@@ -7061,8 +15017,8 @@ project:
             "future-git".into(),
         ));
 
-        assert!(composer_condition_fields(&task, 0).is_empty());
-        let before_inspect = composer_condition_fields(&task, 1);
+        assert!(composer_condition_fields_scoped(&task, 0, None).is_empty());
+        let before_inspect = composer_condition_fields_scoped(&task, 1, None);
         assert!(!before_inspect.is_empty());
         assert!(before_inspect.iter().all(|field| {
             matches!(
@@ -7074,7 +15030,7 @@ project:
             field_ref_label(&field.reference) == "list-repositories.github.account.login"
         }));
 
-        let before_future = composer_condition_fields(&task, 2);
+        let before_future = composer_condition_fields_scoped(&task, 2, None);
         assert!(before_future.iter().any(|field| {
             field_ref_label(&field.reference) == "inspect-path.exists"
                 && field.value_type == ContextType::Boolean
@@ -7176,7 +15132,7 @@ project:
             policy: RuleOutcomePolicy::default(),
         });
 
-        let mut task = github_repository_composer_task(1);
+        let mut task = legacy_github_repository_composer_task(1);
         task.steps.push(step.clone());
         task.validate().unwrap();
 
@@ -7388,13 +15344,14 @@ project:
 
         assert_eq!(task.id, "github-repositories-3");
         assert_eq!(task.name, "Получить репозитории GitHub");
-        assert_eq!(task.steps.len(), 1);
-        assert!(matches!(
-            task.steps[0].action,
-            Action::GithubListRepositories
-        ));
-        let lines =
-            schema_context_lines(&definition_for_action(&task.steps[0].action).output_schema);
+        assert!(task.steps.is_empty());
+        let graph = task.graph.as_ref().expect("graph-native composer task");
+        assert_eq!(graph.entries, ["list-repositories"]);
+        let GraphNode::Action(action) = &graph.nodes[0] else {
+            panic!("expected GitHub repository action node")
+        };
+        assert!(matches!(action.step.action, Action::GithubListRepositories));
+        let lines = schema_context_lines(&definition_for_action(&action.step.action).output_schema);
         assert!(lines
             .iter()
             .any(|line| line == "github.account.login : string<identifier>"));
@@ -7410,18 +15367,1793 @@ project:
         assert!(lines
             .iter()
             .all(|line| !line.contains(',') && line.len() < 96));
-        assert!(task
-            .steps
-            .iter()
-            .all(|step| matches!(step.auth, AuthPolicy::None)));
+        assert!(matches!(action.step.auth, AuthPolicy::None));
         task.validate().unwrap();
         let yaml = serde_yaml::to_string(&TaskFile { task }).unwrap();
         assert!(yaml.contains("type: github-list-repositories"));
+        assert!(yaml.contains("format_version: 3"));
+        assert!(yaml.contains("workflow_graph:"));
+        assert!(!yaml.contains("\n  steps:"));
         let round_trip: TaskFile = serde_yaml::from_str(&yaml).unwrap();
+        assert!(round_trip.task.steps.is_empty());
+        let GraphNode::Action(round_trip_action) =
+            &round_trip.task.graph.as_ref().unwrap().nodes[0]
+        else {
+            panic!("expected round-tripped GitHub action node")
+        };
         assert!(matches!(
-            round_trip.task.steps[0].action,
+            round_trip_action.step.action,
             Action::GithubListRepositories
         ));
+    }
+
+    #[test]
+    fn unsupported_if_preview_is_byte_stable_until_explicit_replacement() {
+        let condition = ExpressionV1::In {
+            needle: Box::new(ExpressionV1::Literal {
+                value: ExpressionValue::String("main".into()),
+            }),
+            collection: Box::new(ExpressionV1::Literal {
+                value: ExpressionValue::List(vec![ExpressionValue::String("main".into())]),
+            }),
+        };
+        let before = serde_yaml::to_string(&condition).unwrap();
+
+        assert!(composer_condition_rule(&condition).is_none());
+        assert!(condition_read_only_summary(&condition).contains("in"));
+        assert_eq!(serde_yaml::to_string(&condition).unwrap(), before);
+        assert!(matches!(
+            default_graph_if_condition(&[]),
+            ExpressionV1::Literal {
+                value: ExpressionValue::Bool(true)
+            }
+        ));
+    }
+
+    #[test]
+    fn graph_delete_never_cascades_or_breaks_structural_references() {
+        let action = |id: &str| {
+            GraphNode::Action(Box::new(ActionNode {
+                step: default_step(ActionKind::GitInspect, id).unwrap(),
+                bindings: BTreeMap::new(),
+            }))
+        };
+        let mut chain = WorkflowGraph {
+            entries: vec!["a".into()],
+            nodes: vec![action("a"), action("b"), action("c")],
+            edges: vec![
+                GraphEdge::new("a", EdgePort::Success, "b"),
+                GraphEdge::new("b", EdgePort::Success, "c"),
+            ],
+            ..WorkflowGraph::default()
+        };
+        let before = serde_yaml::to_string(&chain).unwrap();
+        let error = graph_remove_composer_node(&mut chain, "b").unwrap_err();
+        assert!(error.contains("downstream"));
+        assert_eq!(serde_yaml::to_string(&chain).unwrap(), before);
+        assert!(graph_remove_composer_node(&mut chain, "c").unwrap());
+        assert!(graph_node(&chain, "b").is_some());
+
+        let mut referenced = WorkflowGraph {
+            entries: vec!["producer".into(), "alternate".into()],
+            nodes: vec![
+                action("producer"),
+                action("alternate"),
+                GraphNode::Action(Box::new(ActionNode {
+                    step: default_step(ActionKind::GitInspect, "consumer").unwrap(),
+                    bindings: BTreeMap::from([(
+                        "repo".into(),
+                        Binding::field(FieldRef::step("producer").field("repository")),
+                    )]),
+                })),
+            ],
+            edges: vec![
+                GraphEdge::new("producer", EdgePort::Success, "consumer"),
+                GraphEdge::new("alternate", EdgePort::Success, "consumer"),
+            ],
+            ..WorkflowGraph::default()
+        };
+        let error = graph_remove_composer_node(&mut referenced, "producer").unwrap_err();
+        assert!(error.contains("привязки и условия"));
+        assert!(graph_node(&referenced, "producer").is_some());
+
+        let mut control = WorkflowGraph {
+            entries: vec!["loop".into()],
+            nodes: vec![GraphNode::ForEach(ForEachNode {
+                id: "loop".into(),
+                collection: Binding::literal(serde_json::json!([])),
+                item_alias: "item".into(),
+                index_alias: None,
+                concurrency: 1,
+                on_error: LoopFailurePolicy::Stop,
+                body: Box::new(WorkflowGraph {
+                    entries: vec!["child".into()],
+                    nodes: vec![action("child")],
+                    ..WorkflowGraph::default()
+                }),
+            })],
+            ..WorkflowGraph::default()
+        };
+        let error = graph_remove_composer_node(&mut control, "loop").unwrap_err();
+        assert!(error.contains("вложенных ветвей"));
+        assert!(graph_node(&control, "child").is_some());
+    }
+
+    #[test]
+    fn graph_attach_uses_explicit_source_port_and_rejects_invalid_port_atomically() {
+        let mut graph = WorkflowGraph {
+            entries: vec!["source".into()],
+            nodes: vec![GraphNode::Action(Box::new(ActionNode {
+                step: default_step(ActionKind::GitInspect, "source").unwrap(),
+                bindings: BTreeMap::new(),
+            }))],
+            ..WorkflowGraph::default()
+        };
+        let attach = ComposerGraphAttach::RootAfter {
+            node_id: "source".into(),
+        };
+        let child = graph_insert_composer_block(
+            &mut graph,
+            &attach,
+            Some(EdgePort::Failure),
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+        )
+        .unwrap();
+        assert!(graph.edges.iter().any(|edge| {
+            edge.from.node == "source"
+                && edge.from.port == EdgePort::Failure
+                && edge.to.node == child
+        }));
+
+        let node_count = graph.nodes.len();
+        let error = graph_insert_composer_block(
+            &mut graph,
+            &attach,
+            Some(EdgePort::Empty),
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+        )
+        .unwrap_err();
+        assert!(error.contains("недоступен"));
+        assert_eq!(graph.nodes.len(), node_count);
+    }
+
+    fn graph_authoring_test_task(id: &str, graph: WorkflowGraph) -> Task {
+        Task {
+            id: id.into(),
+            name: id.into(),
+            description: "generated graph authoring test".into(),
+            platform: ppduster::rules::Platform::Macos,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            graph: Some(graph),
+            steps: Vec::new(),
+        }
+    }
+
+    fn assert_graph_authoring_round_trip(id: &str, graph: &WorkflowGraph) {
+        graph.validate().unwrap_or_else(|errors| {
+            panic!(
+                "generated graph {id} must validate: {}",
+                errors
+                    .into_iter()
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        });
+        let yaml = serde_yaml::to_string(&TaskFile {
+            task: graph_authoring_test_task(id, graph.clone()),
+        })
+        .unwrap();
+        let decoded: TaskFile = serde_yaml::from_str(&yaml).unwrap();
+        assert!(decoded.task.steps.is_empty());
+        assert!(decoded.task.is_v3());
+        decoded.task.validate().unwrap_or_else(|error| {
+            panic!("round-tripped generated graph {id} must validate: {error}")
+        });
+        assert_eq!(
+            serde_yaml::to_string(decoded.task.graph.as_ref().unwrap()).unwrap(),
+            serde_yaml::to_string(graph).unwrap(),
+            "graph authoring round trip changed {id}"
+        );
+    }
+
+    #[test]
+    fn graph_authoring_matrix_covers_every_action_at_root_and_in_foreach() {
+        let action_kinds = ActionKind::ALL
+            .into_iter()
+            .filter(|kind| kind.is_graph_action())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            action_kinds.len(),
+            23,
+            "update the authoring matrix for new actions"
+        );
+
+        for kind in action_kinds {
+            let mut root = WorkflowGraph::default();
+            let root_id = graph_insert_composer_block(
+                &mut root,
+                &ComposerGraphAttach::RootStart,
+                None,
+                ComposerGraphBlockKind::Action(kind),
+            )
+            .unwrap_or_else(|error| panic!("root authoring failed for {}: {error}", kind.id()));
+            let GraphNode::Action(root_action) = graph_node(&root, &root_id).unwrap() else {
+                panic!("{} was not authored as an action", kind.id())
+            };
+            assert_eq!(root_action.step.action.kind(), kind);
+            assert_graph_authoring_round_trip(&format!("root-{}", kind.id()), &root);
+
+            let mut nested = WorkflowGraph::default();
+            let loop_id = graph_insert_composer_block(
+                &mut nested,
+                &ComposerGraphAttach::RootStart,
+                None,
+                ComposerGraphBlockKind::ForEach,
+            )
+            .unwrap();
+            let nested_id = graph_insert_composer_block(
+                &mut nested,
+                &ComposerGraphAttach::NestedStart {
+                    scope: ComposerGraphNestedScope::ForEachBody {
+                        owner_id: loop_id.clone(),
+                    },
+                },
+                None,
+                ComposerGraphBlockKind::Action(kind),
+            )
+            .unwrap_or_else(|error| panic!("nested authoring failed for {}: {error}", kind.id()));
+            let GraphNode::Action(nested_action) = graph_node(&nested, &nested_id).unwrap() else {
+                panic!("nested {} was not authored as an action", kind.id())
+            };
+            assert_eq!(nested_action.step.action.kind(), kind);
+            assert_graph_authoring_round_trip(&format!("nested-{}", kind.id()), &nested);
+        }
+    }
+
+    #[test]
+    fn repository_loop_autobinding_is_semantic_unambiguous_and_recipe_scoped() {
+        let mut graph = WorkflowGraph::default();
+        let list_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GithubListRepositories),
+        )
+        .unwrap();
+        let loop_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootAfter { node_id: list_id },
+            Some(EdgePort::Success),
+            ComposerGraphBlockKind::ForEach,
+        )
+        .unwrap();
+
+        let repository_item = graph_loop_item_type(&graph, &loop_id).unwrap();
+        let run_definition = block_definition(ActionKind::RunCommand);
+        assert!(unique_exact_loop_binding_field(
+            &repository_item,
+            run_definition.input_schema.field("program").unwrap()
+        )
+        .is_none());
+        let inspect_definition = block_definition(ActionKind::InspectPath);
+        assert!(unique_exact_loop_binding_field(
+            &repository_item,
+            inspect_definition
+                .input_schema
+                .field("recursive_size")
+                .unwrap()
+        )
+        .is_none());
+        let clone_definition = block_definition(ActionKind::GitClone);
+        assert_eq!(
+            unique_exact_loop_binding_field(
+                &repository_item,
+                clone_definition.input_schema.field("branch").unwrap()
+            )
+            .map(|field| field.path),
+            Some("default_branch".into())
+        );
+
+        let one_plain_string =
+            ContextType::object(ObjectSchema::new("test.loop-item@1").with_field(
+                "label",
+                FieldSchema::required(ContextType::String { format: None }),
+            ));
+        assert_eq!(
+            unique_exact_loop_binding_field(
+                &one_plain_string,
+                &FieldSchema::required(ContextType::String { format: None })
+            )
+            .map(|field| field.path),
+            Some("label".into())
+        );
+
+        for kind in [
+            ActionKind::RunCommand,
+            ActionKind::WriteFile,
+            ActionKind::InspectPath,
+        ] {
+            let action_id = graph_insert_composer_block(
+                &mut graph,
+                &ComposerGraphAttach::NestedStart {
+                    scope: ComposerGraphNestedScope::ForEachBody {
+                        owner_id: loop_id.clone(),
+                    },
+                },
+                None,
+                ComposerGraphBlockKind::Action(kind),
+            )
+            .unwrap();
+            let GraphNode::Action(action) = graph_node(&graph, &action_id).unwrap() else {
+                panic!("expected action node")
+            };
+            assert!(
+                action.bindings.is_empty(),
+                "{} received unrelated repository fields: {:?}",
+                kind.id(),
+                action.bindings
+            );
+        }
+
+        let clone_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::NestedStart {
+                scope: ComposerGraphNestedScope::ForEachBody {
+                    owner_id: loop_id.clone(),
+                },
+            },
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GitClone),
+        )
+        .unwrap();
+        let GraphNode::Action(clone) = graph_node(&graph, &clone_id).unwrap() else {
+            panic!("expected Git clone action node")
+        };
+        assert_eq!(
+            clone.bindings.get("repo"),
+            Some(&Binding::field(
+                FieldRef::loop_item(&loop_id).field("https_url")
+            ))
+        );
+        assert_eq!(
+            clone.bindings.get("branch"),
+            Some(&Binding::field(
+                FieldRef::loop_item(&loop_id).field("default_branch")
+            ))
+        );
+        assert!(matches!(
+            clone.bindings.get("dest"),
+            Some(Binding::Interpolated { .. })
+        ));
+        assert_graph_authoring_round_trip("repository-loop-semantic-bindings", &graph);
+    }
+
+    #[test]
+    fn github_loop_materializes_all_git_recipes_without_nullable_required_branch_flow() {
+        for kind in [
+            ActionKind::GitClone,
+            ActionKind::GitInspect,
+            ActionKind::GitCloneIfMissing,
+            ActionKind::GitFetch,
+            ActionKind::GitFastForward,
+        ] {
+            let mut graph = WorkflowGraph::default();
+            let list_id = graph_insert_composer_block(
+                &mut graph,
+                &ComposerGraphAttach::RootStart,
+                None,
+                ComposerGraphBlockKind::Action(ActionKind::GithubListRepositories),
+            )
+            .unwrap();
+            let loop_id = graph_insert_composer_block(
+                &mut graph,
+                &ComposerGraphAttach::RootAfter { node_id: list_id },
+                Some(EdgePort::Success),
+                ComposerGraphBlockKind::ForEach,
+            )
+            .unwrap();
+            let action_id = graph_insert_composer_block(
+                &mut graph,
+                &ComposerGraphAttach::NestedStart {
+                    scope: ComposerGraphNestedScope::ForEachBody {
+                        owner_id: loop_id.clone(),
+                    },
+                },
+                None,
+                ComposerGraphBlockKind::Action(kind),
+            )
+            .unwrap();
+            let GraphNode::Action(action) = graph_node(&graph, &action_id).unwrap() else {
+                panic!("Git action expected")
+            };
+            assert_eq!(
+                action.bindings.get("repo"),
+                Some(&Binding::field(
+                    FieldRef::loop_item(&loop_id).field("https_url")
+                ))
+            );
+            assert!(matches!(
+                action.bindings.get("dest"),
+                Some(Binding::Interpolated { .. })
+            ));
+            if matches!(kind, ActionKind::GitClone | ActionKind::GitCloneIfMissing) {
+                assert_eq!(
+                    action.bindings.get("branch"),
+                    Some(&Binding::field(
+                        FieldRef::loop_item(&loop_id).field("default_branch")
+                    ))
+                );
+            } else {
+                assert!(
+                    !action.bindings.contains_key("branch"),
+                    "{} must not consume nullable default_branch",
+                    kind.id()
+                );
+            }
+            if matches!(kind, ActionKind::GitFetch | ActionKind::GitFastForward) {
+                match &action.step.action {
+                    Action::GitFetch { branch, .. } | Action::GitFastForward { branch, .. } => {
+                        assert_eq!(branch, "main")
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            assert_graph_authoring_round_trip(&format!("github-loop-{}", kind.id()), &graph);
+        }
+    }
+
+    #[test]
+    fn github_loop_never_guesses_bindings_for_non_git_actions() {
+        let mut graph = WorkflowGraph::default();
+        let list_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GithubListRepositories),
+        )
+        .unwrap();
+        let loop_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootAfter { node_id: list_id },
+            Some(EdgePort::Success),
+            ComposerGraphBlockKind::ForEach,
+        )
+        .unwrap();
+        for kind in ActionKind::ALL.into_iter().filter(|kind| {
+            kind.is_graph_action()
+                && !matches!(
+                    kind,
+                    ActionKind::GitClone
+                        | ActionKind::GitInspect
+                        | ActionKind::GitCloneIfMissing
+                        | ActionKind::GitFetch
+                        | ActionKind::GitFastForward
+                )
+        }) {
+            let id = graph_insert_composer_block(
+                &mut graph,
+                &ComposerGraphAttach::NestedStart {
+                    scope: ComposerGraphNestedScope::ForEachBody {
+                        owner_id: loop_id.clone(),
+                    },
+                },
+                None,
+                ComposerGraphBlockKind::Action(kind),
+            )
+            .unwrap();
+            let GraphNode::Action(action) = graph_node(&graph, &id).unwrap() else {
+                panic!("action expected")
+            };
+            assert!(
+                action.bindings.is_empty(),
+                "{} guessed repository bindings: {:?}",
+                kind.id(),
+                action.bindings
+            );
+        }
+        assert_graph_authoring_round_trip("github-loop-non-git-actions", &graph);
+    }
+
+    #[test]
+    fn nested_foreach_aliases_are_unique_editable_and_round_trip() {
+        let mut graph = WorkflowGraph::default();
+        let outer = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::ForEach,
+        )
+        .unwrap();
+        let middle = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::NestedStart {
+                scope: ComposerGraphNestedScope::ForEachBody {
+                    owner_id: outer.clone(),
+                },
+            },
+            None,
+            ComposerGraphBlockKind::ForEach,
+        )
+        .unwrap();
+        let inner = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::NestedStart {
+                scope: ComposerGraphNestedScope::ForEachBody {
+                    owner_id: middle.clone(),
+                },
+            },
+            None,
+            ComposerGraphBlockKind::ForEach,
+        )
+        .unwrap();
+        graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::NestedStart {
+                scope: ComposerGraphNestedScope::ForEachBody {
+                    owner_id: inner.clone(),
+                },
+            },
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+        )
+        .unwrap();
+
+        let aliases = [&outer, &middle, &inner]
+            .into_iter()
+            .flat_map(|id| {
+                let GraphNode::ForEach(node) = graph_node(&graph, id).unwrap() else {
+                    panic!("foreach expected")
+                };
+                [node.item_alias.clone(), node.index_alias.clone().unwrap()]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(aliases.iter().collect::<BTreeSet<_>>().len(), aliases.len());
+        assert_eq!(
+            aliases,
+            [
+                "item",
+                "item_index",
+                "item_2",
+                "item_2_index",
+                "item_3",
+                "item_3_index"
+            ]
+        );
+
+        let GraphNode::ForEach(node) = graph_node_mut(&mut graph, &inner).unwrap() else {
+            panic!("foreach expected")
+        };
+        node.item_alias = "leaf".into();
+        node.index_alias = Some("leaf_index".into());
+        assert_graph_authoring_round_trip("nested-foreach-aliases", &graph);
+    }
+
+    fn populated_control_graph(kind: ComposerGraphBlockKind) -> (WorkflowGraph, String) {
+        let mut graph = WorkflowGraph::default();
+        let control_id =
+            graph_insert_composer_block(&mut graph, &ComposerGraphAttach::RootStart, None, kind)
+                .unwrap();
+        match graph_node(&graph, &control_id).unwrap() {
+            GraphNode::ForEach(_) => {
+                graph_insert_composer_block(
+                    &mut graph,
+                    &ComposerGraphAttach::NestedStart {
+                        scope: ComposerGraphNestedScope::ForEachBody {
+                            owner_id: control_id.clone(),
+                        },
+                    },
+                    None,
+                    ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+                )
+                .unwrap();
+            }
+            GraphNode::If(_) => {
+                for scope in [
+                    ComposerGraphNestedScope::IfThen {
+                        owner_id: control_id.clone(),
+                    },
+                    ComposerGraphNestedScope::IfElse {
+                        owner_id: control_id.clone(),
+                    },
+                ] {
+                    graph_insert_composer_block(
+                        &mut graph,
+                        &ComposerGraphAttach::NestedStart { scope },
+                        None,
+                        ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+                    )
+                    .unwrap();
+                }
+            }
+            GraphNode::Switch(_) => {
+                for scope in [
+                    ComposerGraphNestedScope::SwitchCase {
+                        owner_id: control_id.clone(),
+                        case_id: "case-1".into(),
+                    },
+                    ComposerGraphNestedScope::SwitchDefault {
+                        owner_id: control_id.clone(),
+                    },
+                ] {
+                    graph_insert_composer_block(
+                        &mut graph,
+                        &ComposerGraphAttach::NestedStart { scope },
+                        None,
+                        ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+                    )
+                    .unwrap();
+                }
+            }
+            GraphNode::Action(_) | GraphNode::Join(_) => {
+                panic!("expected nested control node")
+            }
+        }
+        (graph, control_id)
+    }
+
+    #[test]
+    fn graph_authoring_matrix_uses_every_explicit_output_port() {
+        for port in [EdgePort::Success, EdgePort::Failure, EdgePort::Always] {
+            let mut graph = WorkflowGraph::default();
+            let source = graph_insert_composer_block(
+                &mut graph,
+                &ComposerGraphAttach::RootStart,
+                None,
+                ComposerGraphBlockKind::Action(ActionKind::GitInspect),
+            )
+            .unwrap();
+            graph_insert_composer_block(
+                &mut graph,
+                &ComposerGraphAttach::RootAfter {
+                    node_id: source.clone(),
+                },
+                Some(port.clone()),
+                ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+            )
+            .unwrap();
+            assert_graph_authoring_round_trip(&format!("action-port-{port:?}"), &graph);
+        }
+
+        for (kind, ports) in [
+            (
+                ComposerGraphBlockKind::ForEach,
+                vec![EdgePort::Completed, EdgePort::Empty, EdgePort::Failure],
+            ),
+            (
+                ComposerGraphBlockKind::If,
+                vec![EdgePort::Completed, EdgePort::Failure],
+            ),
+            (
+                ComposerGraphBlockKind::Switch,
+                vec![EdgePort::Completed, EdgePort::Failure],
+            ),
+        ] {
+            for port in ports {
+                let (mut graph, control_id) = populated_control_graph(kind);
+                graph_insert_composer_block(
+                    &mut graph,
+                    &ComposerGraphAttach::RootAfter {
+                        node_id: control_id,
+                    },
+                    Some(port.clone()),
+                    ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+                )
+                .unwrap();
+                assert_graph_authoring_round_trip(
+                    &format!("control-{}-{port:?}", graph.nodes[0].kind_name()),
+                    &graph,
+                );
+            }
+        }
+
+        for port in [EdgePort::Completed, EdgePort::Failure] {
+            let action = |kind, id| {
+                GraphNode::Action(Box::new(ActionNode {
+                    step: default_step(kind, id).unwrap(),
+                    bindings: BTreeMap::new(),
+                }))
+            };
+            let mut graph = WorkflowGraph {
+                entries: vec!["left".into(), "right".into()],
+                nodes: vec![
+                    action(ActionKind::GitInspect, "left"),
+                    action(ActionKind::InspectPath, "right"),
+                    GraphNode::Join(JoinNode {
+                        id: "join".into(),
+                        mode: JoinMode::All,
+                    }),
+                ],
+                edges: vec![
+                    GraphEdge::new("left", EdgePort::Success, "join"),
+                    GraphEdge::new("right", EdgePort::Success, "join"),
+                ],
+                ..WorkflowGraph::default()
+            };
+            graph_insert_composer_block(
+                &mut graph,
+                &ComposerGraphAttach::RootAfter {
+                    node_id: "join".into(),
+                },
+                Some(port.clone()),
+                ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+            )
+            .unwrap();
+            assert_graph_authoring_round_trip(&format!("join-port-{port:?}"), &graph);
+        }
+    }
+
+    #[test]
+    fn graph_authoring_rejects_invalid_ports_atomically_for_every_node_kind() {
+        let mut cases = Vec::new();
+
+        let mut action = WorkflowGraph::default();
+        let action_id = graph_insert_composer_block(
+            &mut action,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GitInspect),
+        )
+        .unwrap();
+        cases.push((action, action_id, EdgePort::Empty));
+
+        for kind in [
+            ComposerGraphBlockKind::ForEach,
+            ComposerGraphBlockKind::If,
+            ComposerGraphBlockKind::Switch,
+        ] {
+            let (graph, id) = populated_control_graph(kind);
+            cases.push((graph, id, EdgePort::Success));
+        }
+
+        let action = |kind, id| {
+            GraphNode::Action(Box::new(ActionNode {
+                step: default_step(kind, id).unwrap(),
+                bindings: BTreeMap::new(),
+            }))
+        };
+        cases.push((
+            WorkflowGraph {
+                entries: vec!["left".into(), "right".into()],
+                nodes: vec![
+                    action(ActionKind::GitInspect, "left"),
+                    action(ActionKind::InspectPath, "right"),
+                    GraphNode::Join(JoinNode {
+                        id: "join".into(),
+                        mode: JoinMode::All,
+                    }),
+                ],
+                edges: vec![
+                    GraphEdge::new("left", EdgePort::Success, "join"),
+                    GraphEdge::new("right", EdgePort::Success, "join"),
+                ],
+                ..WorkflowGraph::default()
+            },
+            "join".into(),
+            EdgePort::Success,
+        ));
+
+        for (mut graph, source, invalid_port) in cases {
+            let before = serde_yaml::to_string(&graph).unwrap();
+            let error = graph_insert_composer_block(
+                &mut graph,
+                &ComposerGraphAttach::RootAfter { node_id: source },
+                Some(invalid_port),
+                ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+            )
+            .unwrap_err();
+            assert!(error.contains("недоступен"));
+            assert_eq!(serde_yaml::to_string(&graph).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn stale_nested_after_does_not_materialize_optional_scopes() {
+        for (kind, scope) in [
+            (
+                ComposerGraphBlockKind::If,
+                ComposerGraphNestedScope::IfElse {
+                    owner_id: "if-1".into(),
+                },
+            ),
+            (
+                ComposerGraphBlockKind::Switch,
+                ComposerGraphNestedScope::SwitchDefault {
+                    owner_id: "switch-1".into(),
+                },
+            ),
+        ] {
+            let mut graph = WorkflowGraph::default();
+            let owner = graph_insert_composer_block(
+                &mut graph,
+                &ComposerGraphAttach::RootStart,
+                None,
+                kind,
+            )
+            .unwrap();
+            assert_eq!(owner, scope.owner_id());
+            let before = serde_yaml::to_string(&graph).unwrap();
+            let error = graph_insert_composer_block(
+                &mut graph,
+                &ComposerGraphAttach::NestedAfter {
+                    scope,
+                    node_id: "stale-child".into(),
+                },
+                Some(EdgePort::Success),
+                ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+            )
+            .unwrap_err();
+            assert!(error.contains("вложенная область"));
+            assert_eq!(serde_yaml::to_string(&graph).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn incomplete_if_and_switch_block_downstream_attach_atomically() {
+        for kind in [ComposerGraphBlockKind::If, ComposerGraphBlockKind::Switch] {
+            let mut graph = WorkflowGraph::default();
+            let control_id = graph_insert_composer_block(
+                &mut graph,
+                &ComposerGraphAttach::RootStart,
+                None,
+                kind,
+            )
+            .unwrap();
+            let before = serde_yaml::to_string(&graph).unwrap();
+            let error = graph_insert_composer_block(
+                &mut graph,
+                &ComposerGraphAttach::RootAfter {
+                    node_id: control_id,
+                },
+                Some(EdgePort::Completed),
+                ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+            )
+            .unwrap_err();
+            assert!(error.contains("вет"), "unexpected blocker message: {error}");
+            assert_eq!(serde_yaml::to_string(&graph).unwrap(), before);
+        }
+
+        let mut conditional = WorkflowGraph::default();
+        let if_id = graph_insert_composer_block(
+            &mut conditional,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::If,
+        )
+        .unwrap();
+        let GraphNode::If(node) = graph_node(&conditional, &if_id).unwrap() else {
+            panic!("if node expected")
+        };
+        assert!(node.else_graph.is_none());
+        graph_insert_composer_block(
+            &mut conditional,
+            &ComposerGraphAttach::NestedStart {
+                scope: ComposerGraphNestedScope::IfThen {
+                    owner_id: if_id.clone(),
+                },
+            },
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+        )
+        .unwrap();
+        let after_if = ComposerGraphAttach::RootAfter {
+            node_id: if_id.clone(),
+        };
+        assert!(graph_attach_blocker(&conditional, &after_if).is_none());
+        let GraphNode::If(node) = graph_node_mut(&mut conditional, &if_id).unwrap() else {
+            panic!("if node expected")
+        };
+        node.else_graph = Some(Box::new(WorkflowGraph::default()));
+        assert!(graph_attach_blocker(&conditional, &after_if)
+            .unwrap()
+            .contains("Иначе"));
+
+        let mut selection = WorkflowGraph::default();
+        let switch_id = graph_insert_composer_block(
+            &mut selection,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Switch,
+        )
+        .unwrap();
+        let GraphNode::Switch(node) = graph_node(&selection, &switch_id).unwrap() else {
+            panic!("switch node expected")
+        };
+        assert!(node.default.is_none());
+        graph_insert_composer_block(
+            &mut selection,
+            &ComposerGraphAttach::NestedStart {
+                scope: ComposerGraphNestedScope::SwitchCase {
+                    owner_id: switch_id.clone(),
+                    case_id: "case-1".into(),
+                },
+            },
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+        )
+        .unwrap();
+        let after_switch = ComposerGraphAttach::RootAfter {
+            node_id: switch_id.clone(),
+        };
+        assert!(graph_attach_blocker(&selection, &after_switch).is_none());
+        let GraphNode::Switch(node) = graph_node_mut(&mut selection, &switch_id).unwrap() else {
+            panic!("switch node expected")
+        };
+        node.default = Some(Box::new(WorkflowGraph::default()));
+        assert!(graph_attach_blocker(&selection, &after_switch)
+            .unwrap()
+            .contains("По умолчанию"));
+    }
+
+    #[test]
+    fn join_blocks_downstream_until_two_valid_inputs_exist() {
+        let action = |kind, id| {
+            GraphNode::Action(Box::new(ActionNode {
+                step: default_step(kind, id).unwrap(),
+                bindings: BTreeMap::new(),
+            }))
+        };
+        let mut graph = WorkflowGraph {
+            entries: vec!["left".into(), "right".into()],
+            nodes: vec![
+                action(ActionKind::GitInspect, "left"),
+                action(ActionKind::InspectPath, "right"),
+                GraphNode::Join(JoinNode {
+                    id: "join".into(),
+                    mode: JoinMode::All,
+                }),
+            ],
+            edges: vec![GraphEdge::new("left", EdgePort::Success, "join")],
+            ..WorkflowGraph::default()
+        };
+        let attach = ComposerGraphAttach::RootAfter {
+            node_id: "join".into(),
+        };
+        let before = serde_yaml::to_string(&graph).unwrap();
+        let error = graph_insert_composer_block(
+            &mut graph,
+            &attach,
+            Some(EdgePort::Completed),
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+        )
+        .unwrap_err();
+        assert!(error.contains("минимум две"));
+        assert_eq!(serde_yaml::to_string(&graph).unwrap(), before);
+
+        graph_set_incoming_edge(&mut graph, "join", "right", Some(EdgePort::Success)).unwrap();
+        assert!(graph_attach_blocker(&graph, &attach).is_none());
+        graph_insert_composer_block(
+            &mut graph,
+            &attach,
+            Some(EdgePort::Completed),
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+        )
+        .unwrap();
+        assert_graph_authoring_round_trip("join-after-two-inputs", &graph);
+    }
+
+    #[test]
+    fn join_rejects_downstream_incoming_source_atomically() {
+        let action = |kind, id| {
+            GraphNode::Action(Box::new(ActionNode {
+                step: default_step(kind, id).unwrap(),
+                bindings: BTreeMap::new(),
+            }))
+        };
+        let mut graph = WorkflowGraph {
+            entries: vec!["left".into(), "right".into()],
+            nodes: vec![
+                action(ActionKind::GitInspect, "left"),
+                action(ActionKind::InspectPath, "right"),
+                GraphNode::Join(JoinNode {
+                    id: "join".into(),
+                    mode: JoinMode::All,
+                }),
+                action(ActionKind::InspectPath, "child"),
+            ],
+            edges: vec![
+                GraphEdge::new("left", EdgePort::Success, "join"),
+                GraphEdge::new("right", EdgePort::Success, "join"),
+                GraphEdge::new("join", EdgePort::Completed, "child"),
+            ],
+            ..WorkflowGraph::default()
+        };
+        graph.validate().unwrap();
+        let before = serde_yaml::to_string(&graph).unwrap();
+        let error = graph_set_incoming_edge(&mut graph, "join", "child", Some(EdgePort::Success))
+            .unwrap_err();
+        assert!(error.contains("цикл"));
+        assert_eq!(serde_yaml::to_string(&graph).unwrap(), before);
+        graph.validate().unwrap();
+    }
+
+    #[test]
+    fn foreach_requires_per_item_body_before_after_loop_and_git_clone_is_item_scoped() {
+        let mut graph = WorkflowGraph::default();
+        let list_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GithubListRepositories),
+        )
+        .unwrap();
+        let loop_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootAfter {
+                node_id: list_id.clone(),
+            },
+            Some(EdgePort::Success),
+            ComposerGraphBlockKind::ForEach,
+        )
+        .unwrap();
+
+        let after = ComposerGraphAttach::RootAfter {
+            node_id: loop_id.clone(),
+        };
+        let node_count = graph.nodes.len();
+        let error = graph_insert_composer_block(
+            &mut graph,
+            &after,
+            Some(EdgePort::Completed),
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+        )
+        .unwrap_err();
+        assert!(error.contains("Для каждого item"));
+        assert_eq!(graph.nodes.len(), node_count);
+
+        let clone_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::NestedStart {
+                scope: ComposerGraphNestedScope::ForEachBody {
+                    owner_id: loop_id.clone(),
+                },
+            },
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GitClone),
+        )
+        .unwrap();
+        assert!(graph_attach_blocker(&graph, &after).is_none());
+
+        let GraphNode::Action(clone) = graph_node(&graph, &clone_id).unwrap() else {
+            panic!("clone action node expected");
+        };
+        assert_eq!(
+            clone.bindings.get("repo"),
+            Some(&Binding::field(
+                FieldRef::loop_item(&loop_id).field("https_url")
+            ))
+        );
+        assert_eq!(
+            clone.bindings.get("dest"),
+            Some(&Binding::interpolated([
+                TemplatePart::literal("$HOME/Developer/"),
+                TemplatePart::field(FieldRef::loop_item(&loop_id).field("full_name")),
+            ]))
+        );
+        assert_eq!(
+            clone.bindings.get("branch"),
+            Some(&Binding::field(
+                FieldRef::loop_item(&loop_id).field("default_branch")
+            ))
+        );
+        graph.validate().unwrap();
+    }
+
+    #[test]
+    fn graph_validation_errors_are_actionable_russian_and_collapse_empty_loop_duplicates() {
+        let mut list = default_step(
+            ActionKind::GithubListRepositories,
+            "github-list-repositories-1",
+        )
+        .unwrap();
+        list.auth = AuthPolicy::GitCredential;
+        let graph = WorkflowGraph {
+            entries: vec![list.id.clone()],
+            nodes: vec![
+                GraphNode::Action(Box::new(ActionNode {
+                    step: list,
+                    bindings: BTreeMap::new(),
+                })),
+                GraphNode::ForEach(ForEachNode {
+                    id: "for-each-2".into(),
+                    collection: Binding::literal(serde_json::json!([])),
+                    item_alias: "repository".into(),
+                    index_alias: Some("index".into()),
+                    concurrency: 1,
+                    on_error: LoopFailurePolicy::Stop,
+                    body: Box::new(WorkflowGraph::default()),
+                }),
+            ],
+            edges: vec![GraphEdge::new(
+                "github-list-repositories-1",
+                EdgePort::Success,
+                "for-each-2",
+            )],
+            ..WorkflowGraph::default()
+        };
+        let task = Task {
+            id: "custom-scenario".into(),
+            name: "Новый сценарий".into(),
+            description: "test".into(),
+            platform: ppduster::rules::Platform::Macos,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            graph: Some(graph.clone()),
+            steps: Vec::new(),
+        };
+        let error = validate_graph_for_ui(&task, &graph).unwrap_err();
+        assert!(error.contains("Сценарий «Новый сценарий» пока не готов"));
+        assert!(error.contains("недопустимая политика безопасности"));
+        assert!(error.contains("Добавьте действие через «＋ Для каждого item»"));
+        assert_eq!(
+            error.matches("Цикл «Для каждого repository» пуст").count(),
+            1
+        );
+        assert!(!error.contains("invalid workflow graph"));
+        assert!(!error.contains("graph.node["));
+    }
+
+    #[test]
+    fn empty_branch_validation_names_each_visual_scope() {
+        let mut graph = WorkflowGraph::default();
+        let if_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::If,
+        )
+        .unwrap();
+        let switch_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Switch,
+        )
+        .unwrap();
+        let GraphNode::If(node) = graph_node_mut(&mut graph, &if_id).unwrap() else {
+            panic!("if node expected")
+        };
+        node.else_graph = Some(Box::new(WorkflowGraph::default()));
+        let GraphNode::Switch(node) = graph_node_mut(&mut graph, &switch_id).unwrap() else {
+            panic!("switch node expected")
+        };
+        node.default = Some(Box::new(WorkflowGraph::default()));
+
+        let task = graph_authoring_test_task("empty-branches", graph.clone());
+        let error = validate_graph_for_ui(&task, &graph).unwrap_err();
+        for expected in [
+            "Ветка «Тогда»",
+            "Ветка «Иначе»",
+            "Вариант «case-1»",
+            "Ветка «По умолчанию»",
+        ] {
+            assert!(error.contains(expected), "missing {expected}: {error}");
+            assert_eq!(error.matches(expected).count(), 1);
+        }
+        assert!(!error.contains("graph.node["));
+    }
+
+    #[test]
+    fn policy_diagnostics_do_not_mutate_loaded_step_and_explicit_reset_repairs_it() {
+        let mut step = default_step(
+            ActionKind::GithubListRepositories,
+            "github-list-repositories-1",
+        )
+        .unwrap();
+        step.auth = AuthPolicy::GitCredential;
+        step.allow_elevation = ElevationPolicy::Allow;
+        step.dangerous = true;
+        let definition = definition_for_action(&step.action);
+        let before = serde_yaml::to_string(&step).unwrap();
+
+        let issues = graph_step_policy_issues(&step, &definition.policy);
+        assert_eq!(issues.len(), 3);
+        assert_eq!(serde_yaml::to_string(&step).unwrap(), before);
+        assert!(!definition.policy.accepts(&step));
+
+        reset_graph_step_policy(&mut step, &definition.policy);
+        assert!(definition.policy.accepts(&step));
+        assert!(matches!(step.auth, AuthPolicy::None));
+        assert!(matches!(step.allow_elevation, ElevationPolicy::Forbidden));
+        assert!(!step.dangerous);
+        step.validate().unwrap();
+    }
+
+    #[test]
+    fn optional_object_inputs_are_atomic_while_required_objects_keep_leaf_editing() {
+        let schema = ObjectSchema::new("test.input@1").with_field(
+            "parent",
+            FieldSchema::optional(ContextType::object(
+                ObjectSchema::new("test.parent@1")
+                    .with_field(
+                        "value",
+                        FieldSchema::required(ContextType::String { format: None }),
+                    )
+                    .with_field(
+                        "nullable_value",
+                        FieldSchema::required(ContextType::String { format: None }).nullable(),
+                    ),
+            ))
+            .nullable(),
+        );
+        let fields = graph_input_fields(&schema)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let parent = fields.get("parent").unwrap();
+        assert!(!parent.required);
+        assert!(parent.nullable);
+        assert!(matches!(parent.value_type, ContextType::Object { .. }));
+        assert!(!fields.contains_key("parent.value"));
+        assert!(!fields.contains_key("parent.nullable_value"));
+
+        let required_schema = ObjectSchema::new("test.required-input@1").with_field(
+            "parent",
+            FieldSchema::required(ContextType::object(
+                ObjectSchema::new("test.required-parent@1").with_field(
+                    "nullable_value",
+                    FieldSchema::required(ContextType::String { format: None }).nullable(),
+                ),
+            )),
+        );
+        let fields = graph_input_fields(&required_schema)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let nullable = fields.get("parent.nullable_value").unwrap();
+        assert!(nullable.required);
+        assert!(nullable.nullable);
+    }
+
+    #[test]
+    fn install_dmg_identity_is_offered_and_materialized_as_one_complete_object() {
+        let definition = block_definition(ActionKind::InstallDmg);
+        let fields = graph_input_fields(&definition.input_schema)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        assert!(fields.contains_key("identity"));
+        for partial in [
+            "identity.bundle_identifier",
+            "identity.team_identifier",
+            "identity.version",
+        ] {
+            assert!(
+                !fields.contains_key(partial),
+                "partial object leaf {partial} leaked"
+            );
+        }
+
+        let step = default_step(ActionKind::InstallDmg, "install").unwrap();
+        let materialized = ppduster::automation::materialize_step(
+            &step,
+            &BTreeMap::from([(
+                "identity".into(),
+                Binding::literal(serde_json::json!({
+                    "bundle_identifier": "com.example.Application",
+                    "team_identifier": "TEAM123456",
+                    "version": "1.2.3"
+                })),
+            )]),
+            &ppduster::automation::ContextStore::default(),
+            ppduster::automation::BindingLimits::default(),
+        )
+        .unwrap();
+        let Action::InstallDmg {
+            identity: Some(identity),
+            ..
+        } = materialized.action
+        else {
+            panic!("complete identity object was not materialized")
+        };
+        assert_eq!(identity.bundle_identifier, "com.example.Application");
+        assert_eq!(identity.team_identifier, "TEAM123456");
+        assert_eq!(identity.version, "1.2.3");
+    }
+
+    #[test]
+    fn enum_input_contracts_drive_all_generic_choices_and_materialize() {
+        let cases: &[(ActionKind, &str, &[&str])] = &[
+            (
+                ActionKind::InspectPath,
+                "expect.kind",
+                &["file", "directory", "symlink", "other"],
+            ),
+            (ActionKind::WriteFile, "on_conflict", &["fail", "replace"]),
+            (ActionKind::RunCommand, "shell", &["forbidden", "allow"]),
+            (
+                ActionKind::RunScript,
+                "interpreter",
+                &["sh", "bash", "powershell"],
+            ),
+            (
+                ActionKind::ExtractArchive,
+                "format",
+                &["auto", "zip", "tar", "tar-gz", "tar-bz2", "tar-xz"],
+            ),
+            (
+                ActionKind::AppStoreInstall,
+                "operation",
+                &["install", "get"],
+            ),
+            (
+                ActionKind::BambuStudioRelease,
+                "channel",
+                &["release", "beta"],
+            ),
+            (ActionKind::ActivateLicense, "provider", &["light-burn"]),
+            (ActionKind::ActivateLicense, "method", &["vendor-ui"]),
+        ];
+        let mut literal_count = 0usize;
+        for (kind, target, expected) in cases {
+            let definition = block_definition(*kind);
+            let fields = graph_input_fields(&definition.input_schema)
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            let field = fields
+                .get(*target)
+                .unwrap_or_else(|| panic!("{} missing enum input {target}", kind.id()));
+            assert_eq!(
+                field
+                    .allowed_values
+                    .iter()
+                    .map(|value| value.as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                *expected
+            );
+            assert!(validate_literal_binding(&serde_json::json!("not-an-option"), field).is_err());
+
+            for value in &field.allowed_values {
+                literal_count += 1;
+                validate_literal_binding(value, field).unwrap();
+                let mut step =
+                    default_step(*kind, format!("{}-{literal_count}", kind.id())).unwrap();
+                apply_literal_policy_implications(&mut step, target, value);
+                let materialized = ppduster::automation::materialize_step(
+                    &step,
+                    &BTreeMap::from([(target.to_string(), Binding::literal(value.clone()))]),
+                    &ppduster::automation::ContextStore::default(),
+                    ppduster::automation::BindingLimits::default(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{} {target}={value} did not materialize: {error}",
+                        kind.id()
+                    )
+                });
+                materialized.validate().unwrap();
+            }
+        }
+        assert_eq!(literal_count, 23);
+    }
+
+    #[test]
+    fn every_manual_input_starts_from_a_materializable_valid_value() {
+        let mut offered = 0usize;
+        for kind in ActionKind::ALL
+            .into_iter()
+            .filter(|kind| kind.is_graph_action())
+        {
+            let step = default_step(kind, format!("manual-{}", kind.id())).unwrap();
+            let definition = block_definition(kind);
+            for (target, field) in graph_input_fields(&definition.input_schema) {
+                offered += 1;
+                let value = manual_input_initial_value(&step, &target, &field);
+                validate_literal_binding(&value, &field).unwrap_or_else(|error| {
+                    panic!(
+                        "{} {target} manual prototype {value} invalid: {error}",
+                        kind.id()
+                    )
+                });
+                let materialized = ppduster::automation::materialize_step(
+                    &step,
+                    &BTreeMap::from([(target.clone(), Binding::literal(value.clone()))]),
+                    &ppduster::automation::ContextStore::default(),
+                    ppduster::automation::BindingLimits::default(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{} {target} manual prototype {value} does not materialize: {error}",
+                        kind.id()
+                    )
+                });
+                materialized.validate().unwrap_or_else(|error| {
+                    panic!(
+                        "{} {target} manual prototype is invalid: {error}",
+                        kind.id()
+                    )
+                });
+            }
+        }
+        // The raw leaf schema has 77 inputs. The three required identity
+        // leaves are intentionally represented by one atomic object control,
+        // eliminating two unsafe partial controls.
+        assert_eq!(offered, 75, "update the manual-input authoring matrix");
+    }
+
+    #[test]
+    fn switch_case_defaults_follow_scalar_selector_type() {
+        for kind in GraphSwitchScalarKind::ALL {
+            let value = kind.default_value(2);
+            assert!(
+                kind.accepts(&value),
+                "{} default must be compatible",
+                kind.label()
+            );
+            assert_eq!(
+                graph_switch_selector_kind(&Binding::literal(value), &[]),
+                Some(kind)
+            );
+        }
+        assert!(GraphSwitchScalarKind::Number.accepts(&serde_json::json!(2)));
+        assert!(!GraphSwitchScalarKind::Integer.accepts(&serde_json::json!(2.5)));
+
+        let null_selector = Binding::literal(serde_json::Value::Null);
+        let before = serde_yaml::to_string(&null_selector).unwrap();
+        assert_eq!(
+            graph_switch_selector_kind(&null_selector, &[]),
+            Some(GraphSwitchScalarKind::Null)
+        );
+        assert_eq!(serde_yaml::to_string(&null_selector).unwrap(), before);
+
+        let composite_selector = Binding::literal(serde_json::json!({ "key": "value" }));
+        let before = serde_yaml::to_string(&composite_selector).unwrap();
+        assert_eq!(graph_switch_selector_kind(&composite_selector, &[]), None);
+        assert_eq!(serde_yaml::to_string(&composite_selector).unwrap(), before);
+    }
+
+    #[test]
+    fn switch_case_ids_reuse_first_free_without_collisions_and_round_trip() {
+        let mut graph = WorkflowGraph::default();
+        let list = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GithubListRepositories),
+        )
+        .unwrap();
+        let loop_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootAfter { node_id: list },
+            Some(EdgePort::Success),
+            ComposerGraphBlockKind::ForEach,
+        )
+        .unwrap();
+        let switch_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::NestedStart {
+                scope: ComposerGraphNestedScope::ForEachBody {
+                    owner_id: loop_id.clone(),
+                },
+            },
+            None,
+            ComposerGraphBlockKind::Switch,
+        )
+        .unwrap();
+        graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::NestedStart {
+                scope: ComposerGraphNestedScope::SwitchCase {
+                    owner_id: switch_id.clone(),
+                    case_id: "case-1".into(),
+                },
+            },
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+        )
+        .unwrap();
+
+        let branch = |id: &str| {
+            Box::new(WorkflowGraph {
+                entries: vec![id.into()],
+                nodes: vec![GraphNode::Action(Box::new(ActionNode {
+                    step: default_step(ActionKind::InspectPath, id).unwrap(),
+                    bindings: BTreeMap::new(),
+                }))],
+                ..WorkflowGraph::default()
+            })
+        };
+        let GraphNode::Switch(node) = graph_node_mut(&mut graph, &switch_id).unwrap() else {
+            panic!("switch expected")
+        };
+        node.selector = Binding::field(FieldRef::loop_item(&loop_id).field("default_branch"));
+        let case_id = first_free_switch_case_id(&node.cases);
+        node.cases.push(SwitchCase {
+            id: case_id,
+            values: vec![serde_json::json!("develop")],
+            graph: branch("case-action-2"),
+        });
+        let case_id = first_free_switch_case_id(&node.cases);
+        node.cases.push(SwitchCase {
+            id: case_id,
+            values: vec![serde_json::json!("release")],
+            graph: branch("case-action-3"),
+        });
+        node.cases.remove(1);
+        assert_eq!(first_free_switch_case_id(&node.cases), "case-2");
+        let case_id = first_free_switch_case_id(&node.cases);
+        node.cases.push(SwitchCase {
+            id: case_id,
+            values: vec![serde_json::json!("feature")],
+            graph: branch("case-action-4"),
+        });
+        assert_eq!(first_free_switch_case_id(&node.cases), "case-4");
+        let case_id = first_free_switch_case_id(&node.cases);
+        node.cases.push(SwitchCase {
+            id: case_id,
+            values: vec![serde_json::Value::Null],
+            graph: branch("case-action-null"),
+        });
+        assert_eq!(
+            node.cases
+                .iter()
+                .map(|case| case.id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            node.cases.len()
+        );
+        assert_graph_authoring_round_trip("switch-first-free-case-ids", &graph);
+    }
+
+    #[test]
+    fn switch_case_values_reuse_first_free_globally_for_every_scalar_kind() {
+        fn branch(id: &str) -> Box<WorkflowGraph> {
+            Box::new(WorkflowGraph {
+                entries: vec![id.into()],
+                nodes: vec![GraphNode::Action(Box::new(ActionNode {
+                    step: default_step(ActionKind::InspectPath, id).unwrap(),
+                    bindings: BTreeMap::new(),
+                }))],
+                ..WorkflowGraph::default()
+            })
+        }
+
+        for kind in GraphSwitchScalarKind::ALL {
+            let first = first_free_switch_case_value(kind, &[]).unwrap();
+            let mut cases = vec![SwitchCase {
+                id: "case-1".into(),
+                values: vec![first.clone()],
+                graph: branch(&format!("{}-case-1", kind.label())),
+            }];
+            if let Some(second) = first_free_switch_case_value(kind, &cases) {
+                assert_ne!(second, first);
+                cases.push(SwitchCase {
+                    id: "case-2".into(),
+                    values: vec![second],
+                    graph: branch(&format!("{}-case-2", kind.label())),
+                });
+            }
+
+            cases.remove(0);
+            assert_eq!(
+                first_free_switch_case_value(kind, &cases),
+                Some(first.clone())
+            );
+            cases.push(SwitchCase {
+                id: "case-readded".into(),
+                values: vec![first],
+                graph: branch(&format!("{}-case-readded", kind.label())),
+            });
+
+            if let Some(extra) = first_free_switch_case_value(kind, &cases) {
+                assert!(cases
+                    .iter()
+                    .all(|case| !case.values.iter().any(|value| value == &extra)));
+                cases[0].values.push(extra);
+            }
+            let values = cases
+                .iter()
+                .flat_map(|case| case.values.iter())
+                .collect::<Vec<_>>();
+            for (index, value) in values.iter().enumerate() {
+                assert!(!values[index + 1..].contains(value));
+            }
+
+            let graph = WorkflowGraph {
+                entries: vec![format!("switch-{}", kind.label())],
+                nodes: vec![GraphNode::Switch(SwitchNode {
+                    id: format!("switch-{}", kind.label()),
+                    selector: Binding::literal(kind.default_value(0)),
+                    cases,
+                    default: None,
+                })],
+                ..WorkflowGraph::default()
+            };
+            assert_graph_authoring_round_trip(
+                &format!("switch-first-free-{}", kind.label()),
+                &graph,
+            );
+        }
+    }
+
+    #[test]
+    fn optional_control_branches_can_only_be_removed_when_empty() {
+        let mut graph = WorkflowGraph::default();
+        let if_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::If,
+        )
+        .unwrap();
+        graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::NestedStart {
+                scope: ComposerGraphNestedScope::IfThen {
+                    owner_id: if_id.clone(),
+                },
+            },
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+        )
+        .unwrap();
+        let else_scope = ComposerGraphNestedScope::IfElse {
+            owner_id: if_id.clone(),
+        };
+        graph_nested_scope_mut(&mut graph, &else_scope).unwrap();
+        assert!(graph_remove_optional_scope(&mut graph, &else_scope).unwrap());
+        let GraphNode::If(node) = graph_node(&graph, &if_id).unwrap() else {
+            panic!("if expected")
+        };
+        assert!(node.else_graph.is_none());
+
+        let else_child = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::NestedStart {
+                scope: else_scope.clone(),
+            },
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+        )
+        .unwrap();
+        let before = serde_yaml::to_string(&graph).unwrap();
+        let error = graph_remove_optional_scope(&mut graph, &else_scope).unwrap_err();
+        assert!(error.contains("Иначе") && error.contains("не пуста"));
+        assert_eq!(serde_yaml::to_string(&graph).unwrap(), before);
+        assert!(graph_remove_composer_node(&mut graph, &else_child).unwrap());
+        assert!(graph_remove_optional_scope(&mut graph, &else_scope).unwrap());
+
+        let switch_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Switch,
+        )
+        .unwrap();
+        graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::NestedStart {
+                scope: ComposerGraphNestedScope::SwitchCase {
+                    owner_id: switch_id.clone(),
+                    case_id: "case-1".into(),
+                },
+            },
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+        )
+        .unwrap();
+        let default_scope = ComposerGraphNestedScope::SwitchDefault {
+            owner_id: switch_id.clone(),
+        };
+        graph_nested_scope_mut(&mut graph, &default_scope).unwrap();
+        assert!(graph_remove_optional_scope(&mut graph, &default_scope).unwrap());
+        let default_child = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::NestedStart {
+                scope: default_scope.clone(),
+            },
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+        )
+        .unwrap();
+        let before = serde_yaml::to_string(&graph).unwrap();
+        let error = graph_remove_optional_scope(&mut graph, &default_scope).unwrap_err();
+        assert!(error.contains("По умолчанию") && error.contains("не пуста"));
+        assert_eq!(serde_yaml::to_string(&graph).unwrap(), before);
+        assert!(graph_remove_composer_node(&mut graph, &default_child).unwrap());
+        assert!(graph_remove_optional_scope(&mut graph, &default_scope).unwrap());
+        assert_graph_authoring_round_trip("optional-branches-removed", &graph);
+    }
+
+    #[test]
+    fn switch_case_removal_never_discards_a_nonempty_branch() {
+        let branch = |id: &str| {
+            Box::new(WorkflowGraph {
+                entries: vec![id.into()],
+                nodes: vec![GraphNode::Action(Box::new(ActionNode {
+                    step: default_step(ActionKind::InspectPath, id).unwrap(),
+                    bindings: BTreeMap::new(),
+                }))],
+                ..WorkflowGraph::default()
+            })
+        };
+        let mut graph = WorkflowGraph {
+            entries: vec!["switch".into()],
+            nodes: vec![GraphNode::Switch(SwitchNode {
+                id: "switch".into(),
+                selector: Binding::literal("selector"),
+                cases: vec![
+                    SwitchCase {
+                        id: "case-1".into(),
+                        values: vec![serde_json::json!("one")],
+                        graph: branch("case-child-1"),
+                    },
+                    SwitchCase {
+                        id: "case-2".into(),
+                        values: vec![serde_json::json!("two")],
+                        graph: branch("case-child-2"),
+                    },
+                ],
+                default: None,
+            })],
+            ..WorkflowGraph::default()
+        };
+        let before = serde_yaml::to_string(&graph).unwrap();
+        let error = graph_remove_switch_case(&mut graph, "switch", "case-2").unwrap_err();
+        assert!(error.contains("case-2") && error.contains("не пуст"));
+        assert_eq!(serde_yaml::to_string(&graph).unwrap(), before);
+
+        assert!(graph_remove_composer_node(&mut graph, "case-child-2").unwrap());
+        assert!(graph_remove_switch_case(&mut graph, "switch", "case-2").unwrap());
+        assert_graph_authoring_round_trip("safe-switch-case-removal", &graph);
+    }
+
+    #[test]
+    fn nullable_switch_field_accepts_typed_and_null_case_values() {
+        let selector = Binding::field(FieldRef::step("source").field("branch"));
+        let options = vec![ComposerGraphBindingOption {
+            label: "source.branch".into(),
+            binding: selector.clone(),
+            value_type: ContextType::String { format: None },
+            required: false,
+            nullable: true,
+            sensitivity: Sensitivity::Public,
+        }];
+        let contract = graph_switch_selector_contract(&selector, &options);
+        assert_eq!(contract, Some((GraphSwitchScalarKind::String, true)));
+        let (kind, nullable) = contract.unwrap();
+        assert!(graph_switch_case_value_compatible(
+            kind,
+            nullable,
+            &serde_json::Value::Null
+        ));
+        assert!(graph_switch_case_value_compatible(
+            kind,
+            nullable,
+            &serde_json::json!("main")
+        ));
+        assert!(!graph_switch_case_value_compatible(
+            kind,
+            nullable,
+            &serde_json::json!(true)
+        ));
+    }
+
+    #[test]
+    fn github_picker_rejects_noncanonical_v3_graphs_without_mutating_them() {
+        let pack = load_tasks().unwrap();
+        let canonical = standalone_github_picker_task(&pack);
+        assert!(github_picker_source_steps(&canonical).is_some());
+
+        let mut failure_edge = canonical.clone();
+        failure_edge.graph.as_mut().unwrap().edges[0].from.port = EdgePort::Failure;
+        let before = serde_yaml::to_string(&failure_edge).unwrap();
+        assert!(github_picker_source_steps(&failure_edge).is_none());
+        assert_eq!(serde_yaml::to_string(&failure_edge).unwrap(), before);
+
+        let mut bound = canonical.clone();
+        let GraphNode::Action(action) = &mut bound.graph.as_mut().unwrap().nodes[0] else {
+            panic!("expected action")
+        };
+        action.bindings.insert(
+            "repo".into(),
+            Binding::literal("https://example.invalid/repo.git"),
+        );
+        assert!(github_picker_source_steps(&bound).is_none());
+
+        let mut spoofed = canonical;
+        spoofed.id = "custom-git-workflow".into();
+        assert!(github_picker_source_steps(&spoofed).is_none());
     }
 
     #[test]

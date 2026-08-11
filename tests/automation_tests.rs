@@ -1,7 +1,7 @@
 use ppduster::automation::{
-    run_task, Action, AppStoreOperation, ArchiveFormat, AuthPolicy, ElevationPolicy, LicenseMethod,
-    LicenseProvider, PackTrust, RunOptions, ScriptInterpreter, StepCondition, TaskFile, TaskPack,
-    TaskSource,
+    run_task, Action, AppStoreOperation, ArchiveFormat, AuthPolicy, ElevationPolicy, GraphNode,
+    LicenseMethod, LicenseProvider, PackTrust, RunOptions, ScriptInterpreter, Step, StepCondition,
+    Task, TaskFile, TaskPack, TaskSource, WorkflowGraph,
 };
 #[cfg(unix)]
 use ppduster::automation::{ActionOutcome, StepOutput, StepStatus};
@@ -29,6 +29,45 @@ fn load_bundled_tasks(dir: &Path) -> TaskPack {
         false,
     )
     .unwrap()
+}
+
+/// Return action steps from the canonical graph in deterministic declaration
+/// order, including actions owned by nested control-flow graphs.
+fn graph_action_steps(task: &Task) -> Vec<&Step> {
+    fn collect<'a>(graph: &'a WorkflowGraph, steps: &mut Vec<&'a Step>) {
+        for node in &graph.nodes {
+            match node {
+                GraphNode::Action(node) => steps.push(&node.step),
+                GraphNode::ForEach(node) => collect(&node.body, steps),
+                GraphNode::If(node) => {
+                    collect(&node.then_graph, steps);
+                    if let Some(graph) = &node.else_graph {
+                        collect(graph, steps);
+                    }
+                }
+                GraphNode::Switch(node) => {
+                    for case in &node.cases {
+                        collect(&case.graph, steps);
+                    }
+                    if let Some(graph) = &node.default {
+                        collect(graph, steps);
+                    }
+                }
+                GraphNode::Join(_) => {}
+            }
+        }
+    }
+
+    let mut steps = Vec::new();
+    collect(task.workflow_graph().unwrap(), &mut steps);
+    steps
+}
+
+fn graph_action_step<'a>(task: &'a Task, id: &str) -> &'a Step {
+    graph_action_steps(task)
+        .into_iter()
+        .find(|step| step.id == id)
+        .unwrap_or_else(|| panic!("canonical graph has no action step {id:?}"))
 }
 
 #[test]
@@ -89,7 +128,10 @@ task:
         pack.get("portable-scenario").unwrap().name,
         "Loaded from file"
     );
-    assert_eq!(pack.resolve("portable-scenario").unwrap().steps.len(), 1);
+    assert_eq!(
+        graph_action_steps(&pack.resolve("portable-scenario").unwrap()).len(),
+        1
+    );
 }
 
 #[test]
@@ -141,7 +183,7 @@ task:
 }
 
 #[test]
-fn task_validation_requires_steps_or_scenarios_but_not_both() {
+fn task_import_requires_exactly_one_executable_form() {
     let both = r#"
 task:
   id: ambiguous-task
@@ -162,16 +204,18 @@ task:
   platform: any
 "#;
 
-    assert!(serde_yaml::from_str::<TaskFile>(both)
-        .unwrap()
-        .task
-        .validate()
-        .is_err());
-    assert!(serde_yaml::from_str::<TaskFile>(neither)
-        .unwrap()
-        .task
-        .validate()
-        .is_err());
+    let error = serde_yaml::from_str::<TaskFile>(both).unwrap_err();
+    assert!(
+        error.to_string().contains("exactly one"),
+        "unexpected import error: {error}"
+    );
+
+    let task = serde_yaml::from_str::<TaskFile>(neither).unwrap().task;
+    let error = task.validate().unwrap_err();
+    assert!(
+        error.contains("no steps, scenarios, or graph"),
+        "unexpected validation error: {error}"
+    );
 }
 
 #[test]
@@ -234,9 +278,8 @@ task:
         .unwrap()
         .validate()
         .unwrap();
-    let step_ids = resolved
-        .steps
-        .iter()
+    let step_ids = graph_action_steps(&resolved)
+        .into_iter()
         .map(|step| step.id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(step_ids, ["alpha/prepare", "beta/finish"]);
@@ -296,9 +339,8 @@ task:
 
     let pack = load_bundled_tasks(dir.path());
     let resolved = pack.resolve("outer").unwrap();
-    let step_names = resolved
-        .steps
-        .iter()
+    let step_names = graph_action_steps(&resolved)
+        .into_iter()
         .map(|step| step.name.as_str())
         .collect::<Vec<_>>();
     assert_eq!(step_names, ["First step", "Second step", "Third step"]);
@@ -605,8 +647,8 @@ task:
 
     let pack = load_bundled_tasks(dir.path());
     let resolved = pack.resolve("permission-template").unwrap();
-    let step_ids = resolved
-        .steps
+    let steps = graph_action_steps(&resolved);
+    let step_ids = steps
         .iter()
         .map(|step| step.id.as_str())
         .collect::<Vec<_>>();
@@ -695,9 +737,9 @@ task:
 
     let pack = load_bundled_tasks(dir.path());
     let resolved = pack.resolve("root").unwrap();
+    let steps = graph_action_steps(&resolved);
     assert_eq!(
-        resolved
-            .steps
+        steps
             .iter()
             .map(|step| step.id.as_str())
             .collect::<Vec<_>>(),
@@ -706,7 +748,7 @@ task:
             "middle/probe-scenario/branch"
         ]
     );
-    let Some(StepCondition::ExitCode { step, codes }) = resolved.steps[1].when.as_ref() else {
+    let Some(StepCondition::ExitCode { step, codes }) = steps[1].when.as_ref() else {
         panic!("expected an exit-code condition");
     };
     assert_eq!(step, "middle/probe-scenario/probe");
@@ -852,7 +894,7 @@ fn bundled_app_store_tasks_do_not_request_elevation() {
 
     for task_id in ["app-store-bootstrap", "macos-top-26-app-store"] {
         let task = pack.get(task_id).unwrap();
-        assert!(task.steps.iter().all(|step| {
+        assert!(graph_action_steps(task).into_iter().all(|step| {
             matches!(step.auth, AuthPolicy::None)
                 && matches!(step.allow_elevation, ElevationPolicy::Forbidden)
         }));
@@ -886,14 +928,7 @@ fn bundled_git_scenarios_expose_atomic_inspect_clone_fetch_and_update_steps() {
         ),
     ] {
         let task = pack.get(task_id).unwrap();
-        let actions = step_ids.map(|step_id| {
-            &task
-                .steps
-                .iter()
-                .find(|step| step.id == step_id)
-                .unwrap()
-                .action
-        });
+        let actions = step_ids.map(|step_id| &graph_action_step(task, step_id).action);
         assert!(matches!(actions[0], Action::GitInspect { .. }));
         assert!(matches!(
             actions[1],
@@ -924,14 +959,15 @@ fn bambu_studio_task_uses_dynamic_release_channel() {
     )
     .unwrap();
     let task = pack.get("bambu-studio-install").unwrap();
+    let steps = graph_action_steps(task);
 
-    assert_eq!(task.steps.len(), 2);
+    assert_eq!(steps.len(), 2);
     assert!(matches!(
-        &task.steps[0].action,
+        &steps[0].action,
         Action::MacosRequirements { minimum_version, .. } if minimum_version == "10.15"
     ));
     assert!(matches!(
-        &task.steps[1].action,
+        &steps[1].action,
         Action::BambuStudioRelease(action)
             if action.channel == ppduster::automation::ReleaseChannel::Release
     ));
@@ -954,7 +990,7 @@ task:
     let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
     task.validate().unwrap();
     assert!(matches!(
-        &task.steps[0].action,
+        &graph_action_steps(&task)[0].action,
         Action::ExtractArchive {
             format: ArchiveFormat::TarXz,
             max_unpacked_bytes: 10_737_418_240,
@@ -981,7 +1017,7 @@ task:
     let task_file = serde_yaml::from_str::<TaskFile>(yaml).unwrap();
     task_file.task.validate().unwrap();
     assert!(matches!(
-        &task_file.task.steps[0].action,
+        &graph_action_steps(&task_file.task)[0].action,
         Action::AppStoreInstall(action)
             if action.app_id == 497799835
                 && action.operation == AppStoreOperation::Install
@@ -1004,9 +1040,10 @@ task:
       app_id: 497799835
 "#;
 
-    let task_file = serde_yaml::from_str::<TaskFile>(yaml).unwrap();
-    let err = task_file.task.validate().unwrap_err();
-    assert!(err.contains("must not request authentication or elevation"));
+    let err = serde_yaml::from_str::<TaskFile>(yaml).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("must not request authentication, elevation, or dangerous execution"));
 }
 
 #[test]
@@ -1020,15 +1057,13 @@ fn lightburn_task_downloads_installs_then_uses_vendor_ui() {
     )
     .unwrap();
     let task = pack.get("lightburn-install-activate").unwrap();
+    let steps = graph_action_steps(task);
 
-    assert_eq!(task.steps.len(), 4);
+    assert_eq!(steps.len(), 4);
+    assert!(matches!(&steps[0].action, Action::MacosRequirements { .. }));
+    assert!(matches!(&steps[1].action, Action::DownloadFile { .. }));
     assert!(matches!(
-        &task.steps[0].action,
-        Action::MacosRequirements { .. }
-    ));
-    assert!(matches!(&task.steps[1].action, Action::DownloadFile { .. }));
-    assert!(matches!(
-        &task.steps[2].action,
+        &steps[2].action,
         Action::InstallDmg {
             identity: Some(identity),
             ..
@@ -1037,7 +1072,7 @@ fn lightburn_task_downloads_installs_then_uses_vendor_ui() {
             && identity.version == "2.1.03"
     ));
     assert!(matches!(
-        &task.steps[3].action,
+        &steps[3].action,
         Action::ActivateLicense(action)
             if action.provider == LicenseProvider::LightBurn
                 && action.method == LicenseMethod::VendorUi
@@ -1199,7 +1234,7 @@ fn bundled_tasks_include_dodopizza_package_registry_files() {
     let task = pack
         .get("dev-dodopizza-package-registries")
         .expect("bundled package registry task");
-    assert_eq!(task.steps.len(), 1);
+    assert_eq!(graph_action_steps(task).len(), 1);
 
     let report = run_task(task, &RunOptions::default()).unwrap();
     assert_eq!(report.plans.len(), 1);
@@ -1963,13 +1998,15 @@ task:
 
     let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
     task.validate().unwrap();
-    assert!(matches!(task.steps[0].action, Action::CreateDirectory(_)));
-    assert!(matches!(task.steps[1].action, Action::InspectPath(_)));
+    let steps = graph_action_steps(&task);
+    assert!(matches!(steps[0].action, Action::CreateDirectory(_)));
+    assert!(matches!(steps[1].action, Action::InspectPath(_)));
 
     let rendered = serde_yaml::to_string(&task).unwrap();
     let reparsed = serde_yaml::from_str::<ppduster::automation::Task>(&rendered).unwrap();
     reparsed.validate().unwrap();
-    let Action::InspectPath(action) = &reparsed.steps[1].action else {
+    let reparsed_steps = graph_action_steps(&reparsed);
+    let Action::InspectPath(action) = &reparsed_steps[1].action else {
         panic!("expected inspect-path action");
     };
     let expectation = action.expect.as_ref().unwrap();
@@ -2037,15 +2074,17 @@ task:
 
     let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
     task.validate().unwrap();
-    assert!(matches!(task.steps[0].action, Action::WriteFile(_)));
-    assert!(matches!(task.steps[1].action, Action::CopyPath(_)));
-    assert!(matches!(task.steps[2].action, Action::InspectPath(_)));
-    assert!(matches!(task.steps[3].action, Action::RemovePath(_)));
+    let steps = graph_action_steps(&task);
+    assert!(matches!(steps[0].action, Action::WriteFile(_)));
+    assert!(matches!(steps[1].action, Action::CopyPath(_)));
+    assert!(matches!(steps[2].action, Action::InspectPath(_)));
+    assert!(matches!(steps[3].action, Action::RemovePath(_)));
 
     let rendered = serde_yaml::to_string(&task).unwrap();
     let reparsed = serde_yaml::from_str::<ppduster::automation::Task>(&rendered).unwrap();
     reparsed.validate().unwrap();
-    let Action::InspectPath(inspect) = &reparsed.steps[2].action else {
+    let reparsed_steps = graph_action_steps(&reparsed);
+    let Action::InspectPath(inspect) = &reparsed_steps[2].action else {
         panic!("expected inspect-path action");
     };
     assert!(inspect.sha256);
@@ -2056,8 +2095,8 @@ task:
             .and_then(|expect| expect.sha256.as_deref()),
         Some(digest)
     );
-    assert!(reparsed.steps[0].require.is_some());
-    assert!(reparsed.steps[1].when.is_some());
+    assert!(reparsed_steps[0].require.is_some());
+    assert!(reparsed_steps[1].when.is_some());
 }
 
 #[test]
@@ -2094,8 +2133,8 @@ task:
       path: $TMPDIR/example
 "#
         );
-        let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
-        let error = task.validate().unwrap_err();
+        let error = serde_yaml::from_str::<TaskFile>(&yaml).unwrap_err();
+        let error = error.to_string();
         assert!(
             error.contains(expected_error),
             "case {name}: unexpected error: {error}"
@@ -2142,8 +2181,8 @@ task:
       expect: {expectation}
 "#
         );
-        let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
-        let error = task.validate().unwrap_err();
+        let error = serde_yaml::from_str::<TaskFile>(&yaml).unwrap_err();
+        let error = error.to_string();
         assert!(
             error.contains(expected_error),
             "case {name}: unexpected error: {error}"
@@ -2282,6 +2321,7 @@ task:
 
     let task_file = serde_yaml::from_str::<TaskFile>(yaml).unwrap();
     task_file.task.validate().unwrap();
+    let steps = graph_action_steps(&task_file.task);
 
     let Action::RunScript {
         interpreter,
@@ -2290,7 +2330,7 @@ task:
         cwd,
         env,
         success_exit_codes,
-    } = &task_file.task.steps[0].action
+    } = &steps[0].action
     else {
         panic!("expected a run-script action");
     };
@@ -2308,7 +2348,7 @@ task:
         env,
         success_exit_codes,
         ..
-    } = &task_file.task.steps[1].action
+    } = &steps[1].action
     else {
         panic!("expected a run-script action");
     };
@@ -2318,7 +2358,7 @@ task:
     assert_eq!(env.get("SETUP_MODE").map(String::as_str), Some("safe"));
     assert_eq!(success_exit_codes, &[0, 10, 42]);
 
-    let Action::RunScript { interpreter, .. } = &task_file.task.steps[2].action else {
+    let Action::RunScript { interpreter, .. } = &steps[2].action else {
         panic!("expected a run-script action");
     };
     assert_eq!(*interpreter, ScriptInterpreter::PowerShell);
@@ -2327,8 +2367,9 @@ task:
     assert!(rendered.contains("interpreter: powershell"));
     let reparsed = serde_yaml::from_str::<TaskFile>(&rendered).unwrap();
     reparsed.task.validate().unwrap();
+    let reparsed_steps = graph_action_steps(&reparsed.task);
     assert!(matches!(
-        reparsed.task.steps[0].action,
+        reparsed_steps[0].action,
         Action::RunScript {
             interpreter: ScriptInterpreter::Sh,
             ref success_exit_codes,
@@ -2336,7 +2377,7 @@ task:
         } if success_exit_codes == &[0]
     ));
     assert!(matches!(
-        reparsed.task.steps[1].action,
+        reparsed_steps[1].action,
         Action::RunScript {
             interpreter: ScriptInterpreter::Bash,
             ref success_exit_codes,
@@ -2344,7 +2385,7 @@ task:
         } if success_exit_codes == &[0, 10, 42]
     ));
     assert!(matches!(
-        reparsed.task.steps[2].action,
+        reparsed_steps[2].action,
         Action::RunScript {
             interpreter: ScriptInterpreter::PowerShell,
             ..
@@ -2375,8 +2416,8 @@ task:
 "#
         );
 
-        let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
-        let error = task.validate().unwrap_err();
+        let error = serde_yaml::from_str::<TaskFile>(&yaml).unwrap_err();
+        let error = error.to_string();
         assert!(
             error.contains("success_exit_codes") && error.contains(expected_error),
             "unexpected error for {codes}: {error}"
@@ -2410,19 +2451,21 @@ task:
 
     let task_file = serde_yaml::from_str::<TaskFile>(yaml).unwrap();
     task_file.task.validate().unwrap();
+    let steps = graph_action_steps(&task_file.task);
     let expected_condition =
         serde_yaml::from_str::<serde_yaml::Value>("type: exit-code\nstep: probe\ncodes: [10]\n")
             .unwrap();
     assert_eq!(
-        serde_yaml::to_value(task_file.task.steps[1].when.as_ref().unwrap()).unwrap(),
+        serde_yaml::to_value(steps[1].when.as_ref().unwrap()).unwrap(),
         expected_condition
     );
 
     let rendered = serde_yaml::to_string(&task_file).unwrap();
     let reparsed = serde_yaml::from_str::<TaskFile>(&rendered).unwrap();
     reparsed.task.validate().unwrap();
+    let reparsed_steps = graph_action_steps(&reparsed.task);
     assert_eq!(
-        serde_yaml::to_value(reparsed.task.steps[1].when.as_ref().unwrap()).unwrap(),
+        serde_yaml::to_value(reparsed_steps[1].when.as_ref().unwrap()).unwrap(),
         expected_condition
     );
 }
@@ -2457,8 +2500,8 @@ task:
 "#
         );
 
-        let task = serde_yaml::from_str::<TaskFile>(&yaml).unwrap().task;
-        let error = task.validate().unwrap_err();
+        let error = serde_yaml::from_str::<TaskFile>(&yaml).unwrap_err();
+        let error = error.to_string();
         assert!(
             error.contains("exit-code condition") && error.contains(expected_error),
             "unexpected error for {codes}: {error}"
@@ -2490,12 +2533,12 @@ task:
       success_exit_codes: [0, 10]
 "#;
 
-    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
-    let error = task.validate().unwrap_err();
+    let error = serde_yaml::from_str::<TaskFile>(yaml).unwrap_err();
+    let error = error.to_string();
     assert!(
         error.contains("conditional")
             && error.contains("probe")
-            && error.contains("must reference an earlier step"),
+            && error.contains("does not dominate"),
         "unexpected error: {error}"
     );
 }
@@ -2521,12 +2564,12 @@ task:
       program: "true"
 "#;
 
-    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
-    let error = task.validate().unwrap_err();
+    let error = serde_yaml::from_str::<TaskFile>(yaml).unwrap_err();
+    let error = error.to_string();
     assert!(
         error.contains("conditional")
             && error.contains("probe")
-            && error.contains("not a run-script step"),
+            && error.contains("not a run-script action"),
         "unexpected error: {error}"
     );
 }
@@ -2555,10 +2598,10 @@ task:
       program: "true"
 "#;
 
-    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
-    let error = task.validate().unwrap_err();
+    let error = serde_yaml::from_str::<TaskFile>(yaml).unwrap_err();
+    let error = error.to_string();
     assert!(
-        error.contains("condition code 20")
+        error.contains("uses code 20")
             && error.contains("probe")
             && error.contains("success_exit_codes"),
         "unexpected error: {error}"
@@ -2648,7 +2691,7 @@ task:
 
 #[cfg(unix)]
 #[test]
-fn unexpected_script_exit_code_reports_process_output_and_blocks_later_steps() {
+fn unexpected_script_exit_code_reports_process_output_and_does_not_activate_successor() {
     let temp = tempfile::tempdir().unwrap();
     let script = temp.path().join("probe.sh");
     let later_directory = temp.path().join("must-not-exist");
@@ -2689,7 +2732,12 @@ task:
     assert_eq!(report.errors.len(), 1);
     assert!(report.errors[0].contains("exit code 23"));
     assert!(report.errors[0].contains("success_exit_codes are [0, 10]"));
-    assert_eq!(report.steps.len(), 2);
+    // A canonical graph only reports activated nodes. The successor is wired
+    // to the probe's Success port, so a failed probe leaves it inactive
+    // instead of synthesizing a legacy "blocked" step report.
+    assert_eq!(report.plans.len(), 1);
+    assert_eq!(report.steps.len(), 1);
+    assert_eq!(report.outcomes.len(), 1);
     assert!(matches!(report.steps[0].status, StepStatus::Failed));
     assert!(matches!(report.outcomes[0], ActionOutcome::Blocked));
     let Some(StepOutput::ProcessExit(process)) = report.steps[0].output.as_ref() else {
@@ -2700,8 +2748,6 @@ task:
     assert!(!process.accepted);
     assert_eq!(process.success_exit_codes, &[0, 10]);
 
-    assert!(matches!(report.steps[1].status, StepStatus::Skipped));
-    assert!(matches!(report.outcomes[1], ActionOutcome::Blocked));
     assert!(!later_directory.exists());
 }
 
@@ -2760,7 +2806,7 @@ task:
     assert!(matches!(
         report.outcomes[1],
         ActionOutcome::Skipped { ref reason }
-            if reason.contains("unavailable") && reason.contains("no exit code")
+            if reason.contains("unavailable") && reason.contains("no normal exit code")
     ));
     assert!(!forbidden_directory.exists());
 }
@@ -2809,7 +2855,10 @@ task:
     )
     .unwrap();
 
-    assert!(report.errors.is_empty());
+    assert!(
+        report.errors.is_empty(),
+        "unexpected graph report: {report:#?}"
+    );
     assert_eq!(report.plans.len(), 2);
     assert!(matches!(report.steps[0].status, StepStatus::Pending));
     assert!(matches!(report.steps[1].status, StepStatus::Pending));
@@ -2834,8 +2883,9 @@ task:
         echo "this must remain in a script file"
 "#;
 
-    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
-    let error = task.validate().unwrap_err();
+    let error = serde_yaml::from_str::<TaskFile>(yaml)
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("file path"), "unexpected error: {error}");
     assert!(error.contains("not inline"), "unexpected error: {error}");
 }
@@ -2855,8 +2905,9 @@ task:
       script: /opt/example/setup.sh
 "#;
 
-    let task = serde_yaml::from_str::<TaskFile>(yaml).unwrap().task;
-    let error = task.validate().unwrap_err();
+    let error = serde_yaml::from_str::<TaskFile>(yaml)
+        .unwrap_err()
+        .to_string();
     assert!(
         error.contains("not marked dangerous"),
         "unexpected error: {error}"

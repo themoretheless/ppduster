@@ -1,6 +1,13 @@
 use crate::automation::context::{ContextType, FieldSchema, ObjectSchema, SemanticFormat};
-use crate::automation::task::Action;
+use crate::automation::task::{
+    Action, ActivateLicenseAction, AppStoreInstallAction, AppStoreOperation, ArchiveFormat,
+    AuthPolicy, BambuStudioReleaseAction, Checksum, CopyPathAction, CreateDirectoryAction,
+    ElevationPolicy, EncryptedSecretsSpec, InspectPathAction, LicenseMethod, LicenseProvider,
+    NpmRegistryFileSpec, NugetRegistryFileSpec, ReleaseChannel, RemovePathAction,
+    ScriptInterpreter, ShellMode, Step, WriteConflictPolicy, WriteFileAction,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Stable identity for every executable block. Display names and canvas
 /// positions may change without invalidating bindings or stored schemas.
@@ -92,6 +99,13 @@ impl ActionKind {
             Self::ActivateLicense => "activate-license",
         }
     }
+
+    /// Whether this registry entry is represented by an executable graph
+    /// action node. Legacy foreach entries remain readable for imports, but
+    /// graph v3 represents loops structurally with `GraphNode::ForEach`.
+    pub const fn is_graph_action(self) -> bool {
+        !matches!(self, Self::ForEach | Self::ForEachGitCloneIfMissing)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,11 +121,76 @@ pub struct BlockDefinition {
     pub read_only: bool,
     #[serde(default)]
     pub may_use_secrets: bool,
+    /// Policies that the visual editor may attach to this block.
+    ///
+    /// Action validation remains the final authority, but publishing the
+    /// capability contract beside the input/output schemas prevents a
+    /// schema-driven editor from offering combinations that are known to be
+    /// invalid (for example GitHub repository discovery with sudo).
+    #[serde(default)]
+    pub policy: BlockPolicyCapabilities,
 }
 
 impl BlockDefinition {
     pub fn output_schema_id(&self) -> Option<&str> {
         self.output_schema.id.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PolicyRequirement {
+    #[default]
+    Forbidden,
+    Optional,
+    Required,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockPolicyCapabilities {
+    #[serde(default)]
+    pub allow_git_credentials: bool,
+    #[serde(default)]
+    pub allow_sudo: bool,
+    #[serde(default)]
+    pub allow_elevation: bool,
+    #[serde(default)]
+    pub dangerous: PolicyRequirement,
+}
+
+impl Default for BlockPolicyCapabilities {
+    fn default() -> Self {
+        Self {
+            allow_git_credentials: false,
+            allow_sudo: false,
+            allow_elevation: false,
+            dangerous: PolicyRequirement::Forbidden,
+        }
+    }
+}
+
+impl BlockPolicyCapabilities {
+    pub const fn allows_auth(&self, auth: AuthPolicy) -> bool {
+        match auth {
+            AuthPolicy::None => true,
+            AuthPolicy::GitCredential => self.allow_git_credentials,
+            AuthPolicy::Sudo => self.allow_sudo,
+        }
+    }
+
+    pub const fn allows_dangerous(&self, dangerous: bool) -> bool {
+        match self.dangerous {
+            PolicyRequirement::Forbidden => !dangerous,
+            PolicyRequirement::Optional => true,
+            PolicyRequirement::Required => dangerous,
+        }
+    }
+
+    pub const fn accepts(&self, step: &Step) -> bool {
+        self.allows_auth(step.auth)
+            && (self.allow_elevation || matches!(step.allow_elevation, ElevationPolicy::Forbidden))
+            && self.allows_dangerous(step.dangerous)
     }
 }
 
@@ -153,6 +232,203 @@ pub fn block_definitions() -> Vec<BlockDefinition> {
 
 pub fn definition_for_action(action: &Action) -> BlockDefinition {
     block_definition(action.kind())
+}
+
+/// Construct a schema-valid editable prototype for an executable block.
+///
+/// The visual graph editor uses this registry entry when a block is added and
+/// then edits its inputs through [`BlockDefinition::input_schema`]. Keeping
+/// prototypes beside the schema registry prevents UI code from growing a
+/// second action-specific constructor table. Legacy linear control actions are
+/// deliberately excluded: graph v3 represents control flow with `GraphNode`
+/// variants instead of executable `Action` values.
+pub fn default_action(kind: ActionKind) -> Result<Action, &'static str> {
+    let repository = "https://github.com/owner/repository.git".to_owned();
+    let destination = "$HOME/Developer/owner/repository".to_owned();
+    Ok(match kind {
+        ActionKind::GithubListRepositories => Action::GithubListRepositories,
+        ActionKind::ForEach | ActionKind::ForEachGitCloneIfMissing => {
+            return Err("legacy foreach actions are not graph-v3 action blocks")
+        }
+        ActionKind::CreateDirectory => Action::CreateDirectory(CreateDirectoryAction {
+            path: "$HOME/Developer/project".into(),
+        }),
+        ActionKind::InspectPath => Action::InspectPath(InspectPathAction {
+            path: "$HOME/Developer/project".into(),
+            recursive_size: false,
+            sha256: false,
+            expect: None,
+        }),
+        ActionKind::CopyPath => Action::CopyPath(CopyPathAction {
+            src: "$HOME/Developer/source".into(),
+            dest: "$HOME/Developer/destination".into(),
+        }),
+        ActionKind::WriteFile => Action::WriteFile(WriteFileAction {
+            path: "$HOME/Developer/project/example.txt".into(),
+            content: String::new(),
+            on_conflict: WriteConflictPolicy::Fail,
+        }),
+        ActionKind::RemovePath => Action::RemovePath(RemovePathAction {
+            path: "$HOME/Library/Caches/example".into(),
+        }),
+        ActionKind::GitClone => Action::GitClone {
+            repo: repository,
+            dest: destination,
+            branch: Some("main".into()),
+        },
+        ActionKind::GitInspect => Action::GitInspect {
+            repo: repository,
+            dest: destination,
+        },
+        ActionKind::GitCloneIfMissing => Action::GitCloneIfMissing {
+            repo: repository,
+            dest: destination,
+            branch: Some("main".into()),
+        },
+        ActionKind::GitFetch => Action::GitFetch {
+            repo: repository,
+            dest: destination,
+            branch: "main".into(),
+        },
+        ActionKind::GitFastForward => Action::GitFastForward {
+            repo: repository,
+            dest: destination,
+            branch: "main".into(),
+        },
+        ActionKind::BrewInstall => Action::BrewInstall {
+            package: "ripgrep".into(),
+            cask: false,
+        },
+        ActionKind::RunCommand => Action::RunCommand {
+            program: "true".into(),
+            args: Vec::new(),
+            cwd: None,
+            env: BTreeMap::new(),
+            shell: ShellMode::Forbidden,
+        },
+        ActionKind::RunScript => Action::RunScript {
+            interpreter: ScriptInterpreter::Sh,
+            script: "$HOME/Developer/script.sh".into(),
+            args: Vec::new(),
+            cwd: None,
+            env: BTreeMap::new(),
+            success_exit_codes: vec![0],
+        },
+        ActionKind::ConfigurePackageRegistryFiles => Action::ConfigurePackageRegistryFiles {
+            secrets: EncryptedSecretsSpec {
+                profile: "company".into(),
+                username_env: "PPDUSTER_REGISTRY_USERNAME".into(),
+                token_env: "PPDUSTER_REGISTRY_TOKEN".into(),
+            },
+            npm: NpmRegistryFileSpec {
+                scope: "@company".into(),
+                registry: "https://registry.example.com/npm/".into(),
+            },
+            nuget: NugetRegistryFileSpec {
+                public_source_name: "nuget.org".into(),
+                public_source: "https://api.nuget.org/v3/index.json".into(),
+                source_name: "company".into(),
+                source: "https://registry.example.com/nuget/v3/index.json".into(),
+                package_patterns: vec!["Company.*".into()],
+            },
+        },
+        ActionKind::DownloadFile => Action::DownloadFile {
+            url: "https://example.com/archive.zip".into(),
+            dest: "$HOME/Downloads/archive.zip".into(),
+            checksum: Checksum {
+                sha256: "0".repeat(64),
+            },
+        },
+        ActionKind::ExtractArchive => Action::ExtractArchive {
+            src: "$HOME/Downloads/archive.zip".into(),
+            dest: "$HOME/Developer/archive".into(),
+            format: ArchiveFormat::Auto,
+            max_unpacked_bytes: 10 * 1024 * 1024 * 1024,
+        },
+        ActionKind::InstallDmg => Action::InstallDmg {
+            dmg: "$HOME/Downloads/Application.dmg".into(),
+            // Keep the editable prototype internally consistent when the
+            // optional identity object is enabled as one atomic input group.
+            app_name: Some("Application.app".into()),
+            target: None,
+            identity: None,
+        },
+        ActionKind::InstallPkg => Action::InstallPkg {
+            pkg: "$HOME/Downloads/Installer.pkg".into(),
+            target: None,
+        },
+        ActionKind::MacosRequirements => Action::MacosRequirements {
+            minimum_version: "13.0".into(),
+            require_rosetta_on_apple_silicon: false,
+        },
+        ActionKind::AppStoreInstall => Action::AppStoreInstall(AppStoreInstallAction {
+            app_id: 1,
+            operation: AppStoreOperation::Install,
+        }),
+        ActionKind::BambuStudioRelease => Action::BambuStudioRelease(BambuStudioReleaseAction {
+            channel: ReleaseChannel::Release,
+        }),
+        ActionKind::ActivateLicense => Action::ActivateLicense(ActivateLicenseAction {
+            provider: LicenseProvider::LightBurn,
+            method: LicenseMethod::VendorUi,
+        }),
+    })
+}
+
+/// Construct a complete action step for a newly-created graph node.
+///
+/// Common policy defaults live here as part of the block registry contract,
+/// rather than being duplicated by every editor or importer.
+pub fn default_step(kind: ActionKind, id: impl Into<String>) -> Result<Step, &'static str> {
+    let definition = block_definition(kind);
+    Ok(Step {
+        id: id.into(),
+        name: definition.title,
+        bindings: BTreeMap::new(),
+        auth: AuthPolicy::None,
+        check: None,
+        dangerous: matches!(kind, ActionKind::RunScript),
+        allow_elevation: ElevationPolicy::Forbidden,
+        when: None,
+        require: None,
+        action: default_action(kind)?,
+    })
+}
+
+pub const fn block_policy_capabilities(kind: ActionKind) -> BlockPolicyCapabilities {
+    match kind {
+        ActionKind::GithubListRepositories
+        | ActionKind::ForEach
+        | ActionKind::ForEachGitCloneIfMissing
+        | ActionKind::CreateDirectory
+        | ActionKind::InspectPath
+        | ActionKind::CopyPath
+        | ActionKind::WriteFile
+        | ActionKind::RemovePath => BlockPolicyCapabilities {
+            allow_git_credentials: false,
+            allow_sudo: false,
+            allow_elevation: false,
+            dangerous: PolicyRequirement::Forbidden,
+        },
+        ActionKind::AppStoreInstall => BlockPolicyCapabilities {
+            allow_git_credentials: false,
+            allow_sudo: false,
+            allow_elevation: false,
+            dangerous: PolicyRequirement::Forbidden,
+        },
+        ActionKind::RunScript => BlockPolicyCapabilities {
+            allow_git_credentials: true,
+            allow_sudo: true,
+            allow_elevation: true,
+            dangerous: PolicyRequirement::Required,
+        },
+        _ => BlockPolicyCapabilities {
+            allow_git_credentials: true,
+            allow_sudo: true,
+            allow_elevation: true,
+            dangerous: PolicyRequirement::Optional,
+        },
+    }
 }
 
 pub fn block_definition(kind: ActionKind) -> BlockDefinition {
@@ -232,7 +508,10 @@ pub fn block_definition(kind: ActionKind) -> BlockDefinition {
                 [
                     ("path", req(file_path())),
                     ("content", req(ContextType::STRING)),
-                    ("on_conflict", opt(ContextType::STRING)),
+                    (
+                        "on_conflict",
+                        opt(ContextType::STRING).with_allowed_values(["fail", "replace"]),
+                    ),
                 ],
             ),
             write_file_schema(),
@@ -348,7 +627,12 @@ pub fn block_definition(kind: ActionKind) -> BlockDefinition {
                 [
                     ("src", req(file_path())),
                     ("dest", req(directory_path())),
-                    ("format", opt(ContextType::STRING)),
+                    (
+                        "format",
+                        opt(ContextType::STRING).with_allowed_values([
+                            "auto", "zip", "tar", "tar-gz", "tar-bz2", "tar-xz",
+                        ]),
+                    ),
                     ("max_unpacked_bytes", opt(ContextType::Integer)),
                 ],
             ),
@@ -396,8 +680,14 @@ pub fn block_definition(kind: ActionKind) -> BlockDefinition {
             schema(
                 "ppduster.license.activation.inputs@1",
                 [
-                    ("provider", req(ContextType::STRING)),
-                    ("method", req(ContextType::STRING)),
+                    (
+                        "provider",
+                        req(ContextType::STRING).with_allowed_values(["light-burn"]),
+                    ),
+                    (
+                        "method",
+                        req(ContextType::STRING).with_allowed_values(["vendor-ui"]),
+                    ),
                 ],
             ),
             license_schema(),
@@ -414,6 +704,7 @@ pub fn block_definition(kind: ActionKind) -> BlockDefinition {
         output_schema: outputs,
         read_only,
         may_use_secrets,
+        policy: block_policy_capabilities(kind),
     }
 }
 
@@ -482,7 +773,15 @@ fn path_expectation_type() -> ContextType {
         "ppduster.path.expectation@1",
         [
             ("exists", nullable(ContextType::Boolean)),
-            ("kind", nullable(ContextType::STRING)),
+            (
+                "kind",
+                nullable(ContextType::STRING).with_allowed_values([
+                    "file",
+                    "directory",
+                    "symlink",
+                    "other",
+                ]),
+            ),
             ("empty", nullable(ContextType::Boolean)),
             ("min_size_bytes", nullable(ContextType::Integer)),
             ("max_size_bytes", nullable(ContextType::Integer)),
@@ -515,13 +814,19 @@ fn process_inputs(kind: ActionKind) -> ObjectSchema {
                     "env",
                     opt(string_map_type("ppduster.process.environment@1")),
                 ),
-                ("shell", opt(ContextType::STRING)),
+                (
+                    "shell",
+                    opt(ContextType::STRING).with_allowed_values(["forbidden", "allow"]),
+                ),
             ],
         ),
         ActionKind::RunScript => schema(
             "ppduster.run-script.inputs@1",
             [
-                ("interpreter", req(ContextType::STRING)),
+                (
+                    "interpreter",
+                    req(ContextType::STRING).with_allowed_values(["sh", "bash", "powershell"]),
+                ),
                 ("script", req(file_path())),
                 ("args", opt(ContextType::array(ContextType::STRING))),
                 ("cwd", nullable(directory_path())),
@@ -610,12 +915,18 @@ fn installation_inputs(kind: ActionKind) -> ObjectSchema {
             "ppduster.app-store-install.inputs@1",
             [
                 ("app_id", req(ContextType::Integer)),
-                ("operation", opt(ContextType::STRING)),
+                (
+                    "operation",
+                    opt(ContextType::STRING).with_allowed_values(["install", "get"]),
+                ),
             ],
         ),
         ActionKind::BambuStudioRelease => schema(
             "ppduster.bambu-studio-release.inputs@1",
-            [("channel", opt(ContextType::STRING))],
+            [(
+                "channel",
+                opt(ContextType::STRING).with_allowed_values(["release", "beta"]),
+            )],
         ),
         _ => unreachable!(),
     }
@@ -954,6 +1265,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const AUTH_POLICIES: [AuthPolicy; 3] = [
+        AuthPolicy::None,
+        AuthPolicy::GitCredential,
+        AuthPolicy::Sudo,
+    ];
+    const ELEVATION_POLICIES: [ElevationPolicy; 2] =
+        [ElevationPolicy::Forbidden, ElevationPolicy::Allow];
+    const DANGEROUS_POLICIES: [bool; 2] = [false, true];
+
+    fn executable_action_kinds() -> impl Iterator<Item = ActionKind> {
+        ActionKind::ALL
+            .into_iter()
+            .filter(|kind| kind.is_graph_action())
+    }
+
     #[test]
     fn registry_covers_every_action_kind_with_versioned_schemas() {
         let definitions = block_definitions();
@@ -964,6 +1290,150 @@ mod tests {
             assert!(definition.input_schema.id.is_some());
             assert!(definition.output_schema.id.is_some());
         }
+    }
+
+    #[test]
+    fn graph_editor_prototypes_cover_every_executable_action_kind() {
+        for kind in ActionKind::ALL {
+            match kind {
+                ActionKind::ForEach | ActionKind::ForEachGitCloneIfMissing => {
+                    assert!(default_action(kind).is_err());
+                }
+                _ => {
+                    let action = default_action(kind).expect("executable action prototype");
+                    assert_eq!(action.kind(), kind);
+                    let encoded = serde_json::to_value(&action).unwrap();
+                    let decoded: Action = serde_json::from_value(encoded).unwrap();
+                    assert_eq!(decoded.kind(), kind);
+
+                    let step = default_step(kind, format!("{}-1", kind.id())).unwrap();
+                    assert!(
+                        block_definition(kind).policy.accepts(&step),
+                        "default policy for {} must match the registry contract",
+                        kind.id()
+                    );
+                    step.validate().unwrap_or_else(|error| {
+                        panic!("default step for {} must validate: {error}", kind.id())
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_executable_action_has_a_valid_default_policy() {
+        for kind in executable_action_kinds() {
+            let step = default_step(kind, format!("{}-default", kind.id()))
+                .expect("every executable action must have a default step");
+            let capabilities = block_policy_capabilities(kind);
+
+            assert!(
+                capabilities.accepts(&step),
+                "default policy for {} is outside its advertised capabilities: {:?}",
+                kind.id(),
+                step
+            );
+            step.validate().unwrap_or_else(|error| {
+                panic!("default policy for {} must validate: {error}", kind.id())
+            });
+        }
+    }
+
+    #[test]
+    fn policy_capability_matrix_matches_step_validation_for_every_executable_action() {
+        let mut combinations = 0;
+
+        for kind in executable_action_kinds() {
+            let capabilities = block_policy_capabilities(kind);
+            for auth in AUTH_POLICIES {
+                for allow_elevation in ELEVATION_POLICIES {
+                    for dangerous in DANGEROUS_POLICIES {
+                        combinations += 1;
+                        let mut step = default_step(kind, format!("{}-matrix", kind.id()))
+                            .expect("executable action prototype");
+                        step.auth = auth;
+                        step.allow_elevation = allow_elevation;
+                        step.dangerous = dangerous;
+
+                        let advertised = capabilities.accepts(&step);
+                        let validation = step.validate();
+                        assert_eq!(
+                            validation.is_ok(),
+                            advertised,
+                            "policy contract mismatch for {} with auth={auth:?}, elevation={allow_elevation:?}, dangerous={dangerous}: capabilities={}, validation={:?}",
+                            kind.id(),
+                            advertised,
+                            validation
+                        );
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            combinations,
+            executable_action_kinds().count()
+                * AUTH_POLICIES.len()
+                * ELEVATION_POLICIES.len()
+                * DANGEROUS_POLICIES.len(),
+            "the generated policy matrix must cover every combination"
+        );
+    }
+
+    #[test]
+    fn policy_capabilities_survive_serde_roundtrip_for_every_action_kind() {
+        for kind in ActionKind::ALL {
+            let capabilities = block_policy_capabilities(kind);
+            assert_eq!(
+                block_definition(kind).policy,
+                capabilities,
+                "block definition for {} must publish the canonical policy contract",
+                kind.id()
+            );
+
+            let encoded = serde_json::to_value(&capabilities).unwrap_or_else(|error| {
+                panic!(
+                    "policy capabilities for {} must serialize: {error}",
+                    kind.id()
+                )
+            });
+            let decoded: BlockPolicyCapabilities =
+                serde_json::from_value(encoded).unwrap_or_else(|error| {
+                    panic!(
+                        "policy capabilities for {} must deserialize: {error}",
+                        kind.id()
+                    )
+                });
+            assert_eq!(
+                decoded,
+                capabilities,
+                "policy capabilities for {} changed during serde roundtrip",
+                kind.id()
+            );
+        }
+    }
+
+    #[test]
+    fn github_repository_discovery_exposes_only_its_valid_safe_policy() {
+        let definition = block_definition(ActionKind::GithubListRepositories);
+        let mut step = default_step(ActionKind::GithubListRepositories, "repositories").unwrap();
+        assert!(definition.policy.accepts(&step));
+        assert!(!definition.policy.allow_git_credentials);
+        assert!(!definition.policy.allow_sudo);
+        assert!(!definition.policy.allow_elevation);
+        assert_eq!(definition.policy.dangerous, PolicyRequirement::Forbidden);
+
+        step.auth = AuthPolicy::GitCredential;
+        assert!(!definition.policy.accepts(&step));
+        assert!(step.validate().is_err());
+        step.auth = AuthPolicy::None;
+        step.allow_elevation = ElevationPolicy::Allow;
+        assert!(!definition.policy.accepts(&step));
+        assert!(step.validate().is_err());
+        step.allow_elevation = ElevationPolicy::Forbidden;
+        step.dangerous = true;
+        assert!(!definition.policy.accepts(&step));
+        assert!(step.validate().is_err());
     }
 
     #[test]

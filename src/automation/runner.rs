@@ -279,11 +279,55 @@ pub struct RunReport {
 /// visual editor exposes; a producer cannot publish a differently shaped
 /// value under a trusted schema ID.
 pub fn context_store_from_reports(task: &Task, reports: &[StepReport]) -> Result<ContextStore> {
-    let steps_by_id = task
-        .steps
+    let graph = task
+        .workflow_graph()
+        .map_err(|error| anyhow!("read task {} workflow graph: {error}", task.id))?;
+    let mut steps_by_id = BTreeMap::new();
+    collect_graph_action_steps(graph, &mut steps_by_id);
+    context_store_from_step_map(&steps_by_id, reports)
+}
+
+fn collect_graph_action_steps<'a>(
+    graph: &'a WorkflowGraph,
+    steps: &mut BTreeMap<&'a str, &'a Step>,
+) {
+    for node in &graph.nodes {
+        match node {
+            GraphNode::Action(node) => {
+                steps.insert(node.step.id.as_str(), &node.step);
+            }
+            GraphNode::ForEach(node) => collect_graph_action_steps(&node.body, steps),
+            GraphNode::If(node) => {
+                collect_graph_action_steps(&node.then_graph, steps);
+                if let Some(graph) = node.else_graph.as_deref() {
+                    collect_graph_action_steps(graph, steps);
+                }
+            }
+            GraphNode::Switch(node) => {
+                for case in &node.cases {
+                    collect_graph_action_steps(&case.graph, steps);
+                }
+                if let Some(graph) = node.default.as_deref() {
+                    collect_graph_action_steps(graph, steps);
+                }
+            }
+            GraphNode::Join(_) => {}
+        }
+    }
+}
+
+fn context_store_from_steps(steps: &[Step], reports: &[StepReport]) -> Result<ContextStore> {
+    let steps_by_id = steps
         .iter()
         .map(|step| (step.id.as_str(), step))
         .collect::<BTreeMap<_, _>>();
+    context_store_from_step_map(&steps_by_id, reports)
+}
+
+fn context_store_from_step_map(
+    steps_by_id: &BTreeMap<&str, &Step>,
+    reports: &[StepReport],
+) -> Result<ContextStore> {
     let mut store = ContextStore::default();
 
     for report in reports {
@@ -291,7 +335,7 @@ pub fn context_store_from_reports(task: &Task, reports: &[StepReport]) -> Result
             continue;
         };
         // Nested legacy foreach reports have instance IDs such as `clone[1]`.
-        // They are intentionally not promoted to the parent scope; Graph v2
+        // They are intentionally not promoted to the parent scope; Graph v3
         // gives every nested instance an explicit scope path.
         let Some(step) = steps_by_id.get(report.step_id.as_str()) else {
             continue;
@@ -332,10 +376,10 @@ pub fn context_store_from_reports(task: &Task, reports: &[StepReport]) -> Result
     Ok(store)
 }
 
-fn context_schema_store_before(task: &Task, consumer_step_id: &str) -> Result<ContextStore> {
+fn context_schema_store_before(steps: &[Step], consumer_step_id: &str) -> Result<ContextStore> {
     let mut store = ContextStore::default();
     let mut found_consumer = false;
-    for step in &task.steps {
+    for step in steps {
         if step.id == consumer_step_id {
             found_consumer = true;
             break;
@@ -371,6 +415,10 @@ enum ApplyStepResult {
         output: StepOutput,
     },
     AlreadySatisfied(String),
+    AlreadySatisfiedWithOutput {
+        summary: String,
+        output: StepOutput,
+    },
     Failed {
         summary: String,
         error: String,
@@ -455,10 +503,10 @@ fn legacy_action_output(step: &Step, changed: bool) -> Option<StepOutput> {
             "ppduster.git.clone@1",
             repository_context_value(repo, dest, branch.as_deref(), changed, "sync"),
         ),
-        Action::GitInspect { repo, dest } => structured_step_output(
-            "ppduster.git.inspect@1",
-            repository_context_value(repo, dest, None, false, "inspect"),
-        ),
+        // Git inspection publishes an observation produced by
+        // `apply_git_inspect`. Deriving it here from `Path::exists` would
+        // incorrectly classify an empty directory as a repository.
+        Action::GitInspect { .. } => return None,
         Action::GitCloneIfMissing { repo, dest, branch } => structured_step_output(
             "ppduster.git.clone-if-missing@1",
             repository_context_value(repo, dest, branch.as_deref(), changed, "clone-if-missing"),
@@ -633,6 +681,17 @@ fn repository_context_value(
     })
 }
 
+fn git_inspection_output(
+    repo: &str,
+    dest: &str,
+    branch: Option<&str>,
+    repository_exists: bool,
+) -> StepOutput {
+    let mut value = repository_context_value(repo, dest, branch, false, "inspect");
+    value["repository"]["exists"] = serde_json::Value::Bool(repository_exists);
+    structured_step_output("ppduster.git.inspect@1", value)
+}
+
 pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
     run_task_with_interactivity(task, opts, terminal_is_interactive())
 }
@@ -642,31 +701,39 @@ fn run_task_with_interactivity(
     opts: &RunOptions,
     terminal_interactive: bool,
 ) -> Result<RunReport> {
-    if task.graph.is_some() {
-        return run_graph_task_with_interactivity(task, opts, terminal_interactive);
-    }
-    run_linear_task_with_interactivity(task, opts, terminal_interactive)
+    // Deserialization and TaskPack resolution are the compatibility boundary.
+    // The runtime accepts only an already canonical graph and never infers
+    // control flow from Task.steps.
+    task.workflow_graph().map_err(|error| {
+        anyhow!(
+            "task {} is not a canonical workflow graph: {error}",
+            task.id
+        )
+    })?;
+    run_graph_task_with_interactivity(task, opts, terminal_interactive)
 }
 
-fn run_linear_task_with_interactivity(
+/// Execute an already materialized sequence of atomic actions.
+///
+/// Graph execution uses this with a one-element slice. Keeping the action
+/// machinery independent from `Task.steps` prevents a graph action from
+/// constructing a synthetic legacy task merely to reuse the platform
+/// adapters. The sequence form remains useful for evaluating the legacy
+/// condition/action behavior in focused regression tests.
+fn run_step_sequence_with_interactivity(
     task: &Task,
+    task_steps: &[Step],
     opts: &RunOptions,
     terminal_interactive: bool,
 ) -> Result<RunReport> {
-    if task.steps.is_empty() {
-        if task.is_template() {
-            bail!(
-                "task template {} must be resolved through TaskPack before execution",
-                task.id
-            );
-        }
-        bail!("task {} has no executable steps", task.id);
+    if task_steps.is_empty() {
+        bail!("task {} has no executable actions", task.id);
     }
-    task.validate_executable()
-        .map_err(AutomationError::Message)?;
+    for step in task_steps {
+        step.validate().map_err(AutomationError::Message)?;
+    }
     if opts.release_channel.is_some()
-        && !task
-            .steps
+        && !task_steps
             .iter()
             .any(|step| matches!(step.action, Action::BambuStudioRelease(_)))
     {
@@ -674,7 +741,7 @@ fn run_linear_task_with_interactivity(
     }
     // Validate every policy gate before the first applied step so a missing
     // acknowledgement cannot leave a task partially applied.
-    for step in &task.steps {
+    for step in task_steps {
         enforce_step_policy(step, opts, terminal_interactive)?;
     }
 
@@ -686,7 +753,7 @@ fn run_linear_task_with_interactivity(
     let mut loop_contexts: BTreeMap<String, (String, Vec<serde_json::Value>)> = BTreeMap::new();
     let mut halted = false;
 
-    for step in &task.steps {
+    for step in task_steps {
         if halted {
             let plan = plan_step(step, opts)?;
             plans.push(plan.clone());
@@ -707,7 +774,7 @@ fn run_linear_task_with_interactivity(
         }
         if opts.apply {
             if let Some(condition) = &step.when {
-                match evaluate_condition(condition, &steps, task, &step.id) {
+                match evaluate_condition(condition, &steps, task_steps, &step.id) {
                     Ok(ConditionEvaluation::Matched(_)) => {}
                     Ok(ConditionEvaluation::NotMatched(reason))
                     | Ok(ConditionEvaluation::Unavailable(reason)) => {
@@ -757,7 +824,7 @@ fn run_linear_task_with_interactivity(
                 }
             }
             if let Some(condition) = &step.require {
-                match evaluate_condition(condition, &steps, task, &step.id) {
+                match evaluate_condition(condition, &steps, task_steps, &step.id) {
                     Ok(ConditionEvaluation::Matched(_)) => {}
                     Ok(ConditionEvaluation::NotMatched(reason))
                     | Ok(ConditionEvaluation::Unavailable(reason)) => {
@@ -916,6 +983,7 @@ fn run_linear_task_with_interactivity(
                         Ok(Step {
                             id: format!("{}[{iteration}]", step.id),
                             name: format!("{} · {iteration}", step_name(step)),
+                            bindings: BTreeMap::new(),
                             auth: step.auth,
                             check: step.check.clone(),
                             dangerous: step.dangerous,
@@ -972,6 +1040,15 @@ fn run_linear_task_with_interactivity(
                                     });
                                 }
                                 Ok(ApplyStepResult::AlreadySatisfied(summary)) => {
+                                    satisfied += 1;
+                                    logs.push(StepLogEntry {
+                                        step_id: iteration_step.id.clone(),
+                                        message: summary,
+                                    });
+                                }
+                                Ok(ApplyStepResult::AlreadySatisfiedWithOutput {
+                                    summary, ..
+                                }) => {
                                     satisfied += 1;
                                     logs.push(StepLogEntry {
                                         step_id: iteration_step.id.clone(),
@@ -1141,8 +1218,7 @@ fn run_linear_task_with_interactivity(
                 let prerequisites = prerequisites_for_step(step);
                 let planned_summary = describe_step(step, opts)?;
                 match apply_git_inspect(repo, dest) {
-                    Ok(ApplyStepResult::AlreadySatisfied(summary)) => {
-                        let output = legacy_action_output(step, false);
+                    Ok(ApplyStepResult::AlreadySatisfiedWithOutput { summary, output }) => {
                         steps.push(StepReport {
                             step_id: step.id.clone(),
                             step_name: step_name(step),
@@ -1153,7 +1229,7 @@ fn run_linear_task_with_interactivity(
                                 step_id: step.id.clone(),
                                 message: summary.clone(),
                             }],
-                            output,
+                            output: Some(output),
                         });
                         outcomes.push(ActionOutcome::Observed { summary });
                     }
@@ -1312,6 +1388,9 @@ fn run_linear_task_with_interactivity(
                     false,
                     legacy_action_output(step, false),
                 ),
+                ApplyStepResult::AlreadySatisfiedWithOutput { summary, output } => {
+                    (StepStatus::Satisfied, summary, false, Some(output))
+                }
                 ApplyStepResult::Failed { .. } => unreachable!(),
             };
             steps[step_idx].status = status;
@@ -1331,7 +1410,7 @@ fn run_linear_task_with_interactivity(
         outcomes.push(ActionOutcome::Planned { action: plan });
     }
 
-    let context = context_store_from_reports(task, &steps)?;
+    let context = context_store_from_steps(task_steps, &steps)?;
 
     Ok(RunReport {
         task_id: task.id.clone(),
@@ -1479,12 +1558,12 @@ fn run_graph_task_with_interactivity(
     opts: &RunOptions,
     terminal_interactive: bool,
 ) -> Result<RunReport> {
-    task.validate_executable()
-        .map_err(AutomationError::Message)?;
-    let graph = task
-        .graph
-        .as_ref()
-        .context("graph task has no workflow graph")?;
+    let graph = task.workflow_graph().map_err(|error| {
+        anyhow!(
+            "task {} is not a canonical workflow graph: {error}",
+            task.id
+        )
+    })?;
     if opts.release_channel.is_some() && !graph_contains_bambu(graph) {
         bail!("--channel is only supported by tasks with a bambu-studio-release action node");
     }
@@ -1547,13 +1626,14 @@ fn preflight_graph_capabilities(
     preflight_graph_policy_order(graph, opts, terminal_interactive, false).map(|_| ())
 }
 
-/// Prove that every safety-critical input which can only be materialized at
-/// runtime is checked before the first possible mutation on its structural
-/// path. Literal bindings are applied and validated immediately. A dynamic
-/// binding is allowed as the first mutation (its materialized policy is
-/// checked by the one-step runner), and inside a `for-each` whose own two-phase
-/// preflight runs before any iteration. Once a previous mutation is possible,
-/// an unresolved safety input fails closed instead of risking partial apply.
+/// Prove that inputs which can fail late or change safety policy are checked
+/// before the first possible mutation on their structural path. Literal
+/// bindings are applied and validated immediately. A dynamic binding is
+/// allowed on the first mutating action (its materialized policy is checked by
+/// the one-step runner), and inside a `for-each` whose own two-phase preflight
+/// runs before any iteration. Once a previous mutation is possible, an
+/// unresolved safety input or positional lookup fails closed. Other dynamic
+/// values retain guard-before-binding and loop preflight semantics.
 fn preflight_graph_policy_order(
     graph: &WorkflowGraph,
     opts: &RunOptions,
@@ -1590,11 +1670,12 @@ fn preflight_graph_policy_order(
                 if mutation_possible {
                     if let Some(target) = node.bindings.iter().find_map(|(target, binding)| {
                         (!binding_is_statically_resolvable(binding)
-                            && binding_affects_preflight_policy(&node.step.action, target))
+                            && (binding_affects_preflight_policy(&node.step.action, target)
+                                || binding_contains_positional_index(binding)))
                         .then_some(target)
                     }) {
                         bail!(
-                            "step {} has runtime-bound safety-critical input {target:?} after a possible earlier mutation; move it before mutating actions or place the mutations in one preflighted for-each",
+                            "step {} has runtime-bound input {target:?} after a possible earlier mutation; move it before mutating actions or place the mutations in one preflighted for-each",
                             node.step.id
                         );
                     }
@@ -1661,6 +1742,22 @@ fn binding_is_statically_resolvable(binding: &Binding) -> bool {
         Binding::Interpolated { parts } => parts
             .iter()
             .all(|part| matches!(part, TemplatePart::Literal { .. })),
+    }
+}
+
+fn binding_contains_positional_index(binding: &Binding) -> bool {
+    let field_has_index = |field: &FieldRef| {
+        field
+            .segments
+            .iter()
+            .any(|segment| matches!(segment, ContextPathSegment::Index { .. }))
+    };
+    match binding {
+        Binding::Field { field } => field_has_index(field),
+        Binding::Interpolated { parts } => parts
+            .iter()
+            .any(|part| matches!(part, TemplatePart::Field { field } if field_has_index(field))),
+        Binding::Literal { .. } | Binding::Template { .. } => false,
     }
 }
 
@@ -1944,7 +2041,6 @@ impl GraphRuntime<'_> {
                 }
             }
         }
-
         let mut materialized = match materialize_step(
             &node.step,
             &node.bindings,
@@ -1953,30 +2049,13 @@ impl GraphRuntime<'_> {
         ) {
             Ok(step) => step,
             Err(_error) if !self.opts.apply => {
-                let mut plan = plan_step(&node.step, self.opts)?;
-                plan.summary = format!(
-                    "deferred until runtime context values are available during apply; {}",
-                    plan.summary
+                return self.defer_graph_action(
+                    node,
+                    scope,
+                    instance_prefix,
+                    "deferred until runtime context values are available during apply",
+                    "typed bindings will be materialized during apply",
                 );
-                let report = StepReport {
-                    step_id: node.step.id.clone(),
-                    step_name: step_name(&node.step),
-                    summary: plan.summary.clone(),
-                    status: StepStatus::Pending,
-                    prerequisites: plan.prerequisites.clone(),
-                    logs: vec![StepLogEntry {
-                        step_id: node.step.id.clone(),
-                        message: "typed bindings will be materialized during apply".into(),
-                    }],
-                    output: None,
-                };
-                self.push_plan(plan.clone(), instance_prefix);
-                self.accumulator.outcomes.push(ActionOutcome::Planned {
-                    action: self.prefixed_plan(plan, instance_prefix),
-                });
-                self.push_step_report(report, instance_prefix);
-                insert_action_schema(&mut scope.schemas, &node.step);
-                return Ok(GraphNodeResult::action_planned());
             }
             Err(error) => {
                 let message = format!("step {} binding failed: {error}", node.step.id);
@@ -1985,20 +2064,21 @@ impl GraphRuntime<'_> {
                 return Ok(GraphNodeResult::action_failure());
             }
         };
-        materialized.when = None;
-        materialized.require = None;
+        // Apply-mode gates were already evaluated against graph scope above.
+        // In planning mode retain them so the atomic runner keeps guarded
+        // read-only observations pending instead of executing them early.
+        if self.opts.apply {
+            materialized.when = None;
+            materialized.require = None;
+        }
 
-        let mut one_step_task = self.task.clone();
-        one_step_task.scenarios.clear();
-        one_step_task.resolved_scenarios.clear();
-        one_step_task.steps = vec![materialized.clone()];
-        one_step_task.graph = None;
         let mut one_step_opts = self.opts.clone();
         if !matches!(materialized.action, Action::BambuStudioRelease(_)) {
             one_step_opts.release_channel = None;
         }
-        let report = match run_linear_task_with_interactivity(
-            &one_step_task,
+        let report = match run_step_sequence_with_interactivity(
+            self.task,
+            std::slice::from_ref(&materialized),
             &one_step_opts,
             self.terminal_interactive,
         ) {
@@ -2036,6 +2116,37 @@ impl GraphRuntime<'_> {
         };
         self.append_linear_report(report, instance_prefix);
         Ok(result)
+    }
+
+    fn defer_graph_action(
+        &mut self,
+        node: &ActionNode,
+        scope: &mut GraphScopeState,
+        instance_prefix: &str,
+        reason: &str,
+        log: &str,
+    ) -> Result<GraphNodeResult> {
+        let mut plan = plan_step(&node.step, self.opts)?;
+        plan.summary = format!("{reason}; {}", plan.summary);
+        let report = StepReport {
+            step_id: node.step.id.clone(),
+            step_name: step_name(&node.step),
+            summary: plan.summary.clone(),
+            status: StepStatus::Pending,
+            prerequisites: plan.prerequisites.clone(),
+            logs: vec![StepLogEntry {
+                step_id: node.step.id.clone(),
+                message: log.into(),
+            }],
+            output: None,
+        };
+        self.push_plan(plan.clone(), instance_prefix);
+        self.accumulator.outcomes.push(ActionOutcome::Planned {
+            action: self.prefixed_plan(plan, instance_prefix),
+        });
+        self.push_step_report(report, instance_prefix);
+        insert_action_schema(&mut scope.schemas, &node.step);
+        Ok(GraphNodeResult::action_planned())
     }
 
     fn push_action_failure(
@@ -2199,7 +2310,7 @@ impl GraphRuntime<'_> {
                     "If",
                     "condition evaluated to null",
                     instance_prefix,
-                ))
+                ));
             }
             Ok(RuleEvaluation::Missing(issue)) => {
                 return Ok(self.control_evaluation_failure(
@@ -2207,7 +2318,7 @@ impl GraphRuntime<'_> {
                     "If",
                     &format!("condition input is missing: {}", issue.message),
                     instance_prefix,
-                ))
+                ));
             }
             Ok(RuleEvaluation::Unknown(issue)) => {
                 return Ok(self.control_evaluation_failure(
@@ -2215,7 +2326,7 @@ impl GraphRuntime<'_> {
                     "If",
                     &format!("condition input is unavailable: {}", issue.message),
                     instance_prefix,
-                ))
+                ));
             }
             Ok(RuleEvaluation::Error(error)) => {
                 return Ok(self.control_evaluation_failure(
@@ -2223,7 +2334,7 @@ impl GraphRuntime<'_> {
                     "If",
                     &format!("condition evaluation failed: {}", error.message),
                     instance_prefix,
-                ))
+                ));
             }
             Err(error) => {
                 return Ok(self.control_evaluation_failure(
@@ -2231,7 +2342,7 @@ impl GraphRuntime<'_> {
                     "If",
                     &format!("condition type-check failed: {error:#}"),
                     instance_prefix,
-                ))
+                ));
             }
         };
 
@@ -2317,6 +2428,7 @@ impl GraphRuntime<'_> {
             required: true,
             nullable: true,
             sensitivity: Sensitivity::Public,
+            allowed_values: Vec::new(),
         };
         let selector = match resolve_binding(
             &node.selector,
@@ -2331,7 +2443,7 @@ impl GraphRuntime<'_> {
                     "Switch",
                     &format!("selector binding failed: {error}"),
                     instance_prefix,
-                ))
+                ));
             }
         };
         let selected = node
@@ -2433,6 +2545,7 @@ impl GraphRuntime<'_> {
             required: true,
             nullable: false,
             sensitivity: Sensitivity::Secret,
+            allowed_values: Vec::new(),
         };
         let collection = match resolve_binding(
             &node.collection,
@@ -2447,7 +2560,7 @@ impl GraphRuntime<'_> {
                     "For each",
                     &format!("collection binding failed: {error}"),
                     instance_prefix,
-                ))
+                ));
             }
         };
         let Some(items) = collection.value.as_array() else {
@@ -2642,6 +2755,7 @@ impl GraphRuntime<'_> {
                         required: true,
                         nullable: false,
                         sensitivity: Sensitivity::Secret,
+                        allowed_values: Vec::new(),
                     };
                     let collection = resolve_binding(
                         &node.collection,
@@ -2732,6 +2846,7 @@ impl GraphRuntime<'_> {
                         required: true,
                         nullable: true,
                         sensitivity: Sensitivity::Public,
+                        allowed_values: Vec::new(),
                     };
                     let selector = resolve_binding(
                         &node.selector,
@@ -2924,7 +3039,7 @@ fn evaluate_graph_condition(
                     ConditionEvaluation::NotMatched(reason) => {
                         return Ok(ConditionEvaluation::NotMatched(format!(
                             "all condition failed: {reason}"
-                        )))
+                        )));
                     }
                     ConditionEvaluation::Unavailable(reason) => unavailable.push(reason),
                 }
@@ -2949,7 +3064,7 @@ fn evaluate_graph_condition(
                     ConditionEvaluation::Matched(reason) => {
                         return Ok(ConditionEvaluation::Matched(format!(
                             "any condition matched: {reason}"
-                        )))
+                        )));
                     }
                     ConditionEvaluation::NotMatched(reason) => unmatched.push(reason),
                     ConditionEvaluation::Unavailable(reason) => unavailable.push(reason),
@@ -3382,8 +3497,12 @@ fn validate_destinations(step: &Step) -> Result<()> {
                 )
             })?;
         }
+        Action::GitInspect { dest, .. } => {
+            validate_git_inspection_path(dest).with_context(|| {
+                format!("step {} git inspection path {} is invalid", step.id, dest)
+            })?;
+        }
         Action::GitClone { dest, .. }
-        | Action::GitInspect { dest, .. }
         | Action::GitCloneIfMissing { dest, .. }
         | Action::GitFetch { dest, .. }
         | Action::GitFastForward { dest, .. } => {
@@ -3456,6 +3575,25 @@ fn validate_declared_path(raw: &str) -> Result<PathBuf> {
     lexical_absolute_path(&path)
 }
 
+fn validate_git_inspection_path(raw: &str) -> Result<PathBuf> {
+    let path = validate_declared_path(raw)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "git inspection path must not be a symlink: {}",
+                path.display()
+            )
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect git inspection path {}", path.display()));
+        }
+    }
+    Ok(path)
+}
+
 fn validate_create_directory_path(raw: &str) -> Result<PathBuf> {
     let path = validate_declared_path(raw)?;
     let resolved = resolve_through_existing_ancestor(&path)?;
@@ -3479,7 +3617,7 @@ fn validate_create_directory_path(raw: &str) -> Result<PathBuf> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("inspect directory destination {}", path.display()))
+                .with_context(|| format!("inspect directory destination {}", path.display()));
         }
     }
     Ok(path)
@@ -3505,7 +3643,7 @@ fn resolve_through_existing_ancestor(path: &Path) -> Result<PathBuf> {
                         "inspect destination ancestor {}",
                         deepest_existing.display()
                     )
-                })
+                });
             }
         }
     };
@@ -3551,7 +3689,7 @@ fn validate_resolved_git_destination(path: &Path) -> Result<PathBuf> {
                         "inspect git destination ancestor {}",
                         deepest_existing.display()
                     )
-                })
+                });
             }
         }
     };
@@ -4005,7 +4143,7 @@ enum ConditionEvaluation {
 fn evaluate_condition(
     condition: &StepCondition,
     completed_steps: &[StepReport],
-    task: &Task,
+    task_steps: &[Step],
     consumer_step_id: &str,
 ) -> Result<ConditionEvaluation> {
     match condition {
@@ -4065,12 +4203,12 @@ fn evaluate_condition(
             let mut matched = Vec::with_capacity(conditions.len());
             let mut unavailable = Vec::new();
             for child in conditions {
-                match evaluate_condition(child, completed_steps, task, consumer_step_id)? {
+                match evaluate_condition(child, completed_steps, task_steps, consumer_step_id)? {
                     ConditionEvaluation::Matched(reason) => matched.push(reason),
                     ConditionEvaluation::NotMatched(reason) => {
                         return Ok(ConditionEvaluation::NotMatched(format!(
                             "all condition failed: {reason}"
-                        )))
+                        )));
                     }
                     ConditionEvaluation::Unavailable(reason) => unavailable.push(reason),
                 }
@@ -4090,11 +4228,11 @@ fn evaluate_condition(
             let mut unmatched = Vec::with_capacity(conditions.len());
             let mut unavailable = Vec::new();
             for child in conditions {
-                match evaluate_condition(child, completed_steps, task, consumer_step_id)? {
+                match evaluate_condition(child, completed_steps, task_steps, consumer_step_id)? {
                     ConditionEvaluation::Matched(reason) => {
                         return Ok(ConditionEvaluation::Matched(format!(
                             "any condition matched: {reason}"
-                        )))
+                        )));
                     }
                     ConditionEvaluation::NotMatched(reason) => unmatched.push(reason),
                     ConditionEvaluation::Unavailable(reason) => unavailable.push(reason),
@@ -4112,7 +4250,7 @@ fn evaluate_condition(
             )))
         }
         StepCondition::Not { condition } => {
-            match evaluate_condition(condition, completed_steps, task, consumer_step_id)? {
+            match evaluate_condition(condition, completed_steps, task_steps, consumer_step_id)? {
                 ConditionEvaluation::Matched(reason) => Ok(ConditionEvaluation::NotMatched(
                     format!("negated condition matched: {reason}"),
                 )),
@@ -4125,8 +4263,8 @@ fn evaluate_condition(
             }
         }
         StepCondition::Expression { rule, policy } => {
-            let schemas = context_schema_store_before(task, consumer_step_id)?;
-            let values = context_store_from_reports(task, completed_steps)?;
+            let schemas = context_schema_store_before(task_steps, consumer_step_id)?;
+            let values = context_store_from_steps(task_steps, completed_steps)?;
             let checked = check_rule(rule.clone(), &schemas, ExpressionLimits::default()).map_err(
                 |diagnostics| {
                     anyhow!(
@@ -4400,7 +4538,7 @@ fn apply_create_directory(raw_path: &str) -> Result<ApplyStepResult> {
             return Ok(ApplyStepResult::AlreadySatisfied(format!(
                 "directory already exists: {}",
                 path.display()
-            )))
+            )));
         }
         Ok(_) => {
             // `validate_create_directory_path` reports the more specific
@@ -4413,7 +4551,7 @@ fn apply_create_directory(raw_path: &str) -> Result<ApplyStepResult> {
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => {
-            return Err(error).with_context(|| format!("inspect directory {}", path.display()))
+            return Err(error).with_context(|| format!("inspect directory {}", path.display()));
         }
     }
 
@@ -4479,7 +4617,7 @@ fn ensure_destination_parent(path: &Path) -> Result<&Path> {
         ),
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("inspect destination parent {}", parent.display()))
+                .with_context(|| format!("inspect destination parent {}", parent.display()));
         }
     }
     let metadata = fs::symlink_metadata(parent)
@@ -4524,7 +4662,7 @@ fn apply_write_file(
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("inspect write destination {}", path.display()))
+                .with_context(|| format!("inspect write destination {}", path.display()));
         }
     };
 
@@ -4978,10 +5116,10 @@ fn inspect_path(action: &InspectPathAction) -> Result<PathMetadataOutput> {
                 modified_at: None,
                 created_at: None,
                 sha256: None,
-            })
+            });
         }
         Err(error) => {
-            return Err(error).with_context(|| format!("inspect path metadata {}", path.display()))
+            return Err(error).with_context(|| format!("inspect path metadata {}", path.display()));
         }
     };
 
@@ -5451,13 +5589,12 @@ fn apply_git_clone_or_update(
 }
 
 fn apply_git_inspect(repo: &str, dest: &str) -> Result<ApplyStepResult> {
-    let dest_path = expand_required_path(dest)?;
-    validate_resolved_git_destination(&dest_path)?;
+    let dest_path = validate_git_inspection_path(dest)?;
     if !dest_path.exists() {
-        return Ok(ApplyStepResult::AlreadySatisfied(format!(
-            "repository is absent at {}",
-            dest_path.display()
-        )));
+        return Ok(ApplyStepResult::AlreadySatisfiedWithOutput {
+            summary: format!("repository is absent at {}", dest_path.display()),
+            output: git_inspection_output(repo, dest, None, false),
+        });
     }
     if fs::symlink_metadata(&dest_path)?.file_type().is_symlink() {
         bail!(
@@ -5471,19 +5608,25 @@ fn apply_git_inspect(repo: &str, dest: &str) -> Result<ApplyStepResult> {
             .next()
             .is_none()
     {
-        return Ok(ApplyStepResult::AlreadySatisfied(format!(
-            "repository is absent; destination is an empty directory at {}",
-            dest_path.display()
-        )));
+        return Ok(ApplyStepResult::AlreadySatisfiedWithOutput {
+            summary: format!(
+                "repository is absent; destination is an empty directory at {}",
+                dest_path.display()
+            ),
+            output: git_inspection_output(repo, dest, None, false),
+        });
     }
     validate_existing_git_repository(&dest_path, repo)?;
-    let active_branch =
-        current_git_branch(&dest_path)?.unwrap_or_else(|| "detached HEAD".to_owned());
-    Ok(ApplyStepResult::AlreadySatisfied(format!(
-        "expected repository exists at {}; active checkout: {}",
-        dest_path.display(),
-        active_branch
-    )))
+    let active_branch = current_git_branch(&dest_path)?;
+    let active_checkout = active_branch.as_deref().unwrap_or("detached HEAD");
+    Ok(ApplyStepResult::AlreadySatisfiedWithOutput {
+        summary: format!(
+            "expected repository exists at {}; active checkout: {}",
+            dest_path.display(),
+            active_checkout
+        ),
+        output: git_inspection_output(repo, dest, active_branch.as_deref(), true),
+    })
 }
 
 fn apply_git_clone_if_missing(
@@ -6592,7 +6735,7 @@ fn create_archive_staging_directory(parent: &Path) -> Result<PathBuf> {
             Err(err) => {
                 return Err(err).with_context(|| {
                     format!("create archive staging directory {}", candidate.display())
-                })
+                });
             }
         }
     }
@@ -6704,7 +6847,7 @@ fn apply_install_dmg(
         (Ok(_), Err(detach_err)) => return Err(detach_err),
         (Err(install_err), Ok(())) => return Err(install_err),
         (Err(install_err), Err(detach_err)) => {
-            return Err(install_err.context(format!("also failed to detach dmg: {detach_err:#}")))
+            return Err(install_err.context(format!("also failed to detach dmg: {detach_err:#}")));
         }
     };
 
@@ -7169,7 +7312,7 @@ fn unique_temp_directory(prefix: &str) -> Result<PathBuf> {
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(err) => {
                 return Err(err)
-                    .with_context(|| format!("create mount point {}", candidate.display()))
+                    .with_context(|| format!("create mount point {}", candidate.display()));
             }
         }
     }
@@ -7443,7 +7586,11 @@ fn require_license_application_stopped(provider: LicenseProvider) -> Result<()> 
             "{} is already running; quit every instance and rerun so ppduster can open the verified app bundle",
             process_name
         ),
-        Some(code) => bail!("checking for running {} failed with exit code {}", process_name, code),
+        Some(code) => bail!(
+            "checking for running {} failed with exit code {}",
+            process_name,
+            code
+        ),
         None => bail!("checking for running {} terminated by signal", process_name),
     }
 }
@@ -7800,7 +7947,7 @@ fn create_unique_temp_file(dest: &Path) -> Result<(PathBuf, fs::File)> {
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
             Err(err) => {
                 return Err(err)
-                    .with_context(|| format!("create temporary download {}", candidate.display()))
+                    .with_context(|| format!("create temporary download {}", candidate.display()));
             }
         }
         index += 1;
@@ -7922,7 +8069,8 @@ fn is_satisfied(step: &Step, run_command_checks: bool) -> Result<Option<String>>
             Ok(_) => true,
             Err(error) if error.kind() == io::ErrorKind::NotFound => false,
             Err(error) => {
-                return Err(error).with_context(|| format!("inspect copy source {}", src.display()))
+                return Err(error)
+                    .with_context(|| format!("inspect copy source {}", src.display()));
             }
         };
         if !source_exists {
@@ -8037,12 +8185,12 @@ mod tests {
     use super::*;
     use crate::automation::context::TemplatePart;
     use crate::automation::expression::ExpressionValue;
-    use crate::automation::graph::{GraphEdge, SwitchCase};
+    use crate::automation::graph::{GraphEdge, LegacyTaskImporter, SwitchCase};
     use crate::automation::loader::{PackTrust, TaskPack, TaskSource};
     use crate::automation::task::{
         ActivateLicenseAction, AppBundleIdentity, AppStoreInstallAction, Checksum, CopyPathAction,
         CreateDirectoryAction, InspectPathAction, PathExpectation, PathKind, RemovePathAction,
-        StepCondition, Task, TrustRequirement, WriteFileAction,
+        ScriptInterpreter, StepCondition, Task, TrustRequirement, WriteFileAction,
     };
     use std::path::PathBuf;
 
@@ -8058,6 +8206,22 @@ mod tests {
             steps: vec![step],
             graph: None,
         }
+    }
+
+    /// Unit fixtures still use the compact legacy step builder. Import them
+    /// explicitly before crossing the production graph-only runtime boundary.
+    fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
+        let canonical = task.to_v3().map_err(anyhow::Error::new)?;
+        super::run_task(&canonical, opts)
+    }
+
+    fn run_imported_task_with_interactivity(
+        task: &Task,
+        opts: &RunOptions,
+        terminal_interactive: bool,
+    ) -> Result<RunReport> {
+        let canonical = task.to_v3().map_err(anyhow::Error::new)?;
+        super::run_task_with_interactivity(&canonical, opts, terminal_interactive)
     }
 
     struct GitTestRepository {
@@ -8125,6 +8289,7 @@ mod tests {
         base_task(Step {
             id: "sync-repository".into(),
             name: "Sync repository".into(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: Some(crate::automation::task::Check {
                 path_exists: Some(destination.join(".git")),
@@ -8194,6 +8359,7 @@ mod tests {
         Step {
             id: id.into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -8230,6 +8396,68 @@ mod tests {
             nodes: vec![action_node(step, bindings)],
             ..WorkflowGraph::default()
         }
+    }
+
+    #[test]
+    fn canonical_v3_task_executes_without_a_steps_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let inspected = temp.path().join("canonical-v3");
+        fs::create_dir(&inspected).unwrap();
+        let step = plain_step(
+            "inspect-canonical",
+            Action::InspectPath(InspectPathAction {
+                path: inspected.to_string_lossy().into_owned(),
+                recursive_size: false,
+                sha256: false,
+                expect: None,
+            }),
+        );
+        let task = graph_task(one_action_graph(step, BTreeMap::new()));
+
+        assert!(task.steps.is_empty());
+        assert!(task.is_v3());
+        let report = run_task_with_interactivity(&task, &RunOptions::default(), false).unwrap();
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(matches!(report.steps[0].status, StepStatus::Satisfied));
+        let path = report
+            .context
+            .resolve(&FieldRef::step("inspect-canonical").field("path"))
+            .unwrap();
+        assert_eq!(path.value, inspected.to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn legacy_steps_require_explicit_import_before_execution() {
+        let temp = tempfile::tempdir().unwrap();
+        let inspected = temp.path().join("legacy-import");
+        fs::create_dir(&inspected).unwrap();
+        let task = base_task(plain_step(
+            "inspect-legacy",
+            Action::InspectPath(InspectPathAction {
+                path: inspected.to_string_lossy().into_owned(),
+                recursive_size: false,
+                sha256: false,
+                expect: None,
+            }),
+        ));
+
+        assert!(task.graph.is_none());
+        assert_eq!(task.steps.len(), 1);
+        let error = run_task_with_interactivity(&task, &RunOptions::default(), false).unwrap_err();
+        assert!(
+            error.to_string().contains("not a canonical workflow graph"),
+            "{error:#}"
+        );
+
+        let canonical = task.to_v3().unwrap();
+        let report =
+            run_task_with_interactivity(&canonical, &RunOptions::default(), false).unwrap();
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.steps.len(), 1);
+        assert!(canonical.steps.is_empty());
+        assert!(canonical.is_v3());
     }
 
     #[test]
@@ -8323,6 +8551,280 @@ mod tests {
         assert!(summary.contains("https://github.com/octocat/hello-world.git"));
         assert!(summary.contains("$HOME/Developer/octocat/hello-world"));
         assert!(summary.contains("branch main"));
+    }
+
+    #[test]
+    fn missing_positional_binding_fails_before_the_consumer_action_runs() {
+        let producer = plain_step("github", Action::GithubListRepositories);
+        let definition = definition_for_action(&producer.action);
+        let mut scope = GraphScopeState::default();
+        scope.values.insert(
+            ContextScope::Step {
+                step_id: producer.id.clone(),
+            },
+            ContextValue::new(
+                serde_json::json!({
+                    "github": {
+                        "account": { "login": "octocat" },
+                        "repositories": [{
+                            "id": "42",
+                            "owner": "octocat",
+                            "name": "hello-world",
+                            "full_name": "octocat/hello-world",
+                            "https_url": "https://github.com/octocat/hello-world.git",
+                            "ssh_url": "git@github.com:octocat/hello-world.git",
+                            "default_branch": "main",
+                            "private": false,
+                            "archived": false
+                        }]
+                    }
+                }),
+                ContextProvenance::step(&producer.id),
+            )
+            .with_schema(definition.output_schema.clone()),
+        );
+        scope.schemas.insert(
+            ContextScope::Step {
+                step_id: producer.id.clone(),
+            },
+            ContextValue::new(
+                serde_json::Value::Null,
+                ContextProvenance::step(&producer.id),
+            )
+            .with_schema(definition.output_schema),
+        );
+        let consumer = ActionNode {
+            step: plain_step(
+                "inspect",
+                Action::GitInspect {
+                    repo: "https://github.com/example/repository.git".into(),
+                    dest: "/tmp/ppduster-missing-positional-binding".into(),
+                },
+            ),
+            bindings: BTreeMap::from([(
+                "repo".into(),
+                Binding::field(
+                    FieldRef::step("github")
+                        .field("github")
+                        .field("repositories")
+                        .index(2)
+                        .field("https_url"),
+                ),
+            )]),
+        };
+        let task = graph_task(one_action_graph(
+            consumer.step.clone(),
+            consumer.bindings.clone(),
+        ));
+        let opts = RunOptions {
+            apply: true,
+            ..RunOptions::default()
+        };
+        let mut runtime = GraphRuntime {
+            task: &task,
+            opts: &opts,
+            terminal_interactive: false,
+            accumulator: GraphRunAccumulator::default(),
+            budget: GraphExecutionBudget::default(),
+        };
+
+        let result = runtime.execute_action(&consumer, &mut scope, "").unwrap();
+
+        assert!(result.failed);
+        assert_eq!(runtime.accumulator.steps.len(), 1);
+        assert!(matches!(
+            runtime.accumulator.steps[0].status,
+            StepStatus::Failed
+        ));
+        assert!(runtime.accumulator.steps[0].output.is_none());
+        assert!(runtime
+            .accumulator
+            .errors
+            .iter()
+            .any(|error| error.contains("binding failed")));
+    }
+
+    #[test]
+    fn linear_task_with_bindings_dispatches_through_the_graph_runner() {
+        let temp = tempfile::tempdir().unwrap();
+        let inspected = temp.path().join("repository");
+        fs::create_dir(&inspected).unwrap();
+        let source = plain_step(
+            "source",
+            Action::InspectPath(InspectPathAction {
+                path: inspected.to_string_lossy().into_owned(),
+                recursive_size: false,
+                sha256: false,
+                expect: None,
+            }),
+        );
+        let mut consumer = plain_step(
+            "consumer",
+            Action::InspectPath(InspectPathAction {
+                path: "/tmp/ppduster-binding-placeholder".into(),
+                recursive_size: false,
+                sha256: false,
+                expect: None,
+            }),
+        );
+        consumer.bindings.insert(
+            "path".into(),
+            Binding::field(FieldRef::step("source").field("path")),
+        );
+        let mut task = base_task(source);
+        task.steps.push(consumer);
+
+        let report = apply_test_task(&task);
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.steps.len(), 2);
+        let path = report
+            .context
+            .resolve(&FieldRef::step("consumer").field("path"))
+            .unwrap();
+        assert_eq!(path.value, inspected.to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn linear_for_each_dispatches_each_loop_item_and_skips_an_empty_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("produce-exit-codes.sh");
+        fs::write(&script, "exit 0\n").unwrap();
+        let inspected = temp.path().join("payload.txt");
+        fs::write(&inspected, "0123456789").unwrap();
+
+        let mut producer = plain_step(
+            "producer",
+            Action::RunScript {
+                interpreter: ScriptInterpreter::Sh,
+                script: script.to_string_lossy().into_owned(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                success_exit_codes: vec![0, 1, 2],
+            },
+        );
+        producer.dangerous = true;
+        let loop_step = plain_step(
+            "items",
+            Action::ForEach {
+                source_step: "producer".into(),
+                array_path: "success_exit_codes".into(),
+                item: "code".into(),
+                fields: Vec::new(),
+            },
+        );
+        let mut consumer = plain_step(
+            "consumer",
+            Action::InspectPath(InspectPathAction {
+                path: inspected.to_string_lossy().into_owned(),
+                recursive_size: true,
+                sha256: false,
+                expect: Some(PathExpectation {
+                    exists: Some(true),
+                    kind: Some(PathKind::File),
+                    min_size_bytes: Some(0),
+                    ..PathExpectation::default()
+                }),
+            }),
+        );
+        consumer.bindings.insert(
+            "/expect/min_size_bytes".into(),
+            Binding::field(FieldRef::loop_item("items")),
+        );
+        let mut task = base_task(producer);
+        task.steps.extend([loop_step, consumer]);
+        let options = RunOptions {
+            apply: true,
+            allow_shell: true,
+            ..RunOptions::default()
+        };
+
+        let report = run_imported_task_with_interactivity(&task, &options, false).unwrap();
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let consumer_ids = report
+            .steps
+            .iter()
+            .filter(|step| step.step_id.ends_with("/consumer"))
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            consumer_ids,
+            vec![
+                "items[1]/consumer",
+                "items[2]/consumer",
+                "items[3]/consumer"
+            ]
+        );
+        assert!(consumer_ids
+            .iter()
+            .all(|id| id.starts_with("items[") && id.ends_with("]/consumer")));
+        assert!(report.steps.iter().any(|step| {
+            step.step_id == "items"
+                && step
+                    .summary
+                    .contains("completed 3 of 3 iteration(s); 0 failed")
+        }));
+
+        let migrated = LegacyTaskImporter::import_steps(&task.steps).unwrap();
+        let GraphNode::ForEach(loop_node) = migrated
+            .nodes
+            .iter()
+            .find(|node| node.id() == "items")
+            .unwrap()
+        else {
+            panic!("expected migrated for-each node")
+        };
+        let loop_node = loop_node.clone();
+        let producer_definition = definition_for_action(&task.steps[0].action);
+        let mut empty_scope = GraphScopeState::default();
+        let producer_scope = ContextScope::Step {
+            step_id: "producer".into(),
+        };
+        empty_scope.values.insert(
+            producer_scope.clone(),
+            ContextValue::new(
+                serde_json::json!({
+                    "exit_code": 0,
+                    "termination_signal": null,
+                    "accepted": true,
+                    "success_exit_codes": []
+                }),
+                ContextProvenance::step("producer"),
+            )
+            .with_schema(producer_definition.output_schema.clone()),
+        );
+        empty_scope.schemas.insert(
+            producer_scope,
+            ContextValue::new(serde_json::Value::Null, ContextProvenance::step("producer"))
+                .with_schema(producer_definition.output_schema),
+        );
+        let empty_task = graph_task(migrated);
+        let mut empty_runtime = GraphRuntime {
+            task: &empty_task,
+            opts: &options,
+            terminal_interactive: false,
+            accumulator: GraphRunAccumulator::default(),
+            budget: GraphExecutionBudget::default(),
+        };
+
+        let empty_result = empty_runtime
+            .execute_for_each(&loop_node, &empty_scope, "", 1)
+            .unwrap();
+
+        assert!(empty_result.successful);
+        assert!(empty_runtime.accumulator.errors.is_empty());
+        assert!(!empty_runtime
+            .accumulator
+            .steps
+            .iter()
+            .any(|step| step.step_id.ends_with("/consumer")));
+        assert!(empty_runtime.accumulator.steps.iter().any(|step| {
+            step.step_id == "items"
+                && matches!(step.status, StepStatus::Satisfied)
+                && step.summary == "collection was empty"
+        }));
     }
 
     #[test]
@@ -8478,7 +8980,7 @@ mod tests {
             body: Box::new(one_action_graph(
                 scalar_action,
                 BTreeMap::from([(
-                    "/args/0".into(),
+                    "/env/ITEM".into(),
                     Binding::field(FieldRef::loop_item("scalar-loop")),
                 )]),
             )),
@@ -8496,7 +8998,7 @@ mod tests {
             body: Box::new(one_action_graph(
                 object_action,
                 BTreeMap::from([(
-                    "/args/0".into(),
+                    "/env/ITEM".into(),
                     Binding::field(FieldRef::loop_item("object-loop").field("name")),
                 )]),
             )),
@@ -8774,7 +9276,7 @@ mod tests {
                 shell: ShellMode::Forbidden,
             },
         );
-        let graph = WorkflowGraph::from_linear_v1(&[skipped, next]).unwrap();
+        let graph = LegacyTaskImporter::import_steps(&[skipped, next]).unwrap();
 
         let report = apply_test_task(&graph_task(graph));
 
@@ -8990,11 +9492,137 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(format!("{error:#}").contains("runtime-bound safety-critical input"));
+        assert!(format!("{error:#}").contains("runtime-bound input"));
         assert!(
             !safe.exists(),
             "dynamic policy analysis must fail before the earlier action mutates"
         );
+    }
+
+    #[test]
+    fn graph_rejects_late_dynamic_non_policy_input_before_earlier_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let sentinel = temp.path().join("must-not-exist");
+        let first = plain_step(
+            "first",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: sentinel.to_string_lossy().into_owned(),
+            }),
+        );
+        let repositories = plain_step("repositories", Action::GithubListRepositories);
+        let inspect = plain_step(
+            "inspect",
+            Action::InspectPath(InspectPathAction {
+                path: temp
+                    .path()
+                    .join("repository")
+                    .to_string_lossy()
+                    .into_owned(),
+                recursive_size: false,
+                sha256: false,
+                expect: None,
+            }),
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["first".into()],
+            nodes: vec![
+                action_node(first, BTreeMap::new()),
+                action_node(repositories, BTreeMap::new()),
+                action_node(
+                    inspect,
+                    BTreeMap::from([(
+                        "recursive_size".into(),
+                        Binding::field(
+                            FieldRef::step("repositories")
+                                .field("github")
+                                .field("repositories")
+                                .index(2)
+                                .field("private"),
+                        ),
+                    )]),
+                ),
+            ],
+            edges: vec![
+                GraphEdge::new("first", EdgePort::Success, "repositories"),
+                GraphEdge::new("repositories", EdgePort::Success, "inspect"),
+            ],
+            ..WorkflowGraph::default()
+        };
+
+        let error = run_task(
+            &graph_task(graph),
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("runtime-bound input \"recursive_size\""));
+        assert!(
+            !sentinel.exists(),
+            "all runtime bindings must be preflighted before an earlier mutation"
+        );
+    }
+
+    #[test]
+    fn graph_preflight_allows_dynamic_inputs_until_the_first_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp
+            .path()
+            .join("repository")
+            .to_string_lossy()
+            .into_owned();
+        let repositories = plain_step("repositories", Action::GithubListRepositories);
+        let inspect = plain_step(
+            "inspect",
+            Action::GitInspect {
+                repo: "https://github.com/example/repository.git".into(),
+                dest: destination.clone(),
+            },
+        );
+        let clone = plain_step(
+            "clone",
+            Action::GitCloneIfMissing {
+                repo: "https://github.com/example/repository.git".into(),
+                dest: destination,
+                branch: None,
+            },
+        );
+        let repository_url = || {
+            Binding::field(
+                FieldRef::step("repositories")
+                    .field("github")
+                    .field("repositories")
+                    .index(2)
+                    .field("https_url"),
+            )
+        };
+        let graph = WorkflowGraph {
+            entries: vec!["repositories".into()],
+            nodes: vec![
+                action_node(repositories, BTreeMap::new()),
+                action_node(inspect, BTreeMap::from([("repo".into(), repository_url())])),
+                action_node(clone, BTreeMap::from([("repo".into(), repository_url())])),
+            ],
+            edges: vec![
+                GraphEdge::new("repositories", EdgePort::Success, "inspect"),
+                GraphEdge::new("inspect", EdgePort::Success, "clone"),
+            ],
+            ..WorkflowGraph::default()
+        };
+        graph.validate().unwrap();
+
+        preflight_graph_capabilities(
+            &graph,
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+            false,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -9063,7 +9691,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(format!("{error:#}").contains("runtime-bound safety-critical input"));
+        assert!(format!("{error:#}").contains("runtime-bound input"));
         assert!(!safe.exists());
     }
 
@@ -9124,7 +9752,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(format!("{error:#}").contains("runtime-bound safety-critical input"));
+        assert!(format!("{error:#}").contains("runtime-bound input"));
         assert!(!safe.exists());
     }
 
@@ -9350,7 +9978,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_path_expectation_halts_later_steps_in_dry_run() {
+    fn failed_path_expectation_does_not_activate_later_steps_in_dry_run() {
         let temp = tempfile::tempdir().unwrap();
         let missing = temp.path().join("missing");
         let mut task = base_task(plain_step(
@@ -9381,7 +10009,7 @@ mod tests {
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].contains("expected exists"));
         assert!(matches!(report.steps[0].status, StepStatus::Failed));
-        assert!(matches!(report.steps[1].status, StepStatus::Skipped));
+        assert!(!report.steps.iter().any(|step| step.step_id == "later"));
     }
 
     #[test]
@@ -9498,15 +10126,19 @@ mod tests {
                 on_conflict: WriteConflictPolicy::Fail,
             }),
         );
-        let error = run_task(
+        let report = run_task(
             &base_task(step.clone()),
             &RunOptions {
                 apply: true,
                 ..RunOptions::default()
             },
         )
-        .unwrap_err();
-        assert!(format!("{error:#}").contains("different content"));
+        .unwrap();
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("different content")));
+        assert!(matches!(report.steps[0].status, StepStatus::Failed));
         assert_eq!(fs::read_to_string(&path).unwrap(), "valuable");
 
         let Action::WriteFile(action) = &mut step.action else {
@@ -9545,15 +10177,19 @@ mod tests {
         ));
 
         fs::write(destination.join("extra.txt"), "different").unwrap();
-        let error = run_task(
+        let report = run_task(
             &task,
             &RunOptions {
                 apply: true,
                 ..RunOptions::default()
             },
         )
-        .unwrap_err();
-        assert!(format!("{error:#}").contains("different content"));
+        .unwrap();
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("different content")));
+        assert!(matches!(report.steps[0].status, StepStatus::Failed));
         assert_eq!(
             fs::read_to_string(destination.join("extra.txt")).unwrap(),
             "different"
@@ -9577,15 +10213,19 @@ mod tests {
             }),
         ));
 
-        let error = run_task(
+        let report = run_task(
             &task,
             &RunOptions {
                 apply: true,
                 ..RunOptions::default()
             },
         )
-        .unwrap_err();
-        assert!(format!("{error:#}").contains("does not follow or copy symlinks"));
+        .unwrap();
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("does not follow or copy symlinks")));
+        assert!(matches!(report.steps[0].status, StepStatus::Failed));
         assert!(!destination.exists());
     }
 
@@ -9665,7 +10305,7 @@ mod tests {
         let report = apply_test_task(&task);
         assert!(matches!(report.steps[0].status, StepStatus::Skipped));
         assert!(matches!(report.steps[1].status, StepStatus::Failed));
-        assert!(matches!(report.steps[2].status, StepStatus::Skipped));
+        assert!(!report.steps.iter().any(|step| step.step_id == "later"));
         assert_eq!(report.errors.len(), 1);
         assert!(!skipped_path.exists());
         assert!(!required_path.exists());
@@ -9740,6 +10380,7 @@ mod tests {
         let task = base_task(Step {
             id: "download".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -9765,6 +10406,7 @@ mod tests {
         let task = base_task(Step {
             id: "cmd".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: true,
@@ -9788,6 +10430,7 @@ mod tests {
         let task = base_task(Step {
             id: "script".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: true,
@@ -10091,6 +10734,7 @@ mod tests {
         let task = base_task(Step {
             id: "download".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: Some(crate::automation::task::Check {
                 path_exists: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
@@ -10211,6 +10855,51 @@ mod tests {
     }
 
     #[test]
+    fn git_inspect_context_distinguishes_absent_empty_and_verified_repository() {
+        let repository = init_git_test_repository();
+        let destination = repository._temp.path().join("inspect-checkout");
+        let task = base_task(plain_step(
+            "inspect-repository",
+            Action::GitInspect {
+                repo: repository.remote.to_string_lossy().into_owned(),
+                dest: destination.to_string_lossy().into_owned(),
+            },
+        ));
+        let exists_ref = FieldRef::step("inspect-repository")
+            .field("repository")
+            .field("exists");
+
+        let absent = apply_test_task(&task);
+        let Some(StepOutput::Structured(output)) = absent.steps[0].output.as_ref() else {
+            panic!("expected structured git inspection output");
+        };
+        assert_eq!(output.schema_id, "ppduster.git.inspect@1");
+        assert_eq!(output.value["repository"]["exists"], false);
+        assert_eq!(absent.context.resolve(&exists_ref).unwrap().value, false);
+
+        fs::create_dir(&destination).unwrap();
+        let empty = apply_test_task(&task);
+        let Some(StepOutput::Structured(output)) = empty.steps[0].output.as_ref() else {
+            panic!("expected structured git inspection output");
+        };
+        assert!(empty.steps[0].summary.contains("empty directory"));
+        assert_eq!(output.value["repository"]["exists"], false);
+        assert_eq!(empty.context.resolve(&exists_ref).unwrap().value, false);
+
+        apply_test_task(&git_sync_task(&repository.remote, &destination));
+        let verified = apply_test_task(&task);
+        let Some(StepOutput::Structured(output)) = verified.steps[0].output.as_ref() else {
+            panic!("expected structured git inspection output");
+        };
+        assert!(verified.steps[0]
+            .summary
+            .contains("expected repository exists"));
+        assert_eq!(output.value["repository"]["exists"], true);
+        assert_eq!(output.value["repository"]["branch"], "main");
+        assert_eq!(verified.context.resolve(&exists_ref).unwrap().value, true);
+    }
+
+    #[test]
     fn git_repository_refuses_to_overwrite_a_non_repository_destination() {
         let repository = init_git_test_repository();
         let destination = repository._temp.path().join("checkout");
@@ -10286,6 +10975,88 @@ mod tests {
             normalize_git_remote("/tmp/example"),
             normalize_git_remote("/tmp/example.git")
         );
+    }
+
+    #[test]
+    fn git_inspect_allows_a_read_only_path_under_documents() {
+        let destination = dirs::home_dir()
+            .unwrap()
+            .join("Documents")
+            .join(format!(
+                ".ppduster-git-inspect-policy-test-{}",
+                std::process::id()
+            ))
+            .join("repository");
+        assert!(!is_safe_rule_root(parent_or_self(&destination)));
+        let task = base_task(plain_step(
+            "inspect-repository",
+            Action::GitInspect {
+                repo: "https://github.com/example/repository.git".into(),
+                dest: destination.to_string_lossy().into_owned(),
+            },
+        ));
+
+        let report = run_task(&task, &RunOptions::default()).unwrap();
+
+        assert!(matches!(report.steps[0].status, StepStatus::Satisfied));
+        assert!(report.steps[0].summary.contains("repository is absent"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn mutating_git_action_remains_blocked_under_documents() {
+        let destination = dirs::home_dir()
+            .unwrap()
+            .join("Documents")
+            .join(format!(
+                ".ppduster-git-mutation-policy-test-{}",
+                std::process::id()
+            ))
+            .join("repository");
+        assert!(!is_safe_rule_root(parent_or_self(&destination)));
+        let step = plain_step(
+            "clone-repository",
+            Action::GitCloneIfMissing {
+                repo: "https://github.com/example/repository.git".into(),
+                dest: destination.to_string_lossy().into_owned(),
+                branch: None,
+            },
+        );
+
+        let error = validate_destinations(&step).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("blocked by safety"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_inspect_rejects_a_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("repository");
+        let link = temp.path().join("repository-link");
+        fs::create_dir(&target).unwrap();
+        symlink(&target, &link).unwrap();
+        let step = plain_step(
+            "inspect-repository",
+            Action::GitInspect {
+                repo: "https://github.com/example/repository.git".into(),
+                dest: link.to_string_lossy().into_owned(),
+            },
+        );
+
+        let error = validate_destinations(&step).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("must not be a symlink"),
+            "unexpected error: {error:#}"
+        );
+        assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+        assert!(target.is_dir());
     }
 
     #[cfg(unix)]
@@ -10477,6 +11248,7 @@ mod tests {
         let task = base_task(Step {
             id: "brew".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: Some(crate::automation::task::Check {
                 path_exists: None,
@@ -10500,6 +11272,7 @@ mod tests {
         let task = base_task(Step {
             id: "clone".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::GitCredential,
             check: None,
             dangerous: false,
@@ -10522,6 +11295,7 @@ mod tests {
         let task = base_task(Step {
             id: "remote-login".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::Sudo,
             check: None,
             dangerous: false,
@@ -10556,6 +11330,7 @@ mod tests {
         let task = base_task(Step {
             id: "download".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -10600,6 +11375,7 @@ mod tests {
                 Step {
                     id: "clone".into(),
                     name: String::new(),
+                    bindings: BTreeMap::new(),
                     auth: AuthPolicy::GitCredential,
                     check: None,
                     dangerous: false,
@@ -10615,6 +11391,7 @@ mod tests {
                 Step {
                     id: "brew".into(),
                     name: String::new(),
+                    bindings: BTreeMap::new(),
                     auth: AuthPolicy::None,
                     check: None,
                     dangerous: false,
@@ -10643,6 +11420,7 @@ mod tests {
         let task = base_task(Step {
             id: "cmd".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -10680,6 +11458,7 @@ mod tests {
         let task = base_task(Step {
             id: "cmd".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -10737,7 +11516,7 @@ mod tests {
     }
 
     #[test]
-    fn steps_after_failure_are_still_reported() {
+    fn steps_after_failure_are_not_activated() {
         let task = Task {
             id: "setup-dev".into(),
             name: "Setup dev".into(),
@@ -10750,6 +11529,7 @@ mod tests {
                 Step {
                     id: "fail".into(),
                     name: String::new(),
+                    bindings: BTreeMap::new(),
                     auth: AuthPolicy::None,
                     check: None,
                     dangerous: false,
@@ -10767,6 +11547,7 @@ mod tests {
                 Step {
                     id: "later".into(),
                     name: String::new(),
+                    bindings: BTreeMap::new(),
                     auth: AuthPolicy::None,
                     check: None,
                     dangerous: false,
@@ -10792,9 +11573,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(report.steps.len(), 2);
+        assert_eq!(report.steps.len(), 1);
         assert!(matches!(report.steps[0].status, StepStatus::Failed));
-        assert!(matches!(report.steps[1].status, StepStatus::Skipped));
     }
 
     #[test]
@@ -10802,6 +11582,7 @@ mod tests {
         let task = base_task(Step {
             id: "package-config".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -10834,10 +11615,11 @@ mod tests {
     }
 
     #[test]
-    fn run_task_accepts_flattened_steps_with_scenario_provenance() {
+    fn run_task_accepts_imported_steps_with_resolved_scenario_provenance() {
         let mut task = base_task(Step {
             id: "inspect".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -10852,7 +11634,7 @@ mod tests {
                 shell: ShellMode::Forbidden,
             },
         });
-        task.scenarios = vec!["child-scenario".into()];
+        task.resolved_scenarios = vec!["child-scenario".into()];
 
         let report = run_task(&task, &RunOptions::default()).unwrap();
 
@@ -10865,6 +11647,7 @@ mod tests {
         let task = base_task(Step {
             id: "cmd".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: true,
@@ -10908,6 +11691,7 @@ mod tests {
         let task = base_task(Step {
             id: "script".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: true,
@@ -11116,6 +11900,7 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
                 Step {
                     id: "download".into(),
                     name: String::new(),
+                    bindings: BTreeMap::new(),
                     auth: AuthPolicy::None,
                     check: None,
                     dangerous: false,
@@ -11133,6 +11918,7 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
                 Step {
                     id: "activate".into(),
                     name: String::new(),
+                    bindings: BTreeMap::new(),
                     auth: AuthPolicy::None,
                     check: None,
                     dangerous: false,
@@ -11148,7 +11934,7 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
             graph: None,
         };
 
-        let err = run_task_with_interactivity(
+        let err = run_imported_task_with_interactivity(
             &task,
             &RunOptions {
                 apply: true,
@@ -11196,6 +11982,7 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
         let task = base_task(Step {
             id: "install-xcode".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -11245,6 +12032,7 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
         let task = base_task(Step {
             id: "install".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -11268,6 +12056,7 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
         let task = base_task(Step {
             id: "install".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -11338,6 +12127,7 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
         let task = base_task(Step {
             id: "bambu".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,

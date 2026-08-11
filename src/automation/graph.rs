@@ -24,7 +24,12 @@ use super::expression::{
 use super::task::{Action, AuthPolicy, ElevationPolicy, Step, StepCondition};
 
 /// Current serialized workflow graph version.
-pub const WORKFLOW_GRAPH_VERSION: u32 = 2;
+pub const WORKFLOW_GRAPH_VERSION: u32 = 3;
+
+/// Oldest explicit graph wire format that can be migrated without guessing.
+/// Version 1 was the legacy linear `steps` representation and is handled only
+/// by [`LegacyTaskImporter`].
+pub const MIN_MIGRATABLE_WORKFLOW_GRAPH_VERSION: u32 = 2;
 
 // Validation runs before execution and may receive untrusted task packs. Keep
 // recursive work and the quadratic/cubic graph algorithms behind a cheap,
@@ -101,6 +106,22 @@ impl Default for WorkflowGraph {
 }
 
 impl WorkflowGraph {
+    /// Upgrade a previously explicit graph to the canonical v3 wire format.
+    ///
+    /// v2 and v3 have the same control-flow topology. The v3 boundary makes
+    /// graph ownership canonical at the task level and applies recursively to
+    /// every lexical subgraph. Unknown versions are rejected rather than
+    /// optimistically interpreted.
+    pub fn into_v3(mut self) -> Result<Self, WorkflowGraphMigrationError> {
+        let mut graph_count = 0usize;
+        migrate_graph_version(&mut self, "workflow_graph", 1, &mut graph_count)?;
+        Ok(self)
+    }
+
+    pub fn to_v3(&self) -> Result<Self, WorkflowGraphMigrationError> {
+        self.clone().into_v3()
+    }
+
     /// Validate graph structure and context visibility without executing it.
     ///
     /// All discoverable errors are returned together so the visual editor can
@@ -125,15 +146,16 @@ impl WorkflowGraph {
     }
 
     /// Convert the declaration order of a legacy v1 step list into an
-    /// explicit v2 graph. This function never observes canvas layout or UI
+    /// explicit v3 graph. This function never observes canvas layout or UI
     /// parent metadata.
     ///
     /// Ordinary steps retain their order through `success -> input` edges.
-    /// The legacy two-step loop/clone special case is migrated only when its
-    /// projection and templates can be represented without changing runtime
-    /// behavior. Other legacy control shapes return a diagnostic rather than
-    /// guessing at intent.
-    pub fn from_linear_v1(steps: &[Step]) -> Result<Self, LinearMigrationError> {
+    /// A legacy loop plus its immediately following consumer is migrated only
+    /// when membership in the loop body is explicit: either the historical
+    /// loop-clone action names the loop, or an ordinary action structurally
+    /// references that loop's item scope. This keeps migration fail-closed and
+    /// never guesses from adjacency or rewrites positional array references.
+    fn import_linear_v1(steps: &[Step]) -> Result<Self, LinearMigrationError> {
         if steps.is_empty() {
             return Err(LinearMigrationError::EmptySteps);
         }
@@ -157,33 +179,12 @@ impl WorkflowGraph {
                     item,
                     fields,
                 } => {
-                    let Some(clone_step) = steps.get(index + 1) else {
+                    let Some(consumer_step) = steps.get(index + 1) else {
                         return Err(unsupported_legacy(
                             step,
-                            "for-each is not immediately followed by its clone consumer",
+                            "for-each is not immediately followed by an explicit loop-item consumer",
                         ));
                     };
-                    let Action::ForEachGitCloneIfMissing {
-                        loop_step,
-                        repo,
-                        dest,
-                        branch,
-                    } = &clone_step.action
-                    else {
-                        return Err(unsupported_legacy(
-                            step,
-                            "for-each is not immediately followed by for-each-git-clone-if-missing",
-                        ));
-                    };
-                    if loop_step != &step.id {
-                        return Err(unsupported_legacy(
-                            clone_step,
-                            format!(
-                                "clone references loop {loop_step:?}, expected {:?}",
-                                step.id
-                            ),
-                        ));
-                    }
                     if !legacy_loop_metadata_is_plain(step) {
                         return Err(unsupported_legacy(
                             step,
@@ -191,59 +192,133 @@ impl WorkflowGraph {
                         ));
                     }
 
-                    let (repo_binding, repo_fields) =
-                        migrate_item_template(repo, &step.id, item, LegacyTemplateMode::Required)
-                            .map_err(|reason| unsupported_legacy(clone_step, reason))?;
-                    let (dest_binding, dest_fields) =
-                        migrate_item_template(dest, &step.id, item, LegacyTemplateMode::Required)
-                            .map_err(|reason| unsupported_legacy(clone_step, reason))?;
-                    let branch_binding = branch
-                        .as_deref()
-                        .map(|template| {
-                            migrate_item_template(
-                                template,
+                    let body_action = match &consumer_step.action {
+                        Action::ForEachGitCloneIfMissing {
+                            loop_step,
+                            repo,
+                            dest,
+                            branch,
+                        } => {
+                            if loop_step != &step.id {
+                                return Err(unsupported_legacy(
+                                    consumer_step,
+                                    format!(
+                                        "clone references loop {loop_step:?}, expected {:?}",
+                                        step.id
+                                    ),
+                                ));
+                            }
+                            let (repo_binding, repo_fields) = migrate_item_template(
+                                repo,
                                 &step.id,
                                 item,
-                                LegacyTemplateMode::Optional,
+                                LegacyTemplateMode::Required,
                             )
-                        })
-                        .transpose()
-                        .map_err(|reason| unsupported_legacy(clone_step, reason))?;
+                            .map_err(|reason| unsupported_legacy(consumer_step, reason))?;
+                            let (dest_binding, dest_fields) = migrate_item_template(
+                                dest,
+                                &step.id,
+                                item,
+                                LegacyTemplateMode::Required,
+                            )
+                            .map_err(|reason| unsupported_legacy(consumer_step, reason))?;
+                            let branch_binding = branch
+                                .as_deref()
+                                .map(|template| {
+                                    migrate_item_template(
+                                        template,
+                                        &step.id,
+                                        item,
+                                        LegacyTemplateMode::Optional,
+                                    )
+                                })
+                                .transpose()
+                                .map_err(|reason| unsupported_legacy(consumer_step, reason))?;
 
-                    let mut referenced_fields = repo_fields;
-                    referenced_fields.extend(dest_fields);
-                    if let Some((_, fields)) = &branch_binding {
-                        referenced_fields.extend(fields.iter().cloned());
-                    }
-                    prove_legacy_projection(
-                        steps,
-                        index,
-                        source_step,
-                        array_path,
-                        fields,
-                        &referenced_fields,
-                    )
-                    .map_err(|reason| unsupported_legacy(step, reason))?;
+                            let mut referenced_fields = repo_fields;
+                            referenced_fields.extend(dest_fields);
+                            if let Some((_, branch_fields)) = &branch_binding {
+                                referenced_fields.extend(branch_fields.iter().cloned());
+                            }
+                            prove_legacy_projection(
+                                steps,
+                                index,
+                                source_step,
+                                array_path,
+                                fields,
+                                &referenced_fields,
+                            )
+                            .map_err(|reason| unsupported_legacy(step, reason))?;
 
-                    let mut converted_clone = clone_step.clone();
-                    converted_clone.action = Action::GitCloneIfMissing {
-                        repo: repo.clone(),
-                        dest: dest.clone(),
-                        branch: branch.clone(),
+                            let mut converted = consumer_step.clone();
+                            converted.bindings.clear();
+                            converted.action = Action::GitCloneIfMissing {
+                                repo: repo.clone(),
+                                dest: dest.clone(),
+                                branch: branch.clone(),
+                            };
+                            let mut bindings = BTreeMap::from([
+                                ("repo".into(), repo_binding),
+                                ("dest".into(), dest_binding),
+                            ]);
+                            if let Some((binding, _)) = branch_binding {
+                                bindings.insert("branch".into(), binding);
+                            }
+                            ActionNode {
+                                step: converted,
+                                bindings,
+                            }
+                        }
+                        Action::ForEach { .. } => {
+                            return Err(unsupported_legacy(
+                                step,
+                                "nested legacy for-each has no explicit body boundary",
+                            ));
+                        }
+                        _ => {
+                            if step_condition_references_loop_item(consumer_step, &step.id) {
+                                return Err(unsupported_legacy(
+                                    consumer_step,
+                                    "loop-item conditions in a legacy linear consumer require an explicit v2 graph",
+                                ));
+                            }
+                            let usage = collect_step_loop_item_usage(consumer_step, &step.id);
+                            if !usage.found {
+                                return Err(unsupported_legacy(
+                                    step,
+                                    format!(
+                                        "following step {:?} does not structurally reference loop item {:?}",
+                                        consumer_step.id, step.id
+                                    ),
+                                ));
+                            }
+                            if usage.whole_item && !fields.is_empty() {
+                                return Err(unsupported_legacy(
+                                    consumer_step,
+                                    "whole loop item is consumed but the legacy loop projects only selected fields",
+                                ));
+                            }
+                            prove_legacy_projection(
+                                steps,
+                                index,
+                                source_step,
+                                array_path,
+                                fields,
+                                &usage.fields,
+                            )
+                            .map_err(|reason| unsupported_legacy(step, reason))?;
+
+                            let mut converted = consumer_step.clone();
+                            let bindings = std::mem::take(&mut converted.bindings);
+                            ActionNode {
+                                step: converted,
+                                bindings,
+                            }
+                        }
                     };
-                    let mut bindings = BTreeMap::from([
-                        ("repo".into(), repo_binding),
-                        ("dest".into(), dest_binding),
-                    ]);
-                    if let Some((binding, _)) = branch_binding {
-                        bindings.insert("branch".into(), binding);
-                    }
                     let body = WorkflowGraph {
-                        entries: vec![converted_clone.id.clone()],
-                        nodes: vec![GraphNode::Action(Box::new(ActionNode {
-                            step: converted_clone,
-                            bindings,
-                        }))],
+                        entries: vec![body_action.step.id.clone()],
+                        nodes: vec![GraphNode::Action(Box::new(body_action))],
                         ..WorkflowGraph::default()
                     };
                     let mut collection = FieldRef::step(source_step);
@@ -269,9 +344,11 @@ impl WorkflowGraph {
                     ));
                 }
                 _ => {
+                    let mut embedded_step = step.clone();
+                    let bindings = std::mem::take(&mut embedded_step.bindings);
                     nodes.push(GraphNode::Action(Box::new(ActionNode {
-                        step: step.clone(),
-                        bindings: BTreeMap::new(),
+                        step: embedded_step,
+                        bindings,
                     })));
                     top_level_nodes.push((step.id.clone(), EdgePort::Success));
                     index += 1;
@@ -299,6 +376,141 @@ impl WorkflowGraph {
             .map_err(|errors| LinearMigrationError::InvalidGeneratedGraph { errors })?;
         Ok(graph)
     }
+}
+
+/// Explicit compatibility boundary for the removed linear task format.
+///
+/// New editors must construct [`WorkflowGraph`] directly. Keeping legacy
+/// lowering behind this named importer prevents canvas coordinates, parent
+/// maps, or declaration adjacency from becoming implicit graph semantics.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct LegacyTaskImporter;
+
+impl LegacyTaskImporter {
+    pub(crate) fn import_steps(steps: &[Step]) -> Result<WorkflowGraph, LinearMigrationError> {
+        WorkflowGraph::import_linear_v1(steps)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowGraphMigrationError {
+    UnsupportedVersion {
+        path: String,
+        found: u32,
+        minimum: u32,
+        current: u32,
+    },
+    ResourceLimitExceeded {
+        path: String,
+        resource: &'static str,
+        limit: usize,
+    },
+}
+
+impl fmt::Display for WorkflowGraphMigrationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedVersion {
+                path,
+                found,
+                minimum,
+                current,
+            } => write!(
+                formatter,
+                "{path} uses unsupported workflow graph version {found}; migratable versions are {minimum}..={current}"
+            ),
+            Self::ResourceLimitExceeded {
+                path,
+                resource,
+                limit,
+            } => write!(
+                formatter,
+                "{path} exceeds workflow graph migration {resource} limit {limit}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WorkflowGraphMigrationError {}
+
+fn migrate_graph_version(
+    graph: &mut WorkflowGraph,
+    path: &str,
+    depth: usize,
+    graph_count: &mut usize,
+) -> Result<(), WorkflowGraphMigrationError> {
+    if depth > GRAPH_MAX_DEPTH {
+        return Err(WorkflowGraphMigrationError::ResourceLimitExceeded {
+            path: path.into(),
+            resource: "nesting depth",
+            limit: GRAPH_MAX_DEPTH,
+        });
+    }
+    *graph_count = graph_count.saturating_add(1);
+    if *graph_count > GRAPH_MAX_TOTAL_GRAPHS {
+        return Err(WorkflowGraphMigrationError::ResourceLimitExceeded {
+            path: path.into(),
+            resource: "nested graph count",
+            limit: GRAPH_MAX_TOTAL_GRAPHS,
+        });
+    }
+    if !(MIN_MIGRATABLE_WORKFLOW_GRAPH_VERSION..=WORKFLOW_GRAPH_VERSION).contains(&graph.version) {
+        return Err(WorkflowGraphMigrationError::UnsupportedVersion {
+            path: path.into(),
+            found: graph.version,
+            minimum: MIN_MIGRATABLE_WORKFLOW_GRAPH_VERSION,
+            current: WORKFLOW_GRAPH_VERSION,
+        });
+    }
+    graph.version = WORKFLOW_GRAPH_VERSION;
+
+    for (index, node) in graph.nodes.iter_mut().enumerate() {
+        let node_path = format!("{path}.nodes[{index}]");
+        match node {
+            GraphNode::ForEach(node) => migrate_graph_version(
+                &mut node.body,
+                &format!("{node_path}.body"),
+                depth + 1,
+                graph_count,
+            )?,
+            GraphNode::If(node) => {
+                migrate_graph_version(
+                    &mut node.then_graph,
+                    &format!("{node_path}.then"),
+                    depth + 1,
+                    graph_count,
+                )?;
+                if let Some(graph) = &mut node.else_graph {
+                    migrate_graph_version(
+                        graph,
+                        &format!("{node_path}.else"),
+                        depth + 1,
+                        graph_count,
+                    )?;
+                }
+            }
+            GraphNode::Switch(node) => {
+                for (case_index, case) in node.cases.iter_mut().enumerate() {
+                    migrate_graph_version(
+                        &mut case.graph,
+                        &format!("{node_path}.cases[{case_index}].graph"),
+                        depth + 1,
+                        graph_count,
+                    )?;
+                }
+                if let Some(graph) = &mut node.default {
+                    migrate_graph_version(
+                        graph,
+                        &format!("{node_path}.default"),
+                        depth + 1,
+                        graph_count,
+                    )?;
+                }
+            }
+            GraphNode::Action(_) | GraphNode::Join(_) => {}
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,6 +567,81 @@ fn legacy_loop_metadata_is_plain(step: &Step) -> bool {
         && matches!(step.allow_elevation, ElevationPolicy::Forbidden)
         && step.when.is_none()
         && step.require.is_none()
+}
+
+#[derive(Default)]
+struct LoopItemUsage {
+    found: bool,
+    whole_item: bool,
+    fields: BTreeSet<String>,
+}
+
+fn collect_step_loop_item_usage(step: &Step, loop_id: &str) -> LoopItemUsage {
+    let mut usage = LoopItemUsage::default();
+    let mut record = |field: &FieldRef| {
+        let ContextScope::LoopItem { step_id } = &field.scope else {
+            return;
+        };
+        if step_id != loop_id {
+            return;
+        }
+        usage.found = true;
+        match field.segments.first() {
+            Some(ContextPathSegment::Field { name }) => {
+                usage.fields.insert(name.clone());
+            }
+            Some(ContextPathSegment::Index { .. }) | None => usage.whole_item = true,
+        }
+    };
+
+    for binding in step.bindings.values() {
+        visit_binding_fields(binding, &mut record);
+    }
+    usage
+}
+
+fn step_condition_references_loop_item(step: &Step, loop_id: &str) -> bool {
+    let mut found = false;
+    let mut record = |field: &FieldRef| {
+        found |= matches!(
+            &field.scope,
+            ContextScope::LoopItem { step_id } if step_id == loop_id
+        );
+    };
+    for condition in [step.when.as_ref(), step.require.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        visit_condition_fields(condition, &mut record);
+    }
+    found
+}
+
+fn visit_binding_fields(binding: &Binding, visitor: &mut impl FnMut(&FieldRef)) {
+    match binding {
+        Binding::Field { field } => visitor(field),
+        Binding::Interpolated { parts } => {
+            for part in parts {
+                if let TemplatePart::Field { field } = part {
+                    visitor(field);
+                }
+            }
+        }
+        Binding::Literal { .. } | Binding::Template { .. } => {}
+    }
+}
+
+fn visit_condition_fields(condition: &StepCondition, visitor: &mut impl FnMut(&FieldRef)) {
+    match condition {
+        StepCondition::Expression { rule, .. } => rule.visit_context_references(visitor),
+        StepCondition::All { conditions } | StepCondition::Any { conditions } => {
+            for condition in conditions {
+                visit_condition_fields(condition, visitor);
+            }
+        }
+        StepCondition::Not { condition } => visit_condition_fields(condition, visitor),
+        StepCondition::ExitCode { .. } | StepCondition::Path { .. } => {}
+    }
 }
 
 fn migrate_item_template(
@@ -778,6 +1065,11 @@ pub enum GraphValidationErrorKind {
     EmptyBindingName {
         node: String,
     },
+    DuplicateBindingTarget {
+        node: String,
+        first: String,
+        duplicate: String,
+    },
     UnknownBindingField {
         node: String,
         field: String,
@@ -973,6 +1265,14 @@ impl fmt::Display for GraphValidationErrorKind {
                     "action node {node:?} contains an empty binding name"
                 )
             }
+            Kind::DuplicateBindingTarget {
+                node,
+                first,
+                duplicate,
+            } => write!(
+                formatter,
+                "action node {node:?} binds the same input through {first:?} and {duplicate:?}"
+            ),
             Kind::UnknownBindingField { node, field } => write!(
                 formatter,
                 "action node {node:?} has no declared input field {field:?}"
@@ -2061,6 +2361,15 @@ impl GraphValidator {
             let node_path = format!("{path}.node[{node_id}]");
             match node {
                 GraphNode::Action(action) => {
+                    if !action.step.bindings.is_empty() {
+                        self.error(
+                            &node_path,
+                            GraphValidationErrorKind::InvalidAction {
+                                node: node_id.into(),
+                                message: "graph action embeds linear bindings; move them to action-node bindings".into(),
+                            },
+                        );
+                    }
                     if let Err(message) = action.step.validate() {
                         self.error(
                             &node_path,
@@ -2082,6 +2391,7 @@ impl GraphValidator {
                         );
                     }
                     let definition = definition_for_action(&action.step.action);
+                    let mut normalized_targets = BTreeMap::<Vec<ContextPathSegment>, String>::new();
                     for (name, binding) in &action.bindings {
                         if name.trim().is_empty() {
                             self.error(
@@ -2090,6 +2400,18 @@ impl GraphValidator {
                                     node: node_id.into(),
                                 },
                             );
+                        }
+                        if let Ok(segments) = parse_binding_target(name, BindingLimits::default()) {
+                            if let Some(first) = normalized_targets.insert(segments, name.clone()) {
+                                self.error(
+                                    &node_path,
+                                    GraphValidationErrorKind::DuplicateBindingTarget {
+                                        node: node_id.into(),
+                                        first,
+                                        duplicate: name.clone(),
+                                    },
+                                );
+                            }
                         }
                         let Some(expected) = resolve_input_field(&definition.input_schema, name)
                         else {
@@ -2203,6 +2525,8 @@ impl GraphValidator {
                         sensitivity: collection_type
                             .as_ref()
                             .map_or(Sensitivity::Public, |value| value.sensitivity),
+                        allowed_values: Vec::new(),
+                        positionally_optional: false,
                     };
                     loops.insert(node_id.into(), item_static_type);
                     let mut aliases = active_aliases.clone();
@@ -2219,6 +2543,8 @@ impl GraphValidator {
                                     required: true,
                                     nullable: false,
                                     sensitivity: Sensitivity::Public,
+                                    allowed_values: Vec::new(),
+                                    positionally_optional: false,
                                 },
                             );
                             aliases.insert(index_alias.clone(), FieldRef::loop_item(index_scope));
@@ -2456,6 +2782,7 @@ impl GraphValidator {
                 required: expected.required,
                 nullable: expected.nullable,
                 sensitivity: expected.sensitivity,
+                allowed_values: expected.allowed_values.clone(),
             };
             if let Err(error) = resolve_binding(
                 binding,
@@ -2514,6 +2841,24 @@ impl GraphValidator {
                 },
             );
         }
+        if !enum_contract_accepts(&expected.allowed_values, &actual.allowed_values) {
+            self.error(
+                path,
+                GraphValidationErrorKind::InvalidBindingValue {
+                    node: consumer.into(),
+                    field: input_name.into(),
+                    message: if actual.allowed_values.is_empty() {
+                        "source field is not constrained to the consumer's allowed values".into()
+                    } else {
+                        format!(
+                            "source allowed values {} are not a subset of {}",
+                            Value::Array(actual.allowed_values.clone()),
+                            Value::Array(expected.allowed_values.clone())
+                        )
+                    },
+                },
+            );
+        }
         if actual.sensitivity.is_secret() && expected.sensitivity != Sensitivity::Secret {
             self.error(
                 path,
@@ -2523,7 +2868,7 @@ impl GraphValidator {
                 },
             );
         }
-        if expected.required && !actual.required {
+        if expected.required && !actual.required && !actual.positionally_optional {
             self.error(
                 path,
                 GraphValidationErrorKind::BindingMayBeMissing {
@@ -2560,12 +2905,16 @@ impl GraphValidator {
                 required: true,
                 nullable: value.is_null(),
                 sensitivity: Sensitivity::Public,
+                allowed_values: vec![value.clone()],
+                positionally_optional: false,
             }),
             Binding::Template { .. } => Some(StaticBindingType {
                 value_type: ContextType::STRING,
                 required: true,
                 nullable: false,
                 sensitivity: Sensitivity::Public,
+                allowed_values: Vec::new(),
+                positionally_optional: false,
             }),
             Binding::Interpolated { parts } => {
                 let sensitivity = parts.iter().fold(Sensitivity::Public, |current, part| {
@@ -2588,6 +2937,8 @@ impl GraphValidator {
                     required: true,
                     nullable: false,
                     sensitivity,
+                    allowed_values: Vec::new(),
+                    positionally_optional: false,
                 })
             }
             Binding::Field { field } => self.field_static_type(
@@ -2660,6 +3011,11 @@ impl GraphValidator {
                         required: resolved.required,
                         nullable: resolved.nullable,
                         sensitivity: resolved.sensitivity,
+                        allowed_values: resolved.allowed_values,
+                        positionally_optional: source_is_optional_only_by_index(
+                            schema,
+                            &field.segments,
+                        ),
                     })
                     .or_else(|| {
                         self.error(
@@ -2734,7 +3090,7 @@ impl GraphValidator {
                                     },
                                 );
                             }
-                            if !actual.required {
+                            if !actual.required && !actual.positionally_optional {
                                 self.error(
                                     path,
                                     GraphValidationErrorKind::BindingMayBeMissing {
@@ -3038,7 +3394,14 @@ impl GraphValidator {
         dominators: &BTreeMap<String, BTreeSet<String>>,
     ) {
         match &field.scope {
-            ContextScope::Scenario => {}
+            ContextScope::Scenario => self.error(
+                path,
+                GraphValidationErrorKind::UnknownContextField {
+                    consumer: consumer.into(),
+                    producer: "scenario input".into(),
+                    field: display_segments(&field.segments),
+                },
+            ),
             ContextScope::LoopItem { step_id } => {
                 if !active_loops.contains_key(step_id) {
                     self.error(
@@ -3082,6 +3445,11 @@ struct StaticBindingType {
     required: bool,
     nullable: bool,
     sensitivity: Sensitivity,
+    allowed_values: Vec<Value>,
+    /// The structural type is optional only because a concrete array index may
+    /// be out of bounds. Runtime resolution remains fail-closed before the
+    /// consumer action; named optional fields never set this flag.
+    positionally_optional: bool,
 }
 
 #[derive(Default)]
@@ -3672,7 +4040,10 @@ fn field_ref_is_visible(
     dominators: &BTreeMap<String, BTreeSet<String>>,
 ) -> bool {
     match &field.scope {
-        ContextScope::Scenario => true,
+        // WorkflowGraph v3 does not yet declare a scenario-input schema.
+        // Reject these references during validation instead of deferring an
+        // untyped lookup to runtime.
+        ContextScope::Scenario => false,
         ContextScope::LoopItem { step_id } => active_loops.contains_key(step_id),
         ContextScope::Step { step_id } => {
             inherited_visible.contains(step_id)
@@ -3693,19 +4064,29 @@ fn resolve_static_type(
     let mut required = root.required;
     let mut nullable = root.nullable;
     let mut sensitivity = root.sensitivity;
+    let mut allowed_values = root.allowed_values.clone();
+    let mut positionally_optional = root.positionally_optional;
     for segment in segments {
         match (segment, value_type) {
             (ContextPathSegment::Field { name }, ContextType::Object { schema }) => {
                 let field = schema.fields.get(name)?;
+                if !field.required {
+                    positionally_optional = false;
+                }
                 required &= field.required;
                 nullable |= field.nullable;
                 sensitivity = sensitivity.combine(field.sensitivity);
+                allowed_values = field.allowed_values.clone();
                 value_type = field.value_type.clone();
             }
             (ContextPathSegment::Index { .. }, ContextType::Array { items }) => {
                 // A concrete array position is never guaranteed by a structural
                 // schema, even when the array field itself is required.
+                if required {
+                    positionally_optional = true;
+                }
                 required = false;
+                allowed_values.clear();
                 value_type = *items;
             }
             _ => return None,
@@ -3717,7 +4098,45 @@ fn resolve_static_type(
         required,
         nullable,
         sensitivity,
+        allowed_values,
+        positionally_optional,
     })
+}
+
+fn enum_contract_accepts(expected: &[Value], actual: &[Value]) -> bool {
+    expected.is_empty()
+        || (!actual.is_empty()
+            && actual
+                .iter()
+                .all(|value| expected.iter().any(|allowed| allowed == value)))
+}
+
+fn source_is_optional_only_by_index(
+    schema: &ObjectSchema,
+    segments: &[ContextPathSegment],
+) -> bool {
+    let mut value_type = ContextType::object(schema.clone());
+    let mut saw_index = false;
+    for segment in segments {
+        match (segment, value_type) {
+            (ContextPathSegment::Field { name }, ContextType::Object { schema }) => {
+                let field = match schema.fields.get(name) {
+                    Some(field) => field,
+                    None => return false,
+                };
+                if !field.required || field.nullable {
+                    return false;
+                }
+                value_type = field.value_type.clone();
+            }
+            (ContextPathSegment::Index { .. }, ContextType::Array { items }) => {
+                saw_index = true;
+                value_type = *items;
+            }
+            _ => return false,
+        }
+    }
+    saw_index
 }
 
 fn context_type_sensitivity(value_type: &ContextType) -> Sensitivity {
@@ -3744,13 +4163,20 @@ fn context_type_sensitivity(value_type: &ContextType) -> Sensitivity {
 
 fn resolve_input_field(schema: &ObjectSchema, target: &str) -> Option<FieldSchema> {
     let segments = parse_binding_target(target, BindingLimits::default()).ok()?;
-    let resolved = schema.resolve(&segments)?;
+    if segments
+        .iter()
+        .any(|segment| matches!(segment, ContextPathSegment::Index { .. }))
+    {
+        return None;
+    }
+    let resolved = schema.resolve_input_target_owned(&segments)?;
     Some(FieldSchema {
-        value_type: resolved.value_type.clone(),
+        value_type: resolved.value_type,
         required: resolved.required,
         nullable: resolved.nullable,
         description: None,
         sensitivity: resolved.sensitivity,
+        allowed_values: resolved.allowed_values,
     })
 }
 
@@ -3934,6 +4360,7 @@ fn is_identifier(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::automation::block::{default_step, ActionKind};
     use crate::automation::context::FieldRef;
     use crate::automation::expression::{CollectionQuantifier, ExpressionValue, ReferenceV1};
     use crate::automation::task::{
@@ -3944,6 +4371,7 @@ mod tests {
         Step {
             id: id.into(),
             name: format!("Step {id}"),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -4005,6 +4433,72 @@ mod tests {
             .is_some_and(|errors| errors.iter().any(|error| predicate(&error.kind)))
     }
 
+    fn validate_interpreter_source(field: FieldSchema) -> Result<(), Vec<GraphValidationError>> {
+        let source = action("source");
+        let script = default_step(ActionKind::RunScript, "script").unwrap();
+        let root = graph(
+            &["source"],
+            vec![
+                source,
+                GraphNode::Action(Box::new(ActionNode {
+                    step: script,
+                    bindings: BTreeMap::from([(
+                        "interpreter".into(),
+                        Binding::field(FieldRef::step("source").field("value")),
+                    )]),
+                })),
+            ],
+            vec![GraphEdge::new("source", EdgePort::Success, "script")],
+        );
+
+        let mut validator = GraphValidator::default();
+        if validator.preflight(&root) {
+            validator.collect_ids(&root, "graph");
+            validator.global_output_schemas.insert(
+                "source".into(),
+                ObjectSchema::new("test.interpreter-source@1").with_field("value", field),
+            );
+            validator.validate_graph(
+                &root,
+                "graph",
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            );
+        }
+        if validator.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(validator.errors)
+        }
+    }
+
+    #[test]
+    fn enum_input_requires_a_statically_constrained_source_subset() {
+        let unrestricted = validate_interpreter_source(FieldSchema::required(ContextType::STRING));
+        assert!(has_error(&unrestricted, |kind| matches!(
+            kind,
+            GraphValidationErrorKind::InvalidBindingValue { node, field, message }
+                if node == "script"
+                    && field == "interpreter"
+                    && message.contains("not constrained")
+        )));
+
+        let constrained = validate_interpreter_source(
+            FieldSchema::required(ContextType::STRING).with_allowed_values(["sh", "bash"]),
+        );
+        assert!(constrained.is_ok(), "{constrained:?}");
+
+        let incompatible = validate_interpreter_source(
+            FieldSchema::required(ContextType::STRING).with_allowed_values(["sh", "python"]),
+        );
+        assert!(has_error(&incompatible, |kind| matches!(
+            kind,
+            GraphValidationErrorKind::InvalidBindingValue { node, field, .. }
+                if node == "script" && field == "interpreter"
+        )));
+    }
+
     #[test]
     fn validates_linear_graph_and_dominating_context_reference() {
         let graph = graph(
@@ -4022,6 +4516,141 @@ mod tests {
             vec![GraphEdge::new("list", EdgePort::Success, "clone")],
         );
         assert!(graph.validate().is_ok());
+    }
+
+    #[test]
+    fn required_input_accepts_a_required_leaf_at_a_positional_index() {
+        let graph = graph(
+            &["list"],
+            vec![
+                action("list"),
+                action_with_ref(
+                    "inspect",
+                    FieldRef::step("list")
+                        .field("github")
+                        .field("repositories")
+                        .index(2)
+                        .field("https_url"),
+                ),
+            ],
+            vec![GraphEdge::new("list", EdgePort::Success, "inspect")],
+        );
+
+        assert!(graph.validate().is_ok());
+    }
+
+    #[test]
+    fn nullable_leaf_at_a_positional_index_remains_invalid_for_required_input() {
+        let mut fetch = step("fetch");
+        fetch.action = Action::GitFetch {
+            repo: "https://github.com/example/repository.git".into(),
+            dest: "/tmp/repository".into(),
+            branch: "main".into(),
+        };
+        let graph = graph(
+            &["list"],
+            vec![
+                action("list"),
+                GraphNode::Action(Box::new(ActionNode {
+                    step: fetch,
+                    bindings: BTreeMap::from([(
+                        "branch".into(),
+                        Binding::field(
+                            FieldRef::step("list")
+                                .field("github")
+                                .field("repositories")
+                                .index(2)
+                                .field("default_branch"),
+                        ),
+                    )]),
+                })),
+            ],
+            vec![GraphEdge::new("list", EdgePort::Success, "fetch")],
+        );
+
+        let result = graph.validate();
+        assert!(has_error(&result, |kind| matches!(
+            kind,
+            GraphValidationErrorKind::BindingMayBeMissing { node, field }
+                if node == "fetch" && field == "branch"
+        )));
+        assert!(has_error(&result, |kind| matches!(
+            kind,
+            GraphValidationErrorKind::BindingMayBeNull { node, field }
+                if node == "fetch" && field == "branch"
+        )));
+    }
+
+    #[test]
+    fn linear_lowering_moves_step_bindings_to_the_action_node() {
+        let producer = step("list");
+        let mut consumer = step("inspect");
+        consumer.action = Action::GitInspect {
+            repo: "https://github.com/example/repository.git".into(),
+            dest: "/tmp/repository".into(),
+        };
+        let expected = Binding::field(
+            FieldRef::step("list")
+                .field("github")
+                .field("repositories")
+                .index(2)
+                .field("https_url"),
+        );
+        consumer.bindings.insert("repo".into(), expected.clone());
+
+        let graph = LegacyTaskImporter::import_steps(&[producer, consumer]).unwrap();
+        let GraphNode::Action(consumer) = &graph.nodes[1] else {
+            panic!("expected lowered action node")
+        };
+        assert!(consumer.step.bindings.is_empty());
+        assert_eq!(consumer.bindings.get("repo"), Some(&expected));
+    }
+
+    #[test]
+    fn linear_lowering_rejects_unknown_and_duplicate_normalized_targets() {
+        let mut unknown = step("unknown");
+        unknown.action = Action::GitInspect {
+            repo: "https://github.com/example/repository.git".into(),
+            dest: "/tmp/repository".into(),
+        };
+        unknown.bindings.insert(
+            "repository_url".into(),
+            Binding::literal("https://github.com/example/other.git"),
+        );
+        let error = LegacyTaskImporter::import_steps(&[unknown]).unwrap_err();
+        assert!(matches!(
+            error,
+            LinearMigrationError::InvalidGeneratedGraph { ref errors }
+                if errors.iter().any(|error| matches!(
+                    error.kind,
+                    GraphValidationErrorKind::UnknownBindingField { .. }
+                ))
+        ));
+
+        let mut duplicate = step("duplicate");
+        duplicate.action = Action::GitInspect {
+            repo: "https://github.com/example/repository.git".into(),
+            dest: "/tmp/repository".into(),
+        };
+        duplicate.bindings = BTreeMap::from([
+            (
+                "repo".into(),
+                Binding::literal("https://github.com/example/one.git"),
+            ),
+            (
+                "/repo".into(),
+                Binding::literal("https://github.com/example/two.git"),
+            ),
+        ]);
+        let error = LegacyTaskImporter::import_steps(&[duplicate]).unwrap_err();
+        assert!(matches!(
+            error,
+            LinearMigrationError::InvalidGeneratedGraph { ref errors }
+                if errors.iter().any(|error| matches!(
+                    error.kind,
+                    GraphValidationErrorKind::DuplicateBindingTarget { .. }
+                ))
+        ));
     }
 
     #[test]
@@ -4273,7 +4902,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_wire_version_defaults_to_v2_and_unicode_round_trips() {
+    fn missing_wire_version_defaults_to_v3_and_unicode_round_trips() {
         let json = serde_json::json!({
             "id": "граф",
             "entries": ["шаг"],
@@ -4296,6 +4925,45 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&graph).unwrap()).unwrap();
         assert_eq!(round_trip.id.as_deref(), Some("граф"));
         assert_eq!(round_trip.nodes[0].id(), "шаг");
+    }
+
+    #[test]
+    fn explicit_v2_graph_migrates_nested_graphs_recursively() {
+        let mut branch = graph(&["inside"], vec![action("inside")], vec![]);
+        branch.version = 2;
+        let mut root = graph(
+            &["choice"],
+            vec![GraphNode::If(IfNode {
+                id: "choice".into(),
+                condition: ExpressionV1::Literal {
+                    value: ExpressionValue::Bool(true),
+                },
+                then_graph: Box::new(branch),
+                else_graph: None,
+            })],
+            vec![],
+        );
+        root.version = 2;
+
+        let migrated = root.into_v3().unwrap();
+        assert_eq!(migrated.version, WORKFLOW_GRAPH_VERSION);
+        let GraphNode::If(choice) = &migrated.nodes[0] else {
+            panic!("expected if node")
+        };
+        assert_eq!(choice.then_graph.version, WORKFLOW_GRAPH_VERSION);
+        migrated.validate().unwrap();
+    }
+
+    #[test]
+    fn graph_migration_rejects_unknown_future_versions() {
+        let mut root = graph(&["step"], vec![action("step")], vec![]);
+        root.version = WORKFLOW_GRAPH_VERSION + 1;
+        let error = root.into_v3().unwrap_err();
+        assert!(matches!(
+            error,
+            WorkflowGraphMigrationError::UnsupportedVersion { found, .. }
+                if found == WORKFLOW_GRAPH_VERSION + 1
+        ));
     }
 
     #[test]
@@ -4789,7 +5457,7 @@ mod tests {
     }
 
     #[test]
-    fn optional_field_can_bind_to_optional_input() {
+    fn optional_source_can_omit_an_optional_input_override() {
         let mut clone = step("clone");
         clone.action = Action::GitClone {
             repo: "https://github.com/example/repository.git".into(),
@@ -4826,7 +5494,51 @@ mod tests {
             vec![GraphEdge::new("list", EdgePort::Success, "loop")],
         );
 
-        assert!(root.validate().is_ok());
+        // Runtime binding materialization treats a missing source as "omit"
+        // only when the destination input is optional, preserving the action
+        // literal/default. Required destinations remain fail-closed.
+        root.validate().unwrap();
+    }
+
+    #[test]
+    fn undeclared_scenario_binding_is_rejected_statically() {
+        let clone = default_step(ActionKind::GitCloneIfMissing, "clone").unwrap();
+        let root = graph(
+            &["clone"],
+            vec![GraphNode::Action(Box::new(ActionNode {
+                step: clone,
+                bindings: BTreeMap::from([(
+                    "branch".into(),
+                    Binding::field(FieldRef::scenario().field("branch")),
+                )]),
+            }))],
+            vec![],
+        );
+
+        assert!(has_error(&root.validate(), |kind| matches!(
+            kind,
+            GraphValidationErrorKind::UnknownContextField { producer, field, .. }
+                if producer == "scenario input" && field == "branch"
+        )));
+    }
+
+    #[test]
+    fn indexed_action_input_target_is_rejected_statically() {
+        let run = default_step(ActionKind::RunCommand, "run").unwrap();
+        let root = graph(
+            &["run"],
+            vec![GraphNode::Action(Box::new(ActionNode {
+                step: run,
+                bindings: BTreeMap::from([("args.0".into(), Binding::literal("--version"))]),
+            }))],
+            vec![],
+        );
+
+        assert!(has_error(&root.validate(), |kind| matches!(
+            kind,
+            GraphValidationErrorKind::UnknownBindingField { node, field }
+                if node == "run" && field == "args.0"
+        )));
     }
 
     #[test]
@@ -5075,7 +5787,7 @@ mod tests {
     #[test]
     fn linear_v1_migration_preserves_slice_order_only() {
         let steps = vec![step("first"), step("second"), step("third")];
-        let migrated = WorkflowGraph::from_linear_v1(&steps).unwrap();
+        let migrated = LegacyTaskImporter::import_steps(&steps).unwrap();
 
         assert_eq!(migrated.entries, vec!["first"]);
         assert_eq!(
@@ -5111,10 +5823,10 @@ mod tests {
             loop_step: "repositories-loop".into(),
             repo: "{{repository.https_url}}".into(),
             dest: "$HOME/Developer/{{repository.owner}}/{{repository.name}}".into(),
-            branch: Some("{{repository.default_branch}}".into()),
+            branch: None,
         };
 
-        let migrated = WorkflowGraph::from_linear_v1(&[source, loop_step, clone]).unwrap();
+        let migrated = LegacyTaskImporter::import_steps(&[source, loop_step, clone]).unwrap();
         assert_eq!(migrated.nodes.len(), 2);
         assert_eq!(
             migrated.edges,
@@ -5144,9 +5856,145 @@ mod tests {
             action.bindings.get("dest"),
             Some(Binding::Interpolated { .. })
         ));
+        assert!(!action.bindings.contains_key("branch"));
+    }
+
+    #[test]
+    fn explicit_loop_item_consumer_migrates_to_generic_foreach_body() {
+        let source = step("repositories");
+        let mut loop_step = step("repositories-loop");
+        loop_step.action = Action::ForEach {
+            source_step: "repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: vec!["https_url".into(), "name".into()],
+        };
+        let mut inspect = step("inspect");
+        inspect.action = Action::GitInspect {
+            repo: "https://github.com/example/repository.git".into(),
+            dest: "/tmp/repository".into(),
+        };
+        let item_binding =
+            Binding::field(FieldRef::loop_item("repositories-loop").field("https_url"));
+        inspect.bindings.insert("repo".into(), item_binding.clone());
+
+        let migrated = LegacyTaskImporter::import_steps(&[source, loop_step, inspect]).unwrap();
+
+        assert_eq!(migrated.nodes.len(), 2);
+        assert_eq!(
+            migrated.edges,
+            vec![GraphEdge::new(
+                "repositories",
+                EdgePort::Success,
+                "repositories-loop"
+            )]
+        );
+        let GraphNode::ForEach(control) = &migrated.nodes[1] else {
+            panic!("expected migrated for-each control node")
+        };
+        assert_eq!(control.body.entries, vec!["inspect"]);
+        let GraphNode::Action(action) = &control.body.nodes[0] else {
+            panic!("expected generic action in loop body")
+        };
+        assert!(action.step.bindings.is_empty());
+        assert_eq!(action.bindings.get("repo"), Some(&item_binding));
+    }
+
+    #[test]
+    fn positional_array_consumer_does_not_imply_foreach_membership() {
+        let source = step("repositories");
+        let mut loop_step = step("repositories-loop");
+        loop_step.action = Action::ForEach {
+            source_step: "repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: vec![],
+        };
+        let mut inspect = step("inspect");
+        inspect.action = Action::GitInspect {
+            repo: "https://github.com/example/repository.git".into(),
+            dest: "/tmp/repository".into(),
+        };
+        inspect.bindings.insert(
+            "repo".into(),
+            Binding::field(
+                FieldRef::step("repositories")
+                    .field("github")
+                    .field("repositories")
+                    .index(2)
+                    .field("https_url"),
+            ),
+        );
+
+        let error = LegacyTaskImporter::import_steps(&[source, loop_step, inspect]).unwrap_err();
         assert!(matches!(
-            action.bindings.get("branch"),
-            Some(Binding::Field { .. })
+            error,
+            LinearMigrationError::UnsupportedLegacyControl { step, reason }
+                if step == "repositories-loop" && reason.contains("does not structurally reference")
+        ));
+    }
+
+    #[test]
+    fn generic_foreach_consumer_cannot_escape_legacy_field_projection() {
+        let source = step("repositories");
+        let mut loop_step = step("repositories-loop");
+        loop_step.action = Action::ForEach {
+            source_step: "repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: vec!["https_url".into()],
+        };
+        let mut inspect = step("inspect");
+        inspect.action = Action::GitInspect {
+            repo: "https://github.com/example/repository.git".into(),
+            dest: "/tmp/repository".into(),
+        };
+        inspect.bindings.insert(
+            "repo".into(),
+            Binding::field(FieldRef::loop_item("repositories-loop").field("ssh_url")),
+        );
+
+        let error = LegacyTaskImporter::import_steps(&[source, loop_step, inspect]).unwrap_err();
+        assert!(matches!(
+            error,
+            LinearMigrationError::UnsupportedLegacyControl { step, reason }
+                if step == "repositories-loop" && reason.contains("omitted by the v1 projection")
+        ));
+    }
+
+    #[test]
+    fn legacy_generic_foreach_rejects_loop_item_conditions_until_graph_lowering() {
+        let source = step("repositories");
+        let mut loop_step = step("repositories-loop");
+        loop_step.action = Action::ForEach {
+            source_step: "repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: vec![],
+        };
+        let mut inspect = step("inspect");
+        inspect.action = Action::GitInspect {
+            repo: "https://github.com/example/repository.git".into(),
+            dest: "/tmp/repository".into(),
+        };
+        inspect.bindings.insert(
+            "repo".into(),
+            Binding::field(FieldRef::loop_item("repositories-loop").field("https_url")),
+        );
+        inspect.when = Some(StepCondition::Expression {
+            rule: ExpressionV1::Exists {
+                reference: ReferenceV1::Context {
+                    field: FieldRef::loop_item("repositories-loop").field("name"),
+                },
+            },
+            policy: RuleOutcomePolicy::default(),
+        });
+
+        let error = LegacyTaskImporter::import_steps(&[source, loop_step, inspect]).unwrap_err();
+        assert!(matches!(
+            error,
+            LinearMigrationError::UnsupportedLegacyControl { step, reason }
+                if step == "inspect" && reason.contains("explicit v2 graph")
         ));
     }
 
@@ -5159,8 +6007,8 @@ mod tests {
             item: "item".into(),
             fields: vec![],
         };
-        let error =
-            WorkflowGraph::from_linear_v1(&[step("source"), loop_step, step("other")]).unwrap_err();
+        let error = LegacyTaskImporter::import_steps(&[step("source"), loop_step, step("other")])
+            .unwrap_err();
         assert!(matches!(
             error,
             LinearMigrationError::UnsupportedLegacyControl { step, .. } if step == "loop"

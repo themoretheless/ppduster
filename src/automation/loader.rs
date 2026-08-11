@@ -27,6 +27,9 @@ pub struct TaskPack {
     pub sources: Vec<TaskSource>,
     origins: BTreeMap<String, PackTrust>,
     unavailable: Vec<(String, Platform)>,
+    /// Original v1 steps retained only while resolving legacy `scenarios`
+    /// templates. Public tasks and resolved tasks are graph-only v3.
+    legacy_steps: BTreeMap<String, Vec<Step>>,
 }
 
 impl TaskPack {
@@ -51,6 +54,7 @@ impl TaskPack {
         let mut loaded = Vec::new();
         let mut origins = BTreeMap::new();
         let mut unavailable = Vec::new();
+        let mut legacy_steps = BTreeMap::new();
         for source in sources {
             let mut files: Vec<PathBuf> = if source.path.is_file() {
                 vec![source.path.clone()]
@@ -75,6 +79,8 @@ impl TaskPack {
                 let text = fs::read_to_string(&file)
                     .with_context(|| format!("read task file {}", file.display()))?;
                 reject_license_key_fields(&text, &file)?;
+                let imported_steps = legacy_steps_from_yaml(&text)
+                    .with_context(|| format!("parse legacy task steps in {}", file.display()))?;
                 let parsed: TaskFile = serde_yaml::from_str(&text)
                     .with_context(|| format!("parse task file {}", file.display()))?;
                 validate_trust(&parsed.task, source.trust, allow_external, &file)?;
@@ -97,8 +103,12 @@ impl TaskPack {
                         .expect("seen task id must have a corresponding task");
                     tasks.remove(index);
                     loaded.remove(index);
+                    legacy_steps.remove(&parsed.task.id);
                 }
                 origins.insert(parsed.task.id.clone(), source.trust);
+                if !imported_steps.is_empty() {
+                    legacy_steps.insert(parsed.task.id.clone(), imported_steps);
+                }
                 tasks.push(parsed.task);
                 loaded.push(TaskSource {
                     path: file,
@@ -111,6 +121,7 @@ impl TaskPack {
             sources: loaded,
             origins,
             unavailable,
+            legacy_steps,
         };
 
         // Resolve every template while loading so broken references, cycles,
@@ -156,12 +167,14 @@ impl TaskPack {
             self.resolve_steps(index, &by_id, &mut stack, &mut cache, &mut seen_scenarios)?;
         let mut resolved = self.tasks[index].clone();
         resolved.resolved_scenarios = std::mem::take(&mut resolved.scenarios);
-        resolved.steps = steps;
+        if !steps.is_empty() {
+            resolved.graph = None;
+            resolved.steps = steps;
+        }
         resolved
-            .validate_executable()
-            .map_err(anyhow::Error::msg)
-            .with_context(|| format!("validate resolved scenario {}", resolved.id))?;
-        Ok(resolved)
+            .into_v3()
+            .map_err(anyhow::Error::new)
+            .with_context(|| format!("migrate resolved scenario {} to workflow graph v3", id))
     }
 
     fn resolve_steps(
@@ -176,7 +189,12 @@ impl TaskPack {
             .validate()
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("validate scenario {}", self.tasks[index].id))?;
-        if self.tasks[index].graph.is_some() {
+        let imported_steps = self
+            .legacy_steps
+            .get(&self.tasks[index].id)
+            .cloned()
+            .unwrap_or_else(|| self.tasks[index].steps.clone());
+        if self.tasks[index].graph.is_some() && imported_steps.is_empty() {
             if let Some(parent_index) = stack.last() {
                 bail!(
                     "scenario {} cannot include graph task {}; graph composition must be explicit",
@@ -214,7 +232,7 @@ impl TaskPack {
         stack.push(index);
         let task = &self.tasks[index];
         let mut resolved = if task.scenarios.is_empty() {
-            task.steps.clone()
+            imported_steps
         } else {
             Vec::new()
         };
@@ -309,6 +327,23 @@ impl TaskPack {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct LegacyStepsTaskFile {
+    task: LegacyStepsTask,
+}
+
+#[derive(serde::Deserialize)]
+struct LegacyStepsTask {
+    #[serde(default)]
+    steps: Vec<Step>,
+}
+
+fn legacy_steps_from_yaml(text: &str) -> Result<Vec<Step>> {
+    Ok(serde_yaml::from_str::<LegacyStepsTaskFile>(text)?
+        .task
+        .steps)
+}
+
 fn is_yaml_file(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -390,13 +425,15 @@ fn validate_trust(task: &Task, trust: PackTrust, allow_external: bool, path: &Pa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automation::graph::WorkflowGraph;
+    use crate::automation::context::{Binding, ContextScope, FieldRef};
+    use crate::automation::graph::LegacyTaskImporter;
     use crate::automation::task::{Action, AuthPolicy, ElevationPolicy};
 
     fn step(id: &str) -> Step {
         Step {
             id: id.into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -431,13 +468,14 @@ mod tests {
             sources: Vec::new(),
             origins,
             unavailable: Vec::new(),
+            legacy_steps: BTreeMap::new(),
         }
     }
 
     #[test]
     fn resolve_preserves_a_direct_v2_graph() {
         let mut graph_task = task("graph-task");
-        graph_task.graph = Some(WorkflowGraph::from_linear_v1(&graph_task.steps).unwrap());
+        graph_task.graph = Some(LegacyTaskImporter::import_steps(&graph_task.steps).unwrap());
         graph_task.steps.clear();
 
         let resolved = pack(vec![graph_task]).resolve("graph-task").unwrap();
@@ -449,7 +487,7 @@ mod tests {
     #[test]
     fn legacy_scenario_template_does_not_silently_flatten_graph_child() {
         let mut child = task("graph-child");
-        child.graph = Some(WorkflowGraph::from_linear_v1(&child.steps).unwrap());
+        child.graph = Some(LegacyTaskImporter::import_steps(&child.steps).unwrap());
         child.steps.clear();
 
         let mut parent = task("parent");
@@ -460,5 +498,51 @@ mod tests {
         assert!(error
             .to_string()
             .contains("cannot include graph task graph-child"));
+    }
+
+    #[test]
+    fn scenario_expansion_prefixes_linear_binding_sources() {
+        let mut child = task("child");
+        child.steps[0].id = "list".into();
+        let mut inspect = step("inspect");
+        inspect.action = Action::GitInspect {
+            repo: "https://github.com/example/repository.git".into(),
+            dest: "/tmp/repository".into(),
+        };
+        inspect.bindings.insert(
+            "repo".into(),
+            Binding::field(
+                FieldRef::step("list")
+                    .field("github")
+                    .field("repositories")
+                    .index(2)
+                    .field("https_url"),
+            ),
+        );
+        child.steps.push(inspect);
+
+        let mut parent = task("parent");
+        parent.steps.clear();
+        parent.scenarios = vec!["child".into()];
+
+        let resolved = pack(vec![parent, child]).resolve("parent").unwrap();
+        assert!(resolved.steps.is_empty());
+        let graph = resolved.workflow_graph().unwrap();
+        assert_eq!(graph.nodes[0].id(), "child/list");
+        assert_eq!(graph.nodes[1].id(), "child/inspect");
+        let crate::automation::graph::GraphNode::Action(inspect) = &graph.nodes[1] else {
+            panic!("expected imported inspect action")
+        };
+        let Binding::Field { field } = &inspect.bindings["repo"] else {
+            panic!("expected field binding")
+        };
+        assert_eq!(
+            field.scope,
+            ContextScope::Step {
+                step_id: "child/list".into()
+            }
+        );
+        assert_eq!(graph.version, crate::automation::WORKFLOW_GRAPH_VERSION);
+        resolved.validate_executable().unwrap();
     }
 }

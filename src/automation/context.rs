@@ -186,6 +186,10 @@ pub struct FieldSchema {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "is_public")]
     pub sensitivity: Sensitivity,
+    /// Closed set of literal values accepted by this field. An empty set
+    /// means that every value satisfying `type` is allowed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_values: Vec<Value>,
 }
 
 fn is_public(value: &Sensitivity) -> bool {
@@ -200,6 +204,7 @@ impl FieldSchema {
             nullable: false,
             description: None,
             sensitivity: Sensitivity::Public,
+            allowed_values: Vec::new(),
         }
     }
 
@@ -225,11 +230,29 @@ impl FieldSchema {
         self
     }
 
+    pub fn with_allowed_values<I, V>(mut self, values: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<Value>,
+    {
+        self.allowed_values = values.into_iter().map(Into::into).collect();
+        self
+    }
+
     pub fn accepts(&self, actual: &Self) -> bool {
         (!self.required || actual.required)
             && (field_accepts_null(self) || !field_may_be_null(actual))
             && self.value_type.is_assignable_from(&actual.value_type)
+            && allowed_values_accept(&self.allowed_values, &actual.allowed_values)
     }
+}
+
+fn allowed_values_accept(expected: &[Value], actual: &[Value]) -> bool {
+    expected.is_empty()
+        || (!actual.is_empty()
+            && actual
+                .iter()
+                .all(|value| expected.iter().any(|allowed| allowed == value)))
 }
 
 fn type_accepts_null(value_type: &ContextType) -> bool {
@@ -389,9 +412,28 @@ impl ObjectSchema {
                 required: true,
                 nullable: false,
                 sensitivity: aggregate_object_sensitivity(self),
+                allowed_values: Vec::new(),
             });
         }
         self.resolve(segments).map(ResolvedSchemaOwned::from)
+    }
+
+    /// Resolve an explicitly configured action-input target.
+    ///
+    /// This differs from resolving an output reference. A nullable or optional
+    /// ancestor may make reading `parent.child` indeterminate, but writing a
+    /// binding to that child materializes the ancestor object. Consequently
+    /// ancestor nullability does not make the child value nullable; only the
+    /// leaf field controls whether a written value may be null. Optionality is
+    /// preserved so a missing source can explicitly mean "omit this optional
+    /// override and keep the action default".
+    pub fn resolve_input_target_owned(
+        &self,
+        segments: &[ContextPathSegment],
+    ) -> Option<ResolvedSchemaOwned> {
+        let mut resolved = self.resolve_owned(segments)?;
+        resolved.nullable = input_target_nullable(self, segments)?;
+        Some(resolved)
     }
 
     pub fn is_assignable_from(&self, actual: &Self) -> bool {
@@ -441,6 +483,58 @@ impl ObjectSchema {
     }
 }
 
+fn input_target_nullable(schema: &ObjectSchema, segments: &[ContextPathSegment]) -> Option<bool> {
+    let (first, rest) = segments.split_first()?;
+    let ContextPathSegment::Field { name } = first else {
+        return None;
+    };
+    let value_type = if let Some(field) = schema.fields.get(name) {
+        if rest.is_empty() {
+            return Some(field.nullable);
+        }
+        &field.value_type
+    } else {
+        let value_type = schema.additional_fields.value_type()?;
+        if rest.is_empty() {
+            return Some(type_accepts_null(value_type));
+        }
+        value_type
+    };
+    input_type_target_nullable(value_type, rest)
+}
+
+fn input_type_target_nullable(
+    value_type: &ContextType,
+    segments: &[ContextPathSegment],
+) -> Option<bool> {
+    let (first, rest) = segments.split_first()?;
+    match (first, value_type) {
+        (ContextPathSegment::Field { name }, ContextType::Object { schema }) => {
+            let child = if let Some(field) = schema.fields.get(name) {
+                if rest.is_empty() {
+                    return Some(field.nullable);
+                }
+                &field.value_type
+            } else {
+                let child = schema.additional_fields.value_type()?;
+                if rest.is_empty() {
+                    return Some(type_accepts_null(child));
+                }
+                child
+            };
+            input_type_target_nullable(child, rest)
+        }
+        (ContextPathSegment::Index { .. }, ContextType::Array { items }) => {
+            if rest.is_empty() {
+                Some(type_accepts_null(items))
+            } else {
+                input_type_target_nullable(items, rest)
+            }
+        }
+        _ => None,
+    }
+}
+
 fn field_accepts_additional_type(expected: &FieldSchema, actual: &ContextType) -> bool {
     expected.value_type.is_assignable_from(actual)
         && (field_accepts_null(expected) || !type_accepts_null(actual))
@@ -465,6 +559,9 @@ pub enum SchemaValidationErrorKind {
         field: String,
     },
     NullNotAllowed,
+    ValueNotAllowed {
+        allowed: Vec<Value>,
+    },
     TypeMismatch {
         expected: ContextTypeName,
         actual: ContextTypeName,
@@ -547,6 +644,11 @@ impl fmt::Display for SchemaValidationError {
             SchemaValidationErrorKind::NullNotAllowed => {
                 write!(formatter, "context value at {path} must not be null")
             }
+            SchemaValidationErrorKind::ValueNotAllowed { allowed } => write!(
+                formatter,
+                "context value at {path} must be one of {}",
+                Value::Array(allowed.clone())
+            ),
             SchemaValidationErrorKind::TypeMismatch { expected, actual } => write!(
                 formatter,
                 "context value at {path} has type {actual}, expected {expected}"
@@ -661,7 +763,16 @@ fn validate_field_value(
             })
         };
     }
-    validate_type_value(&field.value_type, value, path)
+    validate_type_value(&field.value_type, value, path)?;
+    if !field.allowed_values.is_empty() && !field.allowed_values.contains(value) {
+        return Err(SchemaValidationError {
+            path: path.clone(),
+            kind: SchemaValidationErrorKind::ValueNotAllowed {
+                allowed: field.allowed_values.clone(),
+            },
+        });
+    }
+    Ok(())
 }
 
 fn validate_type_value(
@@ -722,6 +833,7 @@ pub struct ResolvedSchema<'a> {
     pub required: bool,
     pub nullable: bool,
     pub sensitivity: Sensitivity,
+    pub allowed_values: &'a [Value],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -730,6 +842,7 @@ pub struct ResolvedSchemaOwned {
     pub required: bool,
     pub nullable: bool,
     pub sensitivity: Sensitivity,
+    pub allowed_values: Vec<Value>,
 }
 
 impl From<ResolvedSchema<'_>> for ResolvedSchemaOwned {
@@ -739,6 +852,7 @@ impl From<ResolvedSchema<'_>> for ResolvedSchemaOwned {
             required: resolved.required,
             nullable: resolved.nullable,
             sensitivity: resolved.sensitivity,
+            allowed_values: resolved.allowed_values.to_vec(),
         }
     }
 }
@@ -759,6 +873,7 @@ fn resolve_field_schema<'a>(
             // below it. Treat it as sensitive as its most-sensitive child so
             // binding the parent cannot launder a nested secret.
             sensitivity: sensitivity.combine(aggregate_type_sensitivity(&field.value_type)),
+            allowed_values: &field.allowed_values,
         });
     };
     match (segment, &field.value_type) {
@@ -803,6 +918,7 @@ fn resolve_type_schema<'a>(
             required,
             nullable,
             sensitivity: sensitivity.combine(aggregate_type_sensitivity(value_type)),
+            allowed_values: &[],
         });
     };
     match (segment, value_type) {
@@ -1445,6 +1561,53 @@ mod tests {
     }
 
     #[test]
+    fn allowed_values_round_trip_validate_and_participate_in_subtyping() {
+        let constrained = FieldSchema::required(ContextType::STRING).with_allowed_values([
+            "sh",
+            "bash",
+            "powershell",
+        ]);
+        let schema =
+            ObjectSchema::new("process-input").with_field("interpreter", constrained.clone());
+
+        schema
+            .validate_value(&json!({ "interpreter": "bash" }))
+            .unwrap();
+        let error = schema
+            .validate_value(&json!({ "interpreter": "python" }))
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            SchemaValidationErrorKind::ValueNotAllowed { .. }
+        ));
+
+        let encoded = serde_json::to_value(&schema).unwrap();
+        assert_eq!(
+            encoded["fields"]["interpreter"]["allowed_values"],
+            json!(["sh", "bash", "powershell"])
+        );
+        let decoded: ObjectSchema = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, schema);
+        assert_eq!(
+            decoded
+                .resolve_owned(&[ContextPathSegment::field("interpreter")])
+                .unwrap()
+                .allowed_values,
+            json!(["sh", "bash", "powershell"])
+                .as_array()
+                .unwrap()
+                .clone()
+        );
+
+        let subset = FieldSchema::required(ContextType::STRING).with_allowed_values(["sh", "bash"]);
+        let unrestricted = FieldSchema::required(ContextType::STRING);
+        assert!(constrained.accepts(&subset));
+        assert!(!subset.accepts(&constrained));
+        assert!(!constrained.accepts(&unrestricted));
+        assert!(unrestricted.accepts(&constrained));
+    }
+
+    #[test]
     fn missing_wire_version_defaults_to_current_version() {
         let schema: ObjectSchema = serde_json::from_value(json!({
             "id": "legacy-schema",
@@ -1683,6 +1846,29 @@ mod tests {
                 field: "unknown".into()
             }
         );
+    }
+
+    #[test]
+    fn explicit_input_targets_use_leaf_nullability_and_preserve_optionality() {
+        let nested = ObjectSchema::new("nested-input")
+            .with_field("value", FieldSchema::required(ContextType::STRING));
+        let schema = ObjectSchema::new("inputs").with_field(
+            "options",
+            FieldSchema::optional(ContextType::object(nested)).nullable(),
+        );
+        let path = [
+            ContextPathSegment::field("options"),
+            ContextPathSegment::field("value"),
+        ];
+
+        let readable = schema.resolve_owned(&path).unwrap();
+        assert!(!readable.required);
+        assert!(readable.nullable);
+
+        let writable = schema.resolve_input_target_owned(&path).unwrap();
+        assert!(!writable.required);
+        assert!(!writable.nullable);
+        assert_eq!(writable.value_type, ContextType::STRING);
     }
 
     #[test]

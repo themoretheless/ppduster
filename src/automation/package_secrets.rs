@@ -1,3 +1,4 @@
+use crate::automation::graph::{GraphNode, WorkflowGraph};
 use crate::automation::package_registry;
 use crate::automation::task::{
     Action, EncryptedSecretsSpec, NpmRegistryFileSpec, NugetRegistryFileSpec, Task,
@@ -86,10 +87,11 @@ impl Drop for InitStdinPayload {
     }
 }
 
-struct RegistryTaskSpec<'a> {
-    secrets: &'a EncryptedSecretsSpec,
-    npm: &'a NpmRegistryFileSpec,
-    nuget: &'a NugetRegistryFileSpec,
+#[derive(Debug)]
+struct RegistryTaskSpec {
+    secrets: EncryptedSecretsSpec,
+    npm: NpmRegistryFileSpec,
+    nuget: NugetRegistryFileSpec,
 }
 
 pub fn init_for_task(
@@ -129,9 +131,9 @@ pub fn exec_for_task(
     ensure_vault_platform_security()?;
     let spec = registry_task_spec(task)?;
     let workspace_id = current_workspace_id()?;
-    validate_tool_args(tool, args, spec.secrets)?;
+    validate_tool_args(tool, args, &spec.secrets)?;
 
-    if package_registry::is_satisfied(spec.secrets, spec.npm, spec.nuget)?.is_none() {
+    if package_registry::is_satisfied(&spec.secrets, &spec.npm, &spec.nuget)?.is_none() {
         bail!(
             "package registry files do not match the bundled task; run setup configuration first"
         );
@@ -281,31 +283,66 @@ pub fn vault_path_for_task(task: &Task, explicit_path: Option<&Path>) -> Result<
     resolve_vault_path(&spec.secrets.profile, &workspace_id, explicit_path)
 }
 
-fn registry_task_spec(task: &Task) -> Result<RegistryTaskSpec<'_>> {
+fn registry_task_spec(task: &Task) -> Result<RegistryTaskSpec> {
     task.validate()
         .map_err(|_| anyhow!("invalid package registry task"))?;
     if task.trust != TrustRequirement::BundledOnly {
         bail!("package secrets are available only to bundled-only tasks");
     }
+
+    let graph = task
+        .workflow_graph()
+        .map_err(|_| anyhow!("invalid package registry task"))?;
     let mut found = None;
-    for step in &task.steps {
-        if let Action::ConfigurePackageRegistryFiles {
-            secrets,
-            npm,
-            nuget,
-        } = &step.action
-        {
-            if found.is_some() {
-                bail!("package registry task must contain exactly one registry action");
+    collect_registry_task_spec(graph, &mut found)?;
+    found.ok_or_else(|| anyhow!("task does not configure package registry files"))
+}
+
+fn collect_registry_task_spec(
+    root: &WorkflowGraph,
+    found: &mut Option<RegistryTaskSpec>,
+) -> Result<()> {
+    let mut pending = vec![root];
+    while let Some(graph) = pending.pop() {
+        for node in &graph.nodes {
+            match node {
+                GraphNode::Action(action) => {
+                    if let Action::ConfigurePackageRegistryFiles {
+                        secrets,
+                        npm,
+                        nuget,
+                    } = &action.step.action
+                    {
+                        if found.is_some() {
+                            bail!("package registry task must contain exactly one registry action");
+                        }
+                        *found = Some(RegistryTaskSpec {
+                            secrets: secrets.clone(),
+                            npm: npm.clone(),
+                            nuget: nuget.clone(),
+                        });
+                    }
+                }
+                GraphNode::ForEach(node) => pending.push(&node.body),
+                GraphNode::If(node) => {
+                    pending.push(&node.then_graph);
+                    if let Some(graph) = &node.else_graph {
+                        pending.push(graph);
+                    }
+                }
+                GraphNode::Switch(node) => {
+                    for case in &node.cases {
+                        pending.push(&case.graph);
+                    }
+                    if let Some(graph) = &node.default {
+                        pending.push(graph);
+                    }
+                }
+                GraphNode::Join(_) => {}
             }
-            found = Some(RegistryTaskSpec {
-                secrets,
-                npm,
-                nuget,
-            });
         }
     }
-    found.ok_or_else(|| anyhow!("task does not configure package registry files"))
+    Ok(())
 }
 
 fn resolve_vault_path(
@@ -1049,9 +1086,128 @@ fn tool_name(tool: PackageTool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::automation::context::Binding;
+    use crate::automation::expression::{ExpressionV1, ExpressionValue};
+    use crate::automation::graph::{ActionNode, IfNode};
+    use crate::automation::task::{AuthPolicy, ElevationPolicy, Step};
+    use crate::rules::Platform;
+    use std::collections::BTreeMap;
 
     const TEST_WORKSPACE_ID: &str =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn registry_action(id: &str) -> GraphNode {
+        GraphNode::Action(Box::new(ActionNode {
+            step: Step {
+                id: id.into(),
+                name: id.into(),
+                bindings: BTreeMap::new(),
+                auth: AuthPolicy::None,
+                check: None,
+                dangerous: false,
+                allow_elevation: ElevationPolicy::Forbidden,
+                when: None,
+                require: None,
+                action: Action::ConfigurePackageRegistryFiles {
+                    secrets: EncryptedSecretsSpec {
+                        profile: "github-packages".into(),
+                        username_env: "GITHUB_PACKAGES_USER".into(),
+                        token_env: "GITHUB_PACKAGES_TOKEN".into(),
+                    },
+                    npm: NpmRegistryFileSpec {
+                        scope: "@dodopizza".into(),
+                        registry: "https://npm.pkg.github.com/".into(),
+                    },
+                    nuget: NugetRegistryFileSpec {
+                        public_source_name: "nuget.org".into(),
+                        public_source: "https://api.nuget.org/v3/index.json".into(),
+                        source_name: "github".into(),
+                        source: "https://nuget.pkg.github.com/dodopizza/index.json".into(),
+                        package_patterns: vec!["Dodo.*".into()],
+                    },
+                },
+            },
+            bindings: BTreeMap::<String, Binding>::new(),
+        }))
+    }
+
+    fn graph(entries: &[&str], nodes: Vec<GraphNode>) -> WorkflowGraph {
+        WorkflowGraph {
+            entries: entries.iter().map(|entry| (*entry).into()).collect(),
+            nodes,
+            ..WorkflowGraph::default()
+        }
+    }
+
+    fn bundled_task(graph: WorkflowGraph) -> Task {
+        Task {
+            id: "registry-task".into(),
+            name: "Registry task".into(),
+            description: "Configure package registries.".into(),
+            platform: Platform::Any,
+            trust: TrustRequirement::BundledOnly,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            steps: Vec::new(),
+            graph: Some(graph),
+        }
+    }
+
+    #[test]
+    fn registry_spec_is_discovered_in_a_graph_only_task() {
+        let task = bundled_task(graph(&["registry"], vec![registry_action("registry")]));
+
+        let spec = registry_task_spec(&task).unwrap();
+
+        assert_eq!(spec.secrets.profile, "github-packages");
+        assert_eq!(spec.npm.scope, "@dodopizza");
+        assert_eq!(spec.nuget.source_name, "github");
+    }
+
+    #[test]
+    fn registry_spec_is_discovered_inside_a_nested_control_graph() {
+        let nested = graph(&["registry"], vec![registry_action("registry")]);
+        let task = bundled_task(graph(
+            &["choice"],
+            vec![GraphNode::If(IfNode {
+                id: "choice".into(),
+                condition: ExpressionV1::Literal {
+                    value: ExpressionValue::Bool(true),
+                },
+                then_graph: Box::new(nested),
+                else_graph: None,
+            })],
+        ));
+
+        let spec = registry_task_spec(&task).unwrap();
+
+        assert_eq!(spec.secrets.token_env, "GITHUB_PACKAGES_TOKEN");
+    }
+
+    #[test]
+    fn registry_spec_rejects_multiple_actions_across_nested_branches() {
+        let task = bundled_task(graph(
+            &["choice"],
+            vec![GraphNode::If(IfNode {
+                id: "choice".into(),
+                condition: ExpressionV1::Literal {
+                    value: ExpressionValue::Bool(true),
+                },
+                then_graph: Box::new(graph(
+                    &["then-registry"],
+                    vec![registry_action("then-registry")],
+                )),
+                else_graph: Some(Box::new(graph(
+                    &["else-registry"],
+                    vec![registry_action("else-registry")],
+                ))),
+            })],
+        ));
+
+        let error = registry_task_spec(&task).unwrap_err().to_string();
+
+        assert!(error.contains("exactly one registry action"));
+    }
 
     #[test]
     fn exact_redaction_covers_every_occurrence() {

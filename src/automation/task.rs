@@ -1,7 +1,12 @@
 use crate::automation::block::definition_for_action;
-use crate::automation::context::{ContextProvenance, ContextScope, ContextStore, ContextValue};
+use crate::automation::context::{
+    Binding, ContextProvenance, ContextScope, ContextStore, ContextValue, TemplatePart,
+};
 use crate::automation::expression::{check_rule, ExpressionLimits, RuleExprV1};
-use crate::automation::graph::WorkflowGraph;
+use crate::automation::graph::{
+    GraphValidationError, LegacyTaskImporter, LinearMigrationError, WorkflowGraph,
+    WorkflowGraphMigrationError, WORKFLOW_GRAPH_VERSION,
+};
 use crate::rules::Platform;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -238,35 +243,226 @@ pub struct TaskFile {
     pub task: Task,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Canonical task document version. Versions 1 and 2 are accepted only by the
+/// compatibility importer and are never emitted again.
+pub const TASK_FORMAT_VERSION: u32 = 3;
+
+#[derive(Debug, Clone)]
 pub struct Task {
     pub id: String,
     pub name: String,
-    #[serde(default)]
     pub description: String,
-    #[serde(default)]
     pub platform: Platform,
-    #[serde(default)]
     pub trust: TrustRequirement,
-    /// Other scenarios included by this reusable template, in execution order.
+    /// Other scenarios included by a legacy reusable template, in execution
+    /// order.
     ///
-    /// A task definition contains exactly one executable form: `scenarios`,
-    /// legacy linear `steps`, or a v2 `graph`. `TaskPack::resolve` recursively
-    /// expands scenario references into a flat, policy-checkable task immediately
-    /// before execution.
-    #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "includes")]
+    /// This field is import-only. `TaskPack::resolve` expands it and returns a
+    /// canonical graph-only v3 task.
     pub scenarios: Vec<String>,
     /// Root scenario references retained after `TaskPack::resolve` flattens a
     /// template. This is runtime provenance only and is never written to YAML.
-    #[serde(skip)]
     pub resolved_scenarios: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Programmatic compatibility for legacy callers. Deserializing `steps`
+    /// immediately imports them into `graph` and leaves this vector empty.
+    /// New code must edit `graph` directly.
     pub steps: Vec<Step>,
-    /// Explicit v2 execution graph. Canvas layout metadata is deliberately not
-    /// part of this representation and is never used to infer control flow.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Canonical v3 execution graph. Canvas layout metadata is deliberately
+    /// not part of this representation and is never used to infer control
+    /// flow.
     pub graph: Option<WorkflowGraph>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskWire {
+    #[serde(default)]
+    format_version: Option<u32>,
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    platform: Platform,
+    #[serde(default)]
+    trust: TrustRequirement,
+    #[serde(default, alias = "includes")]
+    scenarios: Vec<String>,
+    #[serde(default)]
+    steps: Vec<Step>,
+    #[serde(default)]
+    workflow_graph: Option<WorkflowGraph>,
+    /// Historical v2 key. Keeping it distinct lets the v3 envelope reject a
+    /// document that merely relabels legacy graph syntax as format v3.
+    #[serde(default, rename = "graph")]
+    legacy_graph: Option<WorkflowGraph>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct TaskV3Wire<'a> {
+    format_version: u32,
+    id: &'a str,
+    name: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    description: &'a str,
+    platform: Platform,
+    trust: TrustRequirement,
+    workflow_graph: &'a WorkflowGraph,
+}
+
+impl<'de> Deserialize<'de> for Task {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = TaskWire::deserialize(deserializer)?;
+        if let Some(version) = wire.format_version {
+            if version == 0 || version > TASK_FORMAT_VERSION {
+                return Err(serde::de::Error::custom(format!(
+                    "unsupported task format version {version}; current version is {TASK_FORMAT_VERSION}"
+                )));
+            }
+        }
+
+        if wire.format_version == Some(TASK_FORMAT_VERSION)
+            && (!wire.scenarios.is_empty()
+                || !wire.steps.is_empty()
+                || wire.legacy_graph.is_some()
+                || wire.workflow_graph.is_none())
+        {
+            return Err(serde::de::Error::custom(
+                "task format version 3 requires exactly one workflow_graph and forbids legacy scenarios, steps, and graph",
+            ));
+        }
+
+        let forms = usize::from(!wire.scenarios.is_empty())
+            + usize::from(!wire.steps.is_empty())
+            + usize::from(wire.workflow_graph.is_some())
+            + usize::from(wire.legacy_graph.is_some());
+        if forms > 1 {
+            return Err(serde::de::Error::custom(
+                "task must define exactly one of legacy scenarios, legacy steps, or workflow_graph",
+            ));
+        }
+
+        let imported_graph = wire.workflow_graph.or(wire.legacy_graph);
+        let graph = match (imported_graph, wire.steps.as_slice()) {
+            (Some(graph), _) => Some(graph.into_v3().map_err(serde::de::Error::custom)?),
+            (None, []) => None,
+            (None, steps) => {
+                Some(LegacyTaskImporter::import_steps(steps).map_err(serde::de::Error::custom)?)
+            }
+        };
+
+        Ok(Self {
+            id: wire.id,
+            name: wire.name,
+            description: wire.description,
+            platform: wire.platform,
+            trust: wire.trust,
+            scenarios: wire.scenarios,
+            resolved_scenarios: Vec::new(),
+            steps: Vec::new(),
+            graph,
+        })
+    }
+}
+
+impl Serialize for Task {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let workflow_graph = self.workflow_graph().map_err(serde::ser::Error::custom)?;
+        TaskV3Wire {
+            format_version: TASK_FORMAT_VERSION,
+            id: &self.id,
+            name: &self.name,
+            description: &self.description,
+            platform: self.platform,
+            trust: self.trust,
+            workflow_graph,
+        }
+        .serialize(serializer)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskMigrationError {
+    InvalidMetadata {
+        task: String,
+        message: String,
+    },
+    NoExecutableForm {
+        task: String,
+    },
+    MultipleExecutableForms {
+        task: String,
+    },
+    UnresolvedScenarios {
+        task: String,
+        scenarios: Vec<String>,
+    },
+    LegacySteps {
+        task: String,
+        source: LinearMigrationError,
+    },
+    WorkflowGraph {
+        task: String,
+        source: WorkflowGraphMigrationError,
+    },
+    InvalidGraph {
+        task: String,
+        errors: Vec<GraphValidationError>,
+    },
+}
+
+impl std::fmt::Display for TaskMigrationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidMetadata { task, message } => {
+                write!(formatter, "task {task} metadata is invalid: {message}")
+            }
+            Self::NoExecutableForm { task } => {
+                write!(formatter, "task {task} has no executable workflow graph")
+            }
+            Self::MultipleExecutableForms { task } => write!(
+                formatter,
+                "task {task} contains conflicting legacy and workflow graph forms"
+            ),
+            Self::UnresolvedScenarios { task, scenarios } => write!(
+                formatter,
+                "task {task} contains unresolved legacy scenarios: {}",
+                scenarios.join(", ")
+            ),
+            Self::LegacySteps { task, source } => {
+                write!(formatter, "task {task} legacy import failed: {source}")
+            }
+            Self::WorkflowGraph { task, source } => {
+                write!(formatter, "task {task} graph migration failed: {source}")
+            }
+            Self::InvalidGraph { task, errors } => write!(
+                formatter,
+                "task {task} has an invalid workflow graph: {}",
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TaskMigrationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::LegacySteps { source, .. } => Some(source),
+            Self::WorkflowGraph { source, .. } => Some(source),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -462,6 +658,14 @@ pub struct Step {
     pub id: String,
     #[serde(default)]
     pub name: String,
+    /// Typed values copied from visible context into the action's declared
+    /// input fields immediately before the step runs.
+    ///
+    /// Linear tasks are lowered to the v2 workflow graph when this map is not
+    /// empty. Graph action nodes keep bindings in `ActionNode::bindings`, so
+    /// their embedded step must leave this map empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, Binding>,
     #[serde(default)]
     pub auth: AuthPolicy,
     #[serde(default)]
@@ -483,6 +687,8 @@ struct StepWire {
     id: String,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    bindings: BTreeMap<String, Binding>,
     #[serde(default)]
     auth: AuthPolicy,
     #[serde(default)]
@@ -516,6 +722,7 @@ impl<'de> Deserialize<'de> for Step {
         Ok(Self {
             id: wire.id,
             name: wire.name,
+            bindings: wire.bindings,
             auth: wire.auth,
             check: wire.check,
             dangerous: wire.dangerous,
@@ -737,6 +944,107 @@ pub enum Action {
 }
 
 impl Task {
+    /// Normalize any supported legacy executable form into the only runtime
+    /// representation: a validated, graph-only WorkflowGraph v3 task.
+    pub fn into_v3(mut self) -> Result<Self, TaskMigrationError> {
+        if !self.scenarios.is_empty() {
+            if !self.steps.is_empty() || self.graph.is_some() {
+                return Err(TaskMigrationError::MultipleExecutableForms {
+                    task: self.id.clone(),
+                });
+            }
+            return Err(TaskMigrationError::UnresolvedScenarios {
+                task: self.id.clone(),
+                scenarios: self.scenarios.clone(),
+            });
+        }
+
+        let graph = match (self.steps.is_empty(), self.graph.take()) {
+            (true, Some(graph)) => {
+                graph
+                    .into_v3()
+                    .map_err(|source| TaskMigrationError::WorkflowGraph {
+                        task: self.id.clone(),
+                        source,
+                    })?
+            }
+            (false, None) => LegacyTaskImporter::import_steps(&self.steps).map_err(|source| {
+                TaskMigrationError::LegacySteps {
+                    task: self.id.clone(),
+                    source,
+                }
+            })?,
+            (true, None) => {
+                return Err(TaskMigrationError::NoExecutableForm {
+                    task: self.id.clone(),
+                });
+            }
+            (false, Some(_)) => {
+                return Err(TaskMigrationError::MultipleExecutableForms {
+                    task: self.id.clone(),
+                });
+            }
+        };
+
+        graph
+            .validate()
+            .map_err(|errors| TaskMigrationError::InvalidGraph {
+                task: self.id.clone(),
+                errors,
+            })?;
+        self.validate_metadata()
+            .map_err(|message| TaskMigrationError::InvalidMetadata {
+                task: self.id.clone(),
+                message,
+            })?;
+        self.steps.clear();
+        self.scenarios.clear();
+        self.graph = Some(graph);
+        Ok(self)
+    }
+
+    pub fn to_v3(&self) -> Result<Self, TaskMigrationError> {
+        self.clone().into_v3()
+    }
+
+    /// Borrow the canonical runtime graph without performing implicit legacy
+    /// lowering. Call [`Task::into_v3`] at an import boundary first.
+    pub fn workflow_graph(&self) -> Result<&WorkflowGraph, TaskMigrationError> {
+        if !self.steps.is_empty() || !self.scenarios.is_empty() {
+            return Err(TaskMigrationError::MultipleExecutableForms {
+                task: self.id.clone(),
+            });
+        }
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| TaskMigrationError::NoExecutableForm {
+                task: self.id.clone(),
+            })?;
+        if graph.version != WORKFLOW_GRAPH_VERSION {
+            return Err(TaskMigrationError::WorkflowGraph {
+                task: self.id.clone(),
+                source: WorkflowGraphMigrationError::UnsupportedVersion {
+                    path: "workflow_graph".into(),
+                    found: graph.version,
+                    minimum: crate::automation::graph::MIN_MIGRATABLE_WORKFLOW_GRAPH_VERSION,
+                    current: WORKFLOW_GRAPH_VERSION,
+                },
+            });
+        }
+        graph
+            .validate()
+            .map_err(|errors| TaskMigrationError::InvalidGraph {
+                task: self.id.clone(),
+                errors,
+            })?;
+        Ok(graph)
+    }
+
+    pub fn is_v3(&self) -> bool {
+        self.workflow_graph().is_ok()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.validate_metadata()?;
         let executable_forms = usize::from(!self.steps.is_empty())
@@ -781,61 +1089,29 @@ impl Task {
             self.validate_steps()?;
         }
         if let Some(graph) = &self.graph {
-            graph.validate().map_err(|errors| {
-                format!(
-                    "task {} has an invalid workflow graph: {}",
-                    self.id,
-                    errors
-                        .into_iter()
-                        .map(|error| error.to_string())
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                )
-            })?;
+            graph
+                .to_v3()
+                .map_err(|error| format!("task {} graph migration failed: {error}", self.id))?
+                .validate()
+                .map_err(|errors| {
+                    format!(
+                        "task {} has an invalid workflow graph: {}",
+                        self.id,
+                        errors
+                            .into_iter()
+                            .map(|error| error.to_string())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    )
+                })?;
         }
         Ok(())
     }
 
-    pub(crate) fn validate_executable(&self) -> Result<(), String> {
-        self.validate_metadata()?;
-        // Historical programmatic callers may retain root scenario IDs in
-        // `scenarios` after flattening steps (new loader code uses
-        // `resolved_scenarios`). Preserve that executable compatibility, while
-        // never allowing scenario references to coexist with a v2 graph.
-        if self.graph.is_some() && !self.scenarios.is_empty() {
-            return Err(format!(
-                "task {} cannot execute a graph with scenario references",
-                self.id
-            ));
-        }
-        let executable_forms =
-            usize::from(!self.steps.is_empty()) + usize::from(self.graph.is_some());
-        if executable_forms == 0 {
-            return Err(format!("task {} has no executable steps or graph", self.id));
-        }
-        if executable_forms > 1 {
-            return Err(format!(
-                "task {} resolved to both linear steps and a graph",
-                self.id
-            ));
-        }
-        if !self.steps.is_empty() {
-            self.validate_steps()?;
-        }
-        if let Some(graph) = &self.graph {
-            graph.validate().map_err(|errors| {
-                format!(
-                    "task {} has an invalid executable graph: {}",
-                    self.id,
-                    errors
-                        .into_iter()
-                        .map(|error| error.to_string())
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                )
-            })?;
-        }
-        Ok(())
+    pub fn validate_executable(&self) -> Result<(), String> {
+        self.workflow_graph()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     fn validate_metadata(&self) -> Result<(), String> {
@@ -948,6 +1224,14 @@ impl Task {
                 script_exit_codes.insert(step.id.as_str(), success_exit_codes);
             }
         }
+        if self.steps.iter().any(|step| !step.bindings.is_empty()) {
+            LegacyTaskImporter::import_steps(&self.steps).map_err(|error| {
+                format!(
+                    "task {} has linear input bindings that cannot be lowered: {error}",
+                    self.id
+                )
+            })?;
+        }
         Ok(())
     }
 
@@ -971,6 +1255,9 @@ impl Step {
         }
         if let Some(condition) = &mut self.require {
             condition.prefix_source_step(prefix);
+        }
+        for binding in self.bindings.values_mut() {
+            prefix_binding_source_steps(binding, prefix);
         }
     }
 
@@ -1002,6 +1289,12 @@ impl Step {
                 item,
                 fields,
             } => {
+                if !self.bindings.is_empty() {
+                    return Err(format!(
+                        "step {} legacy for-each cannot declare typed input bindings; migrate the loop to graph v2",
+                        self.id
+                    ));
+                }
                 if source_step.trim().is_empty()
                     || array_path.trim().is_empty()
                     || item.trim().is_empty()
@@ -1033,6 +1326,12 @@ impl Step {
                 dest,
                 ..
             } => {
+                if !self.bindings.is_empty() {
+                    return Err(format!(
+                        "step {} legacy foreach clone cannot declare typed input bindings; migrate the loop to graph v2",
+                        self.id
+                    ));
+                }
                 if loop_step.trim().is_empty() || repo.trim().is_empty() || dest.trim().is_empty() {
                     return Err(format!(
                         "step {} foreach clone requires loop_step, repo, and dest",
@@ -1359,9 +1658,10 @@ impl Step {
                 }
                 if !matches!(self.auth, AuthPolicy::None)
                     || !matches!(self.allow_elevation, ElevationPolicy::Forbidden)
+                    || self.dangerous
                 {
                     return Err(format!(
-                        "step {} app-store-install must not request authentication or elevation",
+                        "step {} app-store-install must not request authentication, elevation, or dangerous execution",
                         self.id
                     ));
                 }
@@ -1393,6 +1693,26 @@ impl Step {
             ));
         }
         Ok(())
+    }
+}
+
+fn prefix_binding_source_steps(binding: &mut Binding, prefix: &str) {
+    let prefix_field = |field: &mut crate::automation::context::FieldRef| match &mut field.scope {
+        ContextScope::Step { step_id } | ContextScope::LoopItem { step_id } => {
+            *step_id = format!("{prefix}/{step_id}");
+        }
+        ContextScope::Scenario => {}
+    };
+    match binding {
+        Binding::Field { field } => prefix_field(field),
+        Binding::Interpolated { parts } => {
+            for part in parts {
+                if let TemplatePart::Field { field } = part {
+                    prefix_field(field);
+                }
+            }
+        }
+        Binding::Literal { .. } | Binding::Template { .. } => {}
     }
 }
 
@@ -1611,6 +1931,7 @@ mod tests {
         Step {
             id: "package-config".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -1736,6 +2057,7 @@ mod tests {
                 Step {
                     id: "repositories".into(),
                     name: String::new(),
+                    bindings: BTreeMap::new(),
                     auth: AuthPolicy::None,
                     check: None,
                     dangerous: false,
@@ -1747,6 +2069,7 @@ mod tests {
                 Step {
                     id: "repositories-loop".into(),
                     name: String::new(),
+                    bindings: BTreeMap::new(),
                     auth: AuthPolicy::None,
                     check: None,
                     dangerous: false,
@@ -1768,6 +2091,7 @@ mod tests {
                 Step {
                     id: "clone".into(),
                     name: String::new(),
+                    bindings: BTreeMap::new(),
                     auth: AuthPolicy::None,
                     check: None,
                     dangerous: false,
@@ -1778,7 +2102,7 @@ mod tests {
                         loop_step: "repositories-loop".into(),
                         repo: "{{repository.https_url}}".into(),
                         dest: "$HOME/Developer/{{repository.owner}}/{{repository.name}}".into(),
-                        branch: Some("{{repository.default_branch}}".into()),
+                        branch: None,
                     },
                 },
             ],
@@ -1786,17 +2110,20 @@ mod tests {
         };
 
         task.validate().unwrap();
-        let yaml = serde_yaml::to_string(&task).unwrap();
-        assert!(yaml.contains("type: for-each"));
-        assert!(yaml.contains("type: for-each-git-clone-if-missing"));
-        serde_yaml::from_str::<Task>(&yaml)
-            .unwrap()
-            .validate()
-            .unwrap();
+        let canonical = task.to_v3().unwrap();
+        let yaml = serde_yaml::to_string(&canonical).unwrap();
+        assert!(yaml.contains("format_version: 3"));
+        assert!(yaml.contains("workflow_graph:"));
+        assert!(yaml.contains("kind: for-each"));
+        assert!(yaml.contains("type: git-clone-if-missing"));
+        assert!(!yaml.contains("\nsteps:"));
+        assert!(!yaml.contains("\ngraph:"));
+        let round_trip = serde_yaml::from_str::<Task>(&yaml).unwrap();
+        assert!(round_trip.is_v3());
     }
 
     #[test]
-    fn legacy_task_yaml_round_trips_without_graph_field() {
+    fn legacy_task_yaml_is_imported_and_serialized_only_as_v3() {
         let yaml = r#"
 id: legacy-linear
 name: Legacy linear
@@ -1807,14 +2134,198 @@ steps:
     type: github-list-repositories
 "#;
         let task: Task = serde_yaml::from_str(yaml).unwrap();
-        assert!(task.graph.is_none());
+        assert!(task.steps.is_empty());
+        assert_eq!(task.graph.as_ref().unwrap().version, WORKFLOW_GRAPH_VERSION);
         task.validate().unwrap();
 
         let serialized = serde_yaml::to_string(&task).unwrap();
-        assert!(!serialized.contains("graph:"));
+        assert!(serialized.contains("format_version: 3"));
+        assert!(serialized.contains("workflow_graph:"));
+        assert!(!serialized.contains("\nsteps:"));
+        assert!(!serialized.contains("\ngraph:"));
         let round_trip: Task = serde_yaml::from_str(&serialized).unwrap();
-        assert!(round_trip.graph.is_none());
-        assert_eq!(round_trip.steps.len(), 1);
+        assert!(round_trip.steps.is_empty());
+        assert!(round_trip.is_v3());
+    }
+
+    #[test]
+    fn linear_binding_yaml_round_trips_a_positional_field_reference() {
+        let yaml = r#"
+id: indexed-binding
+name: Indexed binding
+description: Inspect the third visible repository.
+trust: external-allowed
+steps:
+  - id: list-repositories
+    type: github-list-repositories
+  - id: inspect-repository
+    bindings:
+      repo:
+        kind: field
+        field:
+          scope:
+            kind: step
+            step_id: list-repositories
+          segments:
+            - kind: field
+              name: github
+            - kind: field
+              name: repositories
+            - kind: index
+              index: 2
+            - kind: field
+              name: https_url
+    type: git-inspect
+    repo: https://github.com/example/repository.git
+    dest: /tmp/repository
+"#;
+        let task: Task = serde_yaml::from_str(yaml).unwrap();
+        task.validate().unwrap();
+        let graph = task.workflow_graph().unwrap();
+        let crate::automation::graph::GraphNode::Action(action) = &graph.nodes[1] else {
+            panic!("expected imported action node")
+        };
+        let Binding::Field { field } = &action.bindings["repo"] else {
+            panic!("expected field binding")
+        };
+        assert_eq!(
+            field.segments,
+            vec![
+                crate::automation::context::ContextPathSegment::field("github"),
+                crate::automation::context::ContextPathSegment::field("repositories"),
+                crate::automation::context::ContextPathSegment::index(2),
+                crate::automation::context::ContextPathSegment::field("https_url"),
+            ]
+        );
+
+        let serialized = serde_yaml::to_string(&task).unwrap();
+        let round_trip: Task = serde_yaml::from_str(&serialized).unwrap();
+        let crate::automation::graph::GraphNode::Action(round_trip_action) =
+            &round_trip.workflow_graph().unwrap().nodes[1]
+        else {
+            panic!("expected round-trip action node")
+        };
+        assert_eq!(round_trip_action.bindings, action.bindings);
+        round_trip.validate().unwrap();
+    }
+
+    #[test]
+    fn linear_foreach_validates_an_immediate_loop_item_consumer() {
+        let mut list = package_registry_step();
+        list.id = "repositories".into();
+        list.action = Action::GithubListRepositories;
+
+        let mut loop_step = package_registry_step();
+        loop_step.id = "repositories-loop".into();
+        loop_step.action = Action::ForEach {
+            source_step: "repositories".into(),
+            array_path: "github.repositories".into(),
+            item: "repository".into(),
+            fields: vec!["https_url".into()],
+        };
+
+        let mut inspect = package_registry_step();
+        inspect.id = "inspect".into();
+        inspect.action = Action::GitInspect {
+            repo: "https://github.com/example/repository.git".into(),
+            dest: "/tmp/repository".into(),
+        };
+        inspect.bindings.insert(
+            "repo".into(),
+            Binding::field(
+                crate::automation::context::FieldRef::loop_item("repositories-loop")
+                    .field("https_url"),
+            ),
+        );
+
+        let task = Task {
+            id: "foreach-item-consumer".into(),
+            name: "For each item consumer".into(),
+            description: "Consume one repository inside the loop body.".into(),
+            platform: crate::rules::Platform::Any,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            steps: vec![list, loop_step, inspect],
+            graph: None,
+        };
+
+        task.validate().unwrap();
+    }
+
+    #[test]
+    fn linear_binding_rejects_a_future_context_source() {
+        let mut inspect = package_registry_step();
+        inspect.id = "inspect".into();
+        inspect.action = Action::GitInspect {
+            repo: "https://github.com/example/repository.git".into(),
+            dest: "/tmp/repository".into(),
+        };
+        inspect.bindings.insert(
+            "repo".into(),
+            Binding::field(
+                crate::automation::context::FieldRef::step("list")
+                    .field("github")
+                    .field("repositories")
+                    .index(2)
+                    .field("https_url"),
+            ),
+        );
+        let mut list = inspect.clone();
+        list.id = "list".into();
+        list.bindings.clear();
+        list.action = Action::GithubListRepositories;
+        let task = Task {
+            id: "future-source".into(),
+            name: "Future source".into(),
+            description: "Reject a non-dominating source.".into(),
+            platform: crate::rules::Platform::Any,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            steps: vec![inspect, list],
+            graph: None,
+        };
+
+        let error = task.validate().unwrap_err();
+        assert!(error.contains("does not dominate"), "{error}");
+    }
+
+    #[test]
+    fn linear_binding_rejects_a_semantically_wrong_source_type() {
+        let mut list = package_registry_step();
+        list.id = "list".into();
+        list.action = Action::GithubListRepositories;
+        let mut inspect = list.clone();
+        inspect.id = "inspect".into();
+        inspect.action = Action::GitInspect {
+            repo: "https://github.com/example/repository.git".into(),
+            dest: "/tmp/repository".into(),
+        };
+        inspect.bindings.insert(
+            "repo".into(),
+            Binding::field(
+                crate::automation::context::FieldRef::step("list")
+                    .field("github")
+                    .field("repositories")
+                    .index(2)
+                    .field("name"),
+            ),
+        );
+        let task = Task {
+            id: "wrong-source-type".into(),
+            name: "Wrong source type".into(),
+            description: "Reject a repository name used as a Git URL.".into(),
+            platform: crate::rules::Platform::Any,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            steps: vec![list, inspect],
+            graph: None,
+        };
+
+        let error = task.validate().unwrap_err();
+        assert!(error.contains("expects"), "{error}");
     }
 
     #[test]
@@ -1848,6 +2359,7 @@ max_unpack_bytes: 1024
         let step = Step {
             id: "repositories".into(),
             name: String::new(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -1856,7 +2368,7 @@ max_unpack_bytes: 1024
             require: None,
             action: Action::GithubListRepositories,
         };
-        let graph = WorkflowGraph::from_linear_v1(std::slice::from_ref(&step)).unwrap();
+        let graph = LegacyTaskImporter::import_steps(std::slice::from_ref(&step)).unwrap();
         let mut task = Task {
             id: "exclusive".into(),
             name: "Exclusive".into(),

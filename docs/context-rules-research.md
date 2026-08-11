@@ -362,7 +362,7 @@ Binding target — JSON Pointer/structural input path consumer block. Прове
 - secret taint разрешён target field;
 - template состоит только из bounded scalar parts.
 
-Legacy `{{repository.https_url}}` читается только schema-v1 migration layer и преобразуется в structural parts; новые v2 файлы его не создают.
+Legacy `{{repository.https_url}}` читается только import layer и преобразуется в structural parts; канонические v3-файлы его не создают.
 
 ### 6.3. Closed AST с CEL-like semantics
 
@@ -393,13 +393,20 @@ quantifier(any/all/none, collection, local, predicate)
 
 Текстовый CEL-like editor может появиться позднее, но сериализуемым source of truth остаётся AST.
 
-### 6.4. Исполняемый Graph IR и dominance
+### 6.4. Канонический WorkflowGraph v3 и dominance
 
-Schema v2 хранит layout-free graph отдельно от canvas:
+Новый task имеет ровно одну исполняемую форму. Его внешний контракт:
 
 ```text
-WorkflowGraph { version, entries, exits, nodes, edges }
+TaskV3 { format_version: 3, metadata..., workflow_graph }
+WorkflowGraph { version: 3, entries, exits, nodes, edges }
+```
 
+Graph остаётся layout-free: позиции блоков принадлежат project/canvas metadata, но не
+`Task` и не участвуют в исполнении. Canvas редактирует `WorkflowGraph.nodes`, вложенные
+graphs и `WorkflowGraph.edges` напрямую.
+
+```text
 GraphNode = Action | ForEach | If | Switch | Join
 ```
 
@@ -434,21 +441,24 @@ UI context picker должен получать уже отфильтрован�
 - deterministic reports;
 - guarantees для non-idempotent actions.
 
-### 6.6. Safe migration v1 → v2
+### 6.6. Safe import legacy → v3
 
 Обязательные правила совместимости:
 
-1. v1 `Task.steps` продолжает читаться и выполняться старым flat runner;
-2. при явном upgrade обычные steps превращаются в Action nodes и связываются линейными success edges **по declaration order**;
-3. `ComposerCanvas.parents` остаётся layout metadata и никогда автоматически не становится execution edge;
-4. v1 `ForEach + ForEachGitCloneIfMissing` преобразуется в generic nested body только при доказуемо безопасной непосредственной паре; иначе migration возвращает diagnostic;
-5. graph и `scenarios` нельзя смешивать, пока не реализован graph-aware template composition с prefix rewrite всех IDs/refs/edges;
-6. schema v2 записывается только после успешной graph validation;
-7. original v1 semantics и migration warnings доступны пользователю до сохранения.
+1. `Task.steps` и `Task.scenarios` принимаются только import boundary; runtime и редактор получают уже нормализованный graph-only task;
+2. обычные legacy steps превращаются в Action nodes и связываются линейными success edges **по declaration order**;
+3. legacy `ForEach + ForEachGitCloneIfMissing` преобразуется в generic nested body только при доказуемо безопасной непосредственной паре; иначе import возвращает diagnostic;
+4. legacy reusable `scenarios` разворачивают только legacy step-children в declaration order, переписывают их ID и structural refs, затем импортируют результат в один v3 graph; вложенный graph-child пока отклоняется явно, потому что безопасная graph-aware composition ещё не определена;
+5. явные graph v2 рекурсивно мигрируют в v3; неизвестные старые и будущие версии отклоняются;
+6. `ComposerCanvas.parents` читается только как устаревшее view metadata и никогда не становится execution edge;
+7. сериализация после успешной validation всегда выдаёт только `format_version: 3` и `workflow_graph`; `steps`, `scenarios` и alias `graph` обратно не записываются;
+8. исполнитель один: `run_task` канонизирует вход на import boundary и передаёт v3 непосредственно GraphExecutor.
 
-Причина пункта 3 принципиальна: текущий canvas допускает несколько визуальных children у `start`, но runtime всё равно исполняет flat steps последовательно. Превращение `parents` в runtime graph без подтверждения изменит эффекты существующего сценария.
+Это разделяет совместимость чтения и авторинг: старый YAML остаётся открываемым, но после
+нормализации не создаёт второй runtime model и не может незаметно вернуть editor к плоскому
+списку.
 
-### 6.7. Минимальные limits v2
+### 6.7. Минимальные limits v3
 
 Значения должны быть централизованы и попадать в diagnostics; минимальный набор:
 
@@ -465,36 +475,37 @@ UI context picker должен получать уже отфильтрован�
 
 ## 7. Что реально реализовано в текущей ветке
 
-Срез сделан по незакоммиченному worktree ветки `codex/context-rules-v2` на 2026-08-11. Это moving target; раздел описывает только найденный код и не означает, что вся schema v2 уже доступна пользователю.
+Срез сделан по worktree ветки `codex/input-context-mapping` на 2026-08-11.
 
-### Реализованные contracts и static/runtime primitives
+### Реализованные contracts, runtime и editor
 
 - [`src/automation/context.rs`](../src/automation/context.rs): versioned `ContextType`, `ObjectSchema`, required/nullable, semantic formats, sensitivity, structural `FieldRef`, `Binding`, template parts, provenance и `ContextStore` с schema/value lookup.
 - [`src/automation/block.rs`](../src/automation/block.rs): стабильный `ActionKind` и единый `BlockDefinition` registry для текущих actions с input/output schemas, read-only и secret-capability metadata.
 - [`src/automation/binding.rs`](../src/automation/binding.rs): bounded resolver/materializer bindings, JSON Pointer targets, assignability/format checks, provenance aggregation, secret-flow rejection и limits.
 - [`src/automation/expression.rs`](../src/automation/expression.rs): закрытый `ExpressionV1`, отдельный checker/evaluator, optional отдельно от nullable, missing/null/unknown diagnostics, bounded regex/quantifiers и отсутствие ambient capabilities.
-- [`src/automation/task.rs`](../src/automation/task.rs): `StepCondition::Expression` с policy `on_null/on_missing/on_unknown`; `Task.graph: Option<WorkflowGraph>` и mutual-exclusion validation для `steps/scenarios/graph`.
-- [`src/automation/graph.rs`](../src/automation/graph.rs): versioned `WorkflowGraph`, Action/ForEach/If/Switch/Join, nested scopes, typed edges/ports, bounded cycle/reachability/port checks, dominance-aware schema validation, static rule checking и conservative `from_linear_v1` migration.
-- [`src/automation/runner.rs`](../src/automation/runner.rs): прежний linear executor сохранён отдельно; graph executor детерминированно исполняет bindings, Action, If, Switch, ForEach и Join, изолирует nested scopes, ограничивает expansion, делает глобальный policy preflight и fail-closed анализ dynamic mutation bindings, а также двухфазный loop preflight до первой мутации.
-- [`src/bin/ppduster-ui.rs`](../src/bin/ppduster-ui.rs): schema registry используется для context picker и совместимых inputs; visual `when/require` editor поддерживает типизированные поля, `И/ИЛИ/НЕ`, сравнения, null/missing/unknown policies, empty и bounded regex.
-- [`src/automation/loader.rs`](../src/automation/loader.rs): direct graph task сохраняется, а попытка вложить graph task в legacy scenario composition отклоняется вместо неявного flattening.
-- [`tasks/github-account-clone-v2.yaml`](../tasks/github-account-clone-v2.yaml): исполняемый пример GitHub list → typed ForEach → guarded clone-if-missing с structural bindings.
+- [`src/automation/task.rs`](../src/automation/task.rs): canonical `TASK_FORMAT_VERSION = 3`; custom serde принимает legacy `steps` и alias `graph`, но хранит graph-only task и сериализует только `format_version: 3` + `workflow_graph`. `StepCondition::Expression` сохраняет явные `on_null/on_missing/on_unknown` policies.
+- [`src/automation/graph.rs`](../src/automation/graph.rs): `WORKFLOW_GRAPH_VERSION = 3`, Action/ForEach/If/Switch/Join, nested lexical scopes, typed edges/ports, bounded cycle/reachability/port checks, dominance-aware schema validation, static rule checking, conservative legacy-step importer и recursive v2 → v3 migration.
+- [`src/automation/runner.rs`](../src/automation/runner.rs): `run_task` имеет один executable path — canonical v3 GraphExecutor. Он детерминированно исполняет bindings, Action, If, Switch, ForEach и Join, изолирует nested scopes, ограничивает expansion, делает глобальный policy preflight и fail-closed анализ dynamic mutation bindings, а также двухфазный loop preflight до первой мутации. Общая atomic-action функция не является вторым task executor.
+- [`src/bin/ppduster-ui.rs`](../src/bin/ppduster-ui.rs): новый project начинается с пустого v3 graph; canvas добавляет/удаляет Action и control nodes во root и nested scopes, рисует topology из `entries/edges` и хранит отдельно только positions. Inspector получает action inputs/outputs из `BlockDefinition`, рекурсивно строит typed context choices и фильтрует producer-ы по lexical scope и dominance. Visual `when/require` editor поддерживает `И/ИЛИ/НЕ`, сравнения, null/missing/unknown policies, empty и bounded regex.
+- [`src/automation/loader.rs`](../src/automation/loader.rs): legacy steps/templates удерживаются только внутри import path, а публичный `resolve` возвращает graph-only v3. Вложенный graph task в legacy template отклоняется вместо неявного flattening.
+- [`tests/workflow_graph_v3.rs`](../tests/workflow_graph_v3.rs): public-boundary tests проверяют import legacy steps, recursive v2 migration, v3-only serialization, graph roundtrip, direct graph execution и отказ на future versions.
 
-### Ещё не реализовано или не подключено end-to-end
+### Текущие ограничения
 
-- Canvas по-прежнему редактирует плоский `Vec<Step>` и `ComposerCanvas.parents`; он не сериализует и не рисует `WorkflowGraph.edges` как source of execution truth.
-- Context picker использует schema registry, но ещё не получает dominance-filtered scope от graph compiler.
-- Graph executor намеренно однопоточный; `concurrency > 1` у ForEach пока отклоняется до появления collision analysis, cancellation и координации credential prompts.
-- Graph-aware composition reusable scenarios, explicit branch exports/phi и collected typed outputs ForEach ещё не завершены.
+- GraphExecutor пока выполняет ForEach последовательно даже при `concurrency > 1`; значение сохраняется в contract и report, но parallel scheduler, cancellation и destination-collision coordination ещё не реализованы.
+- Legacy `scenarios` умеют составлять только legacy step-children. Graph-aware reusable composition, explicit branch exports/phi и collected typed outputs ForEach пока отсутствуют.
+- Nested graph stores изолированы; root report публикует только outputs root actions. Вывод данных из branch/loop должен быть оформлен будущим явным export/collect contract.
+- Control-node inspector (`ForEach`, `If`, `Switch`, `Join`) использует их собственные graph schemas и компактные специализированные controls; единый `BlockDefinition` registry сейчас покрывает atomic actions. Unsupported advanced expression AST по-прежнему сохраняется read-only.
+- Inline context остаётся in-memory JSON с установленными структурными/размерными limits; универсальный внешний artifact/reference transport для больших outputs ещё не завершён.
 
-Итого: **typed context, rules, static graph compiler и однопоточный executable graph работают end-to-end через YAML/CLI; следующий интеграционный слой — graph-native canvas и явные branch/loop exports**. Legacy tasks по-прежнему идут через прежний executor, а visual `parents` остаётся только layout metadata.
+Итого: **v3 graph теперь единственный авторский, сериализуемый и исполняемый task model; legacy формы существуют только на входе**. Typed context, rules, graph compiler, bounded executor и graph-native canvas работают через один structural contract. Следующие отдельные задачи — explicit exports/collect, graph-aware reusable composition и безопасный parallel scheduler.
 
 ## 8. Проверки и acceptance criteria
 
-Перед объединением schema v2 необходимы как минимум:
+Регрессии v3 должны подтверждать как минимум:
 
-1. legacy YAML parse/roundtrip и runner equivalence;
-2. доказательство, что visual `parents` не меняет v1 execution order;
+1. legacy YAML import и v3-only serialization/roundtrip;
+2. доказательство, что canvas positions и legacy `parents` не меняют execution topology;
 3. schema registry completeness для каждого `ActionKind` и runtime output validation;
 4. binding type/format/secret tests, включая nullable и missing source;
 5. AST typecheck/evaluation tests для short-circuit, missing/null/unknown, regex и limits;
@@ -503,7 +514,7 @@ UI context picker должен получать уже отфильтрован�
 8. If/Switch only-selected-branch и Join без deadlock на skipped paths;
 9. все item-derived mutating actions проходят preflight до первой мутации, когда их bindings разрешимы на входе цикла;
 10. secret taint не попадает в plan/report/log/error;
-11. v1 special foreach migration либо сохраняет порядок эффектов, либо отказывается с diagnostic;
+11. legacy special foreach import либо сохраняет порядок эффектов, либо отказывается с diagnostic;
 12. UI rename/delete переписывает или блокирует все structural refs и edges;
 13. report IDs включают stable node ID и iteration/scope path;
 14. большие outputs переходят в artifact/reference, а не раздувают in-memory context.

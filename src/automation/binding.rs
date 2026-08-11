@@ -54,10 +54,19 @@ pub enum BindingError {
     PathLimit { target: String, limit: usize },
     #[error("action {action} has no declared input field at {target}")]
     UnknownInput { action: String, target: String },
+    #[error(
+        "binding target {target:?} indexes an action input array; bind the whole array instead"
+    )]
+    IndexedInputTarget { target: String },
     #[error("context reference {reference:?} has no declared schema")]
     MissingSourceSchema { reference: FieldRef },
     #[error("context reference {reference:?} cannot be resolved: {message}")]
     MissingSource {
+        reference: FieldRef,
+        message: String,
+    },
+    #[error("context reference {reference:?} violates its declared contract: {message}")]
+    InvalidSourceValue {
         reference: FieldRef,
         message: String,
     },
@@ -115,7 +124,7 @@ pub fn resolve_binding(
                 sensitivity: Sensitivity::Public,
             }
         }
-        Binding::Interpolated { parts } => resolve_interpolated(parts, context, limits)?,
+        Binding::Interpolated { parts } => resolve_interpolated(parts, expected, context, limits)?,
     };
 
     // Enforce information-flow policy before any value validation. Semantic
@@ -148,6 +157,27 @@ pub fn resolve_binding(
     Ok(resolved)
 }
 
+/// Validate a literal editor value against one declared action-input field.
+///
+/// This is the side-effect-free validation entry point used by schema-driven
+/// editors before they persist a `Binding::Literal`. It applies the same
+/// structural, nullable, and semantic-format rules as runtime materialization.
+pub fn validate_literal_binding(
+    value: &Value,
+    expected: &super::context::FieldSchema,
+) -> Result<(), String> {
+    validate_value_for_schema(
+        value,
+        &ResolvedSchemaOwned {
+            value_type: expected.value_type.clone(),
+            required: true,
+            nullable: expected.nullable,
+            sensitivity: expected.sensitivity,
+            allowed_values: expected.allowed_values.clone(),
+        },
+    )
+}
+
 fn resolve_field(
     field: &FieldRef,
     expected: &ResolvedSchemaOwned,
@@ -173,6 +203,7 @@ fn resolve_field(
             reference: field.clone(),
         });
     }
+    validate_source_value(field, value.value, &source_schema, value.sensitivity)?;
     if !expected
         .value_type
         .is_assignable_from(&source_schema.value_type)
@@ -192,6 +223,7 @@ fn resolve_field(
 
 fn resolve_interpolated(
     parts: &[TemplatePart],
+    expected: &ResolvedSchemaOwned,
     context: &ContextStore,
     limits: BindingLimits,
 ) -> Result<ResolvedBinding, BindingError> {
@@ -208,6 +240,11 @@ fn resolve_interpolated(
         match part {
             TemplatePart::Literal { value } => append_bounded(&mut rendered, value, limits)?,
             TemplatePart::Field { field } => {
+                let source_schema = context.resolve_type_owned(field).ok_or_else(|| {
+                    BindingError::MissingSourceSchema {
+                        reference: field.clone(),
+                    }
+                })?;
                 let resolved =
                     context
                         .resolve(field)
@@ -215,6 +252,12 @@ fn resolve_interpolated(
                             reference: field.clone(),
                             message: error.to_string(),
                         })?;
+                if resolved.sensitivity.is_secret() && expected.sensitivity != Sensitivity::Secret {
+                    return Err(BindingError::SecretFlow {
+                        reference: field.clone(),
+                    });
+                }
+                validate_source_value(field, resolved.value, &source_schema, resolved.sensitivity)?;
                 let scalar = match resolved.value {
                     Value::String(value) => value.clone(),
                     Value::Bool(value) => value.to_string(),
@@ -235,6 +278,25 @@ fn resolve_interpolated(
         value: Value::String(rendered),
         sources,
         sensitivity,
+    })
+}
+
+fn validate_source_value(
+    reference: &FieldRef,
+    value: &Value,
+    schema: &ResolvedSchemaOwned,
+    sensitivity: Sensitivity,
+) -> Result<(), BindingError> {
+    validate_value_for_schema(value, schema).map_err(|message| {
+        let message = if sensitivity.is_secret() {
+            "secret context value does not satisfy its declared contract".into()
+        } else {
+            message
+        };
+        BindingError::InvalidSourceValue {
+            reference: reference.clone(),
+            message,
+        }
     })
 }
 
@@ -275,24 +337,39 @@ pub fn materialize_step(
     for (target, binding) in bindings {
         let segments = parse_binding_target(target, limits)?;
         let canonical = display_target(&segments);
+        if segments
+            .iter()
+            .any(|segment| matches!(segment, ContextPathSegment::Index { .. }))
+        {
+            return Err(BindingError::IndexedInputTarget { target: canonical });
+        }
         if !seen.insert(canonical.clone()) {
             return Err(BindingError::DuplicateTarget { target: canonical });
         }
         let expected = definition
             .input_schema
-            .resolve_owned(&segments)
+            .resolve_input_target_owned(&segments)
             .ok_or_else(|| BindingError::UnknownInput {
                 action: definition.kind.id().into(),
                 target: canonical.clone(),
             })?;
-        let resolved =
-            resolve_binding(binding, &expected, context, limits).map_err(|error| match error {
-                BindingError::InvalidValue { message, .. } => BindingError::InvalidValue {
-                    target: canonical.clone(),
+        let resolved = match resolve_binding(binding, &expected, context, limits) {
+            Ok(resolved) => resolved,
+            Err(BindingError::MissingSource { .. }) if !expected.required => {
+                // Optional inputs use missing-as-omit semantics. The action's
+                // declared literal/default remains in place, which makes
+                // guarded and partially-populated contexts composable without
+                // conflating missing with null.
+                continue;
+            }
+            Err(BindingError::InvalidValue { message, .. }) => {
+                return Err(BindingError::InvalidValue {
+                    target: canonical,
                     message,
-                },
-                other => other,
-            })?;
+                });
+            }
+            Err(other) => return Err(other),
+        };
         set_value_at_path(&mut serialized, &segments, resolved.value).map_err(|message| {
             BindingError::Patch {
                 target: canonical,
@@ -394,12 +471,22 @@ fn set_value_at_path(
         return Err("target has no path segments".into());
     };
     let mut current = root;
-    for segment in parents {
+    for (position, segment) in parents.iter().enumerate() {
+        let next = parents.get(position + 1).unwrap_or(last);
         current = match segment {
-            ContextPathSegment::Field { name } => current
-                .as_object_mut()
-                .and_then(|object| object.get_mut(name))
-                .ok_or_else(|| format!("missing object field {name:?}"))?,
+            ContextPathSegment::Field { name } => {
+                let object = current
+                    .as_object_mut()
+                    .ok_or_else(|| format!("parent of {name:?} is not an object"))?;
+                let child = object.entry(name.clone()).or_insert(Value::Null);
+                if child.is_null() {
+                    *child = match next {
+                        ContextPathSegment::Field { .. } => Value::Object(Default::default()),
+                        ContextPathSegment::Index { .. } => Value::Array(Vec::new()),
+                    };
+                }
+                child
+            }
             ContextPathSegment::Index { index } => current
                 .as_array_mut()
                 .and_then(|array| array.get_mut(*index))
@@ -431,6 +518,7 @@ fn validate_value_for_schema(value: &Value, expected: &ResolvedSchemaOwned) -> R
         nullable: expected.nullable,
         description: None,
         sensitivity: expected.sensitivity,
+        allowed_values: expected.allowed_values.clone(),
     };
     let wrapper = ObjectSchema::new("ppduster.binding.value@1").with_field("value", field);
     wrapper
@@ -552,10 +640,13 @@ fn valid_git_ref(value: &str) -> bool {
 
 fn valid_repository_name(value: &str) -> bool {
     !value.is_empty()
-        && value != "."
-        && value != ".."
-        && value.chars().all(|character| {
-            character.is_alphanumeric() || matches!(character, '-' | '_' | '.' | '/')
+        && value.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment.chars().all(|character| {
+                    character.is_alphanumeric() || matches!(character, '-' | '_' | '.')
+                })
         })
 }
 
@@ -569,20 +660,22 @@ fn valid_identifier(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automation::block::{block_definition, ActionKind};
-    use crate::automation::context::{ContextProvenance, ContextScope, ContextValue};
+    use crate::automation::block::{block_definition, default_step, ActionKind};
+    use crate::automation::context::{
+        ContextProvenance, ContextScope, ContextValue, FieldSchema, ObjectSchema,
+    };
     use crate::automation::task::{Action, AuthPolicy, ElevationPolicy};
 
-    fn github_context() -> ContextStore {
+    fn github_context_with_names(owner: &str, name: &str, full_name: &str) -> ContextStore {
         let schema = block_definition(ActionKind::GithubListRepositories).output_schema;
         let value = serde_json::json!({
             "github": {
                 "account": { "login": "octocat" },
                 "repositories": [{
                     "id": "R_123",
-                    "owner": "acme",
-                    "name": "service",
-                    "full_name": "acme/service",
+                    "owner": owner,
+                    "name": name,
+                    "full_name": full_name,
                     "https_url": "https://github.com/acme/service.git",
                     "ssh_url": "git@github.com:acme/service.git",
                     "default_branch": "main",
@@ -601,10 +694,15 @@ mod tests {
         store
     }
 
+    fn github_context() -> ContextStore {
+        github_context_with_names("acme", "service", "acme/service")
+    }
+
     fn clone_step() -> Step {
         Step {
             id: "clone".into(),
             name: "Clone".into(),
+            bindings: BTreeMap::new(),
             auth: AuthPolicy::None,
             check: None,
             dangerous: false,
@@ -657,6 +755,213 @@ mod tests {
     }
 
     #[test]
+    fn nested_binding_materializes_an_optional_object_from_null() {
+        let step = default_step(ActionKind::InspectPath, "inspect").unwrap();
+        let bindings = BTreeMap::from([(
+            "expect.exists".into(),
+            Binding::literal(serde_json::Value::Bool(false)),
+        )]);
+
+        let materialized = materialize_step(
+            &step,
+            &bindings,
+            &ContextStore::default(),
+            BindingLimits::default(),
+        )
+        .unwrap();
+        let Action::InspectPath(action) = materialized.action else {
+            panic!("expected inspect-path action")
+        };
+        assert_eq!(
+            action.expect.and_then(|expectation| expectation.exists),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn missing_source_omits_an_optional_input_override() {
+        let mut store = ContextStore::default();
+        store.insert(
+            ContextScope::Step {
+                step_id: "source".into(),
+            },
+            ContextValue::new(serde_json::json!({}), ContextProvenance::step("source"))
+                .with_schema(ObjectSchema::new("optional-source").with_field(
+                    "branch",
+                    FieldSchema::optional(ContextType::string(SemanticFormat::GitRef)),
+                )),
+        );
+        let bindings = BTreeMap::from([(
+            "branch".into(),
+            Binding::field(FieldRef::step("source").field("branch")),
+        )]);
+
+        let materialized =
+            materialize_step(&clone_step(), &bindings, &store, BindingLimits::default()).unwrap();
+        let Action::GitCloneIfMissing { branch, .. } = materialized.action else {
+            panic!("expected clone action")
+        };
+        assert_eq!(branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn missing_source_schema_never_silently_omits_an_optional_override() {
+        let field = FieldRef::scenario().field("branch");
+        let bindings = BTreeMap::from([("branch".into(), Binding::field(field.clone()))]);
+
+        let error = materialize_step(
+            &clone_step(),
+            &bindings,
+            &ContextStore::default(),
+            BindingLimits::default(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BindingError::MissingSourceSchema { reference } if reference == field
+        ));
+    }
+
+    #[test]
+    fn indexed_action_input_targets_are_rejected_before_patching() {
+        let step = default_step(ActionKind::RunCommand, "run").unwrap();
+        let bindings = BTreeMap::from([("args.0".into(), Binding::literal("--version"))]);
+
+        let error = materialize_step(
+            &step,
+            &bindings,
+            &ContextStore::default(),
+            BindingLimits::default(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BindingError::IndexedInputTarget { ref target } if target == "/args/0"
+        ));
+    }
+
+    #[test]
+    fn literal_editor_validation_uses_runtime_semantic_contracts() {
+        let inputs = block_definition(ActionKind::GitCloneIfMissing).input_schema;
+        let repo = inputs.field("repo").unwrap();
+        assert!(validate_literal_binding(&serde_json::json!("not a git url"), repo).is_err());
+        assert!(validate_literal_binding(
+            &serde_json::json!("https://github.com/acme/service.git"),
+            repo,
+        )
+        .is_ok());
+
+        let branch = inputs.field("branch").unwrap();
+        assert!(validate_literal_binding(&serde_json::Value::Null, branch).is_ok());
+    }
+
+    #[test]
+    fn repository_name_requires_safe_non_empty_path_segments() {
+        for valid in [
+            "acme",
+            "service-api_2",
+            "acme/service.v2",
+            "org/team/repository",
+            "организация/репозиторий",
+        ] {
+            assert!(
+                valid_repository_name(valid),
+                "expected {valid:?} to be a valid repository name"
+            );
+        }
+
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "/repository",
+            "repository/",
+            "owner//repository",
+            "owner/./repository",
+            "owner/../repository",
+            "owner/repository/..",
+        ] {
+            assert!(
+                !valid_repository_name(invalid),
+                "expected {invalid:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn interpolated_binding_accepts_normal_repository_source_fields() {
+        let store =
+            github_context_with_names("организация", "сервис.v2", "организация/команда/сервис.v2");
+        let repository = FieldRef::step("list")
+            .field("github")
+            .field("repositories")
+            .index(0);
+        let expected = ResolvedSchemaOwned {
+            value_type: ContextType::string(SemanticFormat::DirectoryPath),
+            required: true,
+            nullable: false,
+            sensitivity: Sensitivity::Public,
+            allowed_values: Vec::new(),
+        };
+        let binding = Binding::interpolated([
+            TemplatePart::literal("/tmp/"),
+            TemplatePart::field(repository.clone().field("owner")),
+            TemplatePart::literal("/"),
+            TemplatePart::field(repository.clone().field("name")),
+            TemplatePart::literal("/"),
+            TemplatePart::field(repository.field("full_name")),
+        ]);
+
+        let resolved = resolve_binding(&binding, &expected, &store, BindingLimits::default())
+            .expect("normal owner, name, and full_name must remain usable");
+        assert_eq!(
+            resolved.value,
+            Value::String("/tmp/организация/сервис.v2/организация/команда/сервис.v2".into())
+        );
+    }
+
+    #[test]
+    fn interpolated_binding_rejects_traversal_in_repository_source_fields() {
+        let cases = [
+            ("owner", "..", "service", "acme/service"),
+            ("name", "acme", "../service", "acme/service"),
+            ("full_name", "acme", "service", "acme/../service"),
+        ];
+        let expected = ResolvedSchemaOwned {
+            value_type: ContextType::string(SemanticFormat::DirectoryPath),
+            required: true,
+            nullable: false,
+            sensitivity: Sensitivity::Public,
+            allowed_values: Vec::new(),
+        };
+
+        for (field_name, owner, name, full_name) in cases {
+            let store = github_context_with_names(owner, name, full_name);
+            let field = FieldRef::step("list")
+                .field("github")
+                .field("repositories")
+                .index(0)
+                .field(field_name);
+            let binding = Binding::interpolated([
+                TemplatePart::literal("/tmp/"),
+                TemplatePart::field(field.clone()),
+            ]);
+
+            let error = resolve_binding(&binding, &expected, &store, BindingLimits::default())
+                .expect_err("traversal-like repository fields must fail before interpolation");
+            assert!(
+                matches!(
+                    error,
+                    BindingError::InvalidSourceValue { ref reference, .. } if reference == &field
+                ),
+                "unexpected error for {field_name}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn semantic_format_prevents_repository_name_from_becoming_git_url() {
         let store = github_context();
         let bindings = BTreeMap::from([(
@@ -681,6 +986,7 @@ mod tests {
             required: true,
             nullable: false,
             sensitivity: Sensitivity::Public,
+            allowed_values: Vec::new(),
         };
         let error = resolve_binding(
             &Binding::template("{{repository.url}}"),
@@ -723,6 +1029,7 @@ mod tests {
             required: true,
             nullable: false,
             sensitivity: Sensitivity::Public,
+            allowed_values: Vec::new(),
         };
         let error = resolve_binding(
             &binding,
@@ -745,9 +1052,9 @@ mod tests {
             BindingLimits::default(),
         )
         .unwrap_err();
-        assert!(matches!(error, BindingError::InvalidValue { .. }));
+        assert!(matches!(error, BindingError::InvalidSourceValue { .. }));
         assert!(!error.to_string().contains(secret));
-        assert!(error.to_string().contains("secret binding value"));
+        assert!(error.to_string().contains("secret context value"));
     }
 
     #[test]
@@ -777,6 +1084,7 @@ mod tests {
             required: true,
             nullable: false,
             sensitivity: Sensitivity::Public,
+            allowed_values: Vec::new(),
         };
         for reference in [
             FieldRef::step("nested"),

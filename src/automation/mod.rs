@@ -10,11 +10,12 @@ pub mod runner;
 pub mod task;
 
 pub use binding::{
-    materialize_step, parse_binding_target, resolve_binding, BindingError, BindingLimits,
-    ResolvedBinding,
+    materialize_step, parse_binding_target, resolve_binding, validate_literal_binding,
+    BindingError, BindingLimits, ResolvedBinding,
 };
 pub use block::{
-    block_definition, block_definitions, definition_for_action, ActionKind, BlockDefinition,
+    block_definition, block_definitions, block_policy_capabilities, default_action, default_step,
+    definition_for_action, ActionKind, BlockDefinition, BlockPolicyCapabilities, PolicyRequirement,
 };
 pub use context::{
     AdditionalProperties, Binding, ContextLookupError, ContextOrigin, ContextPathSegment,
@@ -35,7 +36,7 @@ pub use graph::{
     ActionNode, EdgeEndpoint, EdgePort, ForEachNode, GraphEdge, GraphExit, GraphNode,
     GraphValidationError, GraphValidationErrorKind, IfNode, JoinMode, JoinNode,
     LinearMigrationError, LoopFailurePolicy, SwitchCase, SwitchNode, WorkflowGraph,
-    WORKFLOW_GRAPH_VERSION,
+    WorkflowGraphMigrationError, MIN_MIGRATABLE_WORKFLOW_GRAPH_VERSION, WORKFLOW_GRAPH_VERSION,
 };
 pub use loader::{PackTrust, TaskPack, TaskSource};
 pub use runner::{
@@ -50,6 +51,6 @@ pub use task::{
     CreateDirectoryAction, ElevationPolicy, EncryptedSecretsSpec, IndeterminatePolicy,
     InspectPathAction, LicenseMethod, LicenseProvider, NpmRegistryFileSpec, NugetRegistryFileSpec,
     PathExpectation, PathKind, ReleaseChannel, RemovePathAction, RuleOutcomePolicy,
-    ScriptInterpreter, ShellMode, Step, StepCondition, Task, TaskFile, TrustRequirement,
-    WriteConflictPolicy, WriteFileAction,
+    ScriptInterpreter, ShellMode, Step, StepCondition, Task, TaskFile, TaskMigrationError,
+    TrustRequirement, WriteConflictPolicy, WriteFileAction, TASK_FORMAT_VERSION,
 };

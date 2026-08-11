@@ -45,8 +45,8 @@ Run from the repo root so `./rules` is found, or pass `--rules-dir /path/to/rule
 ## Scenario Flow UI
 
 `ppduster-ui` is a native `egui` application inspired by Peregon's visual pipeline
-canvas. It presents every setup scenario as a connected route of typed steps, with a
-project group navigator, step inspector, release-channel controls, permission
+canvas. It presents every setup scenario as a graph of typed nodes, with a
+project group navigator, node inspector, release-channel controls, permission
 switches, dry-run planning, and explicit confirmation before supported scenarios are
 applied. **New group** opens a visual project constructor. A project file owns a tree
 of arbitrarily nested groups, and every group can contain scenarios or more groups.
@@ -59,13 +59,20 @@ picker opened by a plus button on the canvas and edited on the right. Every scen
 starts with a permanent Start block. Its plus button, and the plus button on every following
 block, opens a block picker that displays the planned typed
 output contract for downstream graph bindings. Blocks can be dragged freely around the
-canvas. Adding from the same plus button more than once creates multiple outgoing branches;
-their connections and canvas positions are saved with the project. Legacy ordered tasks remain
-supported. The v2 automation format has an explicit, layout-free execution graph; canvas
-coordinates and visual `parents` metadata are never guessed to be runtime control flow. The
-constructor saves the whole project as portable YAML. Loading a legacy standalone task
-YAML wraps it in an imported project group, so existing files remain usable. Loaded and
-saved files retain external-pack trust and never weaken normal permission gates.
+canvas. Adding from the same plus button more than once creates multiple outgoing branches.
+Connections are written directly to `WorkflowGraph.edges`; canvas coordinates are separate
+view metadata and never become runtime control flow. New scenarios use one canonical wire
+format: task `format_version: 3` with a layout-free `workflow_graph` version 3. The constructor
+never authors `Task.steps`. Legacy `steps`, reusable `scenarios`, and explicit v2 graphs are
+accepted only at the import boundary, normalized to v3, and saved back only as v3. Loading a
+legacy standalone task YAML wraps the normalized task in an imported project group, so existing
+files remain usable. Loaded and saved files retain external-pack trust and never weaken normal
+permission gates.
+
+The current graph executor is deliberately deterministic: `ForEach.concurrency` is recorded,
+but iterations still run sequentially. Legacy templates can compose legacy step-based children;
+including a graph task from a legacy template is rejected until graph-aware composition has an
+explicit ID, edge, scope, and export contract.
 
 For the bundled GitHub repository scenario, the inspector can load repositories visible
 to the current GitHub CLI account and select one or many public repositories. Each
@@ -79,16 +86,27 @@ block. Its typed output contains `github.account.login` and `github.repositories
 Each repository exposes `id`, `owner`, `name`, `full_name`, `https_url`, `ssh_url`,
 `default_branch`, `private`, and `archived`.
 
+To pass one concrete repository to a later **Check Git repository** block, select that
+block and use **Input context** for `Repository URL`: choose **From context**, select
+the earlier `github.repositories[]` output, enter the one-based element number, and
+choose `https_url` or `ssh_url`. For example, element `3` is stored structurally as
+`github.repositories[2].https_url`; the UI shows `3`, while the runtime uses the
+zero-based index `2`. If the array contains fewer elements, the binding fails before
+the consumer action runs. Use **For each** instead when every repository should be
+processed.
+
 Every automation block publishes a versioned structural output schema and declares a typed
-input schema. The context picker walks those schemas recursively, including arrays and loop-item
-fields, and filters choices by structural type and semantic format (`git-url`, `git-ref`, path,
-repository name, and others). Bindings keep stable field references instead of interpolating
-untrusted source text. Conditions use a bounded, side-effect-free expression tree with explicit
-handling for `null`, missing values, unavailable values, and evaluation errors. The v2 graph IR
-adds nested `for-each`, `if`, `switch`, joins, typed ports, dominance checks, and safe migration
-from legacy linear steps without deriving execution edges from canvas layout. The condition editor
-can compose nested `AND`/`OR`/`NOT` groups, typed comparisons, emptiness checks, and bounded regular
-expressions while preserving unsupported advanced AST nodes read-only.
+input schema. One schema-driven inspector walks those definitions recursively, renders the
+declared inputs, and offers only context fields compatible by structural type, nullability,
+sensitivity, and semantic format (`git-url`, `git-ref`, path, repository name, and others).
+Arrays and lexical loop-item fields are represented structurally. Bindings therefore keep a
+stable producer, scope, and field path instead of interpolating untrusted source text. Conditions
+use a bounded, side-effect-free expression tree with explicit handling for `null`, missing values,
+unavailable values, and evaluation errors. WorkflowGraph v3 provides nested `for-each`, `if`,
+`switch`, joins, typed ports, dominance checks, and safe import of legacy linear steps without
+deriving execution edges from canvas layout. The condition editor can compose nested
+`AND`/`OR`/`NOT` groups, typed comparisons, emptiness checks, and bounded regular expressions while
+preserving unsupported advanced AST nodes read-only.
 The design choices and the stratified review of 100 relevant repositories are documented in
 [`docs/context-rules-research.md`](docs/context-rules-research.md).
 
@@ -259,7 +277,36 @@ recommended for a useful overview of changes, prerequisites, permissions, and wh
 the scenario intentionally leaves alone. The UI and `setup run` combine that overview
 with a generated, action-by-action explanation of what will happen.
 
-A reusable template groups existing scenarios without copying their steps:
+New task files have one executable representation. This is a complete minimal v3 task:
+
+```yaml
+task:
+  format_version: 3
+  id: inspect-temporary-directory
+  name: Inspect the temporary directory
+  description: Read path metadata without changing the filesystem.
+  platform: any
+  trust: bundled-only
+  workflow_graph:
+    version: 3
+    entries: [inspect-temp]
+    nodes:
+      - kind: action
+        config:
+          step:
+            id: inspect-temp
+            name: Inspect /tmp
+            type: inspect-path
+            path: /tmp
+    edges: []
+```
+
+`workflow_graph.nodes` and `workflow_graph.edges` are the execution source of truth. The
+runtime validates and executes this graph directly; there is no second flat executor and no
+lowering based on canvas position. Action nodes embed the same typed action fields documented
+in the shorter block fragments below.
+
+A legacy reusable template can group existing scenarios without copying their steps:
 
 ```yaml
 task:
@@ -276,14 +323,15 @@ task:
     - macos-top-05-toolchains
 ```
 
-Templates may include other templates. References are expanded in the listed order
+Legacy templates may include other templates. References are expanded in the listed order
 before execution so all shell, elevation, authentication, and destination policies are
 checked before the first change. Loading fails early on missing references, cycles,
 duplicate children, platform mismatches, excessive expansion, or a reference from a
-more-trusted pack to a less-trusted pack. A definition contains either `steps` or
-`scenarios`, never both.
+more-trusted pack to a less-trusted pack. `scenarios` and flat `steps` are import-only:
+successful loading returns a graph-only v3 task, and serialization never writes either field.
 
-A repository synchronization is expressed as atomic, independently reported steps:
+A repository synchronization still consists of atomic, independently reported action nodes.
+For brevity, the following shows only their embedded `step` payloads:
 
 ```yaml
 - id: inspect-repository
