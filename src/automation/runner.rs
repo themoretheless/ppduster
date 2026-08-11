@@ -355,6 +355,7 @@ pub struct GithubAccountOutput {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GithubRepositoryOutput {
+    /// Opaque GitHub GraphQL node ID; it is not a workflow identifier.
     pub id: String,
     pub owner: String,
     pub name: String,
@@ -13716,6 +13717,107 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
                 .unwrap(),
             Some("main".into())
         );
+    }
+
+    #[test]
+    fn github_base64_node_id_validates_and_materializes_through_foreach_binding() {
+        const NODE_ID: &str = "MDEwOlJlcG9zaXRvcnkxMjM0NTY=";
+
+        let producer = plain_step("repositories", Action::GithubListRepositories);
+        let task = graph_task(one_action_graph(producer.clone(), BTreeMap::new()));
+        let reports = vec![StepReport {
+            step_id: producer.id.clone(),
+            step_name: "Repositories".into(),
+            summary: String::new(),
+            status: StepStatus::Applied,
+            prerequisites: Vec::new(),
+            logs: Vec::new(),
+            output: Some(StepOutput::GithubRepositories(GithubRepositoriesOutput {
+                github: GithubContextOutput {
+                    account: GithubAccountOutput {
+                        login: "octocat".into(),
+                    },
+                    repositories: vec![GithubRepositoryOutput {
+                        id: NODE_ID.into(),
+                        owner: "owner".into(),
+                        name: "repository".into(),
+                        full_name: "owner/repository".into(),
+                        https_url: "https://github.com/owner/repository".into(),
+                        ssh_url: "git@github.com:owner/repository.git".into(),
+                        default_branch: Some("main".into()),
+                        private: false,
+                        archived: false,
+                    }],
+                },
+            })),
+        }];
+
+        let values = context_store_from_reports(&task, &reports).unwrap();
+        let collection_field = FieldRef::step("repositories")
+            .field("github")
+            .field("repositories");
+        let expected_collection = ResolvedSchemaOwned {
+            value_type: ContextType::array(ContextType::Any),
+            required: true,
+            nullable: false,
+            sensitivity: Sensitivity::Public,
+            allowed_values: Vec::new(),
+        };
+        let collection = resolve_binding(
+            &Binding::field(collection_field),
+            &expected_collection,
+            &values,
+            BindingLimits::default(),
+        )
+        .unwrap();
+        let repository = collection.value.as_array().unwrap()[0].clone();
+        let repository_type = definition_for_action(&producer.action)
+            .output_schema
+            .resolve(&[
+                ContextPathSegment::field("github"),
+                ContextPathSegment::field("repositories"),
+                ContextPathSegment::index(0),
+            ])
+            .unwrap()
+            .value_type
+            .clone();
+        let mut iteration_scope = GraphScopeState {
+            values,
+            ..GraphScopeState::default()
+        };
+        insert_loop_value(
+            &mut iteration_scope,
+            "repositories-loop",
+            0,
+            repository,
+            repository_type,
+            collection.sensitivity,
+        );
+        let consumer = plain_step(
+            "consume-id",
+            Action::RunCommand {
+                program: "/usr/bin/true".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        );
+        let consumer_bindings = BTreeMap::from([(
+            "/env/REPOSITORY_ID".into(),
+            Binding::field(FieldRef::loop_item("repositories-loop").field("id")),
+        )]);
+        let materialized = materialize_step(
+            &consumer,
+            &consumer_bindings,
+            &iteration_scope.values,
+            BindingLimits::default(),
+        )
+        .unwrap();
+        let Action::RunCommand { env, .. } = materialized.action else {
+            panic!("expected run-command consumer")
+        };
+        assert_eq!(env.get("REPOSITORY_ID").map(String::as_str), Some(NODE_ID));
     }
 
     #[test]

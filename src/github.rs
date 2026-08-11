@@ -118,6 +118,7 @@ query {
 /// Repository metadata needed by the scenario repository picker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GithubRepository {
+    /// Opaque GitHub GraphQL node ID; it is not a ppduster identifier.
     pub id: String,
     pub name: String,
     pub name_with_owner: String,

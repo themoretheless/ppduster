@@ -34,6 +34,8 @@ pub enum SemanticFormat {
     GitRef,
     RepositoryName,
     Identifier,
+    /// Non-empty, NUL-free identity issued by an external system.
+    OpaqueId,
 }
 
 /// Structural type information shared by the runner, expression checker, and

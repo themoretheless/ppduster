@@ -951,7 +951,9 @@ fn github_repository_type() -> ContextType {
     ContextType::object(schema(
         "ppduster.github.repository@1",
         [
-            ("id", req(identifier())),
+            // GitHub GraphQL node IDs are opaque strings. In particular,
+            // legacy IDs can be base64 values containing `=` padding.
+            ("id", req(string(SemanticFormat::OpaqueId))),
             ("owner", req(string(SemanticFormat::RepositoryName))),
             ("name", req(string(SemanticFormat::RepositoryName))),
             ("full_name", req(string(SemanticFormat::RepositoryName))),
@@ -1416,6 +1418,19 @@ mod tests {
     #[test]
     fn github_repository_discovery_exposes_only_its_valid_safe_policy() {
         let definition = block_definition(ActionKind::GithubListRepositories);
+        let repository_id = definition
+            .output_schema
+            .resolve(&[
+                crate::automation::context::ContextPathSegment::field("github"),
+                crate::automation::context::ContextPathSegment::field("repositories"),
+                crate::automation::context::ContextPathSegment::index(0),
+                crate::automation::context::ContextPathSegment::field("id"),
+            ])
+            .unwrap();
+        assert_eq!(
+            repository_id.value_type,
+            &ContextType::string(SemanticFormat::OpaqueId)
+        );
         let mut step = default_step(ActionKind::GithubListRepositories, "repositories").unwrap();
         assert!(definition.policy.accepts(&step));
         assert!(!definition.policy.allow_git_credentials);

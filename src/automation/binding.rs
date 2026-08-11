@@ -578,6 +578,7 @@ fn validate_string_format(value: &str, format: SemanticFormat) -> Result<(), Str
         SemanticFormat::GitRef => valid_git_ref(value),
         SemanticFormat::RepositoryName => valid_repository_name(value),
         SemanticFormat::Identifier => valid_identifier(value),
+        SemanticFormat::OpaqueId => !value.is_empty() && !value.contains('\0'),
     };
     if valid {
         Ok(())
@@ -888,6 +889,16 @@ mod tests {
                 "expected {invalid:?} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn opaque_id_accepts_base64_without_promising_an_identifier_charset() {
+        assert!(
+            validate_string_format("MDEwOlJlcG9zaXRvcnkxMjM0NTY=", SemanticFormat::OpaqueId)
+                .is_ok()
+        );
+        assert!(validate_string_format("", SemanticFormat::OpaqueId).is_err());
+        assert!(validate_string_format("node\0id", SemanticFormat::OpaqueId).is_err());
     }
 
     #[test]

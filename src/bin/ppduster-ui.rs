@@ -4020,6 +4020,7 @@ fn literal_prototype_for_type(value_type: &ContextType, path: &str) -> serde_jso
             Some(SemanticFormat::GitRef) => "main".into(),
             Some(SemanticFormat::RepositoryName) => "owner/repository".into(),
             Some(SemanticFormat::Identifier) => "value".into(),
+            Some(SemanticFormat::OpaqueId) => "opaque-id".into(),
             None if path.ends_with("version") => "1.0".into(),
             None if path.ends_with("app_name") => "Application.app".into(),
             None => "value".into(),
@@ -10792,6 +10793,7 @@ fn semantic_format_label(format: SemanticFormat) -> &'static str {
         SemanticFormat::GitRef => "git-ref",
         SemanticFormat::RepositoryName => "repository-name",
         SemanticFormat::Identifier => "identifier",
+        SemanticFormat::OpaqueId => "opaque-id",
     }
 }
 
@@ -18330,6 +18332,9 @@ task:
         assert!(lines
             .iter()
             .any(|line| line == "github.repositories[] : object"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "github.repositories[].id : string<opaque-id>"));
         assert!(lines
             .iter()
             .any(|line| { line == "github.repositories[].https_url : string<git-url>" }));
