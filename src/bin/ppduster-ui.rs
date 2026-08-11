@@ -1,7 +1,9 @@
 use anyhow::Context;
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Layout, Margin, Pos2, Rect,
-    RichText, ScrollArea, Sense, Stroke, StrokeKind, Vec2,
+    self,
+    text::{LayoutJob, TextFormat},
+    Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Layout, Margin, Pos2, Rect, RichText,
+    ScrollArea, Sense, Stroke, StrokeKind, Vec2,
 };
 use ppduster::automation::binding::validate_literal_binding;
 use ppduster::automation::block::default_step;
@@ -4612,10 +4614,7 @@ fn paint_graph_action_editor(
     for (target, field) in graph_input_fields(&definition.input_schema) {
         ui.add_space(5.0);
         ui.vertical(|ui| {
-            ui.add(
-                egui::Label::new(RichText::new(&target).monospace().size(9.0).color(PURPLE))
-                    .truncate(),
-            );
+            ui.add(egui::Label::new(context_line_layout_job(&target, 9.0)).truncate());
             ui.add(
                 egui::Label::new(
                     RichText::new(context_type_label(
@@ -4633,21 +4632,21 @@ fn paint_graph_action_editor(
         let compatible = options.get(&target).map(Vec::as_slice).unwrap_or_default();
         let current = node.bindings.get(&target).cloned();
         let manual_initial = manual_input_initial_value(&node.step, &target, &field);
-        let selected_label = match &current {
-            None if field.required => "Значение блока по умолчанию".to_owned(),
-            None => "Не задавать · оставить default".to_owned(),
+        let selected_text: egui::WidgetText = match &current {
+            None if field.required => "Значение блока по умолчанию".into(),
+            None => "Не задавать · оставить default".into(),
             Some(Binding::Literal {
                 value: serde_json::Value::Null,
-            }) if field.nullable => "Явно null".to_owned(),
-            Some(Binding::Literal { .. }) => "Вручную".to_owned(),
+            }) if field.nullable => "Явно null".into(),
+            Some(Binding::Literal { .. }) => "Вручную".into(),
             Some(binding) => compatible
                 .iter()
                 .find(|option| option.binding == *binding)
-                .map(|option| option.label.clone())
+                .map(|option| context_widget_layout_job(&option.label, 10.0).into())
                 .unwrap_or_else(|| "Привязка из YAML".into()),
         };
         egui::ComboBox::from_id_salt(("graph-input", &node.step.id, &target))
-            .selected_text(selected_label)
+            .selected_text(selected_text)
             .truncate()
             .width(ui.available_width())
             .show_ui(ui, |ui| {
@@ -4698,7 +4697,10 @@ fn paint_graph_action_editor(
                 }
                 for option in compatible {
                     if ui
-                        .selectable_label(current.as_ref() == Some(&option.binding), &option.label)
+                        .selectable_label(
+                            current.as_ref() == Some(&option.binding),
+                            context_widget_layout_job(&option.label, 10.0),
+                        )
                         .clicked()
                     {
                         node.bindings.insert(target.clone(), option.binding.clone());
@@ -6067,12 +6069,10 @@ impl ScenarioApp {
                                             "       "
                                         };
                                         ui.add(
-                                            egui::Label::new(
-                                                RichText::new(format!("{prefix}{line}"))
-                                                    .monospace()
-                                                    .size(8.0)
-                                                    .color(PURPLE),
-                                            )
+                                            egui::Label::new(context_line_layout_job(
+                                                &format!("{prefix}{line}"),
+                                                8.0,
+                                            ))
                                             .truncate(),
                                         );
                                     }
@@ -7122,10 +7122,8 @@ impl ScenarioApp {
                                 &definition_for_action(&node.step.action).output_schema,
                             ) {
                                 ui.add(
-                                    egui::Label::new(
-                                        RichText::new(line).monospace().size(8.0).color(PURPLE),
-                                    )
-                                    .truncate(),
+                                    egui::Label::new(context_line_layout_job(&line, 8.0))
+                                        .truncate(),
                                 );
                             }
                         }
@@ -7139,13 +7137,16 @@ impl ScenarioApp {
                             );
                             ui.label(RichText::new("Коллекция").size(9.0).color(MUTED));
                             egui::ComboBox::from_id_salt(("foreach-collection", &node.id))
-                                .selected_text(binding_label(&node.collection))
+                                .selected_text(context_binding_widget_text(&node.collection, 10.0))
                                 .truncate()
                                 .width(ui.available_width())
                                 .show_ui(ui, |ui| {
                                     for (label, binding, alias, _) in &array_options {
                                         if ui
-                                            .selectable_label(node.collection == *binding, label)
+                                            .selectable_label(
+                                                node.collection == *binding,
+                                                context_widget_layout_job(label, 10.0),
+                                            )
                                             .clicked()
                                         {
                                             node.collection = binding.clone();
@@ -7292,10 +7293,8 @@ impl ScenarioApp {
                                 );
                                 for line in lines {
                                     ui.add(
-                                        egui::Label::new(
-                                            RichText::new(line).monospace().size(8.0).color(PURPLE),
-                                        )
-                                        .truncate(),
+                                        egui::Label::new(context_line_layout_job(&line, 8.0))
+                                            .truncate(),
                                     );
                                 }
                             }
@@ -7394,7 +7393,7 @@ impl ScenarioApp {
                             graph_control_summary(ui, "SWITCH", &node.id, self.dark);
                             ui.label(RichText::new("Selector").size(9.0).color(MUTED));
                             egui::ComboBox::from_id_salt(("switch-selector", &node.id))
-                                .selected_text(binding_label(&node.selector))
+                                .selected_text(context_binding_widget_text(&node.selector, 10.0))
                                 .truncate()
                                 .width(ui.available_width())
                                 .show_ui(ui, |ui| {
@@ -7416,7 +7415,7 @@ impl ScenarioApp {
                                         if ui
                                             .selectable_label(
                                                 node.selector == option.binding,
-                                                &option.label,
+                                                context_widget_layout_job(&option.label, 10.0),
                                             )
                                             .clicked()
                                         {
@@ -9305,6 +9304,54 @@ fn schema_context_lines(schema: &ObjectSchema) -> Vec<String> {
     lines
 }
 
+/// Make nested context paths easier to scan without changing their copyable
+/// representation. Only dots in the path portion are accented; punctuation in
+/// the type annotation remains visually neutral.
+fn context_line_layout_job(line: &str, size: f32) -> LayoutJob {
+    context_layout_job(line, size, PURPLE)
+}
+
+/// Use the widget's fallback text color for ordinary characters so hover,
+/// selection and disabled states keep their native contrast.
+fn context_widget_layout_job(line: &str, size: f32) -> LayoutJob {
+    context_layout_job(line, size, Color32::PLACEHOLDER)
+}
+
+fn context_layout_job(line: &str, size: f32, base_color: Color32) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    let path_end = [" : ", " · "]
+        .into_iter()
+        .filter_map(|delimiter| line.find(delimiter))
+        .min()
+        .unwrap_or(line.len());
+    let base = TextFormat::simple(FontId::monospace(size), base_color);
+    let separator = TextFormat::simple(FontId::monospace(size), CYAN);
+    let mut chunk_start = 0;
+
+    for (index, character) in line.char_indices() {
+        if index >= path_end || character != '.' {
+            continue;
+        }
+        if chunk_start < index {
+            job.append(&line[chunk_start..index], 0.0, base.clone());
+        }
+        let separator_end = index + character.len_utf8();
+        job.append(&line[index..separator_end], 0.0, separator.clone());
+        chunk_start = separator_end;
+    }
+    if chunk_start < line.len() {
+        job.append(&line[chunk_start..], 0.0, base);
+    }
+    job
+}
+
+fn context_binding_widget_text(binding: &Binding, size: f32) -> egui::WidgetText {
+    match binding {
+        Binding::Field { field } => context_widget_layout_job(&field_ref_label(field), size).into(),
+        _ => binding_label(binding).into(),
+    }
+}
+
 fn collect_schema_context_lines(schema: &ObjectSchema, prefix: &str, lines: &mut Vec<String>) {
     for (name, field) in &schema.fields {
         let path = join_context_path(prefix, name);
@@ -10002,13 +10049,16 @@ fn paint_simple_condition_editor(
         .map(|field| field.label.clone())
         .unwrap_or_else(|| format!("Недоступно: {}", field_ref_label(&rule.field)));
     egui::ComboBox::from_id_salt((editor_id, "field"))
-        .selected_text(selected_label)
+        .selected_text(context_widget_layout_job(&selected_label, 10.0))
         .truncate()
         .width(ui.available_width())
         .show_ui(ui, |ui| {
             for field in fields {
                 if ui
-                    .selectable_label(field.reference == rule.field, &field.label)
+                    .selectable_label(
+                        field.reference == rule.field,
+                        context_widget_layout_job(&field.label, 10.0),
+                    )
                     .clicked()
                 {
                     rule.field = field.reference.clone();
@@ -10088,16 +10138,10 @@ fn paint_simple_condition_editor(
         .corner_radius(7)
         .inner_margin(Margin::same(7))
         .show(ui, |ui| {
-            ui.label(
-                RichText::new(format!(
-                    "{} {}",
-                    field_ref_label(&rule.field),
-                    rule.operator.label()
-                ))
-                .monospace()
-                .size(8.0)
-                .color(PURPLE),
-            );
+            ui.label(context_line_layout_job(
+                &format!("{} {}", field_ref_label(&rule.field), rule.operator.label()),
+                8.0,
+            ));
         });
     changed
 }
@@ -13928,12 +13972,10 @@ positions:
                                     &definition_for_action(&node.step.action).output_schema,
                                 ) {
                                     ui.add(
-                                        egui::Label::new(
-                                            RichText::new(format!("{line}::{huge_token}"))
-                                                .monospace()
-                                                .size(8.0)
-                                                .color(PURPLE),
-                                        )
+                                        egui::Label::new(context_line_layout_job(
+                                            &format!("{line}::{huge_token}"),
+                                            8.0,
+                                        ))
                                         .truncate(),
                                     );
                                 }
@@ -14501,6 +14543,50 @@ task:
         assert!(path
             .iter()
             .any(|line| line == "sha256 : string<sha256> | null (optional)"));
+    }
+
+    #[test]
+    fn context_line_layout_accents_only_path_separators() {
+        let line = "github.repositories[].https_url : string<example.com>";
+        let layout = context_line_layout_job(line, 8.0);
+
+        assert_eq!(layout.text, line);
+        assert_eq!(
+            layout
+                .sections
+                .iter()
+                .filter(|section| section.format.color == CYAN)
+                .count(),
+            2
+        );
+        assert!(layout
+            .sections
+            .iter()
+            .all(|section| { section.format.color == PURPLE || section.format.color == CYAN }));
+
+        let root_layout = context_line_layout_job("sha256 : string<example.com>", 8.0);
+        assert_eq!(
+            root_layout
+                .sections
+                .iter()
+                .filter(|section| section.format.color == CYAN)
+                .count(),
+            0
+        );
+
+        let widget_layout =
+            context_widget_layout_job("inspect.repository · string<example.com>", 10.0);
+        assert_eq!(
+            widget_layout
+                .sections
+                .iter()
+                .filter(|section| section.format.color == CYAN)
+                .count(),
+            1
+        );
+        assert!(widget_layout.sections.iter().all(|section| {
+            section.format.color == Color32::PLACEHOLDER || section.format.color == CYAN
+        }));
     }
 
     #[test]
