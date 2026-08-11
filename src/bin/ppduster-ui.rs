@@ -58,6 +58,8 @@ const CANVAS_MIN_ZOOM: f32 = 0.35;
 const CANVAS_MAX_ZOOM: f32 = 2.5;
 const CANVAS_ZOOM_STEP: f32 = 1.2;
 const CANVAS_FIT_PADDING: f32 = 56.0;
+const GITHUB_LOGIN_COMMAND: &str =
+    "gh auth login --hostname github.com --git-protocol https --web --clipboard";
 
 /// Keep the editor usable down to the minimum supported viewport while
 /// preserving the roomier desktop proportions on wide windows.
@@ -4534,6 +4536,152 @@ fn auth_policy_label(policy: AuthPolicy) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum GithubSessionStatus {
+    #[default]
+    Unknown,
+    Succeeded,
+    Failed(String),
+}
+
+impl GithubSessionStatus {
+    fn error(&self) -> Option<&str> {
+        match self {
+            Self::Failed(error) => Some(error),
+            Self::Unknown | Self::Succeeded => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalAuthProvider {
+    GithubCli,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GraphExternalAuthContract {
+    provider: ExternalAuthProvider,
+    intent: GithubAuthorizationIntent,
+}
+
+fn graph_action_external_auth(action: &Action) -> Option<GraphExternalAuthContract> {
+    matches!(action, Action::GithubListRepositories).then_some(GraphExternalAuthContract {
+        provider: ExternalAuthProvider::GithubCli,
+        intent: GithubAuthorizationIntent::AuthenticateOnly,
+    })
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct GraphExternalAuthUiState {
+    enabled: bool,
+    authorizing: bool,
+    checking: bool,
+    status: GithubSessionStatus,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct GraphActionEditorResponse {
+    changed: bool,
+    external_auth_request: Option<GraphExternalAuthContract>,
+}
+
+fn paint_graph_external_auth(
+    ui: &mut egui::Ui,
+    contract: GraphExternalAuthContract,
+    state: &GraphExternalAuthUiState,
+    dark: bool,
+) -> bool {
+    match contract.provider {
+        ExternalAuthProvider::GithubCli => {
+            let mut requested = false;
+            Frame::new()
+                .fill(panel(dark))
+                .stroke(Stroke::new(1.0, line(dark)))
+                .corner_radius(9)
+                .inner_margin(Margin::same(10))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("GitHub CLI")
+                                .strong()
+                                .size(10.0)
+                                .color(text(dark)),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let (label, color) = if state.authorizing {
+                                ("Выполняется вход…", PURPLE)
+                            } else if state.checking {
+                                ("Проверяется…", PURPLE)
+                            } else {
+                                match &state.status {
+                                    GithubSessionStatus::Unknown => ("Не проверено", MUTED),
+                                    GithubSessionStatus::Succeeded => ("Вход завершён", CYAN),
+                                    GithubSessionStatus::Failed(_) => ("Нужен вход", ORANGE),
+                                }
+                            };
+                            ui.label(RichText::new(label).strong().size(8.0).color(color));
+                        });
+                    });
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(
+                                "Блок использует внешнюю OAuth-сессию `gh`. Токен хранит GitHub CLI; ppduster его не читает и не сохраняет.",
+                            )
+                            .size(8.0)
+                            .color(MUTED),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(7.0);
+                    if state.authorizing || state.checking {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(
+                                RichText::new(if state.authorizing {
+                                    "Ожидаю подтверждения входа в браузере…"
+                                } else {
+                                    "Проверяю доступ текущей сессии GitHub CLI…"
+                                })
+                                .size(8.0)
+                                .color(MUTED),
+                            );
+                        });
+                    } else {
+                        if ui
+                            .add_enabled(
+                                state.enabled,
+                                egui::Button::new("Войти через GitHub")
+                                    .min_size(Vec2::new(ui.available_width(), 30.0)),
+                            )
+                            .clicked()
+                        {
+                            requested = true;
+                        }
+                        if matches!(&state.status, GithubSessionStatus::Succeeded) {
+                            ui.label(
+                                RichText::new(
+                                    "Доступ к репозиториям будет проверен при запуске блока.",
+                                )
+                                .size(8.0)
+                                .color(CYAN),
+                            );
+                        }
+                    }
+                    if ui.button("Скопировать команду входа").clicked() {
+                        ui.ctx().copy_text(GITHUB_LOGIN_COMMAND.into());
+                    }
+                    if !state.authorizing && !state.checking {
+                        if let Some(error) = state.status.error() {
+                            ui.add_space(6.0);
+                            error_box(ui, error, dark);
+                        }
+                    }
+                });
+            requested
+        }
+    }
+}
+
 fn graph_step_policy_issues(step: &Step, capabilities: &BlockPolicyCapabilities) -> Vec<String> {
     let mut issues = Vec::new();
     if !capabilities.allows_auth(step.auth) {
@@ -4576,9 +4724,11 @@ fn paint_graph_action_editor(
     ui: &mut egui::Ui,
     node: &mut ActionNode,
     options: &BTreeMap<String, Vec<ComposerGraphBindingOption>>,
+    external_auth_state: &GraphExternalAuthUiState,
     dark: bool,
-) -> bool {
+) -> GraphActionEditorResponse {
     let mut changed = false;
+    let mut external_auth_request = None;
     ui.label(RichText::new("Название блока").size(9.0).color(MUTED));
     changed |= ui
         .add(egui::TextEdit::singleline(&mut node.step.name).desired_width(ui.available_width()))
@@ -4788,29 +4938,35 @@ fn paint_graph_action_editor(
         ui.add_space(5.0);
     }
     ui.label(RichText::new("Аутентификация").size(9.0).color(MUTED));
-    egui::ComboBox::from_id_salt(("graph-step-auth", &node.step.id))
-        .selected_text(auth_policy_label(node.step.auth))
-        .truncate()
-        .width(ui.available_width())
-        .show_ui(ui, |ui| {
-            changed |= ui
-                .selectable_value(&mut node.step.auth, AuthPolicy::None, "Нет")
-                .changed();
-            if definition.policy.allow_git_credentials {
+    if let Some(contract) = graph_action_external_auth(&node.step.action) {
+        if paint_graph_external_auth(ui, contract, external_auth_state, dark) {
+            external_auth_request = Some(contract);
+        }
+    } else {
+        egui::ComboBox::from_id_salt(("graph-step-auth", &node.step.id))
+            .selected_text(auth_policy_label(node.step.auth))
+            .truncate()
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
                 changed |= ui
-                    .selectable_value(
-                        &mut node.step.auth,
-                        AuthPolicy::GitCredential,
-                        "Git credentials",
-                    )
+                    .selectable_value(&mut node.step.auth, AuthPolicy::None, "Нет")
                     .changed();
-            }
-            if definition.policy.allow_sudo {
-                changed |= ui
-                    .selectable_value(&mut node.step.auth, AuthPolicy::Sudo, "Sudo")
-                    .changed();
-            }
-        });
+                if definition.policy.allow_git_credentials {
+                    changed |= ui
+                        .selectable_value(
+                            &mut node.step.auth,
+                            AuthPolicy::GitCredential,
+                            "Git credentials",
+                        )
+                        .changed();
+                }
+                if definition.policy.allow_sudo {
+                    changed |= ui
+                        .selectable_value(&mut node.step.auth, AuthPolicy::Sudo, "Sudo")
+                        .changed();
+                }
+            });
+    }
     ui.label(RichText::new("Повышение прав").size(9.0).color(MUTED));
     if definition.policy.allow_elevation {
         egui::ComboBox::from_id_salt(("graph-step-elevation", &node.step.id))
@@ -4892,7 +5048,10 @@ fn paint_graph_action_editor(
         )
         .truncate(),
     );
-    changed
+    GraphActionEditorResponse {
+        changed,
+        external_auth_request,
+    }
 }
 
 struct GithubPickerState {
@@ -4908,6 +5067,7 @@ struct GithubPickerState {
     receiver: Option<Receiver<Result<Vec<GithubRepository>, String>>>,
     auth_receiver: Option<Receiver<Result<(), String>>>,
     authorization_intent: GithubAuthorizationIntent,
+    auth_status: GithubSessionStatus,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -4915,6 +5075,32 @@ enum GithubAuthorizationIntent {
     #[default]
     RepositoryPicker,
     RetryScenario,
+    AuthenticateOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GithubAuthorizationFollowUp {
+    InvalidatePlan,
+    LoadRepositories,
+    RunScenario,
+}
+
+const fn github_authorization_follow_up(
+    intent: GithubAuthorizationIntent,
+) -> GithubAuthorizationFollowUp {
+    match intent {
+        GithubAuthorizationIntent::RepositoryPicker => {
+            GithubAuthorizationFollowUp::LoadRepositories
+        }
+        GithubAuthorizationIntent::RetryScenario => GithubAuthorizationFollowUp::RunScenario,
+        GithubAuthorizationIntent::AuthenticateOnly => GithubAuthorizationFollowUp::InvalidatePlan,
+    }
+}
+
+impl GithubPickerState {
+    const fn is_idle(&self) -> bool {
+        !self.loading && !self.authorizing
+    }
 }
 
 impl Default for GithubPickerState {
@@ -4932,6 +5118,7 @@ impl Default for GithubPickerState {
             receiver: None,
             auth_receiver: None,
             authorization_intent: GithubAuthorizationIntent::RepositoryPicker,
+            auth_status: GithubSessionStatus::Unknown,
         }
     }
 }
@@ -4975,6 +5162,7 @@ struct ScenarioApp {
     confirm_run: bool,
     running: bool,
     run_receiver: Option<Receiver<Result<RunReport, String>>>,
+    run_checks_github_auth: bool,
     github_picker: GithubPickerState,
     file_message: Option<(bool, String)>,
     custom_project: Option<ScenarioProject>,
@@ -5021,6 +5209,7 @@ impl ScenarioApp {
             confirm_run: false,
             running: false,
             run_receiver: None,
+            run_checks_github_auth: false,
             github_picker: GithubPickerState::default(),
             file_message: None,
             custom_project: None,
@@ -5078,6 +5267,18 @@ impl ScenarioApp {
         self.report_applied = false;
         self.plan_error = None;
         self.confirm_run = false;
+    }
+
+    fn update_github_auth_status(
+        &mut self,
+        errors: &[String],
+        checks_github_repository_access: bool,
+    ) {
+        if let Some(error) = github_authorization_error(errors) {
+            self.github_picker.auth_status = GithubSessionStatus::Failed(error.to_owned());
+        } else if checks_github_repository_access && errors.is_empty() {
+            self.github_picker.auth_status = GithubSessionStatus::Succeeded;
+        }
     }
 
     fn start_custom_project(&mut self) {
@@ -5588,7 +5789,7 @@ impl ScenarioApp {
     }
 
     fn start_github_repository_load(&mut self, ctx: &egui::Context) {
-        if self.github_picker.loading {
+        if !self.github_picker.is_idle() {
             return;
         }
         if !self.github_picker.selected_ids.is_empty() {
@@ -5616,6 +5817,7 @@ impl ScenarioApp {
                 self.github_picker.repositories = repositories;
                 self.github_picker.loaded_once = true;
                 self.github_picker.error = None;
+                self.github_picker.auth_status = GithubSessionStatus::Succeeded;
                 self.github_picker.loading = false;
                 self.github_picker.receiver = None;
                 if selection_uses_loaded_metadata {
@@ -5623,6 +5825,7 @@ impl ScenarioApp {
                 }
             }
             Ok(Err(error)) => {
+                self.update_github_auth_status(std::slice::from_ref(&error), false);
                 self.github_picker.error = Some(error);
                 self.github_picker.loading = false;
                 self.github_picker.receiver = None;
@@ -5644,7 +5847,7 @@ impl ScenarioApp {
         ctx: &egui::Context,
         intent: GithubAuthorizationIntent,
     ) {
-        if self.github_picker.authorizing || self.github_picker.loading {
+        if !self.github_picker.is_idle() {
             return;
         }
         let (sender, receiver) = mpsc::channel();
@@ -5658,6 +5861,7 @@ impl ScenarioApp {
         self.github_picker.authorizing = true;
         self.github_picker.authorization_intent = intent;
         self.github_picker.error = None;
+        self.github_picker.auth_status = GithubSessionStatus::Unknown;
     }
 
     fn poll_github_authorization(&mut self, ctx: &egui::Context) {
@@ -5669,15 +5873,17 @@ impl ScenarioApp {
                 let intent = self.github_picker.authorization_intent;
                 self.github_picker.authorizing = false;
                 self.github_picker.auth_receiver = None;
-                match intent {
-                    GithubAuthorizationIntent::RepositoryPicker => {
+                self.github_picker.auth_status = GithubSessionStatus::Succeeded;
+                match github_authorization_follow_up(intent) {
+                    GithubAuthorizationFollowUp::LoadRepositories => {
                         self.start_github_repository_load(ctx);
                     }
-                    GithubAuthorizationIntent::RetryScenario => self.start_run(ctx),
+                    GithubAuthorizationFollowUp::RunScenario => self.start_run(ctx),
+                    GithubAuthorizationFollowUp::InvalidatePlan => self.invalidate_plan(),
                 }
             }
             Ok(Err(error)) => {
-                self.github_picker.error = Some(error);
+                self.github_picker.auth_status = GithubSessionStatus::Failed(error);
                 self.github_picker.authorizing = false;
                 self.github_picker.auth_receiver = None;
             }
@@ -5685,8 +5891,9 @@ impl ScenarioApp {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                self.github_picker.error =
-                    Some("Фоновая авторизация GitHub неожиданно завершилась".into());
+                self.github_picker.auth_status = GithubSessionStatus::Failed(
+                    "Фоновая авторизация GitHub неожиданно завершилась".into(),
+                );
                 self.github_picker.authorizing = false;
                 self.github_picker.auth_receiver = None;
             }
@@ -5710,14 +5917,18 @@ impl ScenarioApp {
                 return;
             }
         };
+        let checks_github_repository_access = task_checks_github_repository_access(&task);
         match run_task(&task, &self.options_for(&task, false)) {
             Ok(report) => {
+                self.update_github_auth_status(&report.errors, checks_github_repository_access);
                 self.report = Some(report);
                 self.plan_error = None;
             }
             Err(error) => {
+                let error = error.to_string();
+                self.update_github_auth_status(std::slice::from_ref(&error), false);
                 self.report = None;
-                self.plan_error = Some(error.to_string());
+                self.plan_error = Some(error);
             }
         }
     }
@@ -5737,6 +5948,7 @@ impl ScenarioApp {
     fn start_run(&mut self, ctx: &egui::Context) {
         self.report = None;
         self.report_applied = false;
+        self.run_checks_github_auth = false;
         if let Some(project) = &self.custom_project {
             if let Err(error) = validate_project(project) {
                 self.plan_error = Some(error);
@@ -5752,6 +5964,7 @@ impl ScenarioApp {
                 return;
             }
         };
+        self.run_checks_github_auth = task_checks_github_repository_access(&task);
         let options = self.options_for(&task, true);
         let (sender, receiver) = mpsc::channel();
         let repaint = ctx.clone();
@@ -5772,21 +5985,26 @@ impl ScenarioApp {
         };
         match receiver.try_recv() {
             Ok(Ok(report)) => {
+                self.update_github_auth_status(&report.errors, self.run_checks_github_auth);
                 self.report = Some(report);
                 self.report_applied = true;
                 self.running = false;
                 self.run_receiver = None;
+                self.run_checks_github_auth = false;
             }
             Ok(Err(error)) => {
+                self.update_github_auth_status(std::slice::from_ref(&error), false);
                 self.plan_error = Some(error);
                 self.running = false;
                 self.run_receiver = None;
+                self.run_checks_github_auth = false;
             }
             Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.plan_error = Some("Фоновый запуск неожиданно завершился".into());
                 self.running = false;
                 self.run_receiver = None;
+                self.run_checks_github_auth = false;
             }
         }
     }
@@ -6650,7 +6868,7 @@ impl ScenarioApp {
                         let selected_count = self.github_picker.selected_ids.len();
                         if ui
                             .add_enabled(
-                                !self.running,
+                                !self.running && !self.github_picker.authorizing,
                                 egui::Button::new(if selected_count == 0 {
                                     "Выбрать репозитории…".into()
                                 } else {
@@ -7019,6 +7237,13 @@ impl ScenarioApp {
         let mut remove_switch_case = None;
         let mut open_graph_attach = None;
         let mut incoming_edge_changes = Vec::new();
+        let mut external_auth_request = None;
+        let external_auth_state = GraphExternalAuthUiState {
+            enabled: !self.running && self.github_picker.is_idle(),
+            authorizing: self.github_picker.authorizing,
+            checking: self.github_picker.loading,
+            status: self.github_picker.auth_status.clone(),
+        };
         let selected_node = self.selected_node.clone();
         let selected_path = self.selected_project_scenario.clone();
         {
@@ -7107,8 +7332,15 @@ impl ScenarioApp {
                     };
                     match node {
                         GraphNode::Action(node) => {
-                            changed |=
-                                paint_graph_action_editor(ui, node, &action_options, self.dark);
+                            let response = paint_graph_action_editor(
+                                ui,
+                                node,
+                                &action_options,
+                                &external_auth_state,
+                                self.dark,
+                            );
+                            changed |= response.changed;
+                            external_auth_request = response.external_auth_request;
                             ui.add_space(12.0);
                             changed |= paint_composer_conditions(
                                 ui,
@@ -7696,6 +7928,9 @@ impl ScenarioApp {
                 );
             }
         }
+        if let Some(request) = external_auth_request {
+            self.start_github_authorization(ui.ctx(), request.intent);
+        }
         if changed {
             self.invalidate_plan();
         }
@@ -7764,7 +7999,7 @@ impl ScenarioApp {
             let selected_count = self.github_picker.selected_ids.len();
             if ui
                 .add_enabled(
-                    !self.running,
+                    !self.running && !self.github_picker.authorizing,
                     egui::Button::new(if selected_count == 0 {
                         "Получить список репозиториев…".into()
                     } else {
@@ -7856,7 +8091,7 @@ impl ScenarioApp {
                 ui.add_space(8.0);
                 if ui
                     .add_enabled(
-                        !self.github_picker.authorizing && !self.running,
+                        self.github_picker.is_idle() && !self.running,
                         egui::Button::new("Войти через GitHub и повторить")
                             .min_size(Vec2::new(ui.available_width(), 32.0)),
                     )
@@ -7882,7 +8117,7 @@ impl ScenarioApp {
                     self.github_picker.authorization_intent,
                     GithubAuthorizationIntent::RetryScenario
                 ) {
-                    if let Some(error) = &self.github_picker.error {
+                    if let Some(error) = self.github_picker.auth_status.error() {
                         error_box(ui, error, self.dark);
                     }
                 }
@@ -8639,7 +8874,12 @@ impl ScenarioApp {
                         );
                     });
 
-                if let Some(error) = &self.github_picker.error {
+                let github_error = self
+                    .github_picker
+                    .error
+                    .as_deref()
+                    .or_else(|| self.github_picker.auth_status.error());
+                if let Some(error) = github_error {
                     ui.add_space(10.0);
                     error_box(ui, error, self.dark);
                     ui.horizontal(|ui| {
@@ -8653,10 +8893,7 @@ impl ScenarioApp {
                             request_authorization = true;
                         }
                         if ui.button("Скопировать команду входа").clicked() {
-                            ui.ctx().copy_text(
-                                "gh auth login --hostname github.com --git-protocol https --web --clipboard"
-                                    .into(),
-                            );
+                            ui.ctx().copy_text(GITHUB_LOGIN_COMMAND.into());
                         }
                     });
                 }
@@ -12337,6 +12574,12 @@ fn task_contains_action(task: &Task, predicate: &dyn Fn(&Action) -> bool) -> boo
             .is_some_and(|graph| graph_steps_any(graph, &|step| predicate(&step.action)))
 }
 
+fn task_checks_github_repository_access(task: &Task) -> bool {
+    task_contains_action(task, &|action| {
+        matches!(action, Action::GithubListRepositories)
+    })
+}
+
 fn graph_steps_all(graph: &WorkflowGraph, predicate: &dyn Fn(&Step) -> bool) -> bool {
     graph.nodes.iter().all(|node| match node {
         GraphNode::Action(node) => predicate(&node.step),
@@ -12533,13 +12776,41 @@ fn github_report_needs_authorization(report: &RunReport) -> bool {
 }
 
 fn github_errors_need_authorization(errors: &[String]) -> bool {
-    errors.iter().any(|error| {
-        let error = error.to_ascii_lowercase();
-        error.contains("github cli")
-            && (error.contains("not authenticated")
-                || error.contains("is not logged")
-                || error.contains("gh auth login"))
-    })
+    github_authorization_error(errors).is_some()
+}
+
+fn github_authorization_error(errors: &[String]) -> Option<&str> {
+    errors
+        .iter()
+        .map(String::as_str)
+        .find(|error| github_error_needs_authorization(error))
+}
+
+fn github_error_needs_authorization(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    if error.contains("rate limit") {
+        return false;
+    }
+
+    let has_auth_recovery_hint =
+        error.contains("gh auth login") || error.contains("gh auth status");
+    let has_auth_failure_marker = error.contains("not authenticated")
+        || error.contains("is not logged")
+        || error.contains("authentication required")
+        || error.contains("bad credentials")
+        || error.contains("http 401")
+        || error.contains("resource not accessible")
+        || error.contains("insufficient scope")
+        || error.contains("http 403")
+        || error.contains("credentials do not grant");
+    let github_cli_auth_failure = error.contains("github cli") && has_auth_failure_marker;
+    let github_api_auth_failure = has_auth_recovery_hint
+        && (error.contains("github credentials")
+            || error.contains("github api returned no repository data")
+            || (error.contains("github api rejected repository discovery")
+                && has_auth_failure_marker));
+
+    github_cli_auth_failure || github_api_auth_failure
 }
 
 fn error_box(ui: &mut egui::Ui, error: &str, dark: bool) {
@@ -12794,6 +13065,7 @@ mod tests {
             confirm_run: false,
             running: false,
             run_receiver: None,
+            run_checks_github_auth: false,
             github_picker: GithubPickerState::default(),
             file_message: None,
             custom_project: Some(project),
@@ -12804,6 +13076,20 @@ mod tests {
             graph_picker_port: None,
             block_picker_search: String::new(),
             readonly_canvas_views: BTreeMap::new(),
+        }
+    }
+
+    fn run_report_with_errors(errors: Vec<String>) -> RunReport {
+        RunReport {
+            task_id: "test-task".into(),
+            task_name: "Test task".into(),
+            task_description: String::new(),
+            scenarios: Vec::new(),
+            plans: Vec::new(),
+            outcomes: Vec::new(),
+            steps: Vec::new(),
+            context: ContextStore::default(),
+            errors,
         }
     }
 
@@ -13937,7 +14223,13 @@ positions:
                         ui.label(RichText::new("ИНСПЕКТОР").strong().size(10.0).color(MUTED));
                         let scroll =
                             bounded_inspector_scroll(ui, "inspector-containment-scroll", |ui| {
-                                paint_graph_action_editor(ui, &mut node, &options, true);
+                                paint_graph_action_editor(
+                                    ui,
+                                    &mut node,
+                                    &options,
+                                    &GraphExternalAuthUiState::default(),
+                                    true,
+                                );
                                 section_label(ui, "SWITCH · ДЛИННЫЙ CASE");
                                 let _ = paint_switch_case_header(ui, &huge_case_id, 1, 2, true);
                                 let _ = paint_switch_case_value_row(
@@ -17601,12 +17893,292 @@ task:
     }
 
     #[test]
+    fn custom_github_block_renders_login_before_run_and_requests_authenticate_only() {
+        fn input(events: Vec<egui::Event>) -> egui::RawInput {
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(380.0, 900.0))),
+                events,
+                ..Default::default()
+            }
+        }
+
+        fn button_text_center(shape: &egui::epaint::Shape, label: &str) -> Option<Pos2> {
+            match shape {
+                egui::epaint::Shape::Text(text) if text.galley.job.text == label => {
+                    Some(text.visual_bounding_rect().center())
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes
+                    .iter()
+                    .find_map(|shape| button_text_center(shape, label)),
+                _ => None,
+            }
+        }
+
+        fn render_editor(
+            ctx: &egui::Context,
+            node: &mut ActionNode,
+            events: Vec<egui::Event>,
+        ) -> (egui::FullOutput, GraphActionEditorResponse) {
+            let mut response = GraphActionEditorResponse::default();
+            let output = ctx.run_ui(input(events), |ui| {
+                ui.set_width(360.0);
+                response = paint_graph_action_editor(
+                    ui,
+                    node,
+                    &BTreeMap::new(),
+                    &GraphExternalAuthUiState {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                    true,
+                );
+            });
+            (output, response)
+        }
+
+        let task = github_repository_composer_task(1);
+        assert_eq!(task.id, "github-repositories-1");
+        assert!(github_picker_source_steps(&task).is_none());
+        let GraphNode::Action(action) = graph_node(
+            task.graph.as_ref().expect("custom GitHub graph"),
+            "list-repositories",
+        )
+        .expect("GitHub repository discovery block") else {
+            panic!("repository discovery must be an action node")
+        };
+        let mut action = action.as_ref().clone();
+        let contract = GraphExternalAuthContract {
+            provider: ExternalAuthProvider::GithubCli,
+            intent: GithubAuthorizationIntent::AuthenticateOnly,
+        };
+        assert_eq!(
+            graph_action_external_auth(&action.step.action),
+            Some(contract)
+        );
+        assert!(matches!(action.step.auth, AuthPolicy::None));
+
+        let ctx = egui::Context::default();
+        configure_styles(&ctx, egui::ThemePreference::Dark);
+        let (mut initial, response) = render_editor(&ctx, &mut action, Vec::new());
+        assert_eq!(response.external_auth_request, None);
+        let button_center = initial
+            .shapes
+            .iter()
+            .find_map(|clipped| button_text_center(&clipped.shape, "Войти через GitHub"))
+            .expect("custom GitHub block must render a proactive login button");
+        initial.textures_delta.clear();
+
+        let pointer = |pressed| egui::Event::PointerButton {
+            pos: button_center,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let (mut pressed, response) = render_editor(
+            &ctx,
+            &mut action,
+            vec![egui::Event::PointerMoved(button_center), pointer(true)],
+        );
+        assert_eq!(response.external_auth_request, None);
+        pressed.textures_delta.clear();
+        let (mut released, response) = render_editor(
+            &ctx,
+            &mut action,
+            vec![egui::Event::PointerMoved(button_center), pointer(false)],
+        );
+        released.textures_delta.clear();
+        assert_eq!(response.external_auth_request, Some(contract));
+        assert!(
+            !response.changed,
+            "authentication must not mutate the graph"
+        );
+    }
+
+    #[test]
+    fn authenticate_only_invalidates_plan_without_automatic_run() {
+        assert_eq!(
+            github_authorization_follow_up(GithubAuthorizationIntent::AuthenticateOnly),
+            GithubAuthorizationFollowUp::InvalidatePlan
+        );
+        assert_eq!(
+            github_authorization_follow_up(GithubAuthorizationIntent::RepositoryPicker),
+            GithubAuthorizationFollowUp::LoadRepositories
+        );
+        assert_eq!(
+            github_authorization_follow_up(GithubAuthorizationIntent::RetryScenario),
+            GithubAuthorizationFollowUp::RunScenario
+        );
+    }
+
+    #[test]
+    fn authenticate_only_success_clears_stale_report_without_starting_work() {
+        let task = github_repository_composer_task(1);
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            task,
+            ComposerCanvas::default(),
+        ));
+        app.report = Some(run_report_with_errors(vec![
+            "GitHub CLI is not authenticated; run gh auth login".into(),
+        ]));
+        app.report_applied = true;
+        app.plan_error = Some("stale plan".into());
+        app.confirm_run = true;
+        app.github_picker.authorizing = true;
+        app.github_picker.authorization_intent = GithubAuthorizationIntent::AuthenticateOnly;
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Ok(())).unwrap();
+        app.github_picker.auth_receiver = Some(receiver);
+
+        app.poll_github_authorization(&egui::Context::default());
+
+        assert_eq!(
+            app.github_picker.auth_status,
+            GithubSessionStatus::Succeeded
+        );
+        assert!(app.github_picker.is_idle());
+        assert!(app.github_picker.auth_receiver.is_none());
+        assert!(app.report.is_none());
+        assert!(!app.report_applied);
+        assert!(app.plan_error.is_none());
+        assert!(!app.confirm_run);
+        assert!(!app.running);
+        assert!(app.run_receiver.is_none());
+    }
+
+    #[test]
+    fn run_report_auth_failure_updates_the_github_block_status() {
+        let task = github_repository_composer_task(1);
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            task,
+            ComposerCanvas::default(),
+        ));
+        app.github_picker.auth_status = GithubSessionStatus::Succeeded;
+        app.running = true;
+        let auth_error = "GitHub repository discovery failed: the GitHub credentials do not grant repository-list access. Check `gh auth status`; authenticate or refresh access with `gh auth login`.".to_owned();
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(run_report_with_errors(vec![auth_error.clone()])))
+            .unwrap();
+        app.run_receiver = Some(receiver);
+
+        app.poll_run(&egui::Context::default());
+
+        assert_eq!(
+            app.github_picker.auth_status,
+            GithubSessionStatus::Failed(auth_error)
+        );
+        assert!(!app.running);
+        assert!(app.run_receiver.is_none());
+        assert!(app
+            .report
+            .as_ref()
+            .is_some_and(|report| { github_report_needs_authorization(report) }));
+    }
+
+    #[test]
+    fn successful_github_plan_result_clears_failed_status_but_unrelated_success_does_not() {
+        let github_task = github_repository_composer_task(1);
+        let create_step = default_step(ActionKind::CreateDirectory, "create-directory-1").unwrap();
+        let non_github_task = graph_authoring_test_task(
+            "non-github",
+            WorkflowGraph {
+                entries: vec![create_step.id.clone()],
+                nodes: vec![GraphNode::Action(Box::new(ActionNode {
+                    step: create_step,
+                    bindings: BTreeMap::new(),
+                }))],
+                ..WorkflowGraph::default()
+            },
+        );
+        let github_checks_repository_access = task_checks_github_repository_access(&github_task);
+        let non_github_checks_repository_access =
+            task_checks_github_repository_access(&non_github_task);
+        assert!(github_checks_repository_access);
+        assert!(!non_github_checks_repository_access);
+
+        let stale_error = GithubSessionStatus::Failed("stale auth failure".into());
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            github_task,
+            ComposerCanvas::default(),
+        ));
+        app.github_picker.auth_status = stale_error.clone();
+        app.update_github_auth_status(&[], non_github_checks_repository_access);
+        assert_eq!(app.github_picker.auth_status, stale_error);
+
+        app.update_github_auth_status(&[], github_checks_repository_access);
+        assert_eq!(
+            app.github_picker.auth_status,
+            GithubSessionStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn successful_github_run_result_clears_failed_status() {
+        let task = github_repository_composer_task(1);
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            task,
+            ComposerCanvas::default(),
+        ));
+        app.github_picker.auth_status = GithubSessionStatus::Failed("expired credentials".into());
+        app.running = true;
+        app.run_checks_github_auth = true;
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Ok(run_report_with_errors(Vec::new()))).unwrap();
+        app.run_receiver = Some(receiver);
+
+        app.poll_run(&egui::Context::default());
+
+        assert_eq!(
+            app.github_picker.auth_status,
+            GithubSessionStatus::Succeeded
+        );
+        assert!(!app.run_checks_github_auth);
+        assert!(!app.running);
+        assert!(app.run_receiver.is_none());
+    }
+
+    #[test]
+    fn github_io_is_serialized_between_repository_check_and_login() {
+        let mut state = GithubPickerState::default();
+        assert!(state.is_idle());
+        state.loading = true;
+        assert!(!state.is_idle());
+        state.loading = false;
+        state.authorizing = true;
+        assert!(!state.is_idle());
+    }
+
+    #[test]
     fn github_authentication_failure_offers_recovery_but_rate_limit_does_not() {
         assert!(github_errors_need_authorization(&[String::from(
             "GitHub repository discovery failed: GitHub CLI is not authenticated for github.com; run gh auth login"
         )]));
+        assert!(github_errors_need_authorization(&[String::from(
+            "GitHub API rejected repository discovery: Resource not accessible. Check `gh auth status`; authenticate or refresh access with `gh auth login`."
+        )]));
+        assert!(github_errors_need_authorization(&[String::from(
+            "GitHub API returned no repository data. Check `gh auth status`."
+        )]));
+        assert!(github_errors_need_authorization(&[String::from(
+            "GitHub repository discovery failed: the GitHub credentials do not grant repository-list access. Check `gh auth status`; authenticate or refresh access with `gh auth login`."
+        )]));
         assert!(!github_errors_need_authorization(&[String::from(
-            "GitHub API rate limit was exceeded"
+            "GitHub repository discovery failed: the GitHub API rate limit was exceeded. Check `gh auth status`; authenticate or refresh access with `gh auth login`."
+        )]));
+        assert!(!github_errors_need_authorization(&[String::from(
+            "GitHub repository discovery failed: github.com could not be reached. Check `gh auth status`; authenticate or refresh access with `gh auth login`."
+        )]));
+        assert!(!github_errors_need_authorization(&[String::from(
+            "GitHub API rejected repository discovery: Internal server error. Check `gh auth status`; authenticate or refresh access with `gh auth login`."
+        )]));
+        assert!(!github_errors_need_authorization(&[String::from(
+            "GitHub repository discovery failed: GitHub CLI reported: HTTP 500. Check `gh auth status`; authenticate or refresh access with `gh auth login`."
+        )]));
+        assert!(github_errors_need_authorization(&[String::from(
+            "GitHub repository discovery failed: GitHub CLI reported: HTTP 401. Check `gh auth status`; authenticate or refresh access with `gh auth login`."
+        )]));
+        assert!(github_errors_need_authorization(&[String::from(
+            "GitHub repository discovery failed: GitHub CLI reported: authentication required."
         )]));
     }
 
