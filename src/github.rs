@@ -926,7 +926,9 @@ mod tests {
         let output = run_gh_command(
             &fs::canonicalize(fake_gh).unwrap(),
             CommandLimits {
-                timeout: Duration::from_secs(1),
+                // This case verifies bounded retention, not timeout behavior.
+                // Leave headroom for process scheduling in the parallel suite.
+                timeout: Duration::from_secs(10),
                 stdout_bytes: 4,
                 stderr_bytes: 5,
             },
@@ -966,7 +968,9 @@ mod tests {
         let output = run_login_via_web_command(
             &fs::canonicalize(fake_gh).unwrap(),
             CommandLimits {
-                timeout: Duration::from_secs(1),
+                // This case verifies exact arguments, not timeout behavior.
+                // Leave headroom for process scheduling in the parallel suite.
+                timeout: Duration::from_secs(10),
                 stdout_bytes: 1024,
                 stderr_bytes: 1024,
             },
