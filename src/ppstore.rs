@@ -630,6 +630,8 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    const FAKE_PROCESS_CONTRACT_TIMEOUT: Duration = Duration::from_secs(30);
+
     fn report_json(
         app_id: u64,
         operation: &str,
@@ -1037,7 +1039,7 @@ mod tests {
             InstallOperation::Get,
             Some("RU"),
             // This case verifies the process contract, not timeout behavior.
-            Duration::from_secs(10),
+            FAKE_PROCESS_CONTRACT_TIMEOUT,
         )
         .unwrap();
         assert_eq!(outcome, InstallOutcome::Applied("status queued".into()));
@@ -1077,7 +1079,7 @@ mod tests {
             InstallOperation::Install,
             None,
             // This case verifies error sanitization, not timeout behavior.
-            Duration::from_secs(10),
+            FAKE_PROCESS_CONTRACT_TIMEOUT,
         )
         .unwrap_err()
         .to_string();

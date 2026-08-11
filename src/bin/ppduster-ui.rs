@@ -17,15 +17,15 @@ use ppduster::automation::{
     ExpressionValue, FieldRef, ForEachNode, GraphEdge, GraphNode, GraphValidationError,
     GraphValidationErrorKind, IfNode, IndeterminatePolicy, JoinMode, JoinNode, LoopFailurePolicy,
     ObjectSchema, PolicyRequirement, ProjectEntry, ReferenceV1, ReleaseChannel, RuleOutcomePolicy,
-    RunOptions, RunReport, ScenarioProject, ScenarioProjectFile, ScriptInterpreter, SemanticFormat,
-    Sensitivity, Step, StepCondition, StepStatus, SwitchCase, SwitchNode, Task, TaskFile, TaskPack,
-    TaskSource, TemplatePart, TrustRequirement, WorkflowGraph,
+    RunOptions, RunReport, ScenarioProject, ScriptInterpreter, SemanticFormat, Sensitivity, Step,
+    StepCondition, StepStatus, SwitchCase, SwitchNode, Task, TaskFile, TaskPack, TaskSource,
+    TemplatePart, TrustRequirement, WorkflowGraph,
 };
 #[cfg(test)]
 use ppduster::automation::{
     ContextStore, CopyPathAction, CreateDirectoryAction, InspectPathAction, RemovePathAction,
-    StepLogEntry, StepOutput, StepReport, StructuredStepOutput, WriteConflictPolicy,
-    WriteFileAction,
+    ScenarioProjectFile, StepLogEntry, StepOutput, StepReport, StructuredStepOutput,
+    WriteConflictPolicy, WriteFileAction,
 };
 use ppduster::automation::{ContextType, FieldSchema};
 use ppduster::github::{list_accessible_repositories, login_via_web, GithubRepository};
@@ -33,6 +33,7 @@ use regex::RegexBuilder;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
@@ -46,7 +47,59 @@ const LINE: Color32 = Color32::from_rgb(222, 223, 216);
 const PURPLE: Color32 = Color32::from_rgb(101, 87, 217);
 const CYAN: Color32 = Color32::from_rgb(21, 146, 136);
 const ORANGE: Color32 = Color32::from_rgb(208, 106, 53);
-const BLUE: Color32 = Color32::from_rgb(54, 127, 187);
+
+// A compact visual system for shared UI primitives. Domain-specific editors
+// can stay dense, but navigation, node cards, statuses, and callouts should use
+// the same readable type scale and geometry.
+const UI_TEXT_CAPTION: f32 = 10.0;
+const UI_TEXT_BODY: f32 = 11.0;
+const UI_TEXT_NODE_TITLE: f32 = 14.0;
+const UI_SPACE_XS: f32 = 4.0;
+const UI_SPACE_SM: f32 = 8.0;
+const UI_SPACE_MD: f32 = 12.0;
+const UI_CONTROL_PADDING_X: f32 = 10.0;
+const UI_CONTROL_PADDING_Y: f32 = 6.0;
+const UI_RADIUS_BADGE: u8 = 6;
+const UI_RADIUS_CONTROL: u8 = 8;
+const UI_RADIUS_CARD: u8 = 12;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiTone {
+    Primary,
+    Success,
+    Warning,
+    Info,
+    Danger,
+    Muted,
+}
+
+/// Semantic colors are intentionally different between themes. Each text
+/// color keeps at least WCAG AA contrast against the corresponding card
+/// surface while retaining the warm paper / charcoal character of the app.
+fn ui_tone(tone: UiTone, dark: bool) -> Color32 {
+    match (tone, dark) {
+        (UiTone::Primary, true) => Color32::from_rgb(174, 164, 255),
+        (UiTone::Primary, false) => Color32::from_rgb(79, 63, 181),
+        (UiTone::Success, true) => Color32::from_rgb(105, 210, 196),
+        (UiTone::Success, false) => Color32::from_rgb(8, 111, 101),
+        (UiTone::Warning, true) => Color32::from_rgb(244, 166, 114),
+        (UiTone::Warning, false) => Color32::from_rgb(166, 70, 24),
+        (UiTone::Info, true) => Color32::from_rgb(120, 186, 235),
+        (UiTone::Info, false) => Color32::from_rgb(37, 99, 150),
+        (UiTone::Danger, true) => Color32::from_rgb(247, 132, 132),
+        (UiTone::Danger, false) => Color32::from_rgb(169, 42, 42),
+        (UiTone::Muted, true) => Color32::from_rgb(174, 181, 173),
+        (UiTone::Muted, false) => Color32::from_rgb(88, 94, 87),
+    }
+}
+
+fn on_primary(dark: bool) -> Color32 {
+    if dark {
+        Color32::from_rgb(24, 28, 30)
+    } else {
+        Color32::WHITE
+    }
+}
 
 const COMPACT_VIEWPORT_WIDTH: f32 = 980.0;
 const WIDE_VIEWPORT_WIDTH: f32 = 1440.0;
@@ -60,6 +113,15 @@ const CANVAS_ZOOM_STEP: f32 = 1.2;
 const CANVAS_FIT_PADDING: f32 = 56.0;
 const GITHUB_LOGIN_COMMAND: &str =
     "gh auth login --hostname github.com --git-protocol https --web --clipboard";
+
+fn safety_badge(allow_shell: bool, allow_elevation: bool, dark: bool) -> (&'static str, Color32) {
+    match (allow_shell, allow_elevation) {
+        (false, false) => ("БЕЗОПАСНЫЙ РЕЖИМ", ui_tone(UiTone::Success, dark)),
+        (true, false) => ("ДОСТУП К SHELL", ui_tone(UiTone::Warning, dark)),
+        (false, true) => ("ПОВЫШЕНИЕ ПРАВ", ui_tone(UiTone::Warning, dark)),
+        (true, true) => ("РАСШИРЕННЫЙ ДОСТУП", ui_tone(UiTone::Warning, dark)),
+    }
+}
 
 /// Keep the editor usable down to the minimum supported viewport while
 /// preserving the roomier desktop proportions on wide windows.
@@ -5103,6 +5165,13 @@ impl GithubPickerState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingProjectAction {
+    Close,
+    Load,
+    Quit,
+}
+
 impl Default for GithubPickerState {
     fn default() -> Self {
         Self {
@@ -5148,6 +5217,7 @@ struct ScenarioApp {
     task_pack: Option<TaskPack>,
     load_error: Option<String>,
     selected_task: usize,
+    library_search: String,
     selected_step: Option<usize>,
     /// Stable graph-node selection for graph-native custom scenarios. Legacy
     /// library tasks retain `selected_step` because their reports are linear.
@@ -5166,6 +5236,9 @@ struct ScenarioApp {
     github_picker: GithubPickerState,
     file_message: Option<(bool, String)>,
     custom_project: Option<ScenarioProject>,
+    project_path: Option<PathBuf>,
+    project_dirty: bool,
+    pending_project_action: Option<PendingProjectAction>,
     selected_project_scenario: Option<Vec<usize>>,
     selected_project_group: Vec<usize>,
     block_picker_parent: Option<String>,
@@ -5197,6 +5270,7 @@ impl ScenarioApp {
             task_pack,
             load_error,
             selected_task,
+            library_search: String::new(),
             selected_step: Some(0),
             selected_node: None,
             channel: ReleaseChannel::Release,
@@ -5213,6 +5287,9 @@ impl ScenarioApp {
             github_picker: GithubPickerState::default(),
             file_message: None,
             custom_project: None,
+            project_path: None,
+            project_dirty: false,
+            pending_project_action: None,
             selected_project_scenario: None,
             selected_project_group: Vec::new(),
             block_picker_parent: None,
@@ -5281,10 +5358,149 @@ impl ScenarioApp {
         }
     }
 
+    fn reset_run_permissions(&mut self) {
+        self.allow_shell = false;
+        self.allow_elevation = false;
+    }
+
+    fn reset_selection_for_task(&mut self, task: &Task) {
+        self.reset_run_permissions();
+        if task.is_template() {
+            self.selected_step = Some(0);
+            self.selected_node = None;
+        } else if let Some(graph) = &task.graph {
+            self.selected_step = None;
+            self.selected_node = graph.nodes.first().map(|node| node.id().to_owned());
+        } else {
+            self.selected_step = (!task.steps.is_empty()).then_some(0);
+            self.selected_node = None;
+        }
+        self.invalidate_plan();
+    }
+
+    fn select_library_task(&mut self, index: usize) -> bool {
+        if self.running || self.custom_project.is_some() || self.selected_task == index {
+            return false;
+        }
+        let Some(task) = self
+            .task_pack
+            .as_ref()
+            .and_then(|pack| pack.tasks.get(index))
+            .cloned()
+        else {
+            return false;
+        };
+        self.selected_task = index;
+        self.reset_selection_for_task(&task);
+        true
+    }
+
+    fn select_project_scenario(&mut self, project: &ScenarioProject, path: Vec<usize>) -> bool {
+        if self.running || self.selected_project_scenario.as_deref() == Some(path.as_slice()) {
+            return false;
+        }
+        let Some(task) = project.scenario(&path) else {
+            return false;
+        };
+        self.selected_project_group = path[..path.len().saturating_sub(1)].to_vec();
+        self.selected_project_scenario = Some(path);
+        self.reset_selection_for_task(task);
+        true
+    }
+
+    fn select_project_group(&mut self, project: &ScenarioProject, path: Vec<usize>) -> bool {
+        if self.running || project_group_entries(project, &path).is_none() {
+            return false;
+        }
+        self.selected_project_group = path.clone();
+        if self
+            .selected_project_scenario
+            .as_ref()
+            .is_some_and(|selected| selected.starts_with(&path))
+        {
+            return false;
+        }
+        let Some(entries) = project_group_entries(project, &path) else {
+            return false;
+        };
+        let mut prefix = path;
+        let next_scenario = first_scenario_path(entries, &mut prefix);
+        if let Some(next_scenario) = next_scenario {
+            return self.select_project_scenario(project, next_scenario);
+        }
+        let changed = self.selected_project_scenario.take().is_some();
+        self.selected_step = None;
+        self.selected_node = None;
+        if changed {
+            self.reset_run_permissions();
+            self.invalidate_plan();
+        }
+        changed
+    }
+
+    fn mark_project_dirty(&mut self) {
+        if self.custom_project.is_some() {
+            self.project_dirty = true;
+        }
+        self.invalidate_plan();
+    }
+
+    fn close_custom_project(&mut self) {
+        self.custom_project = None;
+        self.project_path = None;
+        self.project_dirty = false;
+        self.pending_project_action = None;
+        self.selected_project_scenario = None;
+        self.selected_project_group.clear();
+        self.selected_step = Some(0);
+        self.selected_node = None;
+        self.reset_run_permissions();
+        self.invalidate_plan();
+    }
+
+    fn request_project_action(&mut self, action: PendingProjectAction) -> bool {
+        if self.running {
+            return false;
+        }
+        if self.custom_project.is_some() && self.project_dirty {
+            self.pending_project_action = Some(action);
+            return false;
+        }
+        self.perform_project_action(action)
+    }
+
+    fn perform_project_action(&mut self, action: PendingProjectAction) -> bool {
+        self.pending_project_action = None;
+        match action {
+            PendingProjectAction::Close => {
+                self.close_custom_project();
+                false
+            }
+            PendingProjectAction::Load => {
+                self.load_scenario_file();
+                false
+            }
+            PendingProjectAction::Quit => {
+                self.close_custom_project();
+                true
+            }
+        }
+    }
+
+    fn defer_viewport_close_if_dirty(&mut self) -> bool {
+        if self.custom_project.is_some() && self.project_dirty {
+            self.pending_project_action = Some(PendingProjectAction::Quit);
+            true
+        } else {
+            false
+        }
+    }
+
     fn start_custom_project(&mut self) {
         if self.running {
             return;
         }
+        self.reset_run_permissions();
         let task = Task {
             id: "custom-scenario".into(),
             name: "Новый сценарий".into(),
@@ -5309,6 +5525,9 @@ impl ScenarioApp {
                 }],
             }],
         });
+        self.project_path = None;
+        self.project_dirty = true;
+        self.pending_project_action = None;
         self.selected_project_scenario = Some(vec![0, 0]);
         self.selected_project_group = vec![0];
         self.selected_step = None;
@@ -5386,7 +5605,7 @@ impl ScenarioApp {
             self.graph_picker_port = None;
             self.block_picker_parent = None;
             self.block_picker_search.clear();
-            self.invalidate_plan();
+            self.mark_project_dirty();
             return;
         }
 
@@ -5483,7 +5702,7 @@ impl ScenarioApp {
         self.graph_picker_attach = None;
         self.graph_picker_port = None;
         self.block_picker_search.clear();
-        self.invalidate_plan();
+        self.mark_project_dirty();
     }
 
     fn add_graph_composer_block(&mut self, kind: ComposerGraphBlockKind) {
@@ -5505,8 +5724,10 @@ impl ScenarioApp {
             return;
         };
         let mut continue_with_loop_body = None;
+        let mut graph_changed = false;
         match graph_insert_composer_block(graph, &attach, source_port, kind) {
             Ok(id) => {
+                graph_changed = true;
                 if matches!(kind, ComposerGraphBlockKind::ForEach) {
                     continue_with_loop_body = Some(ComposerGraphAttach::NestedStart {
                         scope: ComposerGraphNestedScope::ForEachBody {
@@ -5549,7 +5770,11 @@ impl ScenarioApp {
         self.graph_picker_port = None;
         self.block_picker_parent = None;
         self.block_picker_search.clear();
-        self.invalidate_plan();
+        if graph_changed {
+            self.mark_project_dirty();
+        } else {
+            self.invalidate_plan();
+        }
         if let Some(attach) = continue_with_loop_body {
             self.open_graph_block_picker(attach);
         }
@@ -5651,6 +5876,7 @@ impl ScenarioApp {
     }
 
     fn set_composer_canvas_view(&mut self, task_id: &str, view: CanvasView) {
+        let view = view.sanitized();
         let Some(canvas) = self
             .custom_project
             .as_mut()
@@ -5658,7 +5884,10 @@ impl ScenarioApp {
         else {
             return;
         };
-        canvas.view = view.sanitized();
+        if canvas.view != view {
+            canvas.view = view;
+            self.project_dirty = true;
+        }
     }
 
     fn drag_composer_node(&mut self, task_id: &str, node_id: &str, delta: Vec2) {
@@ -5675,6 +5904,7 @@ impl ScenarioApp {
         };
         position.x = (position.x + delta.x).max(24.0);
         position.y = (position.y + delta.y).max(210.0);
+        self.project_dirty = true;
     }
 
     fn remove_composer_node(&mut self, node_id: &str) {
@@ -5715,7 +5945,7 @@ impl ScenarioApp {
             }
         }
         self.selected_node = None;
-        self.invalidate_plan();
+        self.mark_project_dirty();
     }
 
     fn add_project_group(&mut self) {
@@ -5735,7 +5965,7 @@ impl ScenarioApp {
         let mut new_path = path;
         new_path.push(entries.len() - 1);
         self.selected_project_group = new_path;
-        self.invalidate_plan();
+        self.mark_project_dirty();
     }
 
     fn add_project_scenario(&mut self) {
@@ -5765,7 +5995,8 @@ impl ScenarioApp {
         self.selected_project_scenario = Some(scenario_path);
         self.selected_step = None;
         self.selected_node = None;
-        self.invalidate_plan();
+        self.reset_run_permissions();
+        self.mark_project_dirty();
     }
 
     fn add_github_project_scenario(&mut self) {
@@ -5785,7 +6016,8 @@ impl ScenarioApp {
         self.selected_project_scenario = Some(scenario_path);
         self.selected_step = None;
         self.selected_node = Some("list-repositories".into());
-        self.invalidate_plan();
+        self.reset_run_permissions();
+        self.mark_project_dirty();
     }
 
     fn start_github_repository_load(&mut self, ctx: &egui::Context) {
@@ -6034,33 +6266,57 @@ impl ScenarioApp {
         Some(command)
     }
 
-    fn save_selected_scenario(&mut self) {
-        if let Some(project) = self.custom_project.clone() {
-            if let Err(error) = validate_project(&project) {
-                self.file_message = Some((true, format!("Проект нельзя сохранить: {error}")));
-                return;
+    fn save_custom_project_to(&mut self, path: PathBuf) -> bool {
+        let Some(project) = self.custom_project.clone() else {
+            return false;
+        };
+        if let Err(error) = validate_project_for_editing(&project) {
+            self.file_message = Some((true, format!("Проект нельзя сохранить: {error}")));
+            return false;
+        }
+        match write_project_file(&path, &project) {
+            Ok(()) => {
+                self.project_path = Some(path.clone());
+                self.project_dirty = false;
+                self.file_message = Some((false, format!("Проект сохранён: {}", path.display())));
+                true
             }
-            let suggested_name = format!("{}.ppduster.yaml", project.id);
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter("Проект ppduster", &["yaml", "yml"])
-                .set_file_name(&suggested_name)
-                .save_file()
-            else {
-                return;
+            Err(error) => {
+                self.file_message = Some((true, format!("{error:#}")));
+                false
+            }
+        }
+    }
+
+    fn save_custom_project_as(&mut self) -> bool {
+        let Some(project) = self.custom_project.as_ref() else {
+            return false;
+        };
+        let suggested_name = format!("{}.ppduster.yaml", project.id);
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Проект ppduster", &["yaml", "yml"])
+            .set_file_name(&suggested_name)
+            .save_file()
+        else {
+            return false;
+        };
+        self.save_custom_project_to(path)
+    }
+
+    fn save_selected_scenario(&mut self) -> bool {
+        if self.custom_project.is_some() {
+            return if let Some(path) = self.project_path.clone() {
+                self.save_custom_project_to(path)
+            } else {
+                self.save_custom_project_as()
             };
-            let result = write_project_file(&path, &project);
-            self.file_message = Some(match result {
-                Ok(()) => (false, format!("Проект сохранён: {}", path.display())),
-                Err(error) => (true, format!("{error:#}")),
-            });
-            return;
         }
         let Some(mut task) = self.selected_task().cloned() else {
-            return;
+            return false;
         };
         if let Err(error) = task.validate() {
             self.file_message = Some((true, format!("Сценарий нельзя сохранить: {error}")));
-            return;
+            return false;
         }
         // A file chosen by the user is external on its next load, even if its
         // source scenario was bundled with the application.
@@ -6071,7 +6327,7 @@ impl ScenarioApp {
             .set_file_name(&suggested_name)
             .save_file()
         else {
-            return;
+            return false;
         };
         let result = serde_yaml::to_string(&TaskFile { task })
             .map_err(anyhow::Error::from)
@@ -6080,10 +6336,16 @@ impl ScenarioApp {
                     .map_err(anyhow::Error::from)
                     .with_context(|| format!("не удалось сохранить {}", path.display()))
             });
-        self.file_message = Some(match result {
-            Ok(()) => (false, format!("Сценарий сохранён: {}", path.display())),
-            Err(error) => (true, format!("{error:#}")),
-        });
+        match result {
+            Ok(()) => {
+                self.file_message = Some((false, format!("Сценарий сохранён: {}", path.display())));
+                true
+            }
+            Err(error) => {
+                self.file_message = Some((true, format!("{error:#}")));
+                false
+            }
+        }
     }
 
     fn load_scenario_file(&mut self) {
@@ -6101,13 +6363,19 @@ impl ScenarioApp {
             }
         };
         self.open_custom_project(project);
+        self.project_path = Some(path.clone());
+        self.project_dirty = false;
         self.file_message = Some((false, format!("Проект загружен: {}", path.display())));
     }
 
     fn open_custom_project(&mut self, mut project: ScenarioProject) {
+        self.reset_run_permissions();
         make_project_external(&mut project.entries);
         let selected = first_scenario_path(&project.entries, &mut Vec::new());
         self.custom_project = Some(project);
+        self.project_path = None;
+        self.project_dirty = false;
+        self.pending_project_action = None;
         self.selected_project_scenario = selected.clone();
         self.selected_project_group = selected
             .as_ref()
@@ -6330,9 +6598,23 @@ impl eframe::App for ScenarioApp {
         // Keep custom colors in sync when the OS appearance changes while the
         // application is using the system theme preference.
         self.dark = ui.ctx().theme() == egui::Theme::Dark;
+        if ui.ctx().input(|input| input.viewport().close_requested())
+            && self.defer_viewport_close_if_dirty()
+        {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
         self.poll_run(ui.ctx());
         self.poll_github_authorization(ui.ctx());
         self.poll_github_repository_load(ui.ctx());
+        let save_shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
+        if ui
+            .ctx()
+            .input_mut(|input| input.consume_shortcut(&save_shortcut))
+            && !self.running
+        {
+            self.save_selected_scenario();
+        }
         self.top_bar(ui);
         self.left_library(ui);
         self.right_inspector(ui);
@@ -6340,49 +6622,210 @@ impl eframe::App for ScenarioApp {
         self.block_picker(ui.ctx());
         self.github_repository_picker(ui.ctx());
         self.run_confirmation(ui.ctx());
+        self.project_action_confirmation(ui.ctx());
     }
 }
 
-fn paint_project_group_tree(
+impl ScenarioApp {
+    fn project_action_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.pending_project_action else {
+            return;
+        };
+        egui::Modal::new(Id::new("confirm-discard-project"))
+            .frame(
+                Frame::popup(&ctx.global_style())
+                    .fill(surface(self.dark))
+                    .corner_radius(14)
+                    .inner_margin(Margin::same(20)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.label(
+                    RichText::new("Сохранить изменения?")
+                        .strong()
+                        .size(20.0)
+                        .color(text(self.dark)),
+                );
+                ui.add_space(8.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "В проекте есть несохранённые изменения. Сохраните черновик или явно продолжите без сохранения.",
+                        )
+                        .size(11.0)
+                        .color(MUTED),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Отмена").clicked() {
+                        self.pending_project_action = None;
+                    }
+                    if ui.button("Не сохранять").clicked()
+                        && self.perform_project_action(action)
+                    {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Сохранить").strong().color(Color32::WHITE),
+                            )
+                            .fill(PURPLE),
+                        )
+                        .clicked()
+                        && self.save_selected_scenario()
+                        && self.perform_project_action(action)
+                    {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            });
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProjectTreeAction {
+    SelectGroup(Vec<usize>),
+    SelectScenario(Vec<usize>),
+}
+
+fn library_task_row_id(task_id: &str) -> Id {
+    Id::new(("library-task-row", task_id))
+}
+
+fn project_scenario_row_id(path: &[usize]) -> Id {
+    Id::new(("project-scenario-row", path.to_vec()))
+}
+
+fn paint_navigation_row(
+    ui: &mut egui::Ui,
+    id: Id,
+    title: &str,
+    subtitle: Option<&str>,
+    selected: bool,
+    enabled: bool,
+    dark: bool,
+) -> egui::Response {
+    let row_height = if subtitle.is_some() { 42.0 } else { 30.0 };
+    let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width(), row_height));
+    let response = ui.interact(
+        rect,
+        id,
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    let fill = if selected {
+        translucent(PURPLE, if dark { 48 } else { 24 })
+    } else if response.hovered() && enabled {
+        panel(dark)
+    } else {
+        Color32::TRANSPARENT
+    };
+    let stroke = if selected {
+        Stroke::new(1.0, translucent(PURPLE, 150))
+    } else {
+        Stroke::NONE
+    };
+    ui.painter()
+        .rect(rect.shrink(1.0), 7.0, fill, stroke, StrokeKind::Inside);
+    if selected {
+        let marker = Rect::from_min_max(
+            rect.left_top() + Vec2::new(1.0, 7.0),
+            rect.left_bottom() + Vec2::new(4.0, -7.0),
+        );
+        ui.painter().rect_filled(marker, 2.0, PURPLE);
+    }
+
+    let title_color = if enabled { text(dark) } else { MUTED };
+    ui.painter().text(
+        rect.left_top() + Vec2::new(10.0, if subtitle.is_some() { 7.0 } else { 8.0 }),
+        Align2::LEFT_TOP,
+        truncate(title, 32),
+        FontId::proportional(10.0),
+        title_color,
+    );
+    if let Some(subtitle) = subtitle {
+        ui.painter().text(
+            rect.left_top() + Vec2::new(10.0, 24.0),
+            Align2::LEFT_TOP,
+            truncate(subtitle, 36),
+            FontId::monospace(8.0),
+            if selected { PURPLE } else { MUTED },
+        );
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, enabled, selected, title)
+    });
+    response
+}
+
+#[derive(Clone, Copy)]
+struct ProjectTreeView<'a> {
+    selected_group: &'a [usize],
+    selected_scenario: Option<&'a [usize]>,
+    enabled: bool,
+    dark: bool,
+}
+
+fn paint_project_tree(
     ui: &mut egui::Ui,
     entries: &[ProjectEntry],
     parent_path: &[usize],
-    selected_group: &[usize],
-    action: &mut Option<Vec<usize>>,
+    action: &mut Option<ProjectTreeAction>,
+    view: ProjectTreeView<'_>,
 ) {
     for (index, entry) in entries.iter().enumerate() {
-        let ProjectEntry::Group {
-            name,
-            entries: children,
-            ..
-        } = entry
-        else {
-            continue;
-        };
         let mut path = parent_path.to_vec();
         path.push(index);
-        let selected = path == selected_group;
-        let has_subgroups = children
-            .iter()
-            .any(|entry| matches!(entry, ProjectEntry::Group { .. }));
-        let label = RichText::new(name).strong().size(9.0).color(if selected {
-            PURPLE
-        } else {
-            ui.visuals().text_color()
-        });
-
-        if has_subgroups {
-            let response = egui::CollapsingHeader::new(label)
-                .id_salt(("project-group", path.clone()))
-                .default_open(selected_group.starts_with(&path))
-                .show(ui, |ui| {
-                    paint_project_group_tree(ui, children, &path, selected_group, action);
+        match entry {
+            ProjectEntry::Group {
+                name,
+                entries: children,
+                ..
+            } => {
+                let selected = path == view.selected_group;
+                let label = RichText::new(name).strong().size(9.0).color(if selected {
+                    PURPLE
+                } else if view.enabled {
+                    ui.visuals().text_color()
+                } else {
+                    MUTED
                 });
-            if response.header_response.clicked() {
-                *action = Some(path);
+                let response = egui::CollapsingHeader::new(label)
+                    .id_salt(("project-group", path.clone()))
+                    .default_open(
+                        view.selected_group.starts_with(&path)
+                            || view
+                                .selected_scenario
+                                .is_some_and(|selected| selected.starts_with(&path)),
+                    )
+                    .show(ui, |ui| {
+                        paint_project_tree(ui, children, &path, action, view);
+                    });
+                if view.enabled && response.header_response.clicked() {
+                    *action = Some(ProjectTreeAction::SelectGroup(path));
+                }
             }
-        } else if ui.selectable_label(selected, label).clicked() {
-            *action = Some(path);
+            ProjectEntry::Scenario { task } => {
+                let selected = view.selected_scenario == Some(path.as_slice());
+                let response = paint_navigation_row(
+                    ui,
+                    project_scenario_row_id(&path),
+                    &task.name,
+                    Some(&task.id),
+                    selected,
+                    view.enabled,
+                    view.dark,
+                );
+                if view.enabled && response.clicked() {
+                    *action = Some(ProjectTreeAction::SelectScenario(path));
+                }
+            }
         }
     }
 }
@@ -6466,10 +6909,14 @@ impl ScenarioApp {
                                 .size(12.0)
                                 .color(text(self.dark)),
                         );
-                        ui.label(RichText::new("SCENARIO FLOW").size(9.0).color(MUTED));
+                        ui.label(
+                            RichText::new("РЕДАКТОР СЦЕНАРИЕВ")
+                                .size(9.0)
+                                .color(ui_tone(UiTone::Muted, self.dark)),
+                        );
                     });
 
-                    ui.add_space(36.0);
+                    ui.add_space(28.0);
                     if let Some(task) = self.selected_task() {
                         let step_count = self
                             .task_pack
@@ -6487,21 +6934,44 @@ impl ScenarioApp {
                         } else {
                             format!("{} · {} шагов", task.id, step_count)
                         };
-                        Frame::new()
-                            .fill(panel(self.dark))
-                            .stroke(Stroke::new(1.0, line(self.dark)))
-                            .corner_radius(10)
-                            .inner_margin(Margin::symmetric(14, 7))
-                            .show(ui, |ui| {
-                                ui.set_min_width(300.0);
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new(&task.name)
-                                        .strong()
-                                        .size(11.0)
-                                        .color(text(self.dark)),
+                                    RichText::new(
+                                        self.custom_project
+                                            .as_ref()
+                                            .map(|project| project.name.as_str())
+                                            .unwrap_or("Библиотека"),
+                                    )
+                                    .size(11.0)
+                                    .color(ui_tone(UiTone::Muted, self.dark)),
                                 );
-                                ui.label(RichText::new(structure).size(9.0).color(MUTED));
+                                ui.label(
+                                    RichText::new("/")
+                                        .size(11.0)
+                                        .color(ui_tone(UiTone::Muted, self.dark)),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&task.name)
+                                            .strong()
+                                            .size(12.0)
+                                            .color(text(self.dark)),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(&task.name);
                             });
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(structure)
+                                        .monospace()
+                                        .size(9.0)
+                                        .color(ui_tone(UiTone::Muted, self.dark)),
+                                )
+                                .truncate(),
+                            );
+                        });
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -6523,7 +6993,21 @@ impl ScenarioApp {
                                 },
                             );
                         }
-                        ui.label(RichText::new("SAFE MODE").strong().size(9.0).color(CYAN));
+                        let (safety_label, safety_color) =
+                            safety_badge(self.allow_shell, self.allow_elevation, self.dark);
+                        ui.label(
+                            RichText::new(safety_label)
+                                .strong()
+                                .size(9.0)
+                                .color(safety_color),
+                        )
+                        .on_hover_text(
+                            if self.allow_shell || self.allow_elevation {
+                                "Для текущего плана включены расширенные разрешения."
+                            } else {
+                                "Shell-команды и повышение прав для текущего плана запрещены."
+                            },
+                        );
                     });
                 });
             });
@@ -6532,8 +7016,9 @@ impl ScenarioApp {
     fn left_library(&mut self, root: &mut egui::Ui) {
         let (library_width, _) = workspace_panel_widths(root.max_rect().width());
         egui::Panel::left("library")
-            .exact_size(library_width)
-            .resizable(false)
+            .default_size(library_width)
+            .size_range(210.0..=280.0)
+            .resizable(true)
             .frame(
                 Frame::new()
                     .fill(surface(self.dark))
@@ -6547,6 +7032,70 @@ impl ScenarioApp {
                     self.composer_palette(ui);
                     return;
                 }
+                ui.label(
+                    RichText::new("Сценарии")
+                        .strong()
+                        .size(22.0)
+                        .color(text(self.dark)),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.library_search)
+                        .hint_text("Поиск по названию или ID…")
+                        .desired_width(ui.available_width()),
+                );
+                ui.add_space(UI_SPACE_XS);
+                let query = self.library_search.trim().to_lowercase();
+                let mut task_action = None;
+                let task_list_height = (ui.available_height() - 190.0).clamp(120.0, 480.0);
+                ScrollArea::vertical()
+                    .id_salt("library-task-list")
+                    .max_height(task_list_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if let Some(pack) = &self.task_pack {
+                            let mut visible_count = 0usize;
+                            for (index, task) in pack.tasks.iter().enumerate() {
+                                if !query.is_empty()
+                                    && !task.name.to_lowercase().contains(&query)
+                                    && !task.id.to_lowercase().contains(&query)
+                                    && !task.description.to_lowercase().contains(&query)
+                                {
+                                    continue;
+                                }
+                                visible_count += 1;
+                                let response = paint_navigation_row(
+                                    ui,
+                                    library_task_row_id(&task.id),
+                                    &task.name,
+                                    Some(&task.id),
+                                    self.selected_task == index,
+                                    !self.running,
+                                    self.dark,
+                                );
+                                if response.clicked() {
+                                    task_action = Some(index);
+                                }
+                                ui.add_space(2.0);
+                            }
+                            if pack.tasks.is_empty() {
+                                ui.label(
+                                    RichText::new("В библиотеке пока нет сценариев.")
+                                        .size(9.0)
+                                        .color(MUTED),
+                                );
+                            } else if visible_count == 0 {
+                                ui.label(
+                                    RichText::new("По этому запросу сценарии не найдены.")
+                                        .size(UI_TEXT_BODY)
+                                        .color(ui_tone(UiTone::Muted, self.dark)),
+                                );
+                            }
+                        }
+                    });
+                if let Some(index) = task_action {
+                    self.select_library_task(index);
+                }
+                ui.add_space(12.0);
                 ui.label(
                     RichText::new("Проект")
                         .strong()
@@ -6608,12 +7157,7 @@ impl ScenarioApp {
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Закрыть").clicked() {
-                    self.custom_project = None;
-                    self.selected_project_scenario = None;
-                    self.selected_project_group.clear();
-                    self.selected_step = Some(0);
-                    self.selected_node = None;
-                    self.invalidate_plan();
+                    let _ = self.request_project_action(PendingProjectAction::Close);
                 }
             });
         });
@@ -6625,22 +7169,64 @@ impl ScenarioApp {
             .as_ref()
             .map(|project| project.name.as_str())
             .unwrap_or("Проект");
-        ui.label(RichText::new(project_name).size(9.0).color(MUTED));
+        ui.label(
+            RichText::new(project_name)
+                .strong()
+                .size(14.0)
+                .color(text(self.dark)),
+        );
+        ui.horizontal(|ui| {
+            if self.project_dirty {
+                ui.label(
+                    RichText::new("● Не сохранено")
+                        .size(10.0)
+                        .color(ui_tone(UiTone::Warning, self.dark)),
+                );
+            } else {
+                ui.label(
+                    RichText::new("Сохранено")
+                        .size(10.0)
+                        .color(ui_tone(UiTone::Success, self.dark)),
+                );
+            }
+            if let Some(path) = self.project_path.as_ref() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("project.yaml"),
+                        )
+                        .monospace()
+                        .size(9.0)
+                        .color(ui_tone(UiTone::Muted, self.dark)),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(path.display().to_string());
+            }
+        });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(!self.running, egui::Button::new("Загрузить…"))
                 .clicked()
             {
-                self.load_scenario_file();
+                let _ = self.request_project_action(PendingProjectAction::Load);
             }
             if ui
-                .add_enabled(!self.running, egui::Button::new("Сохранить…"))
+                .add_enabled(!self.running, egui::Button::new("Сохранить"))
                 .clicked()
             {
                 self.save_selected_scenario();
             }
         });
+        if ui
+            .add_enabled(!self.running, egui::Button::new("Сохранить как…"))
+            .clicked()
+        {
+            self.save_custom_project_as();
+        }
         if let Some((is_error, message)) = &self.file_message {
             ui.label(
                 RichText::new(message)
@@ -6676,46 +7262,140 @@ impl ScenarioApp {
             .max_height(240.0)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                paint_project_group_tree(
+                paint_project_tree(
                     ui,
                     &project.entries,
                     &[],
-                    &self.selected_project_group,
                     &mut tree_action,
+                    ProjectTreeView {
+                        selected_group: &self.selected_project_group,
+                        selected_scenario: self.selected_project_scenario.as_deref(),
+                        enabled: !self.running,
+                        dark: self.dark,
+                    },
                 );
             });
-        if let Some(path) = tree_action {
-            self.selected_project_group = path.clone();
-            let selected_is_inside = self
-                .selected_project_scenario
-                .as_ref()
-                .is_some_and(|selected| selected.starts_with(&path));
-            if !selected_is_inside {
-                if let Some(entries) = project_group_entries(&project, &path) {
-                    let mut prefix = path;
-                    self.selected_project_scenario = first_scenario_path(entries, &mut prefix);
-                    let selected_task = self
-                        .selected_project_scenario
-                        .as_ref()
-                        .and_then(|path| project.scenario(path));
-                    self.selected_node = selected_task
-                        .and_then(|task| task.graph.as_ref())
-                        .and_then(|graph| graph.nodes.first())
-                        .map(|node| node.id().to_owned());
-                    self.selected_step = selected_task
-                        .is_some_and(|task| task.graph.is_none() && !task.steps.is_empty())
-                        .then_some(0);
-                    self.invalidate_plan();
-                }
+        match tree_action {
+            Some(ProjectTreeAction::SelectGroup(path)) => {
+                self.select_project_group(&project, path);
             }
+            Some(ProjectTreeAction::SelectScenario(path)) => {
+                self.select_project_scenario(&project, path);
+            }
+            None => {}
+        }
+    }
+
+    fn inspector_action_bar(&mut self, ui: &mut egui::Ui) {
+        let validation_error = self
+            .custom_project
+            .as_ref()
+            .and_then(|project| validate_project(project).err());
+        let resolved = self
+            .resolved_selected_task()
+            .map_err(|error| format!("{error:#}"));
+        let resolved_task = resolved.as_ref().ok();
+        let resolution_error = resolved.as_ref().err().map(String::as_str);
+        let plan_enabled = validation_error.is_none()
+            && resolved_task.is_some()
+            && !self.github_picker.loading
+            && !self.running;
+        let run_blocker = run_disabled_reason(RunGate {
+            validation_error: validation_error.as_deref(),
+            resolved_task,
+            resolution_error,
+            report: self.report.as_ref(),
+            report_applied: self.report_applied,
+            plan_error: self.plan_error.as_deref(),
+            github_loading: self.github_picker.loading,
+            running: self.running,
+            github_auth_ready: github_selection_auth_ready(&self.github_picker),
+        });
+        let mut plan_clicked = false;
+        let mut run_clicked = false;
+        Frame::new()
+            .fill(panel(self.dark))
+            .stroke(Stroke::new(1.0, line(self.dark)))
+            .corner_radius(UI_RADIUS_CONTROL)
+            .inner_margin(Margin::same(10))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(if self.report.is_some() {
+                            "ПЛАН И ЗАПУСК"
+                        } else {
+                            "СНАЧАЛА ПРОВЕРЬТЕ ПЛАН"
+                        })
+                        .strong()
+                        .size(UI_TEXT_CAPTION)
+                        .color(ui_tone(UiTone::Muted, self.dark)),
+                    );
+                    if self.running {
+                        ui.spinner();
+                    }
+                });
+                ui.add_space(UI_SPACE_XS);
+                let button_width = ((ui.available_width() - UI_SPACE_SM) * 0.5).max(120.0);
+                ui.horizontal(|ui| {
+                    plan_clicked = ui
+                        .add_enabled(
+                            plan_enabled,
+                            egui::Button::new(
+                                RichText::new("Проверить план")
+                                    .strong()
+                                    .color(on_primary(self.dark)),
+                            )
+                            .min_size(Vec2::new(button_width, 36.0))
+                            .fill(ui_tone(UiTone::Primary, self.dark)),
+                        )
+                        .clicked();
+                    let run_response = ui.add_enabled(
+                        run_blocker.is_none(),
+                        egui::Button::new(
+                            RichText::new(if self.running {
+                                "Выполняется…"
+                            } else {
+                                "Запустить"
+                            })
+                            .strong()
+                            .color(on_primary(self.dark)),
+                        )
+                        .min_size(Vec2::new(button_width, 36.0))
+                        .fill(ui_tone(UiTone::Warning, self.dark)),
+                    );
+                    run_clicked = if let Some(reason) = run_blocker.as_deref() {
+                        run_response.on_disabled_hover_text(reason).clicked()
+                    } else {
+                        run_response.clicked()
+                    };
+                });
+                if let Some(reason) = run_blocker.as_deref() {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(reason)
+                                .size(UI_TEXT_CAPTION)
+                                .color(ui_tone(UiTone::Muted, self.dark)),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(reason);
+                }
+            });
+        if plan_clicked {
+            self.build_plan();
+        }
+        if run_clicked {
+            self.confirm_run = true;
         }
     }
 
     fn right_inspector(&mut self, root: &mut egui::Ui) {
         let (_, inspector_width) = workspace_panel_widths(root.max_rect().width());
         egui::Panel::right("inspector")
-            .exact_size(inspector_width)
-            .resizable(false)
+            .default_size(inspector_width)
+            .size_range(320.0..=400.0)
+            .resizable(true)
             .frame(
                 Frame::new()
                     .fill(surface(self.dark))
@@ -6725,6 +7405,10 @@ impl ScenarioApp {
             .show(root, |ui| {
                 ui.label(RichText::new("ИНСПЕКТОР").strong().size(10.0).color(MUTED));
                 ui.add_space(6.0);
+                if self.selected_task().is_some() {
+                    self.inspector_action_bar(ui);
+                    ui.add_space(8.0);
+                }
                 if self.custom_project.is_some() {
                     bounded_inspector_scroll(ui, "composer-inspector-scroll", |ui| {
                         self.composer_inspector(ui);
@@ -6960,94 +7644,15 @@ impl ScenarioApp {
                     }
                     ui.add_space(14.0);
 
-                    section_label(ui, "РАЗРЕШЕНИЯ");
-                    let permissions_changed = ui
-                        .checkbox(&mut self.allow_elevation, "Разрешить elevation")
-                        .changed()
-                        | ui.checkbox(
-                            &mut self.allow_shell,
-                            "Разрешить shell-команды и скрипты",
-                        )
-                        .changed();
+                    let permissions_changed = paint_run_permission_controls(
+                        ui,
+                        &mut self.allow_elevation,
+                        &mut self.allow_shell,
+                    );
                     if permissions_changed {
                         self.invalidate_plan();
                     }
-                    ui.label(
-                        RichText::new("Без этих флагов опасные шаги не попадут в план.")
-                            .size(9.0)
-                            .color(MUTED),
-                    );
                     ui.add_space(14.0);
-
-                    if ui
-                        .add_enabled(
-                            resolved_task.is_some() && !self.github_picker.loading,
-                            egui::Button::new(
-                                RichText::new("Проверить план")
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            )
-                            .min_size(Vec2::new(ui.available_width(), 36.0))
-                            .fill(PURPLE)
-                            .corner_radius(9),
-                        )
-                        .clicked()
-                    {
-                        self.build_plan();
-                    }
-                    ui.add_space(7.0);
-                    let can_run = self
-                        .report
-                        .as_ref()
-                        .is_some_and(|report| report.errors.is_empty())
-                        && !self.report_applied
-                        && self.plan_error.is_none()
-                        && !self.github_picker.loading
-                        && !self.running
-                        && github_selection_auth_ready(&self.github_picker)
-                        && resolved_task.as_ref().is_some_and(task_supports_gui_run);
-                    if ui
-                        .add_enabled(
-                            can_run,
-                            egui::Button::new(if self.running {
-                                "Выполняется…"
-                            } else {
-                                "Запустить сценарий"
-                            })
-                            .min_size(Vec2::new(ui.available_width(), 34.0))
-                            .fill(ORANGE)
-                            .corner_radius(9),
-                        )
-                        .clicked()
-                    {
-                        self.confirm_run = true;
-                    }
-                    if resolved_task
-                        .as_ref()
-                        .is_some_and(|resolved| !task_supports_gui_run(resolved))
-                    {
-                        let git_auth_missing = resolved_task
-                            .as_ref()
-                            .is_some_and(task_has_unready_git_credentials);
-                        ui.label(
-                            RichText::new(if git_auth_missing {
-                                "Git credentials пока не готовы для фонового запуска. Настройте gh credential helper или SSH agent в окне выбора репозиториев."
-                            } else {
-                                "Этот сценарий требует терминала или vendor UI; используйте команду ниже."
-                            })
-                            .size(9.0)
-                            .color(MUTED),
-                        );
-                    } else if !github_selection_auth_ready(&self.github_picker) {
-                        ui.label(
-                            RichText::new(
-                                "Запуск заблокирован, пока Git credentials не готовы. Используйте подсказку в окне выбора репозиториев и затем снова проверьте план.",
-                            )
-                            .size(9.0)
-                            .color(ORANGE),
-                        );
-                    }
-                    ui.add_space(7.0);
                     if let Some(command) = self.command_for_selected() {
                         if ui
                             .add_sized(
@@ -7090,24 +7695,21 @@ impl ScenarioApp {
                             .inner_margin(Margin::same(10))
                             .show(ui, |ui| {
                                 ui.label(
-                                    RichText::new(if self.report_applied {
-                                        if failed {
-                                            format!(
-                                                "Сценарий завершён с ошибкой · {} шагов",
-                                                report.steps.len()
-                                            )
-                                        } else {
-                                            format!(
-                                                "Сценарий выполнен · {} шагов",
-                                                report.steps.len()
-                                            )
-                                        }
-                                    } else {
-                                        format!("План готов · {} шагов", report.steps.len())
-                                    })
+                                    RichText::new(library_run_report_heading(
+                                        report,
+                                        self.report_applied,
+                                    ))
                                     .strong()
                                     .color(report_color),
                                 );
+                                if failed {
+                                    ui.add_space(8.0);
+                                    section_label(ui, "ОШИБКИ ПЛАНА И ВЫПОЛНЕНИЯ");
+                                    for error in &report.errors {
+                                        error_box(ui, error, self.dark);
+                                        ui.add_space(6.0);
+                                    }
+                                }
                                 if self.report_applied {
                                     for step in &report.steps {
                                         let result = step
@@ -7266,10 +7868,25 @@ impl ScenarioApp {
             changed |= ui
                 .add(egui::TextEdit::singleline(&mut task.name).desired_width(ui.available_width()))
                 .changed();
-            ui.label(RichText::new("ID").size(9.0).color(MUTED));
-            changed |= ui
-                .add(egui::TextEdit::singleline(&mut task.id).desired_width(ui.available_width()))
-                .changed();
+            ui.label(RichText::new("ID сценария").size(9.0).color(MUTED));
+            Frame::new()
+                .fill(code_surface(self.dark))
+                .corner_radius(8)
+                .inner_margin(Margin::symmetric(10, 7))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&task.id)
+                                .monospace()
+                                .size(10.0)
+                                .color(text(self.dark)),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(
+                        "ID является стабильным ключом сценария и его канваса; в редакторе он не меняется.",
+                    );
+                });
             ui.label(RichText::new("Описание").size(9.0).color(MUTED));
             changed |= ui
                 .add(
@@ -7932,7 +8549,7 @@ impl ScenarioApp {
             self.start_github_authorization(ui.ctx(), request.intent);
         }
         if changed {
-            self.invalidate_plan();
+            self.mark_project_dirty();
         }
         if let Some(node_id) = remove_node {
             self.remove_composer_node(&node_id);
@@ -7953,7 +8570,7 @@ impl ScenarioApp {
                     Ok(false)
                 };
                 match result {
-                    Ok(true) => self.invalidate_plan(),
+                    Ok(true) => self.mark_project_dirty(),
                     Ok(false) => {}
                     Err(error) => self.file_message = Some((true, error)),
                 }
@@ -7975,7 +8592,7 @@ impl ScenarioApp {
                         self.file_message = Some((true, error));
                     }
                 }
-                self.invalidate_plan();
+                self.mark_project_dirty();
             }
         }
 
@@ -8027,6 +8644,12 @@ impl ScenarioApp {
         }
 
         ui.add_space(14.0);
+        let permissions_changed =
+            paint_run_permission_controls(ui, &mut self.allow_elevation, &mut self.allow_shell);
+        if permissions_changed {
+            self.invalidate_plan();
+        }
+        ui.add_space(14.0);
         let validation = self
             .custom_project
             .as_ref()
@@ -8035,45 +8658,22 @@ impl ScenarioApp {
         match &validation {
             Ok(()) => {
                 ui.label(
-                    RichText::new("Сценарий корректен и готов к сохранению.")
+                    RichText::new("Сценарий корректен и готов к проверке плана.")
                         .size(9.0)
                         .color(CYAN),
                 );
             }
             Err(error) => {
                 section_label(ui, "НУЖНО ИСПРАВИТЬ");
+                ui.label(
+                    RichText::new(
+                        "Черновик можно сохранить, но проверка плана и запуск пока заблокированы.",
+                    )
+                    .size(UI_TEXT_CAPTION)
+                    .color(ui_tone(UiTone::Warning, self.dark)),
+                );
                 error_box(ui, error, self.dark);
             }
-        }
-        ui.add_space(8.0);
-        if ui
-            .add_enabled(
-                validation.is_ok() && !self.running,
-                egui::Button::new("Проверить план")
-                    .min_size(Vec2::new(ui.available_width(), 34.0))
-                    .fill(PURPLE),
-            )
-            .clicked()
-        {
-            self.build_plan();
-        }
-        let can_run = validation.is_ok()
-            && self
-                .report
-                .as_ref()
-                .is_some_and(|report| report.errors.is_empty())
-            && !self.report_applied
-            && !self.running;
-        if ui
-            .add_enabled(
-                can_run,
-                egui::Button::new("Запустить сценарий")
-                    .min_size(Vec2::new(ui.available_width(), 34.0))
-                    .fill(ORANGE),
-            )
-            .clicked()
-        {
-            self.confirm_run = true;
         }
         let mut request_github_authorization = false;
         if let Some(error) = &self.plan_error {
@@ -8083,7 +8683,7 @@ impl ScenarioApp {
             paint_composer_run_report(
                 ui,
                 report,
-                self.selected_step,
+                self.selected_node.as_deref(),
                 self.report_applied,
                 self.dark,
             );
@@ -8246,6 +8846,7 @@ impl ScenarioApp {
                     *to + Vec2::new(0.0, node_size.y * 0.5),
                     edge.kind,
                     edge.port.as_ref(),
+                    self.dark,
                 );
             }
 
@@ -8288,7 +8889,7 @@ impl ScenarioApp {
                     Vec2::splat(30.0),
                 );
                 if editable {
-                    paint_graph_plus(&painter, plus_rect, "+");
+                    paint_graph_plus(&painter, plus_rect, "+", self.dark);
                 }
                 if editable
                     && ui
@@ -8384,7 +8985,7 @@ impl ScenarioApp {
                             FontId::proportional(8.0),
                             if *body_empty { MUTED } else { PURPLE },
                         );
-                        paint_graph_plus(&painter, body_rect, "∀");
+                        paint_graph_plus(&painter, body_rect, "∀", self.dark);
                         if *body_empty {
                             painter.circle_filled(completed_rect.center(), 12.0, panel(self.dark));
                             painter.circle_stroke(
@@ -8400,7 +9001,7 @@ impl ScenarioApp {
                                 MUTED,
                             );
                         } else {
-                            paint_graph_plus(&painter, completed_rect, "+");
+                            paint_graph_plus(&painter, completed_rect, "+", self.dark);
                         }
                         if ui
                             .interact(
@@ -8452,7 +9053,7 @@ impl ScenarioApp {
                             Pos2::new(rect.right() - 18.0, rect.center().y),
                             Vec2::splat(28.0),
                         );
-                        paint_graph_plus(&painter, plus_rect, "+");
+                        paint_graph_plus(&painter, plus_rect, "+", self.dark);
                         if ui
                             .interact(
                                 plus_rect,
@@ -8648,9 +9249,10 @@ impl ScenarioApp {
                                 &position_map,
                                 &canvas.parents,
                                 node_size,
+                                self.dark,
                             );
                         } else {
-                            paint_connectors(&painter, &positions, node_size);
+                            paint_connectors(&painter, &positions, node_size, self.dark);
                         }
 
                         if task.is_template() {
@@ -9894,6 +10496,7 @@ fn scenario_groups(
 }
 
 fn paint_bounded_code_lines(ui: &mut egui::Ui, source: &str, size: f32, color: Color32) {
+    let size = size.max(UI_TEXT_CAPTION);
     for line in source.split('\n') {
         ui.add(
             egui::Label::new(RichText::new(line).monospace().size(size).color(color)).truncate(),
@@ -9906,26 +10509,41 @@ fn paint_step_inspector(ui: &mut egui::Ui, step: &Step, options: Option<&RunOpti
         egui::Label::new(
             RichText::new(step_title(step))
                 .strong()
-                .size(14.0)
+                .size(UI_TEXT_NODE_TITLE)
                 .color(text(dark)),
         )
         .truncate(),
     );
-    ui.add(egui::Label::new(RichText::new(&step.id).monospace().size(9.0).color(MUTED)).truncate());
+    ui.add(
+        egui::Label::new(
+            RichText::new(&step.id)
+                .monospace()
+                .size(UI_TEXT_CAPTION)
+                .color(ui_tone(UiTone::Muted, dark)),
+        )
+        .truncate(),
+    );
     if let Some(options) = options {
         let summary = describe_step(step, options)
             .unwrap_or_else(|error| format!("Не удалось описать шаг: {error:#}"));
-        ui.add_space(8.0);
-        ui.add(egui::Label::new(RichText::new(summary).size(9.0).color(PURPLE)).truncate());
+        ui.add_space(UI_SPACE_SM);
+        ui.add(
+            egui::Label::new(
+                RichText::new(summary)
+                    .size(UI_TEXT_BODY)
+                    .color(ui_tone(UiTone::Primary, dark)),
+            )
+            .truncate(),
+        );
     }
-    ui.add_space(8.0);
+    ui.add_space(UI_SPACE_SM);
     let yaml = serde_yaml::to_string(step).unwrap_or_else(|error| format!("Ошибка: {error}"));
     Frame::new()
         .fill(code_surface(dark))
-        .corner_radius(8)
-        .inner_margin(Margin::same(9))
+        .corner_radius(UI_RADIUS_CONTROL)
+        .inner_margin(Margin::same(UI_SPACE_SM as i8))
         .show(ui, |ui| {
-            paint_bounded_code_lines(ui, &yaml, 9.0, text(dark));
+            paint_bounded_code_lines(ui, &yaml, UI_TEXT_CAPTION, text(dark));
         });
 }
 
@@ -11895,7 +12513,8 @@ fn branch_offset(sibling_index: usize) -> f32 {
     }
 }
 
-fn paint_connector(painter: &egui::Painter, from: Pos2, to: Pos2) {
+fn paint_connector(painter: &egui::Painter, from: Pos2, to: Pos2, dark: bool) {
+    let color = ui_tone(UiTone::Primary, dark);
     let bend = ((to.x - from.x).abs() * 0.46).max(34.0);
     let direction = if to.x >= from.x { 1.0 } else { -1.0 };
     painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
@@ -11907,12 +12526,12 @@ fn paint_connector(painter: &egui::Painter, from: Pos2, to: Pos2) {
         ],
         false,
         Color32::TRANSPARENT,
-        Stroke::new(4.0, translucent(PURPLE, 115)),
+        Stroke::new(2.5, translucent(color, if dark { 165 } else { 145 })),
     ));
-    painter.circle_filled(from, 7.0, PURPLE);
-    painter.circle_filled(to, 7.0, PURPLE);
-    painter.circle_stroke(from, 11.0, Stroke::new(2.0, translucent(PURPLE, 80)));
-    painter.circle_stroke(to, 11.0, Stroke::new(2.0, translucent(PURPLE, 80)));
+    painter.circle_filled(from, 5.0, color);
+    painter.circle_filled(to, 5.0, color);
+    painter.circle_stroke(from, 8.0, Stroke::new(1.0, translucent(color, 90)));
+    painter.circle_stroke(to, 8.0, Stroke::new(1.0, translucent(color, 90)));
 }
 
 fn paint_graph_connector(
@@ -11921,14 +12540,16 @@ fn paint_graph_connector(
     to: Pos2,
     kind: ComposerGraphEdgeKind,
     port: Option<&EdgePort>,
+    dark: bool,
 ) {
     let color = match kind {
-        ComposerGraphEdgeKind::Flow => PURPLE,
-        ComposerGraphEdgeKind::Iteration => CYAN,
-        ComposerGraphEdgeKind::Then => CYAN,
-        ComposerGraphEdgeKind::Else => ORANGE,
-        ComposerGraphEdgeKind::Case => BLUE,
-        ComposerGraphEdgeKind::Default => MUTED,
+        ComposerGraphEdgeKind::Flow => ui_tone(UiTone::Primary, dark),
+        ComposerGraphEdgeKind::Iteration | ComposerGraphEdgeKind::Then => {
+            ui_tone(UiTone::Success, dark)
+        }
+        ComposerGraphEdgeKind::Else => ui_tone(UiTone::Warning, dark),
+        ComposerGraphEdgeKind::Case => ui_tone(UiTone::Info, dark),
+        ComposerGraphEdgeKind::Default => ui_tone(UiTone::Muted, dark),
     };
     let bend = ((to.x - from.x).abs() * 0.46).max(34.0);
     let direction = if to.x >= from.x { 1.0 } else { -1.0 };
@@ -11941,10 +12562,10 @@ fn paint_graph_connector(
         ],
         false,
         Color32::TRANSPARENT,
-        Stroke::new(4.0, translucent(color, 125)),
+        Stroke::new(2.5, translucent(color, if dark { 175 } else { 155 })),
     ));
-    painter.circle_filled(from, 6.0, color);
-    painter.circle_filled(to, 6.0, color);
+    painter.circle_filled(from, 5.0, color);
+    painter.circle_filled(to, 5.0, color);
     let label = match kind {
         ComposerGraphEdgeKind::Flow => port.map(|port| graph_edge_port_label(port).to_owned()),
         ComposerGraphEdgeKind::Iteration => Some("для item".into()),
@@ -11954,24 +12575,64 @@ fn paint_graph_connector(
         ComposerGraphEdgeKind::Default => Some("иначе".into()),
     };
     if let Some(label) = label {
-        painter.text(
+        let galley = painter.layout_no_wrap(label, FontId::monospace(UI_TEXT_CAPTION), color);
+        let label_rect = Rect::from_center_size(
             from.lerp(to, 0.5) + Vec2::new(0.0, -12.0),
-            Align2::CENTER_BOTTOM,
-            label,
-            FontId::monospace(8.0),
-            color,
+            galley.size() + Vec2::new(10.0, 4.0),
         );
+        painter.rect_filled(
+            label_rect,
+            CornerRadius::same(UI_RADIUS_BADGE),
+            translucent(canvas(dark), if dark { 235 } else { 245 }),
+        );
+        painter.galley(label_rect.center() - galley.size() * 0.5, galley, color);
     }
 }
 
-fn paint_graph_plus(painter: &egui::Painter, rect: Rect, label: &str) {
-    painter.circle_filled(rect.center(), 12.0, PURPLE);
+fn paint_graph_plus(painter: &egui::Painter, rect: Rect, label: &str, dark: bool) {
+    painter.circle_filled(rect.center(), 11.0, ui_tone(UiTone::Primary, dark));
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional(16.0),
-        Color32::WHITE,
+        FontId::proportional(UI_TEXT_NODE_TITLE),
+        on_primary(dark),
+    );
+}
+
+fn paint_node_shell(
+    painter: &egui::Painter,
+    rect: Rect,
+    accent: Color32,
+    selected: bool,
+    dark: bool,
+) {
+    painter.rect_filled(
+        rect.translate(Vec2::new(0.0, 3.0)),
+        CornerRadius::same(UI_RADIUS_CARD),
+        translucent(Color32::BLACK, if dark { 18 } else { 12 }),
+    );
+    painter.rect(
+        rect,
+        CornerRadius::same(UI_RADIUS_CARD),
+        card(dark),
+        Stroke::new(
+            if selected { 2.0 } else { 1.0 },
+            if selected {
+                ui_tone(UiTone::Primary, dark)
+            } else {
+                line(dark)
+            },
+        ),
+        StrokeKind::Outside,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(
+            rect.left_top() + Vec2::new(0.0, UI_RADIUS_CARD as f32),
+            Pos2::new(rect.left() + 4.0, rect.bottom() - UI_RADIUS_CARD as f32),
+        ),
+        CornerRadius::same(2),
+        accent,
     );
 }
 
@@ -11985,39 +12646,33 @@ fn paint_graph_control_node(
     dark: bool,
 ) {
     let (eyebrow, title, icon, accent) = match card_kind {
-        ComposerGraphCard::ForEach { item_alias, .. } => {
-            ("ЦИКЛ", format!("Для каждого {item_alias}"), "∀", CYAN)
-        }
-        ComposerGraphCard::If => ("УСЛОВИЕ", "Если / иначе".into(), "?", ORANGE),
-        ComposerGraphCard::Switch => ("ВЫБОР", "Switch".into(), "≡", ORANGE),
-        ComposerGraphCard::Join => ("СЛИЯНИЕ", "Join".into(), "⋈", BLUE),
+        ComposerGraphCard::ForEach { item_alias, .. } => (
+            "ЦИКЛ",
+            format!("Для каждого {item_alias}"),
+            "∀",
+            ui_tone(UiTone::Success, dark),
+        ),
+        ComposerGraphCard::If => (
+            "УСЛОВИЕ",
+            "Если / иначе".into(),
+            "?",
+            ui_tone(UiTone::Warning, dark),
+        ),
+        ComposerGraphCard::Switch => (
+            "ВЫБОР",
+            "Switch".into(),
+            "≡",
+            ui_tone(UiTone::Warning, dark),
+        ),
+        ComposerGraphCard::Join => ("СЛИЯНИЕ", "Join".into(), "⋈", ui_tone(UiTone::Info, dark)),
         ComposerGraphCard::Action(_) => unreachable!("actions use paint_step_node"),
     };
-    painter.rect_filled(
-        rect.translate(Vec2::new(0.0, 7.0)),
-        CornerRadius::same(14),
-        translucent(Color32::BLACK, 22),
-    );
-    painter.rect(
-        rect,
-        CornerRadius::same(14),
-        card(dark),
-        Stroke::new(
-            if selected { 2.0 } else { 1.0 },
-            if selected { PURPLE } else { line(dark) },
-        ),
-        StrokeKind::Outside,
-    );
-    painter.rect_filled(
-        Rect::from_min_max(rect.min, Pos2::new(rect.left() + 7.0, rect.bottom())),
-        CornerRadius::same(14),
-        accent,
-    );
+    paint_node_shell(painter, rect, accent, selected, dark);
     let icon_rect = Rect::from_min_size(rect.min + Vec2::new(20.0, 20.0), Vec2::new(38.0, 38.0));
     painter.rect_filled(
         icon_rect,
-        CornerRadius::same(9),
-        translucent(accent, if dark { 54 } else { 28 }),
+        CornerRadius::same(UI_RADIUS_CONTROL),
+        translucent(accent, if dark { 48 } else { 22 }),
     );
     painter.text(
         icon_rect.center(),
@@ -12030,33 +12685,47 @@ fn paint_graph_control_node(
         rect.min + Vec2::new(70.0, 18.0),
         Align2::LEFT_TOP,
         eyebrow,
-        FontId::proportional(8.0),
-        MUTED,
+        FontId::proportional(UI_TEXT_CAPTION),
+        ui_tone(UiTone::Muted, dark),
     );
     painter.text(
         rect.min + Vec2::new(70.0, 36.0),
         Align2::LEFT_TOP,
-        truncate(&title, 23),
-        FontId::proportional(13.0),
+        truncate(&title, 19),
+        FontId::proportional(UI_TEXT_NODE_TITLE),
         text(dark),
     );
     painter.text(
-        rect.min + Vec2::new(20.0, 78.0),
+        rect.min + Vec2::new(20.0, 88.0),
         Align2::LEFT_TOP,
-        truncate(id, 27),
-        FontId::monospace(9.0),
-        MUTED,
+        truncate(id, 14),
+        FontId::monospace(UI_TEXT_CAPTION),
+        ui_tone(UiTone::Muted, dark),
     );
-    paint_status_badge(painter, rect, status);
+    paint_status_badge(painter, rect, status, dark);
 }
 
 fn graph_control_summary(ui: &mut egui::Ui, kind: &str, id: &str, dark: bool) {
-    ui.label(RichText::new(kind).strong().size(10.0).color(CYAN));
-    ui.label(RichText::new("ID блока").size(9.0).color(MUTED));
-    ui.label(RichText::new(id).monospace().size(9.0).color(PURPLE));
+    ui.label(
+        RichText::new(kind)
+            .strong()
+            .size(UI_TEXT_BODY)
+            .color(ui_tone(UiTone::Success, dark)),
+    );
+    ui.label(
+        RichText::new("ID блока")
+            .size(UI_TEXT_CAPTION)
+            .color(ui_tone(UiTone::Muted, dark)),
+    );
+    ui.label(
+        RichText::new(id)
+            .monospace()
+            .size(UI_TEXT_CAPTION)
+            .color(ui_tone(UiTone::Primary, dark)),
+    );
     ui.label(
         RichText::new("Управляющий узел хранит ветви непосредственно в WorkflowGraph.")
-            .size(8.0)
+            .size(UI_TEXT_BODY)
             .color(text(dark)),
     );
 }
@@ -12091,11 +12760,11 @@ fn collect_context_type_lines(value_type: &ContextType, path: &str, lines: &mut 
     }
 }
 
-fn paint_connectors(painter: &egui::Painter, positions: &[Pos2], node_size: Vec2) {
+fn paint_connectors(painter: &egui::Painter, positions: &[Pos2], node_size: Vec2, dark: bool) {
     for pair in positions.windows(2) {
         let from = pair[0] + Vec2::new(node_size.x, node_size.y * 0.5);
         let to = pair[1] + Vec2::new(0.0, node_size.y * 0.5);
-        paint_connector(painter, from, to);
+        paint_connector(painter, from, to, dark);
     }
 }
 
@@ -12105,6 +12774,7 @@ fn paint_composer_connectors(
     positions: &BTreeMap<String, Pos2>,
     parents: &BTreeMap<String, String>,
     node_size: Vec2,
+    dark: bool,
 ) {
     for (child, parent) in parents {
         if !composer_canvas_edge_is_visible(task, child, parent) {
@@ -12117,6 +12787,7 @@ fn paint_composer_connectors(
             painter,
             *from + Vec2::new(node_size.x, node_size.y * 0.5),
             *to + Vec2::new(0.0, node_size.y * 0.5),
+            dark,
         );
     }
 }
@@ -12130,34 +12801,14 @@ fn paint_group_node(
     status: Option<&StepStatus>,
     dark: bool,
 ) {
-    let accent = PURPLE;
-    let shadow = rect.translate(Vec2::new(0.0, 7.0));
-    painter.rect_filled(
-        shadow,
-        CornerRadius::same(14),
-        translucent(Color32::BLACK, 22),
-    );
-    painter.rect(
-        rect,
-        CornerRadius::same(14),
-        card(dark),
-        Stroke::new(
-            if selected { 2.0 } else { 1.0 },
-            if selected { PURPLE } else { line(dark) },
-        ),
-        StrokeKind::Outside,
-    );
-    painter.rect_filled(
-        Rect::from_min_max(rect.min, Pos2::new(rect.left() + 7.0, rect.bottom())),
-        CornerRadius::same(14),
-        accent,
-    );
+    let accent = ui_tone(UiTone::Primary, dark);
+    paint_node_shell(painter, rect, accent, selected, dark);
 
     let icon_rect = Rect::from_min_size(rect.min + Vec2::new(20.0, 18.0), Vec2::new(38.0, 38.0));
     painter.rect_filled(
         icon_rect,
-        CornerRadius::same(9),
-        translucent(accent, if dark { 54 } else { 28 }),
+        CornerRadius::same(UI_RADIUS_CONTROL),
+        translucent(accent, if dark { 48 } else { 22 }),
     );
     painter.text(
         icon_rect.center(),
@@ -12170,14 +12821,14 @@ fn paint_group_node(
         rect.min + Vec2::new(70.0, 16.0),
         Align2::LEFT_TOP,
         "СЦЕНАРИЙ-ГРУППА",
-        FontId::proportional(8.0),
-        MUTED,
+        FontId::proportional(UI_TEXT_CAPTION),
+        ui_tone(UiTone::Muted, dark),
     );
     painter.text(
         rect.min + Vec2::new(70.0, 34.0),
         Align2::LEFT_TOP,
-        truncate(&group.name, 25),
-        FontId::proportional(13.0),
+        truncate(&group.name, 21),
+        FontId::proportional(UI_TEXT_NODE_TITLE),
         text(dark),
     );
 
@@ -12186,25 +12837,25 @@ fn paint_group_node(
             rect.min + Vec2::new(20.0, 68.0 + line_index as f32 * 15.0),
             Align2::LEFT_TOP,
             line,
-            FontId::proportional(9.0),
-            MUTED,
+            FontId::proportional(UI_TEXT_CAPTION),
+            ui_tone(UiTone::Muted, dark),
         );
     }
     painter.text(
         rect.min + Vec2::new(20.0, 111.0),
         Align2::LEFT_TOP,
         format!("{:02}  {}", index + 1, truncate(&group.id, 27)),
-        FontId::monospace(9.0),
-        MUTED,
+        FontId::monospace(UI_TEXT_CAPTION),
+        ui_tone(UiTone::Muted, dark),
     );
     painter.text(
         rect.min + Vec2::new(20.0, 132.0),
         Align2::LEFT_TOP,
         format!("{} раскрытых шагов", group.step_count),
-        FontId::proportional(8.0),
-        PURPLE,
+        FontId::proportional(UI_TEXT_CAPTION),
+        accent,
     );
-    paint_status_badge(painter, rect, status);
+    paint_status_badge(painter, rect, status, dark);
 }
 
 fn aggregate_group_status(report: &RunReport, start: usize, count: usize) -> Option<StepStatus> {
@@ -12292,34 +12943,14 @@ fn paint_step_node(
     status: Option<&StepStatus>,
     dark: bool,
 ) {
-    let accent = action_color(&step.action);
-    let shadow = rect.translate(Vec2::new(0.0, 7.0));
-    painter.rect_filled(
-        shadow,
-        CornerRadius::same(14),
-        translucent(Color32::BLACK, 22),
-    );
-    painter.rect(
-        rect,
-        CornerRadius::same(14),
-        card(dark),
-        Stroke::new(
-            if selected { 2.0 } else { 1.0 },
-            if selected { PURPLE } else { line(dark) },
-        ),
-        StrokeKind::Outside,
-    );
-    painter.rect_filled(
-        Rect::from_min_max(rect.min, Pos2::new(rect.left() + 7.0, rect.bottom())),
-        CornerRadius::same(14),
-        accent,
-    );
+    let accent = action_color(&step.action, dark);
+    paint_node_shell(painter, rect, accent, selected, dark);
 
     let icon_rect = Rect::from_min_size(rect.min + Vec2::new(20.0, 20.0), Vec2::new(38.0, 38.0));
     painter.rect_filled(
         icon_rect,
-        CornerRadius::same(9),
-        translucent(accent, if dark { 54 } else { 28 }),
+        CornerRadius::same(UI_RADIUS_CONTROL),
+        translucent(accent, if dark { 48 } else { 22 }),
     );
     painter.text(
         icon_rect.center(),
@@ -12332,42 +12963,70 @@ fn paint_step_node(
         rect.min + Vec2::new(70.0, 18.0),
         Align2::LEFT_TOP,
         action_eyebrow(&step.action).to_uppercase(),
-        FontId::proportional(8.0),
-        MUTED,
+        FontId::proportional(UI_TEXT_CAPTION),
+        ui_tone(UiTone::Muted, dark),
     );
     painter.text(
         rect.min + Vec2::new(70.0, 36.0),
         Align2::LEFT_TOP,
-        truncate(&step_title(step), 23),
-        FontId::proportional(13.0),
+        truncate(&step_title(step), 19),
+        FontId::proportional(UI_TEXT_NODE_TITLE),
         text(dark),
     );
     painter.text(
-        rect.min + Vec2::new(20.0, 78.0),
+        rect.min + Vec2::new(20.0, 88.0),
         Align2::LEFT_TOP,
-        format!("{:02}  {}", index + 1, truncate(&step.id, 27)),
-        FontId::monospace(9.0),
-        MUTED,
+        format!("{:02}  {}", index + 1, truncate(&step.id, 14)),
+        FontId::monospace(UI_TEXT_CAPTION),
+        ui_tone(UiTone::Muted, dark),
     );
-    paint_status_badge(painter, rect, status);
+    paint_status_badge(painter, rect, status, dark);
 }
 
-fn paint_status_badge(painter: &egui::Painter, rect: Rect, status: Option<&StepStatus>) {
+fn paint_status_badge(
+    painter: &egui::Painter,
+    rect: Rect,
+    status: Option<&StepStatus>,
+    dark: bool,
+) {
     let (status_text, status_color) = match status {
-        Some(StepStatus::Satisfied) => ("ГОТОВО", CYAN),
-        Some(StepStatus::Failed) => ("ОШИБКА", Color32::from_rgb(194, 64, 64)),
-        Some(StepStatus::Applied) => ("ВЫПОЛНЕНО", CYAN),
-        Some(StepStatus::Skipped) => ("ПРОПУЩЕНО", MUTED),
-        Some(StepStatus::Running) => ("ВЫПОЛНЯЕТСЯ", ORANGE),
-        Some(StepStatus::WaitingForAttention) => ("ОЖИДАЕТ ВВОД", ORANGE),
-        Some(StepStatus::Pending) | None => ("ОЖИДАЕТ", PURPLE),
+        Some(StepStatus::Satisfied | StepStatus::Applied) => (
+            if matches!(status, Some(StepStatus::Applied)) {
+                "ВЫПОЛНЕНО"
+            } else {
+                "ГОТОВО"
+            },
+            ui_tone(UiTone::Success, dark),
+        ),
+        Some(StepStatus::Failed) => ("ОШИБКА", ui_tone(UiTone::Danger, dark)),
+        Some(StepStatus::Skipped) => ("ПРОПУЩЕНО", ui_tone(UiTone::Muted, dark)),
+        Some(StepStatus::Running) => ("ВЫПОЛНЯЕТСЯ", ui_tone(UiTone::Warning, dark)),
+        Some(StepStatus::WaitingForAttention) => ("ОЖИДАЕТ ВВОД", ui_tone(UiTone::Warning, dark)),
+        Some(StepStatus::Pending) | None => ("ОЖИДАЕТ", ui_tone(UiTone::Primary, dark)),
     };
-    painter.circle_filled(rect.max - Vec2::new(22.0, 19.0), 4.0, status_color);
-    painter.text(
-        rect.max - Vec2::new(32.0, 24.0),
-        Align2::RIGHT_TOP,
-        status_text,
-        FontId::proportional(7.0),
+    let galley = painter.layout_no_wrap(
+        status_text.to_owned(),
+        FontId::proportional(UI_TEXT_CAPTION),
+        status_color,
+    );
+    let badge_rect = Rect::from_min_size(
+        rect.right_bottom() - galley.size() - Vec2::new(24.0, 19.0),
+        galley.size() + Vec2::new(14.0, 7.0),
+    );
+    painter.rect_filled(
+        badge_rect,
+        CornerRadius::same(UI_RADIUS_BADGE),
+        translucent(status_color, if dark { 42 } else { 24 }),
+    );
+    painter.rect_stroke(
+        badge_rect,
+        CornerRadius::same(UI_RADIUS_BADGE),
+        Stroke::new(1.0, translucent(status_color, if dark { 100 } else { 70 })),
+        StrokeKind::Inside,
+    );
+    painter.galley(
+        badge_rect.center() - galley.size() * 0.5,
+        galley,
         status_color,
     );
 }
@@ -12397,29 +13056,32 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, dark: bool) {
     }
 }
 
-fn action_color(action: &Action) -> Color32 {
+fn action_color(action: &Action, dark: bool) -> Color32 {
     match action {
-        Action::GithubListRepositories => PURPLE,
-        Action::ForEach { .. } => CYAN,
-        Action::ForEachGitCloneIfMissing { .. } => PURPLE,
-        Action::CreateDirectory(_) | Action::InspectPath(_) | Action::WriteFile(_) => CYAN,
+        Action::GithubListRepositories => ui_tone(UiTone::Primary, dark),
+        Action::ForEach { .. } => ui_tone(UiTone::Success, dark),
+        Action::ForEachGitCloneIfMissing { .. } => ui_tone(UiTone::Primary, dark),
+        Action::CreateDirectory(_) | Action::InspectPath(_) | Action::WriteFile(_) => {
+            ui_tone(UiTone::Success, dark)
+        }
         Action::CopyPath(_)
         | Action::DownloadFile { .. }
         | Action::GitClone { .. }
         | Action::GitCloneIfMissing { .. }
         | Action::GitFetch { .. }
-        | Action::GitFastForward { .. } => PURPLE,
-        Action::GitInspect { .. } => CYAN,
+        | Action::GitFastForward { .. } => ui_tone(UiTone::Primary, dark),
+        Action::GitInspect { .. } => ui_tone(UiTone::Success, dark),
         Action::RemovePath(_)
         | Action::ExtractArchive { .. }
         | Action::InstallDmg { .. }
-        | Action::InstallPkg { .. } => ORANGE,
-        Action::MacosRequirements { .. } => CYAN,
-        Action::BrewInstall { .. } | Action::AppStoreInstall(_) => BLUE,
-        Action::RunCommand { .. } | Action::RunScript { .. } => Color32::from_rgb(139, 95, 191),
-        Action::BambuStudioRelease(_) => ORANGE,
-        Action::ActivateLicense(_) => Color32::from_rgb(183, 90, 115),
-        Action::ConfigurePackageRegistryFiles { .. } => CYAN,
+        | Action::InstallPkg { .. } => ui_tone(UiTone::Warning, dark),
+        Action::MacosRequirements { .. } => ui_tone(UiTone::Success, dark),
+        Action::BrewInstall { .. } | Action::AppStoreInstall(_) => ui_tone(UiTone::Info, dark),
+        Action::RunCommand { .. } | Action::RunScript { .. } => ui_tone(UiTone::Primary, dark),
+        Action::BambuStudioRelease(_) | Action::ActivateLicense(_) => {
+            ui_tone(UiTone::Warning, dark)
+        }
+        Action::ConfigurePackageRegistryFiles { .. } => ui_tone(UiTone::Success, dark),
     }
 }
 
@@ -12492,6 +13154,64 @@ fn step_title(step: &Step) -> String {
     } else {
         step.name.clone()
     }
+}
+
+struct RunGate<'a> {
+    validation_error: Option<&'a str>,
+    resolved_task: Option<&'a Task>,
+    resolution_error: Option<&'a str>,
+    report: Option<&'a RunReport>,
+    report_applied: bool,
+    plan_error: Option<&'a str>,
+    github_loading: bool,
+    running: bool,
+    github_auth_ready: bool,
+}
+
+fn run_disabled_reason(gate: RunGate<'_>) -> Option<String> {
+    if gate.running {
+        return Some("Сценарий уже выполняется.".into());
+    }
+    if gate.validation_error.is_some() {
+        return Some("Исправьте ошибки сценария перед запуском.".into());
+    }
+    if let Some(error) = gate.resolution_error {
+        return Some(format!(
+            "Сценарий не готов к запуску: {}",
+            error.lines().next().unwrap_or(error)
+        ));
+    }
+    if gate.github_loading {
+        return Some("Дождитесь загрузки репозиториев GitHub.".into());
+    }
+    if !gate.github_auth_ready {
+        return Some(
+            "Git credentials пока не готовы. Обновите авторизацию и снова проверьте план.".into(),
+        );
+    }
+    let Some(task) = gate.resolved_task else {
+        return Some("Сценарий не выбран или не удалось подготовить.".into());
+    };
+    if !task_supports_gui_run(task) {
+        return Some(if task_has_unready_git_credentials(task) {
+            "Git credentials пока не готовы для фонового запуска.".into()
+        } else {
+            "Этот сценарий требует терминала или vendor UI и не запускается в фоне.".into()
+        });
+    }
+    if gate.plan_error.is_some() {
+        return Some("Исправьте ошибку проверки плана.".into());
+    }
+    let Some(report) = gate.report else {
+        return Some("Сначала проверьте план.".into());
+    };
+    if !report.errors.is_empty() {
+        return Some("Исправьте ошибки плана и проверьте его снова.".into());
+    }
+    if gate.report_applied {
+        return Some("Этот план уже применён. Проверьте план заново.".into());
+    }
+    None
 }
 
 fn task_supports_gui_run(task: &Task) -> bool {
@@ -12669,8 +13389,36 @@ fn truncate(value: &str, max: usize) -> String {
 }
 
 fn section_label(ui: &mut egui::Ui, label: &str) {
-    ui.label(RichText::new(label).strong().size(9.0).color(MUTED));
-    ui.add_space(5.0);
+    let dark = ui.visuals().dark_mode;
+    ui.label(
+        RichText::new(label)
+            .strong()
+            .size(UI_TEXT_CAPTION)
+            .color(ui_tone(UiTone::Muted, dark)),
+    );
+    ui.add_space(UI_SPACE_XS);
+}
+
+fn paint_run_permission_controls(
+    ui: &mut egui::Ui,
+    allow_elevation: &mut bool,
+    allow_shell: &mut bool,
+) -> bool {
+    section_label(ui, "РАЗРЕШЕНИЯ");
+    let elevation_changed = ui
+        .checkbox(allow_elevation, "Разрешить elevation")
+        .on_hover_text("Разрешить шагам запрашивать административные права.")
+        .changed();
+    let shell_changed = ui
+        .checkbox(allow_shell, "Разрешить shell-команды и скрипты")
+        .on_hover_text("Разрешить выполнение команд и скриптов из проверенного плана.")
+        .changed();
+    ui.label(
+        RichText::new("Без этих флагов опасные шаги не попадут в план.")
+            .size(9.0)
+            .color(MUTED),
+    );
+    elevation_changed || shell_changed
 }
 
 fn paint_composer_output_json(ui: &mut egui::Ui, step_id: &str, json: &str, dark: bool) {
@@ -12686,19 +13434,51 @@ fn paint_composer_output_json(ui: &mut egui::Ui, step_id: &str, json: &str, dark
             ui.set_width(content_width);
             Frame::new()
                 .fill(code_surface(dark))
-                .corner_radius(8)
-                .inner_margin(Margin::same(8))
+                .corner_radius(UI_RADIUS_CONTROL)
+                .inner_margin(Margin::same(UI_SPACE_SM as i8))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width().max(0.0));
-                    paint_bounded_code_lines(ui, json, 8.0, text(dark));
+                    paint_bounded_code_lines(ui, json, UI_TEXT_CAPTION, text(dark));
                 });
         });
+}
+
+fn library_run_report_heading(report: &RunReport, applied: bool) -> String {
+    if applied {
+        if report.errors.is_empty() {
+            format!("Сценарий выполнен · {} шагов", report.steps.len())
+        } else {
+            format!("Сценарий завершён с ошибкой · {} шагов", report.steps.len())
+        }
+    } else if report.errors.is_empty() {
+        format!("План готов · {} шагов", report.steps.len())
+    } else {
+        format!(
+            "План содержит ошибок: {} · {} шагов",
+            report.errors.len(),
+            report.steps.len()
+        )
+    }
+}
+
+fn report_step_index_for_node(report: &RunReport, node_id: &str) -> Option<usize> {
+    report
+        .steps
+        .iter()
+        .position(|step| step.step_id == node_id)
+        .or_else(|| {
+            report.steps.iter().position(|step| {
+                step.step_id
+                    .rsplit_once('/')
+                    .is_some_and(|(_, authoring_id)| authoring_id == node_id)
+            })
+        })
 }
 
 fn paint_composer_run_report(
     ui: &mut egui::Ui,
     report: &RunReport,
-    selected_step: Option<usize>,
+    selected_node: Option<&str>,
     applied: bool,
     dark: bool,
 ) {
@@ -12733,7 +13513,10 @@ fn paint_composer_run_report(
         }
     }
 
-    let Some(step) = selected_step.and_then(|index| report.steps.get(index)) else {
+    let Some(step) = selected_node
+        .and_then(|node_id| report_step_index_for_node(report, node_id))
+        .and_then(|index| report.steps.get(index))
+    else {
         return;
     };
     ui.add_space(8.0);
@@ -12814,32 +13597,150 @@ fn github_error_needs_authorization(error: &str) -> bool {
 }
 
 fn error_box(ui: &mut egui::Ui, error: &str, dark: bool) {
-    let red = Color32::from_rgb(194, 64, 64);
+    let red = ui_tone(UiTone::Danger, dark);
     Frame::new()
-        .fill(translucent(red, if dark { 36 } else { 16 }))
-        .stroke(Stroke::new(1.0, translucent(red, 95)))
-        .corner_radius(9)
-        .inner_margin(Margin::same(10))
+        .fill(translucent(red, if dark { 34 } else { 14 }))
+        .stroke(Stroke::new(
+            1.0,
+            translucent(red, if dark { 100 } else { 80 }),
+        ))
+        .corner_radius(UI_RADIUS_CONTROL)
+        .inner_margin(Margin::same(UI_SPACE_MD as i8))
         .show(ui, |ui| {
             for line in error.split('\n') {
-                ui.add(egui::Label::new(RichText::new(line).size(9.0).color(red)).truncate());
+                ui.add(egui::Label::new(RichText::new(line).size(UI_TEXT_BODY).color(red)).wrap());
             }
         });
 }
 
+#[derive(serde::Serialize)]
+struct EditableProjectFile<'a> {
+    project: EditableProject<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct EditableProject<'a> {
+    id: &'a str,
+    name: &'a str,
+    description: &'a str,
+    entries: Vec<EditableProjectEntry<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    canvases: Option<&'a BTreeMap<String, ComposerCanvas>>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum EditableProjectEntry<'a> {
+    Group {
+        id: &'a str,
+        name: &'a str,
+        entries: Vec<EditableProjectEntry<'a>>,
+    },
+    Scenario {
+        task: EditableTask<'a>,
+    },
+}
+
+#[derive(serde::Serialize)]
+struct EditableTask<'a> {
+    format_version: u32,
+    id: &'a str,
+    name: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    description: &'a str,
+    platform: ppduster::rules::Platform,
+    trust: TrustRequirement,
+    workflow_graph: &'a WorkflowGraph,
+}
+
+impl<'a> EditableProjectEntry<'a> {
+    fn from_entry(entry: &'a ProjectEntry) -> anyhow::Result<Self> {
+        match entry {
+            ProjectEntry::Group { id, name, entries } => Ok(Self::Group {
+                id,
+                name,
+                entries: entries
+                    .iter()
+                    .map(Self::from_entry)
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+            }),
+            ProjectEntry::Scenario { task } => {
+                let workflow_graph = task.graph.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("сценарий {} не импортирован в WorkflowGraph v3", task.id)
+                })?;
+                Ok(Self::Scenario {
+                    task: EditableTask {
+                        format_version: ppduster::automation::TASK_FORMAT_VERSION,
+                        id: &task.id,
+                        name: &task.name,
+                        description: &task.description,
+                        platform: task.platform,
+                        trust: task.trust,
+                        workflow_graph,
+                    },
+                })
+            }
+        }
+    }
+}
+
+impl<'a> EditableProjectFile<'a> {
+    fn from_project(project: &'a ScenarioProject) -> anyhow::Result<Self> {
+        Ok(Self {
+            project: EditableProject {
+                id: &project.id,
+                name: &project.name,
+                description: &project.description,
+                entries: project
+                    .entries
+                    .iter()
+                    .map(EditableProjectEntry::from_entry)
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+                canvases: (!project.canvases.is_empty()).then_some(&project.canvases),
+            },
+        })
+    }
+}
+
 fn write_project_file(path: &Path, project: &ScenarioProject) -> anyhow::Result<()> {
-    let yaml = serde_yaml::to_string(&ScenarioProjectFile {
-        project: project.clone(),
-    })?;
-    fs::write(path, yaml).with_context(|| format!("не удалось сохранить {}", path.display()))
+    // Project authoring deliberately permits structurally sound but not yet
+    // runnable graphs. Standalone Task serialization stays strict; this
+    // project-specific wire preserves an in-progress graph so it can be
+    // reopened and repaired before plan/apply validation.
+    let yaml = serde_yaml::to_string(&EditableProjectFile::from_project(project)?)?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".ppduster-project-")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .with_context(|| {
+            format!(
+                "не удалось создать временный файл рядом с {}",
+                path.display()
+            )
+        })?;
+    temporary
+        .write_all(yaml.as_bytes())
+        .and_then(|()| temporary.flush())
+        .and_then(|()| temporary.as_file().sync_all())
+        .with_context(|| format!("не удалось записать черновик для {}", path.display()))?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("не удалось атомарно заменить {}", path.display()))?;
+    Ok(())
 }
 
 fn read_project_file(path: &Path) -> anyhow::Result<ScenarioProject> {
     let yaml = fs::read_to_string(path)
         .with_context(|| format!("не удалось прочитать {}", path.display()))?;
     let project = load_project_yaml(&yaml)?;
-    // Draft graph errors remain editable after load; full validation still
-    // blocks plan, run, and save until the user repairs them.
+    // Draft graph errors remain editable after load. Full validation blocks
+    // plan and run, while structural editing validation still permits saving
+    // the in-progress project safely.
     validate_project_for_editing(&project).map_err(anyhow::Error::msg)?;
     Ok(project)
 }
@@ -12936,17 +13837,47 @@ fn configure_styles(ctx: &egui::Context, preference: egui::ThemePreference) {
         visuals.panel_fill = surface(dark);
         visuals.window_fill = surface(dark);
         visuals.extreme_bg_color = code_surface(dark);
+        visuals.code_bg_color = code_surface(dark);
         visuals.faint_bg_color = panel(dark);
-        visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
-        visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
-        visuals.widgets.active.corner_radius = CornerRadius::same(8);
-        visuals.selection.bg_fill = translucent(PURPLE, 70);
-        visuals.selection.stroke = Stroke::new(1.0, PURPLE);
+        visuals.weak_text_color = Some(ui_tone(UiTone::Muted, dark));
+        visuals.hyperlink_color = ui_tone(UiTone::Info, dark);
+        visuals.warn_fg_color = ui_tone(UiTone::Warning, dark);
+        visuals.error_fg_color = ui_tone(UiTone::Danger, dark);
+        visuals.window_corner_radius = CornerRadius::same(UI_RADIUS_CARD);
+        visuals.menu_corner_radius = CornerRadius::same(UI_RADIUS_CONTROL);
+        visuals.widgets.noninteractive.corner_radius = CornerRadius::same(UI_RADIUS_CONTROL);
+        visuals.widgets.inactive.corner_radius = CornerRadius::same(UI_RADIUS_CONTROL);
+        visuals.widgets.hovered.corner_radius = CornerRadius::same(UI_RADIUS_CONTROL);
+        visuals.widgets.active.corner_radius = CornerRadius::same(UI_RADIUS_CONTROL);
+        visuals.widgets.open.corner_radius = CornerRadius::same(UI_RADIUS_CONTROL);
+        let primary = ui_tone(UiTone::Primary, dark);
+        visuals.widgets.hovered.bg_fill = translucent(primary, if dark { 38 } else { 18 });
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, translucent(primary, 120));
+        visuals.widgets.active.bg_fill = translucent(primary, if dark { 52 } else { 26 });
+        visuals.selection.bg_fill = translucent(primary, if dark { 75 } else { 48 });
+        visuals.selection.stroke = Stroke::new(1.0, primary);
         ctx.set_visuals_of(theme, visuals);
 
         let mut style = (*ctx.style_of(theme)).clone();
-        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-        style.spacing.button_padding = Vec2::new(10.0, 7.0);
+        style.text_styles.insert(
+            egui::TextStyle::Small,
+            FontId::proportional(UI_TEXT_CAPTION),
+        );
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, FontId::proportional(12.0));
+        style.text_styles.insert(
+            egui::TextStyle::Monospace,
+            FontId::monospace(UI_TEXT_CAPTION),
+        );
+        style
+            .text_styles
+            .insert(egui::TextStyle::Button, FontId::proportional(12.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Heading, FontId::proportional(20.0));
+        style.spacing.item_spacing = Vec2::splat(UI_SPACE_SM);
+        style.spacing.button_padding = Vec2::new(UI_CONTROL_PADDING_X, UI_CONTROL_PADDING_Y);
         ctx.set_style_of(theme, style);
     }
     ctx.set_theme(preference);
@@ -13053,6 +13984,7 @@ mod tests {
             task_pack: None,
             load_error: None,
             selected_task: 0,
+            library_search: String::new(),
             selected_step: None,
             selected_node: None,
             channel: ReleaseChannel::Release,
@@ -13069,6 +14001,9 @@ mod tests {
             github_picker: GithubPickerState::default(),
             file_message: None,
             custom_project: Some(project),
+            project_path: None,
+            project_dirty: false,
+            pending_project_action: None,
             selected_project_scenario: Some(vec![0]),
             selected_project_group: Vec::new(),
             block_picker_parent: None,
@@ -13091,6 +14026,152 @@ mod tests {
             context: ContextStore::default(),
             errors,
         }
+    }
+
+    fn library_app_for_test(tasks: Vec<Task>) -> ScenarioApp {
+        let mut app = composer_app_for_test(ScenarioProject {
+            id: "navigation-placeholder".into(),
+            name: "Navigation placeholder".into(),
+            description: String::new(),
+            canvases: BTreeMap::new(),
+            entries: Vec::new(),
+        });
+        let mut pack = TaskPack::default();
+        pack.tasks = tasks;
+        app.task_pack = Some(pack);
+        app.custom_project = None;
+        app.selected_project_scenario = None;
+        app.selected_project_group.clear();
+        app.selected_task = 0;
+        app
+    }
+
+    fn headless_click_row(
+        ctx: &egui::Context,
+        size: Vec2,
+        response_id: Id,
+        mut render: impl FnMut(&mut egui::Ui),
+    ) {
+        let input = |events| egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+            events,
+            ..Default::default()
+        };
+        let pointer_button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut frame = |events| {
+            let mut output = ctx.run_ui(input(events), |ui| render(ui));
+            output.textures_delta.clear();
+        };
+
+        frame(Vec::new());
+        let center = ctx
+            .read_response(response_id)
+            .unwrap_or_else(|| panic!("headless navigation row {response_id:?} was not rendered"))
+            .rect
+            .center();
+        frame(vec![egui::Event::PointerMoved(center)]);
+        frame(vec![pointer_button(center, true)]);
+        frame(vec![pointer_button(center, false)]);
+    }
+
+    #[test]
+    fn library_task_row_click_selects_task_and_resets_plan_headlessly() {
+        let first = legacy_github_repository_composer_task(1);
+        let second = github_repository_composer_task(2);
+        let second_id = second.id.clone();
+        let mut app = library_app_for_test(vec![first, second]);
+        app.selected_step = Some(0);
+        app.selected_node = Some("stale-node".into());
+        app.plan_error = Some("stale plan".into());
+        app.report_applied = true;
+        app.confirm_run = true;
+        app.allow_shell = true;
+        app.allow_elevation = true;
+
+        let ctx = egui::Context::default();
+        configure_styles(&ctx, egui::ThemePreference::Dark);
+        headless_click_row(
+            &ctx,
+            Vec2::new(420.0, 720.0),
+            library_task_row_id(&second_id),
+            |ui| app.left_library(ui),
+        );
+
+        assert_eq!(app.selected_task, 1);
+        assert_eq!(
+            app.selected_task().map(|task| task.id.as_str()),
+            Some(second_id.as_str())
+        );
+        assert_eq!(app.selected_step, None);
+        assert_eq!(app.selected_node.as_deref(), Some("list-repositories"));
+        assert_eq!(app.plan_error, None);
+        assert!(!app.report_applied);
+        assert!(!app.confirm_run);
+        assert!(!app.allow_shell);
+        assert!(!app.allow_elevation);
+    }
+
+    #[test]
+    fn project_scenario_leaf_click_selects_leaf_and_parent_group_headlessly() {
+        let first = legacy_github_repository_composer_task(1);
+        let second = github_repository_composer_task(2);
+        let second_id = second.id.clone();
+        let project = ScenarioProject {
+            id: "navigation-project".into(),
+            name: "Navigation project".into(),
+            description: String::new(),
+            canvases: BTreeMap::new(),
+            entries: vec![ProjectEntry::Group {
+                id: "group".into(),
+                name: "Group".into(),
+                entries: vec![
+                    ProjectEntry::Scenario {
+                        task: Box::new(first),
+                    },
+                    ProjectEntry::Scenario {
+                        task: Box::new(second),
+                    },
+                ],
+            }],
+        };
+        let mut app = composer_app_for_test(project);
+        app.selected_project_scenario = Some(vec![0, 0]);
+        app.selected_project_group = vec![0];
+        app.selected_step = Some(0);
+        app.selected_node = Some("stale-node".into());
+        app.plan_error = Some("stale plan".into());
+        app.report_applied = true;
+        app.confirm_run = true;
+        app.allow_shell = true;
+        app.allow_elevation = true;
+
+        let ctx = egui::Context::default();
+        configure_styles(&ctx, egui::ThemePreference::Dark);
+        headless_click_row(
+            &ctx,
+            Vec2::new(320.0, 720.0),
+            project_scenario_row_id(&[0, 1]),
+            |ui| app.composer_palette(ui),
+        );
+
+        assert_eq!(app.selected_project_scenario, Some(vec![0, 1]));
+        assert_eq!(app.selected_project_group, vec![0]);
+        assert_eq!(
+            app.selected_task().map(|task| task.id.as_str()),
+            Some(second_id.as_str())
+        );
+        assert_eq!(app.selected_step, None);
+        assert_eq!(app.selected_node.as_deref(), Some("list-repositories"));
+        assert_eq!(app.plan_error, None);
+        assert!(!app.report_applied);
+        assert!(!app.confirm_run);
+        assert!(!app.allow_shell);
+        assert!(!app.allow_elevation);
     }
 
     fn selected_graph_mut_for_test(app: &mut ScenarioApp) -> &mut WorkflowGraph {
@@ -13123,6 +14204,343 @@ mod tests {
             .iter()
             .find(|step| step.step_id == step_id)
             .unwrap_or_else(|| panic!("run report has no step {step_id}"))
+    }
+
+    fn run_report_for_ui_test(step_ids: &[&str], errors: &[&str]) -> RunReport {
+        RunReport {
+            task_id: "ui-report".into(),
+            task_name: "UI report".into(),
+            task_description: "Report fixture for UI state tests.".into(),
+            scenarios: Vec::new(),
+            plans: Vec::new(),
+            outcomes: Vec::new(),
+            steps: step_ids
+                .iter()
+                .map(|step_id| StepReport {
+                    step_id: (*step_id).into(),
+                    step_name: (*step_id).into(),
+                    summary: format!("summary for {step_id}"),
+                    status: StepStatus::Pending,
+                    prerequisites: Vec::new(),
+                    logs: Vec::new(),
+                    output: None,
+                })
+                .collect(),
+            context: ContextStore::default(),
+            errors: errors.iter().map(|error| (*error).into()).collect(),
+        }
+    }
+
+    fn gui_supported_task_for_test() -> Task {
+        Task {
+            id: "gui-supported".into(),
+            name: "GUI supported".into(),
+            description: "A task with no external UI requirements.".into(),
+            platform: ppduster::rules::Platform::Macos,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            graph: Some(WorkflowGraph::default()),
+            steps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn invalid_graph_draft_can_be_saved_and_clears_dirty_state() {
+        let mut task = gui_supported_task_for_test();
+        task.graph = Some(WorkflowGraph {
+            entries: vec!["missing-node".into()],
+            ..WorkflowGraph::default()
+        });
+        let project = composer_project_with_canvas(task, ComposerCanvas::default());
+        assert!(validate_project(&project).is_err());
+        assert!(validate_project_for_editing(&project).is_ok());
+
+        let mut app = composer_app_for_test(project);
+        app.project_dirty = true;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("draft.ppduster.yaml");
+        assert!(
+            app.save_custom_project_to(path.clone()),
+            "save failed: {:?}",
+            app.file_message
+        );
+        assert_eq!(app.project_path.as_deref(), Some(path.as_path()));
+        assert!(!app.project_dirty);
+        assert!(path.is_file());
+        assert!(read_project_file(&path).is_ok());
+    }
+
+    #[test]
+    fn project_write_atomically_replaces_destination_without_temp_artifacts() {
+        let project =
+            composer_project_with_canvas(gui_supported_task_for_test(), ComposerCanvas::default());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("project.ppduster.yaml");
+        fs::write(&path, "previous contents").unwrap();
+
+        write_project_file(&path, &project).unwrap();
+
+        assert_eq!(read_project_file(&path).unwrap().id, project.id);
+        let entries = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![path.file_name().unwrap()]);
+    }
+
+    #[test]
+    fn failed_project_persist_cleans_temporary_file_and_preserves_destination() {
+        let project =
+            composer_project_with_canvas(gui_supported_task_for_test(), ComposerCanvas::default());
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("existing-directory");
+        fs::create_dir(&destination).unwrap();
+
+        assert!(write_project_file(&destination, &project).is_err());
+
+        assert!(destination.is_dir());
+        let entries = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![destination.file_name().unwrap()]);
+    }
+
+    #[test]
+    fn failed_project_serialization_preserves_existing_file() {
+        let mut project =
+            composer_project_with_canvas(gui_supported_task_for_test(), ComposerCanvas::default());
+        let ProjectEntry::Scenario { task } = &mut project.entries[0] else {
+            panic!("test fixture must contain a scenario");
+        };
+        task.graph = None;
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("project.ppduster.yaml");
+        fs::write(&destination, "last known good contents").unwrap();
+
+        assert!(write_project_file(&destination, &project).is_err());
+
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "last known good contents"
+        );
+        let entries = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![destination.file_name().unwrap()]);
+    }
+
+    #[test]
+    fn project_lifecycle_resets_run_permissions() {
+        let project =
+            composer_project_with_canvas(gui_supported_task_for_test(), ComposerCanvas::default());
+        let mut app = library_app_for_test(vec![gui_supported_task_for_test()]);
+        app.allow_shell = true;
+        app.allow_elevation = true;
+
+        app.start_custom_project();
+
+        assert!(!app.allow_shell);
+        assert!(!app.allow_elevation);
+        app.allow_shell = true;
+        app.allow_elevation = true;
+
+        app.close_custom_project();
+
+        assert!(!app.allow_shell);
+        assert!(!app.allow_elevation);
+        app.allow_shell = true;
+        app.allow_elevation = true;
+
+        app.open_custom_project(project);
+
+        assert!(!app.allow_shell);
+        assert!(!app.allow_elevation);
+
+        app.allow_shell = true;
+        app.allow_elevation = true;
+        app.add_project_scenario();
+        assert!(!app.allow_shell);
+        assert!(!app.allow_elevation);
+
+        app.allow_shell = true;
+        app.allow_elevation = true;
+        app.add_github_project_scenario();
+        assert!(!app.allow_shell);
+        assert!(!app.allow_elevation);
+    }
+
+    #[test]
+    fn dirty_project_requires_explicit_discard_before_close() {
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            gui_supported_task_for_test(),
+            ComposerCanvas::default(),
+        ));
+        app.project_dirty = true;
+        assert!(!app.request_project_action(PendingProjectAction::Close));
+        assert!(app.custom_project.is_some());
+        assert_eq!(
+            app.pending_project_action,
+            Some(PendingProjectAction::Close)
+        );
+
+        assert!(!app.perform_project_action(PendingProjectAction::Close));
+        assert!(app.custom_project.is_none());
+        assert!(!app.project_dirty);
+        assert!(app.project_path.is_none());
+    }
+
+    #[test]
+    fn viewport_close_is_deferred_until_dirty_project_is_cancelled_or_discarded() {
+        let project = || {
+            composer_project_with_canvas(gui_supported_task_for_test(), ComposerCanvas::default())
+        };
+        let mut dirty = composer_app_for_test(project());
+        dirty.project_dirty = true;
+
+        assert!(dirty.defer_viewport_close_if_dirty());
+        assert_eq!(
+            dirty.pending_project_action,
+            Some(PendingProjectAction::Quit)
+        );
+        assert!(dirty.custom_project.is_some());
+
+        // The modal's Cancel path only clears the pending action; the project
+        // and its dirty state must remain intact.
+        dirty.pending_project_action = None;
+        assert!(dirty.custom_project.is_some());
+        assert!(dirty.project_dirty);
+
+        assert!(dirty.defer_viewport_close_if_dirty());
+        assert!(dirty.perform_project_action(PendingProjectAction::Quit));
+        assert!(dirty.custom_project.is_none());
+        assert!(!dirty.project_dirty);
+
+        let mut clean = composer_app_for_test(project());
+        assert!(!clean.defer_viewport_close_if_dirty());
+        assert_eq!(clean.pending_project_action, None);
+        assert!(clean.custom_project.is_some());
+    }
+
+    #[test]
+    fn safety_badge_tracks_each_permission_combination() {
+        assert_eq!(safety_badge(false, false, true).0, "БЕЗОПАСНЫЙ РЕЖИМ");
+        assert_eq!(safety_badge(true, false, true).0, "ДОСТУП К SHELL");
+        assert_eq!(safety_badge(false, true, true).0, "ПОВЫШЕНИЕ ПРАВ");
+        assert_eq!(safety_badge(true, true, true).0, "РАСШИРЕННЫЙ ДОСТУП");
+        assert_eq!(
+            safety_badge(false, false, true).1,
+            ui_tone(UiTone::Success, true)
+        );
+        assert_eq!(
+            safety_badge(true, true, false).1,
+            ui_tone(UiTone::Warning, false)
+        );
+    }
+
+    #[test]
+    fn custom_run_gate_requires_a_clean_plan_and_enforces_runtime_capabilities() {
+        let supported = gui_supported_task_for_test();
+        let clean_report = run_report_for_ui_test(&["inspect"], &[]);
+        let failed_report = run_report_for_ui_test(&["inspect"], &["blocked by policy"]);
+
+        let without_plan = run_disabled_reason(RunGate {
+            validation_error: None,
+            resolved_task: Some(&supported),
+            resolution_error: None,
+            report: None,
+            report_applied: false,
+            plan_error: None,
+            github_loading: false,
+            running: false,
+            github_auth_ready: true,
+        });
+        assert_eq!(without_plan.as_deref(), Some("Сначала проверьте план."));
+
+        let ready = run_disabled_reason(RunGate {
+            validation_error: None,
+            resolved_task: Some(&supported),
+            resolution_error: None,
+            report: Some(&clean_report),
+            report_applied: false,
+            plan_error: None,
+            github_loading: false,
+            running: false,
+            github_auth_ready: true,
+        });
+        assert_eq!(ready, None);
+
+        let failed_plan = run_disabled_reason(RunGate {
+            validation_error: None,
+            resolved_task: Some(&supported),
+            resolution_error: None,
+            report: Some(&failed_report),
+            report_applied: false,
+            plan_error: None,
+            github_loading: false,
+            running: false,
+            github_auth_ready: true,
+        });
+        assert!(failed_plan
+            .as_deref()
+            .is_some_and(|reason| reason.contains("ошибки плана")));
+
+        let missing_auth = run_disabled_reason(RunGate {
+            validation_error: None,
+            resolved_task: Some(&supported),
+            resolution_error: None,
+            report: Some(&clean_report),
+            report_applied: false,
+            plan_error: None,
+            github_loading: false,
+            running: false,
+            github_auth_ready: false,
+        });
+        assert!(missing_auth
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Git credentials")));
+
+        let unsupported = load_tasks()
+            .unwrap()
+            .resolve("lightburn-install-activate")
+            .unwrap();
+        assert!(!task_supports_gui_run(&unsupported));
+        let unsupported_reason = run_disabled_reason(RunGate {
+            validation_error: None,
+            resolved_task: Some(&unsupported),
+            resolution_error: None,
+            report: Some(&clean_report),
+            report_applied: false,
+            plan_error: None,
+            github_loading: false,
+            running: false,
+            github_auth_ready: true,
+        });
+        assert!(unsupported_reason.is_some());
+    }
+
+    #[test]
+    fn graph_report_detail_resolves_exact_and_nested_runtime_step_ids() {
+        let report = run_report_for_ui_test(
+            &["exact", "if-1[then]/nested", "loop-1[2]/inspect-item"],
+            &[],
+        );
+
+        assert_eq!(report_step_index_for_node(&report, "exact"), Some(0));
+        assert_eq!(report_step_index_for_node(&report, "nested"), Some(1));
+        assert_eq!(report_step_index_for_node(&report, "inspect-item"), Some(2));
+        assert_eq!(report_step_index_for_node(&report, "missing"), None);
+    }
+
+    #[test]
+    fn library_report_heading_calls_out_plan_errors() {
+        let report = run_report_for_ui_test(&["inspect"], &["first", "second"]);
+        let heading = library_run_report_heading(&report, false);
+
+        assert!(heading.contains("План содержит ошибок: 2"));
+        assert!(!heading.contains("План готов"));
     }
 
     #[test]
@@ -13470,6 +14888,79 @@ mod tests {
             reported_step_for_test(report, &create_id).status,
             StepStatus::Applied
         ));
+    }
+
+    fn contrast_ratio(foreground: Color32, background: Color32) -> f32 {
+        fn relative_luminance(color: Color32) -> f32 {
+            fn linear(channel: u8) -> f32 {
+                let channel = channel as f32 / 255.0;
+                if channel <= 0.04045 {
+                    channel / 12.92
+                } else {
+                    ((channel + 0.055) / 1.055).powf(2.4)
+                }
+            }
+
+            0.2126 * linear(color.r()) + 0.7152 * linear(color.g()) + 0.0722 * linear(color.b())
+        }
+
+        let foreground = relative_luminance(foreground);
+        let background = relative_luminance(background);
+        let lighter = foreground.max(background);
+        let darker = foreground.min(background);
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn semantic_ui_palette_and_shared_type_scale_stay_readable() {
+        let tones = [
+            UiTone::Primary,
+            UiTone::Success,
+            UiTone::Warning,
+            UiTone::Info,
+            UiTone::Danger,
+            UiTone::Muted,
+        ];
+        for dark in [false, true] {
+            for tone in tones {
+                let ratio = contrast_ratio(ui_tone(tone, dark), card(dark));
+                assert!(
+                    ratio >= 4.5,
+                    "{tone:?} contrast {ratio:.2} is below AA in {} theme",
+                    if dark { "dark" } else { "light" }
+                );
+            }
+            assert!(
+                contrast_ratio(on_primary(dark), ui_tone(UiTone::Primary, dark)) >= 4.5,
+                "primary controls need a readable foreground"
+            );
+        }
+
+        let ctx = egui::Context::default();
+        configure_styles(&ctx, egui::ThemePreference::Dark);
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let style = ctx.style_of(theme);
+            for text_style in [egui::TextStyle::Small, egui::TextStyle::Monospace] {
+                let size = style
+                    .text_styles
+                    .get(&text_style)
+                    .expect("shared text style")
+                    .size;
+                assert!(size >= UI_TEXT_CAPTION);
+            }
+            for text_style in [egui::TextStyle::Body, egui::TextStyle::Button] {
+                let size = style
+                    .text_styles
+                    .get(&text_style)
+                    .expect("shared text style")
+                    .size;
+                assert!(size >= UI_TEXT_BODY);
+            }
+            assert_eq!(
+                style.visuals.widgets.inactive.corner_radius,
+                CornerRadius::same(UI_RADIUS_CONTROL)
+            );
+        }
     }
 
     #[test]
@@ -14249,7 +15740,13 @@ positions:
                                     Some(EdgePort::Success),
                                 );
                                 section_label(ui, "RUNTIME · UNICODE JSON/LOG");
-                                paint_composer_run_report(ui, &report, Some(0), true, true);
+                                paint_composer_run_report(
+                                    ui,
+                                    &report,
+                                    Some(report.steps[0].step_id.as_str()),
+                                    true,
+                                    true,
+                                );
                                 // The production JSON section is collapsed by
                                 // default. Render the same bounded body here so
                                 // this geometry regression always exercises it.
