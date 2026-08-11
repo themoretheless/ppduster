@@ -16,10 +16,12 @@ use ppduster::automation::{
     ContextPathSegment, ContextScope, EdgePort, ElevationPolicy, ExpressionLimits, ExpressionV1,
     ExpressionValue, FieldRef, ForEachNode, GraphEdge, GraphNode, GraphValidationError,
     GraphValidationErrorKind, IfNode, IndeterminatePolicy, JoinMode, JoinNode, LoopFailurePolicy,
-    ObjectSchema, PolicyRequirement, ProjectEntry, ReferenceV1, ReleaseChannel, RuleOutcomePolicy,
-    RunOptions, RunReport, ScenarioProject, ScriptInterpreter, SemanticFormat, Sensitivity, Step,
-    StepCondition, StepStatus, SwitchCase, SwitchNode, Task, TaskFile, TaskPack, TaskSource,
-    TemplatePart, TrustRequirement, WorkflowGraph,
+    ObjectSchema, PolicyRequirement, ProjectEntry, ProtectedPathApproval,
+    ProtectedPathApprovalRequest, ProtectedPathApprovalRequired, ProtectedPathOperation,
+    ProtectedPathRisk, ReferenceV1, ReleaseChannel, RuleOutcomePolicy, RunOptions, RunReport,
+    ScenarioProject, ScriptInterpreter, SemanticFormat, Sensitivity, Step, StepCondition,
+    StepStatus, SwitchCase, SwitchNode, Task, TaskFile, TaskPack, TaskSource, TemplatePart,
+    TrustRequirement, WorkflowGraph,
 };
 #[cfg(test)]
 use ppduster::automation::{
@@ -65,6 +67,9 @@ const UI_CONTROL_PADDING_Y: f32 = 6.0;
 const UI_RADIUS_BADGE: u8 = 6;
 const UI_RADIUS_CONTROL: u8 = 8;
 const UI_RADIUS_CARD: u8 = 12;
+const PROTECTED_PATH_APPROVAL_TITLE: &str = "Разрешить запись в защищённую папку?";
+const PROTECTED_PATH_APPROVAL_BUTTON: &str = "Разрешить один запуск";
+const PROTECTED_PATH_APPROVAL_SCOPE: &str = "Разрешение действует один запуск и только для этого шага, репозитория, операции и точного пути. Git сможет создавать, изменять и удалять файлы рабочей копии, включая служебную папку .git. Соседние папки, shell-команды и elevation это разрешение не открывает.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UiTone {
@@ -5311,10 +5316,12 @@ struct ScenarioApp {
     report: Option<RunReport>,
     report_applied: bool,
     plan_error: Option<String>,
+    protected_path_approvals: Vec<ProtectedPathApproval>,
+    pending_protected_path_approval: Option<ProtectedPathApprovalRequest>,
     dark: bool,
     confirm_run: bool,
     running: bool,
-    run_receiver: Option<Receiver<Result<RunReport, String>>>,
+    run_receiver: Option<Receiver<anyhow::Result<RunReport>>>,
     run_checks_github_auth: bool,
     github_picker: GithubPickerState,
     file_message: Option<(bool, String)>,
@@ -5373,6 +5380,8 @@ impl ScenarioApp {
             report: None,
             report_applied: false,
             plan_error: None,
+            protected_path_approvals: Vec::new(),
+            pending_protected_path_approval: None,
             dark,
             confirm_run: false,
             running: false,
@@ -5445,6 +5454,8 @@ impl ScenarioApp {
         self.report = None;
         self.report_applied = false;
         self.plan_error = None;
+        self.protected_path_approvals.clear();
+        self.pending_protected_path_approval = None;
         self.confirm_run = false;
     }
 
@@ -6324,10 +6335,21 @@ impl ScenarioApp {
     }
 
     fn build_plan(&mut self) {
+        // A manual plan check starts a new, ephemeral consent cycle. Rechecks
+        // triggered from the approval dialog use the approvals accumulated in
+        // that same cycle via `build_plan_with_current_path_approvals`.
+        self.protected_path_approvals.clear();
+        self.pending_protected_path_approval = None;
+        self.build_plan_with_current_path_approvals();
+    }
+
+    fn build_plan_with_current_path_approvals(&mut self) {
         self.report_applied = false;
+        self.pending_protected_path_approval = None;
         if let Some(project) = &self.custom_project {
             if let Err(error) = validate_project(project) {
                 self.report = None;
+                self.protected_path_approvals.clear();
                 self.plan_error = Some(error);
                 return;
             }
@@ -6336,6 +6358,7 @@ impl ScenarioApp {
             Ok(task) => task,
             Err(error) => {
                 self.report = None;
+                self.protected_path_approvals.clear();
                 self.plan_error = Some(format!("{error:#}"));
                 return;
             }
@@ -6344,14 +6367,24 @@ impl ScenarioApp {
         match run_task(&task, &self.options_for(&task, false)) {
             Ok(report) => {
                 self.update_github_auth_status(&report.errors, checks_github_repository_access);
+                if !report.errors.is_empty() {
+                    self.protected_path_approvals.clear();
+                }
                 self.report = Some(report);
                 self.plan_error = None;
             }
             Err(error) => {
-                let error = error.to_string();
-                self.update_github_auth_status(std::slice::from_ref(&error), false);
                 self.report = None;
-                self.plan_error = Some(error);
+                if let Some(required) = error.downcast_ref::<ProtectedPathApprovalRequired>() {
+                    self.pending_protected_path_approval = Some(required.request().clone());
+                    self.plan_error = None;
+                    self.confirm_run = false;
+                } else {
+                    let error = error.to_string();
+                    self.update_github_auth_status(std::slice::from_ref(&error), false);
+                    self.protected_path_approvals.clear();
+                    self.plan_error = Some(error);
+                }
             }
         }
     }
@@ -6365,6 +6398,7 @@ impl ScenarioApp {
                 matches!(action, Action::BambuStudioRelease(_))
             })
             .then_some(self.channel),
+            protected_path_approvals: self.protected_path_approvals.clone(),
         }
     }
 
@@ -6374,6 +6408,8 @@ impl ScenarioApp {
         self.run_checks_github_auth = false;
         if let Some(project) = &self.custom_project {
             if let Err(error) = validate_project(project) {
+                self.protected_path_approvals.clear();
+                self.pending_protected_path_approval = None;
                 self.plan_error = Some(error);
                 self.confirm_run = false;
                 return;
@@ -6382,6 +6418,8 @@ impl ScenarioApp {
         let task = match self.resolved_selected_task() {
             Ok(task) => task,
             Err(error) => {
+                self.protected_path_approvals.clear();
+                self.pending_protected_path_approval = None;
                 self.plan_error = Some(format!("{error:#}"));
                 self.confirm_run = false;
                 return;
@@ -6392,7 +6430,7 @@ impl ScenarioApp {
         let (sender, receiver) = mpsc::channel();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
-            let result = run_task(&task, &options).map_err(|error| format!("{error:#}"));
+            let result = run_task(&task, &options);
             let _ = sender.send(result);
             repaint.request_repaint();
         });
@@ -6411,19 +6449,40 @@ impl ScenarioApp {
                 self.update_github_auth_status(&report.errors, self.run_checks_github_auth);
                 self.report = Some(report);
                 self.report_applied = true;
+                self.protected_path_approvals.clear();
+                self.pending_protected_path_approval = None;
                 self.running = false;
                 self.run_receiver = None;
                 self.run_checks_github_auth = false;
             }
             Ok(Err(error)) => {
-                self.update_github_auth_status(std::slice::from_ref(&error), false);
-                self.plan_error = Some(error);
+                let protected_path_request = error
+                    .downcast_ref::<ProtectedPathApprovalRequired>()
+                    .map(|required| required.request().clone());
+                self.protected_path_approvals.clear();
+                self.report = None;
+                self.report_applied = false;
+                self.confirm_run = false;
+                if let Some(request) = protected_path_request {
+                    // The destination changed after planning, or a new exact
+                    // protected destination appeared. Never retry an applied
+                    // run automatically: ask, then build a fresh plan.
+                    self.pending_protected_path_approval = Some(request);
+                    self.plan_error = None;
+                } else {
+                    let error = format!("{error:#}");
+                    self.update_github_auth_status(std::slice::from_ref(&error), false);
+                    self.pending_protected_path_approval = None;
+                    self.plan_error = Some(error);
+                }
                 self.running = false;
                 self.run_receiver = None;
                 self.run_checks_github_auth = false;
             }
             Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
             Err(mpsc::TryRecvError::Disconnected) => {
+                self.protected_path_approvals.clear();
+                self.pending_protected_path_approval = None;
                 self.plan_error = Some("Фоновый запуск неожиданно завершился".into());
                 self.running = false;
                 self.run_receiver = None;
@@ -6813,7 +6872,10 @@ impl eframe::App for ScenarioApp {
         self.canvas(ui);
         self.block_picker(ui.ctx());
         self.github_repository_picker(ui.ctx());
-        self.run_confirmation(ui.ctx());
+        self.protected_path_approval_confirmation(ui.ctx());
+        if self.pending_protected_path_approval.is_none() {
+            self.run_confirmation(ui.ctx());
+        }
         self.project_action_confirmation(ui.ctx());
     }
 }
@@ -9029,8 +9091,10 @@ impl ScenarioApp {
         }
 
         let mut scene_rect = view.visible_world_rect(viewport);
-        let gestures_enabled =
-            self.block_picker_parent.is_none() && !self.github_picker.open && !self.confirm_run;
+        let gestures_enabled = self.block_picker_parent.is_none()
+            && !self.github_picker.open
+            && !self.confirm_run
+            && self.pending_protected_path_approval.is_none();
         // A dedicated interaction inside the transformed layer owns blank
         // canvas drags. It is registered before the smaller card hit zones,
         // so cards reliably win without the full-scene parent racing them.
@@ -10016,6 +10080,217 @@ impl ScenarioApp {
                     }
                 });
             });
+    }
+
+    fn protected_path_approval_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(request) = self.pending_protected_path_approval.clone() else {
+            return;
+        };
+        let mut approve = false;
+        let mut cancel = false;
+        let modal = egui::Modal::new(Id::new("approve-protected-destination"))
+            .frame(
+                Frame::popup(&ctx.global_style())
+                    .fill(surface(self.dark))
+                    .corner_radius(14)
+                    .inner_margin(Margin::same(20)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(500.0);
+                ui.label(
+                    RichText::new(PROTECTED_PATH_APPROVAL_TITLE)
+                        .strong()
+                        .size(20.0)
+                        .color(text(self.dark)),
+                );
+                ui.add_space(UI_SPACE_SM);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(protected_path_risk_description(request.risk()))
+                            .size(UI_TEXT_BODY)
+                            .color(ui_tone(UiTone::Warning, self.dark)),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(UI_SPACE_MD);
+                section_label(ui, "ТОЧНОЕ НАЗНАЧЕНИЕ");
+                Frame::new()
+                    .fill(code_surface(self.dark))
+                    .stroke(Stroke::new(1.0, line(self.dark)))
+                    .corner_radius(UI_RADIUS_CONTROL)
+                    .inner_margin(Margin::same(UI_SPACE_SM as i8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(protected_path_display(request.resolved_path()))
+                                    .monospace()
+                                    .size(UI_TEXT_BODY)
+                                    .color(text(self.dark)),
+                            )
+                            .wrap(),
+                        );
+                    });
+                if request.requested_path() != request.resolved_path() {
+                    ui.add_space(UI_SPACE_XS);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!(
+                                "Указанный путь: {}",
+                                protected_path_display(request.requested_path())
+                            ))
+                            .monospace()
+                            .size(UI_TEXT_CAPTION)
+                            .color(ui_tone(UiTone::Muted, self.dark)),
+                        )
+                        .wrap(),
+                    );
+                }
+                ui.add_space(UI_SPACE_SM);
+                ui.label(
+                    RichText::new(format!(
+                        "{} · шаг {}",
+                        protected_path_operation_label(request.operation()),
+                        protected_path_text(request.step_id())
+                    ))
+                    .size(UI_TEXT_CAPTION)
+                    .color(ui_tone(UiTone::Muted, self.dark)),
+                );
+                if let Some(detail) = protected_path_operation_detail(request.operation()) {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(detail)
+                                .size(UI_TEXT_CAPTION)
+                                .color(ui_tone(UiTone::Muted, self.dark)),
+                        )
+                        .wrap(),
+                    );
+                }
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "Репозиторий: {}",
+                            protected_path_text(request.expected_repository())
+                        ))
+                        .monospace()
+                        .size(UI_TEXT_CAPTION)
+                        .color(ui_tone(UiTone::Muted, self.dark)),
+                    )
+                    .wrap(),
+                );
+                if let Some(branch) = request.expected_branch() {
+                    ui.label(
+                        RichText::new(format!("Ветка/ref: {}", protected_path_text(branch)))
+                            .monospace()
+                            .size(UI_TEXT_CAPTION)
+                            .color(ui_tone(UiTone::Muted, self.dark)),
+                    );
+                }
+                ui.add_space(UI_SPACE_SM);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(PROTECTED_PATH_APPROVAL_SCOPE)
+                            .size(UI_TEXT_BODY)
+                            .color(ui_tone(UiTone::Muted, self.dark)),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    cancel = ui.button("Отмена").clicked();
+                    approve = ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(PROTECTED_PATH_APPROVAL_BUTTON)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(ORANGE),
+                        )
+                        .clicked();
+                });
+            });
+        cancel |= modal.should_close();
+        if cancel {
+            self.reject_pending_protected_path_approval();
+        } else if approve {
+            self.approve_pending_protected_path_approval();
+        }
+    }
+
+    fn reject_pending_protected_path_approval(&mut self) {
+        self.pending_protected_path_approval = None;
+        self.protected_path_approvals.clear();
+        self.report = None;
+        self.report_applied = false;
+        self.confirm_run = false;
+        self.plan_error = Some(
+            "Доступ к защищённому пути не разрешён. Чтобы запросить его снова, проверьте план."
+                .into(),
+        );
+    }
+
+    fn approve_pending_protected_path_approval(&mut self) {
+        let Some(request) = self.pending_protected_path_approval.take() else {
+            return;
+        };
+        match request.approve() {
+            Ok(approval) => {
+                self.protected_path_approvals.push(approval);
+                self.plan_error = None;
+                // Consent never starts execution. It only reruns the plan
+                // check and may surface the next exact destination request.
+                self.build_plan_with_current_path_approvals();
+            }
+            Err(error) => {
+                self.protected_path_approvals.clear();
+                self.report = None;
+                self.report_applied = false;
+                self.plan_error = Some(format!(
+                    "Не удалось подтвердить защищённый путь: {error:#}. Проверьте план снова."
+                ));
+            }
+        }
+    }
+}
+
+fn protected_path_operation_label(operation: ProtectedPathOperation) -> &'static str {
+    match operation {
+        ProtectedPathOperation::GitCloneOrUpdate => {
+            "Клонирование или синхронизация Git-репозитория"
+        }
+        ProtectedPathOperation::GitCloneIfMissing => "Клонирование Git при отсутствии",
+        ProtectedPathOperation::GitFetch => "Получение изменений Git",
+        ProtectedPathOperation::GitFastForward => "Обновление рабочей копии Git",
+    }
+}
+
+fn protected_path_text(value: &str) -> String {
+    value.chars().flat_map(char::escape_debug).collect()
+}
+
+fn protected_path_display(path: &Path) -> String {
+    path.to_str()
+        .map(protected_path_text)
+        .unwrap_or_else(|| format!("{path:?}"))
+}
+
+fn protected_path_operation_detail(operation: ProtectedPathOperation) -> Option<&'static str> {
+    match operation {
+        ProtectedPathOperation::GitCloneOrUpdate => Some(
+            "Если рабочая копия уже существует, операция может выполнить fetch и безопасный fast-forward.",
+        ),
+        ProtectedPathOperation::GitCloneIfMissing
+        | ProtectedPathOperation::GitFetch
+        | ProtectedPathOperation::GitFastForward => None,
+    }
+}
+
+fn protected_path_risk_description(risk: ProtectedPathRisk) -> &'static str {
+    match risk {
+        ProtectedPathRisk::UserDocuments => {
+            "Сценарий хочет создать или изменить файлы внутри вашей папки Documents. Проверьте точное назначение перед разрешением."
+        }
     }
 }
 
@@ -14248,6 +14523,8 @@ mod tests {
             report: None,
             report_applied: false,
             plan_error: None,
+            protected_path_approvals: Vec::new(),
+            pending_protected_path_approval: None,
             dark: true,
             confirm_run: false,
             running: false,
@@ -14498,6 +14775,249 @@ mod tests {
             graph: Some(WorkflowGraph::default()),
             steps: Vec::new(),
         }
+    }
+
+    fn protected_git_task_for_test(destination: &Path) -> Task {
+        let mut step = default_step(ActionKind::GitCloneIfMissing, "clone-protected")
+            .expect("git-clone-if-missing block");
+        step.action = Action::GitCloneIfMissing {
+            repo: "https://github.com/example/repository.git".into(),
+            dest: destination.to_string_lossy().into_owned(),
+            branch: None,
+        };
+        let entry = step.id.clone();
+        Task {
+            id: "protected-git-ui-test".into(),
+            name: "Protected Git UI test".into(),
+            description: "Exercises exact protected-path consent in the UI.".into(),
+            platform: ppduster::rules::Platform::Macos,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            graph: Some(WorkflowGraph {
+                entries: vec![entry],
+                nodes: vec![GraphNode::Action(Box::new(ActionNode {
+                    step,
+                    bindings: BTreeMap::new(),
+                }))],
+                ..WorkflowGraph::default()
+            }),
+            steps: Vec::new(),
+        }
+    }
+
+    fn protected_test_destination(label: &str) -> Option<PathBuf> {
+        let documents = dirs::home_dir()?.join("Documents");
+        if !documents.is_dir() {
+            return None;
+        }
+        let destination = documents.join(format!(
+            ".ppduster-ui-protected-{label}-test-{}",
+            std::process::id()
+        ));
+        (!destination.exists()).then_some(destination)
+    }
+
+    #[test]
+    fn protected_path_dialog_labels_describe_the_exact_one_run_scope() {
+        assert_eq!(
+            PROTECTED_PATH_APPROVAL_TITLE,
+            "Разрешить запись в защищённую папку?"
+        );
+        assert_eq!(PROTECTED_PATH_APPROVAL_BUTTON, "Разрешить один запуск");
+        assert!(PROTECTED_PATH_APPROVAL_SCOPE.contains("служебную папку .git"));
+        assert!(PROTECTED_PATH_APPROVAL_SCOPE.contains("Соседние папки"));
+        assert!(PROTECTED_PATH_APPROVAL_SCOPE.contains("shell-команды"));
+        assert!(PROTECTED_PATH_APPROVAL_SCOPE.contains("elevation"));
+        assert_eq!(
+            protected_path_operation_label(ProtectedPathOperation::GitCloneOrUpdate),
+            "Клонирование или синхронизация Git-репозитория"
+        );
+        let clone_or_update_detail =
+            protected_path_operation_detail(ProtectedPathOperation::GitCloneOrUpdate)
+                .expect("clone-or-update detail");
+        assert!(clone_or_update_detail.contains("fetch"));
+        assert!(clone_or_update_detail.contains("fast-forward"));
+        assert!(
+            protected_path_risk_description(ProtectedPathRisk::UserDocuments).contains("Documents")
+        );
+        assert_eq!(
+            protected_path_text("https://example.invalid/repo\nподмена"),
+            "https://example.invalid/repo\\nподмена"
+        );
+        assert_eq!(
+            protected_path_display(Path::new("/tmp/repository\nподмена")),
+            "/tmp/repository\\nподмена"
+        );
+    }
+
+    #[test]
+    fn protected_destination_consent_is_exact_ephemeral_and_rechecks_the_plan() {
+        let Some(destination) = protected_test_destination("path") else {
+            return;
+        };
+        let task = protected_git_task_for_test(&destination);
+        let project = composer_project_with_canvas(task, ComposerCanvas::default());
+        let mut app = composer_app_for_test(project);
+
+        app.build_plan();
+
+        assert!(app.report.is_none());
+        assert!(app.plan_error.is_none(), "{:?}", app.plan_error);
+        let request = app
+            .pending_protected_path_approval
+            .as_ref()
+            .expect("typed protected path request");
+        assert_eq!(request.task_id(), "protected-git-ui-test");
+        assert_eq!(request.step_id(), "clone-protected");
+        assert_eq!(
+            request.operation(),
+            ProtectedPathOperation::GitCloneIfMissing
+        );
+        assert_eq!(request.requested_path(), destination);
+        assert_eq!(request.resolved_path(), destination);
+
+        app.approve_pending_protected_path_approval();
+
+        assert!(app.pending_protected_path_approval.is_none());
+        assert_eq!(app.protected_path_approvals.len(), 1);
+        let report = app.report.as_ref().expect("rechecked plan");
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(!destination.exists(), "plan must not write the destination");
+
+        app.invalidate_plan();
+        assert!(app.report.is_none());
+        assert!(app.protected_path_approvals.is_empty());
+        assert!(app.pending_protected_path_approval.is_none());
+
+        // A user-started plan check begins a new consent cycle and asks again.
+        app.build_plan();
+        assert!(app.report.is_none());
+        assert!(app.protected_path_approvals.is_empty());
+        assert!(app.pending_protected_path_approval.is_some());
+
+        app.reject_pending_protected_path_approval();
+        assert!(app.pending_protected_path_approval.is_none());
+        assert!(app.protected_path_approvals.is_empty());
+        assert!(app
+            .plan_error
+            .as_deref()
+            .is_some_and(|error| error.contains("не разрешён")));
+    }
+
+    #[test]
+    fn escape_from_protected_path_dialog_is_an_explicit_cancel() {
+        let Some(destination) = protected_test_destination("escape") else {
+            return;
+        };
+        let task = protected_git_task_for_test(&destination);
+        let project = composer_project_with_canvas(task, ComposerCanvas::default());
+        let mut app = composer_app_for_test(project);
+        app.build_plan();
+        assert!(app.pending_protected_path_approval.is_some());
+
+        let ctx = egui::Context::default();
+        configure_styles(&ctx, egui::ThemePreference::Dark);
+        let input = |events| egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 700.0))),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input(Vec::new()), |_ui| {
+            app.protected_path_approval_confirmation(&ctx);
+        });
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            input(vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: Some(egui::Key::Escape),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }]),
+            |_ui| app.protected_path_approval_confirmation(&ctx),
+        );
+        output.textures_delta.clear();
+
+        assert!(app.pending_protected_path_approval.is_none());
+        assert!(app.protected_path_approvals.is_empty());
+        assert!(app
+            .plan_error
+            .as_deref()
+            .is_some_and(|error| error.contains("не разрешён")));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn apply_time_protected_path_error_remains_typed_and_never_retries_automatically() {
+        let Some(destination) = protected_test_destination("run") else {
+            return;
+        };
+        let task = protected_git_task_for_test(&destination);
+        let error = run_task(&task, &RunOptions::default()).expect_err("approval required");
+        assert!(error
+            .downcast_ref::<ProtectedPathApprovalRequired>()
+            .is_some());
+        let project = composer_project_with_canvas(task, ComposerCanvas::default());
+        let mut app = composer_app_for_test(project);
+        app.report = Some(run_report_for_ui_test(&["clone-protected"], &[]));
+        app.running = true;
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Err(error)).unwrap();
+        app.run_receiver = Some(receiver);
+        let ctx = egui::Context::default();
+
+        app.poll_run(&ctx);
+
+        assert!(!app.running);
+        assert!(app.report.is_none());
+        assert!(!app.report_applied);
+        assert!(app.plan_error.is_none());
+        assert!(app.pending_protected_path_approval.is_some());
+        assert!(app.protected_path_approvals.is_empty());
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn every_run_terminal_state_drops_ephemeral_protected_path_approvals() {
+        let Some(destination) = protected_test_destination("terminal") else {
+            return;
+        };
+        let task = protected_git_task_for_test(&destination);
+        let project = composer_project_with_canvas(task, ComposerCanvas::default());
+        let mut app = composer_app_for_test(project);
+        app.build_plan();
+        app.approve_pending_protected_path_approval();
+        let approval = app.protected_path_approvals[0].clone();
+        let ctx = egui::Context::default();
+
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(run_report_for_ui_test(&["clone-protected"], &[])))
+            .unwrap();
+        app.run_receiver = Some(receiver);
+        app.running = true;
+        app.poll_run(&ctx);
+        assert!(app.protected_path_approvals.is_empty());
+
+        app.protected_path_approvals.push(approval.clone());
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Err(anyhow::anyhow!("ordinary run error")))
+            .unwrap();
+        app.run_receiver = Some(receiver);
+        app.running = true;
+        app.poll_run(&ctx);
+        assert!(app.protected_path_approvals.is_empty());
+
+        app.protected_path_approvals.push(approval);
+        let (sender, receiver) = mpsc::channel::<anyhow::Result<RunReport>>();
+        drop(sender);
+        app.run_receiver = Some(receiver);
+        app.running = true;
+        app.poll_run(&ctx);
+        assert!(app.protected_path_approvals.is_empty());
+        assert!(!destination.exists());
     }
 
     #[test]

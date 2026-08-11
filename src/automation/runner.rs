@@ -34,6 +34,7 @@ use std::io::IsTerminal;
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -43,12 +44,163 @@ pub enum AutomationError {
     Message(String),
 }
 
+/// Runtime-only consent for one exact protected Git destination.
+///
+/// Values can only be created from a [`ProtectedPathApprovalRequest`]. They
+/// deliberately do not implement serde traits: callers must keep consent in
+/// memory for the current plan/apply cycle and must never persist it in a task
+/// or project file.
+#[derive(Debug, Clone)]
+pub struct ProtectedPathApproval {
+    task_id: String,
+    step_id: String,
+    operation: ProtectedPathOperation,
+    repository: String,
+    branch: Option<String>,
+    snapshot: ProtectedPathSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProtectedPathOperation {
+    GitCloneOrUpdate,
+    GitCloneIfMissing,
+    GitFetch,
+    GitFastForward,
+}
+
+impl ProtectedPathOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GitCloneOrUpdate => "git-clone-or-update",
+            Self::GitCloneIfMissing => "git-clone-if-missing",
+            Self::GitFetch => "git-fetch",
+            Self::GitFastForward => "git-fast-forward",
+        }
+    }
+}
+
+impl std::fmt::Display for ProtectedPathOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProtectedPathRisk {
+    UserDocuments,
+}
+
+impl ProtectedPathRisk {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserDocuments => "user-documents",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProtectedPathSnapshot {
+    requested_path: PathBuf,
+    resolved_path: PathBuf,
+    anchor_path: PathBuf,
+    anchor_identity: Arc<same_file::Handle>,
+}
+
+/// A typed, exact consent request surfaced through
+/// [`ProtectedPathApprovalRequired`].
+///
+/// The request owns an open identity handle for the deepest existing ancestor
+/// observed during validation. Calling [`Self::approve`] rechecks that both the
+/// resolved destination and that ancestor are unchanged before issuing an
+/// opaque runtime token.
+#[derive(Debug, Clone)]
+pub struct ProtectedPathApprovalRequest {
+    task_id: String,
+    step_id: String,
+    operation: ProtectedPathOperation,
+    repository: String,
+    branch: Option<String>,
+    risk: ProtectedPathRisk,
+    snapshot: ProtectedPathSnapshot,
+}
+
+impl ProtectedPathApprovalRequest {
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    pub fn step_id(&self) -> &str {
+        &self.step_id
+    }
+
+    pub fn operation(&self) -> ProtectedPathOperation {
+        self.operation
+    }
+
+    pub fn expected_repository(&self) -> &str {
+        &self.repository
+    }
+
+    pub fn expected_branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+
+    pub fn requested_path(&self) -> &Path {
+        &self.snapshot.requested_path
+    }
+
+    pub fn resolved_path(&self) -> &Path {
+        &self.snapshot.resolved_path
+    }
+
+    pub fn risk(&self) -> ProtectedPathRisk {
+        self.risk
+    }
+
+    pub fn approve(&self) -> Result<ProtectedPathApproval> {
+        revalidate_protected_path_snapshot(&self.snapshot).with_context(|| {
+            format!(
+                "protected destination changed before approval: {}",
+                self.snapshot.requested_path.display()
+            )
+        })?;
+        Ok(ProtectedPathApproval {
+            task_id: self.task_id.clone(),
+            step_id: self.step_id.clone(),
+            operation: self.operation,
+            repository: self.repository.clone(),
+            branch: self.branch.clone(),
+            snapshot: self.snapshot.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Error)]
+#[error(
+    "explicit approval required for {operation} destination {path} under Documents",
+    operation = .request.operation,
+    path = .request.snapshot.resolved_path.display()
+)]
+pub struct ProtectedPathApprovalRequired {
+    request: ProtectedPathApprovalRequest,
+}
+
+impl ProtectedPathApprovalRequired {
+    pub fn request(&self) -> &ProtectedPathApprovalRequest {
+        &self.request
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
     pub apply: bool,
     pub allow_shell: bool,
     pub allow_elevation: bool,
     pub release_channel: Option<ReleaseChannel>,
+    /// Ephemeral, exact path approvals for the current plan/apply cycle.
+    /// Callers are responsible for dropping these when the project or plan is
+    /// invalidated.
+    pub protected_path_approvals: Vec<ProtectedPathApproval>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -742,7 +894,7 @@ fn run_step_sequence_with_interactivity(
     // Validate every policy gate before the first applied step so a missing
     // acknowledgement cannot leave a task partially applied.
     for step in task_steps {
-        enforce_step_policy(step, opts, terminal_interactive)?;
+        enforce_step_policy(&task.id, step, opts, terminal_interactive)?;
     }
 
     let mut plans = Vec::new();
@@ -1000,15 +1152,22 @@ fn run_step_sequence_with_interactivity(
                             break;
                         }
                     };
-                    if let Err(error) = iteration_step
-                        .validate()
-                        .map_err(AutomationError::Message)
-                        .and_then(|_| {
-                            enforce_step_policy(&iteration_step, opts, terminal_interactive)
-                                .map_err(|error| AutomationError::Message(error.to_string()))
-                        })
-                    {
+                    if let Err(error) = iteration_step.validate() {
                         failure = Some(format!("iteration {iteration}: {error}"));
+                        break;
+                    }
+                    if let Err(error) =
+                        enforce_step_policy(&task.id, &iteration_step, opts, terminal_interactive)
+                    {
+                        if error
+                            .downcast_ref::<ProtectedPathApprovalRequired>()
+                            .is_some()
+                        {
+                            return Err(error).with_context(|| {
+                                format!("iteration {iteration} requires protected path approval")
+                            });
+                        }
+                        failure = Some(format!("iteration {iteration}: {error:#}"));
                         break;
                     }
                     iteration_steps.push(iteration_step);
@@ -1030,7 +1189,7 @@ fn run_step_sequence_with_interactivity(
                                     message: reason,
                                 });
                             }
-                            None => match apply_step(iteration_step, opts) {
+                            None => match apply_step(&task.id, iteration_step, opts) {
                                 Ok(ApplyStepResult::Applied(summary))
                                 | Ok(ApplyStepResult::AppliedWithOutput { summary, .. }) => {
                                     applied += 1;
@@ -1060,6 +1219,16 @@ fn run_step_sequence_with_interactivity(
                                     break;
                                 }
                                 Err(error) => {
+                                    if error
+                                        .downcast_ref::<ProtectedPathApprovalRequired>()
+                                        .is_some()
+                                    {
+                                        return Err(error).with_context(|| {
+                                            format!(
+                                                "iteration {iteration} requires renewed protected path approval"
+                                            )
+                                        });
+                                    }
                                     failure = Some(format!("iteration {iteration}: {error:#}"));
                                     break;
                                 }
@@ -1337,9 +1506,20 @@ fn run_step_sequence_with_interactivity(
                 step_id: step.id.clone(),
                 message: "running".into(),
             });
-            let result = match apply_step(step, opts) {
+            let result = match apply_step(&task.id, step, opts) {
                 Ok(result) => result,
                 Err(err) => {
+                    if err
+                        .downcast_ref::<ProtectedPathApprovalRequired>()
+                        .is_some()
+                    {
+                        return Err(err).with_context(|| {
+                            format!(
+                                "step {} requires renewed protected path approval during apply",
+                                step.id
+                            )
+                        });
+                    }
                     let message = err.to_string();
                     steps[step_idx].status = StepStatus::Failed;
                     steps[step_idx].logs.push(StepLogEntry {
@@ -1567,7 +1747,7 @@ fn run_graph_task_with_interactivity(
     if opts.release_channel.is_some() && !graph_contains_bambu(graph) {
         bail!("--channel is only supported by tasks with a bambu-studio-release action node");
     }
-    preflight_graph_capabilities(graph, opts, terminal_interactive)?;
+    preflight_graph_capabilities(&task.id, graph, opts, terminal_interactive)?;
 
     let mut runtime = GraphRuntime {
         task,
@@ -1619,11 +1799,12 @@ fn graph_contains_bambu(graph: &WorkflowGraph) -> bool {
 }
 
 fn preflight_graph_capabilities(
+    task_id: &str,
     graph: &WorkflowGraph,
     opts: &RunOptions,
     terminal_interactive: bool,
 ) -> Result<()> {
-    preflight_graph_policy_order(graph, opts, terminal_interactive, false).map(|_| ())
+    preflight_graph_policy_order(task_id, graph, opts, terminal_interactive, false).map(|_| ())
 }
 
 /// Prove that inputs which can fail late or change safety policy are checked
@@ -1635,6 +1816,7 @@ fn preflight_graph_capabilities(
 /// unresolved safety input or positional lookup fails closed. Other dynamic
 /// values retain guard-before-binding and loop preflight semantics.
 fn preflight_graph_policy_order(
+    task_id: &str,
     graph: &WorkflowGraph,
     opts: &RunOptions,
     terminal_interactive: bool,
@@ -1666,7 +1848,7 @@ fn preflight_graph_policy_order(
                 // runner's all-step preflight. In particular, destination and
                 // existing-DMG identity checks must fail before an earlier
                 // graph action can mutate the machine.
-                enforce_step_policy(&step, opts, terminal_interactive)?;
+                enforce_step_policy(task_id, &step, opts, terminal_interactive)?;
                 if mutation_possible {
                     if let Some(target) = node.bindings.iter().find_map(|(target, binding)| {
                         (!binding_is_statically_resolvable(binding)
@@ -1684,6 +1866,7 @@ fn preflight_graph_policy_order(
             }
             GraphNode::ForEach(node) => {
                 mutation_possible = preflight_graph_policy_order(
+                    task_id,
                     &node.body,
                     opts,
                     terminal_interactive,
@@ -1692,6 +1875,7 @@ fn preflight_graph_policy_order(
             }
             GraphNode::If(node) => {
                 let then_mutation = preflight_graph_policy_order(
+                    task_id,
                     &node.then_graph,
                     opts,
                     terminal_interactive,
@@ -1699,6 +1883,7 @@ fn preflight_graph_policy_order(
                 )?;
                 let else_mutation = if let Some(graph) = node.else_graph.as_deref() {
                     preflight_graph_policy_order(
+                        task_id,
                         graph,
                         opts,
                         terminal_interactive,
@@ -1713,6 +1898,7 @@ fn preflight_graph_policy_order(
                 let mut branch_mutation = mutation_possible;
                 for case in &node.cases {
                     branch_mutation |= preflight_graph_policy_order(
+                        task_id,
                         &case.graph,
                         opts,
                         terminal_interactive,
@@ -1721,6 +1907,7 @@ fn preflight_graph_policy_order(
                 }
                 if let Some(graph) = node.default.as_deref() {
                     branch_mutation |= preflight_graph_policy_order(
+                        task_id,
                         graph,
                         opts,
                         terminal_interactive,
@@ -2084,6 +2271,17 @@ impl GraphRuntime<'_> {
         ) {
             Ok(report) => report,
             Err(error) => {
+                if error
+                    .downcast_ref::<ProtectedPathApprovalRequired>()
+                    .is_some()
+                {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "graph action {} requires protected path approval",
+                            materialized.id
+                        )
+                    });
+                }
                 let message = format!("step {} execution failed: {error:#}", materialized.id);
                 self.push_action_failure(&materialized, &message, instance_prefix)?;
                 return Ok(GraphNodeResult::action_failure());
@@ -2746,7 +2944,12 @@ impl GraphRuntime<'_> {
                             node.step.id
                         )
                     })?;
-                    enforce_step_policy(&materialized, self.opts, self.terminal_interactive)?;
+                    enforce_step_policy(
+                        &self.task.id,
+                        &materialized,
+                        self.opts,
+                        self.terminal_interactive,
+                    )?;
                     insert_action_schema(&mut scope.schemas, &materialized);
                 }
                 GraphNode::ForEach(node) => {
@@ -3264,7 +3467,12 @@ fn display_instance_prefix(prefix: &str) -> String {
     }
 }
 
-fn enforce_step_policy(step: &Step, opts: &RunOptions, terminal_interactive: bool) -> Result<()> {
+fn enforce_step_policy(
+    task_id: &str,
+    step: &Step,
+    opts: &RunOptions,
+    terminal_interactive: bool,
+) -> Result<()> {
     if matches!(step.allow_elevation, ElevationPolicy::Allow) && !opts.allow_elevation {
         return Err(AutomationError::Message(format!(
             "step {} requires --allow-elevation",
@@ -3291,7 +3499,7 @@ fn enforce_step_policy(step: &Step, opts: &RunOptions, terminal_interactive: boo
         ))
         .into());
     }
-    validate_destinations(step)?;
+    validate_destinations(task_id, step, opts)?;
     if opts.apply {
         validate_existing_dmg_install(step)?;
     }
@@ -3455,7 +3663,7 @@ fn validate_existing_dmg_install(step: &Step) -> Result<()> {
     Ok(())
 }
 
-fn validate_destinations(step: &Step) -> Result<()> {
+fn validate_destinations(task_id: &str, step: &Step, opts: &RunOptions) -> Result<()> {
     match &step.action {
         Action::CreateDirectory(action) => {
             validate_create_directory_path(&action.path).with_context(|| {
@@ -3502,14 +3710,99 @@ fn validate_destinations(step: &Step) -> Result<()> {
                 format!("step {} git inspection path {} is invalid", step.id, dest)
             })?;
         }
-        Action::GitClone { dest, .. }
-        | Action::GitCloneIfMissing { dest, .. }
-        | Action::GitFetch { dest, .. }
-        | Action::GitFastForward { dest, .. } => {
+        Action::GitClone {
+            repo, dest, branch, ..
+        } => {
             let Some(path) = expand_path_template(dest) else {
                 bail!("step {} has unexpanded destination {}", step.id, dest);
             };
-            validate_resolved_git_destination(&path).with_context(|| {
+            validate_git_destination_with_approval(
+                &path,
+                GitDestinationApprovalContext {
+                    task_id,
+                    step_id: &step.id,
+                    operation: ProtectedPathOperation::GitCloneOrUpdate,
+                    repository: repo,
+                    branch: branch.as_deref(),
+                    approvals: &opts.protected_path_approvals,
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "step {} git destination {} blocked by safety",
+                    step.id,
+                    path.display()
+                )
+            })?;
+        }
+        Action::GitCloneIfMissing {
+            repo, dest, branch, ..
+        } => {
+            let Some(path) = expand_path_template(dest) else {
+                bail!("step {} has unexpanded destination {}", step.id, dest);
+            };
+            validate_git_destination_with_approval(
+                &path,
+                GitDestinationApprovalContext {
+                    task_id,
+                    step_id: &step.id,
+                    operation: ProtectedPathOperation::GitCloneIfMissing,
+                    repository: repo,
+                    branch: branch.as_deref(),
+                    approvals: &opts.protected_path_approvals,
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "step {} git destination {} blocked by safety",
+                    step.id,
+                    path.display()
+                )
+            })?;
+        }
+        Action::GitFetch {
+            repo, dest, branch, ..
+        } => {
+            let Some(path) = expand_path_template(dest) else {
+                bail!("step {} has unexpanded destination {}", step.id, dest);
+            };
+            validate_git_destination_with_approval(
+                &path,
+                GitDestinationApprovalContext {
+                    task_id,
+                    step_id: &step.id,
+                    operation: ProtectedPathOperation::GitFetch,
+                    repository: repo,
+                    branch: Some(branch),
+                    approvals: &opts.protected_path_approvals,
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "step {} git destination {} blocked by safety",
+                    step.id,
+                    path.display()
+                )
+            })?;
+        }
+        Action::GitFastForward {
+            repo, dest, branch, ..
+        } => {
+            let Some(path) = expand_path_template(dest) else {
+                bail!("step {} has unexpanded destination {}", step.id, dest);
+            };
+            validate_git_destination_with_approval(
+                &path,
+                GitDestinationApprovalContext {
+                    task_id,
+                    step_id: &step.id,
+                    operation: ProtectedPathOperation::GitFastForward,
+                    repository: repo,
+                    branch: Some(branch),
+                    approvals: &opts.protected_path_approvals,
+                },
+            )
+            .with_context(|| {
                 format!(
                     "step {} git destination {} blocked by safety",
                     step.id,
@@ -3671,7 +3964,35 @@ fn resolve_through_existing_ancestor(path: &Path) -> Result<PathBuf> {
     Ok(canonical_base.join(suffix))
 }
 
-fn validate_resolved_git_destination(path: &Path) -> Result<PathBuf> {
+#[derive(Debug)]
+struct ValidatedGitDestination {
+    resolved_path: PathBuf,
+    protected: bool,
+}
+
+#[derive(Clone, Copy)]
+struct GitDestinationApprovalContext<'a> {
+    task_id: &'a str,
+    step_id: &'a str,
+    operation: ProtectedPathOperation,
+    repository: &'a str,
+    branch: Option<&'a str>,
+    approvals: &'a [ProtectedPathApproval],
+}
+
+fn capture_git_destination_snapshot(path: &Path) -> Result<ProtectedPathSnapshot> {
+    if !path.is_absolute() {
+        bail!(
+            "git destination must be absolute after template expansion: {}",
+            path.display()
+        );
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        bail!("git destination must not contain '..': {}", path.display());
+    }
     let absolute = lexical_absolute_path(path)?;
     let mut deepest_existing = absolute.clone();
     let metadata = loop {
@@ -3715,6 +4036,234 @@ fn validate_resolved_git_destination(path: &Path) -> Result<PathBuf> {
         );
     }
     let resolved = canonical_base.join(suffix);
+    let anchor_identity = same_file::Handle::from_path(&canonical_base).with_context(|| {
+        format!(
+            "open git destination ancestor identity {}",
+            canonical_base.display()
+        )
+    })?;
+    Ok(ProtectedPathSnapshot {
+        requested_path: absolute,
+        resolved_path: resolved,
+        anchor_path: canonical_base,
+        anchor_identity: Arc::new(anchor_identity),
+    })
+}
+
+fn revalidate_protected_path_snapshot(snapshot: &ProtectedPathSnapshot) -> Result<()> {
+    reject_documents_symlink_components(&snapshot.requested_path)?;
+    revalidate_destination_snapshot_identity(snapshot)
+}
+
+fn revalidate_destination_snapshot_identity(snapshot: &ProtectedPathSnapshot) -> Result<()> {
+    let current = capture_git_destination_snapshot(&snapshot.requested_path)?;
+    if current.resolved_path != snapshot.resolved_path
+        || current.anchor_path != snapshot.anchor_path
+        || current.anchor_identity.as_ref() != snapshot.anchor_identity.as_ref()
+    {
+        bail!(
+            "protected destination identity changed: {}",
+            snapshot.requested_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn canonical_documents_root() -> Result<PathBuf> {
+    let documents = dirs::home_dir()
+        .ok_or_else(|| anyhow!("home directory unavailable"))?
+        .join("Documents");
+    documents
+        .canonicalize()
+        .with_context(|| format!("canonicalize Documents root {}", documents.display()))
+}
+
+fn is_approvable_documents_destination(path: &Path) -> Result<bool> {
+    let documents = canonical_documents_root()?;
+    Ok(path != documents && path.starts_with(documents))
+}
+
+fn lexical_documents_root() -> Result<PathBuf> {
+    let documents = dirs::home_dir()
+        .ok_or_else(|| anyhow!("home directory unavailable"))?
+        .join("Documents");
+    lexical_absolute_path(&documents)
+}
+
+fn reject_documents_symlink_components(path: &Path) -> Result<()> {
+    let documents = lexical_documents_root()?;
+    reject_symlink_components_below(&documents, path)
+}
+
+fn reject_symlink_components_below(root: &Path, path: &Path) -> Result<()> {
+    let relative = path.strip_prefix(root).with_context(|| {
+        format!(
+            "protected destination {} is not below {}",
+            path.display(),
+            root.display()
+        )
+    })?;
+    if relative.as_os_str().is_empty() {
+        bail!("the Documents root itself cannot be approved");
+    }
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!(
+                    "protected git destination must not contain symlink components: {}",
+                    current.display()
+                )
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "inspect protected destination component {}",
+                        current.display()
+                    )
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn protected_destination_parent_is_real(path: &Path) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        anyhow!(
+            "protected git destination has no parent: {}",
+            path.display()
+        )
+    })?;
+    let metadata = fs::symlink_metadata(parent).with_context(|| {
+        format!(
+            "protected git destination requires its immediate parent to already exist: {}",
+            parent.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!(
+            "protected git destination requires a real immediate parent directory: {}",
+            parent.display()
+        );
+    }
+    Ok(())
+}
+
+fn approval_matches_destination(
+    approval: &ProtectedPathApproval,
+    context: GitDestinationApprovalContext<'_>,
+    snapshot: &ProtectedPathSnapshot,
+) -> bool {
+    approval_key_matches_destination(approval, context, snapshot)
+        && revalidate_protected_path_snapshot(&approval.snapshot).is_ok()
+}
+
+fn approval_key_matches_destination(
+    approval: &ProtectedPathApproval,
+    context: GitDestinationApprovalContext<'_>,
+    snapshot: &ProtectedPathSnapshot,
+) -> bool {
+    approval.task_id == context.task_id
+        && approval.step_id == context.step_id
+        && approval.operation == context.operation
+        && approval.repository == context.repository
+        && approval.branch.as_deref() == context.branch
+        && approval.snapshot.requested_path == snapshot.requested_path
+        && approval.snapshot.resolved_path == snapshot.resolved_path
+}
+
+fn approval_anchor_identity_is_current(approval: &ProtectedPathApproval) -> bool {
+    let Ok(canonical_anchor) = approval.snapshot.anchor_path.canonicalize() else {
+        return false;
+    };
+    if canonical_anchor != approval.snapshot.anchor_path {
+        return false;
+    }
+    let Ok(current_identity) = same_file::Handle::from_path(&approval.snapshot.anchor_path) else {
+        return false;
+    };
+    &current_identity == approval.snapshot.anchor_identity.as_ref()
+}
+
+fn revalidate_git_destination_after_action(
+    path: &Path,
+    context: GitDestinationApprovalContext<'_>,
+) -> Result<()> {
+    let snapshot = capture_git_destination_snapshot(path)?;
+    if is_safe_rule_root(parent_or_self(&snapshot.resolved_path)) {
+        return Ok(());
+    }
+    if !is_approvable_documents_destination(&snapshot.resolved_path)? {
+        bail!(
+            "git destination escaped its approved protected path during execution: {}",
+            snapshot.resolved_path.display()
+        );
+    }
+    reject_documents_symlink_components(&snapshot.requested_path)?;
+    protected_destination_parent_is_real(&snapshot.requested_path)?;
+    if context.approvals.iter().any(|approval| {
+        approval_key_matches_destination(approval, context, &snapshot)
+            && approval_anchor_identity_is_current(approval)
+    }) {
+        return Ok(());
+    }
+    bail!(
+        "git destination changed during protected operation: {}",
+        snapshot.requested_path.display()
+    )
+}
+
+fn validate_git_destination_with_approval(
+    path: &Path,
+    context: GitDestinationApprovalContext<'_>,
+) -> Result<ValidatedGitDestination> {
+    let snapshot = capture_git_destination_snapshot(path)?;
+    if is_safe_rule_root(parent_or_self(&snapshot.resolved_path)) {
+        return Ok(ValidatedGitDestination {
+            resolved_path: snapshot.resolved_path,
+            protected: false,
+        });
+    }
+    if !is_approvable_documents_destination(&snapshot.resolved_path)? {
+        bail!(
+            "resolved destination {} is not safe",
+            snapshot.resolved_path.display()
+        );
+    }
+    reject_documents_symlink_components(&snapshot.requested_path)?;
+    protected_destination_parent_is_real(&snapshot.requested_path)?;
+    if context
+        .approvals
+        .iter()
+        .any(|approval| approval_matches_destination(approval, context, &snapshot))
+    {
+        return Ok(ValidatedGitDestination {
+            resolved_path: snapshot.resolved_path,
+            protected: true,
+        });
+    }
+    Err(ProtectedPathApprovalRequired {
+        request: ProtectedPathApprovalRequest {
+            task_id: context.task_id.to_owned(),
+            step_id: context.step_id.to_owned(),
+            operation: context.operation,
+            repository: context.repository.to_owned(),
+            branch: context.branch.map(str::to_owned),
+            risk: ProtectedPathRisk::UserDocuments,
+            snapshot,
+        },
+    }
+    .into())
+}
+
+#[cfg(test)]
+fn validate_resolved_git_destination(path: &Path) -> Result<PathBuf> {
+    let snapshot = capture_git_destination_snapshot(path)?;
+    let resolved = snapshot.resolved_path;
     if !is_safe_rule_root(parent_or_self(&resolved)) {
         bail!("resolved destination {} is not safe", resolved.display());
     }
@@ -4397,7 +4946,7 @@ fn prompt_once(message: &str) -> Result<()> {
     Ok(())
 }
 
-fn apply_step(step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
+fn apply_step(task_id: &str, step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
     match &step.action {
         Action::GithubListRepositories => apply_github_list_repositories(),
         Action::ForEach { .. } | Action::ForEachGitCloneIfMissing { .. } => {
@@ -4419,14 +4968,62 @@ fn apply_step(step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
         }
         Action::RemovePath(action) => apply_remove_path(&action.path),
         Action::GitClone { repo, dest, branch } => {
-            apply_git_clone_or_update(repo, dest, branch.as_deref())
+            let context = GitDestinationApprovalContext {
+                task_id,
+                step_id: &step.id,
+                operation: ProtectedPathOperation::GitCloneOrUpdate,
+                repository: repo,
+                branch: branch.as_deref(),
+                approvals: &opts.protected_path_approvals,
+            };
+            finish_git_action(
+                dest,
+                context,
+                apply_git_clone_or_update(repo, dest, branch.as_deref(), context),
+            )
         }
         Action::GitInspect { repo, dest } => apply_git_inspect(repo, dest),
         Action::GitCloneIfMissing { repo, dest, branch } => {
-            apply_git_clone_if_missing(repo, dest, branch.as_deref())
+            let context = GitDestinationApprovalContext {
+                task_id,
+                step_id: &step.id,
+                operation: ProtectedPathOperation::GitCloneIfMissing,
+                repository: repo,
+                branch: branch.as_deref(),
+                approvals: &opts.protected_path_approvals,
+            };
+            finish_git_action(
+                dest,
+                context,
+                apply_git_clone_if_missing(repo, dest, branch.as_deref(), context),
+            )
         }
-        Action::GitFetch { repo, dest, branch } => apply_git_fetch(repo, dest, branch),
-        Action::GitFastForward { repo, dest, branch } => apply_git_fast_forward(repo, dest, branch),
+        Action::GitFetch { repo, dest, branch } => {
+            let context = GitDestinationApprovalContext {
+                task_id,
+                step_id: &step.id,
+                operation: ProtectedPathOperation::GitFetch,
+                repository: repo,
+                branch: Some(branch),
+                approvals: &opts.protected_path_approvals,
+            };
+            finish_git_action(dest, context, apply_git_fetch(repo, dest, branch, context))
+        }
+        Action::GitFastForward { repo, dest, branch } => {
+            let context = GitDestinationApprovalContext {
+                task_id,
+                step_id: &step.id,
+                operation: ProtectedPathOperation::GitFastForward,
+                repository: repo,
+                branch: Some(branch),
+                approvals: &opts.protected_path_approvals,
+            };
+            finish_git_action(
+                dest,
+                context,
+                apply_git_fast_forward(repo, dest, branch, context),
+            )
+        }
         Action::BrewInstall { package, cask } => {
             apply_brew_install(package, *cask).map(ApplyStepResult::Applied)
         }
@@ -5423,13 +6020,25 @@ fn format_timestamp(value: &DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
+fn finish_git_action(
+    dest: &str,
+    approval_context: GitDestinationApprovalContext<'_>,
+    result: Result<ApplyStepResult>,
+) -> Result<ApplyStepResult> {
+    let result = result?;
+    let dest_path = expand_required_path(dest)?;
+    revalidate_git_destination_after_action(&dest_path, approval_context)?;
+    Ok(result)
+}
+
 fn apply_git_clone_or_update(
     repo: &str,
     dest: &str,
     branch: Option<&str>,
+    approval_context: GitDestinationApprovalContext<'_>,
 ) -> Result<ApplyStepResult> {
     let dest_path = expand_required_path(dest)?;
-    validate_resolved_git_destination(&dest_path)?;
+    let validated = validate_git_destination_with_approval(&dest_path, approval_context)?;
     if dest_path.exists() && fs::symlink_metadata(&dest_path)?.file_type().is_symlink() {
         bail!(
             "git destination must not be a symlink: {}",
@@ -5443,10 +6052,10 @@ fn apply_git_clone_or_update(
             .next()
             .is_none();
     if !dest_path.exists() || destination_is_empty {
-        return clone_git_repository(repo, &dest_path, branch);
+        return clone_git_repository(repo, &dest_path, branch, approval_context);
     }
 
-    validate_existing_git_repository(&dest_path, repo)?;
+    validate_existing_git_repository(&dest_path, repo, validated.protected)?;
     let active_branch = current_git_branch(&dest_path)?;
     let target_branch = match branch {
         Some(branch) => branch.to_owned(),
@@ -5616,7 +6225,7 @@ fn apply_git_inspect(repo: &str, dest: &str) -> Result<ApplyStepResult> {
             output: git_inspection_output(repo, dest, None, false),
         });
     }
-    validate_existing_git_repository(&dest_path, repo)?;
+    validate_existing_git_repository(&dest_path, repo, false)?;
     let active_branch = current_git_branch(&dest_path)?;
     let active_checkout = active_branch.as_deref().unwrap_or("detached HEAD");
     Ok(ApplyStepResult::AlreadySatisfiedWithOutput {
@@ -5633,9 +6242,10 @@ fn apply_git_clone_if_missing(
     repo: &str,
     dest: &str,
     branch: Option<&str>,
+    approval_context: GitDestinationApprovalContext<'_>,
 ) -> Result<ApplyStepResult> {
     let dest_path = expand_required_path(dest)?;
-    validate_resolved_git_destination(&dest_path)?;
+    let validated = validate_git_destination_with_approval(&dest_path, approval_context)?;
     if dest_path.exists() && fs::symlink_metadata(&dest_path)?.file_type().is_symlink() {
         bail!(
             "git destination must not be a symlink: {}",
@@ -5648,20 +6258,25 @@ fn apply_git_clone_if_missing(
             .next()
             .is_none();
     if !dest_path.exists() || destination_is_empty {
-        return clone_git_repository(repo, &dest_path, branch);
+        return clone_git_repository(repo, &dest_path, branch, approval_context);
     }
-    validate_existing_git_repository(&dest_path, repo)?;
+    validate_existing_git_repository(&dest_path, repo, validated.protected)?;
     Ok(ApplyStepResult::AlreadySatisfied(format!(
         "clone not needed; expected repository already exists at {}",
         dest_path.display()
     )))
 }
 
-fn apply_git_fetch(repo: &str, dest: &str, branch: &str) -> Result<ApplyStepResult> {
+fn apply_git_fetch(
+    repo: &str,
+    dest: &str,
+    branch: &str,
+    approval_context: GitDestinationApprovalContext<'_>,
+) -> Result<ApplyStepResult> {
     validate_git_branch_name(branch)?;
     let dest_path = expand_required_path(dest)?;
-    validate_resolved_git_destination(&dest_path)?;
-    validate_existing_git_repository(&dest_path, repo)?;
+    let validated = validate_git_destination_with_approval(&dest_path, approval_context)?;
+    validate_existing_git_repository(&dest_path, repo, validated.protected)?;
     let remote_ref = format!("refs/remotes/origin/{branch}");
     let before = git_ref_sha(&dest_path, &remote_ref)?;
     let refspec = format!("+refs/heads/{branch}:{remote_ref}");
@@ -5699,11 +6314,16 @@ fn apply_git_fetch(repo: &str, dest: &str, branch: &str) -> Result<ApplyStepResu
     }
 }
 
-fn apply_git_fast_forward(repo: &str, dest: &str, branch: &str) -> Result<ApplyStepResult> {
+fn apply_git_fast_forward(
+    repo: &str,
+    dest: &str,
+    branch: &str,
+    approval_context: GitDestinationApprovalContext<'_>,
+) -> Result<ApplyStepResult> {
     validate_git_branch_name(branch)?;
     let dest_path = expand_required_path(dest)?;
-    validate_resolved_git_destination(&dest_path)?;
-    validate_existing_git_repository(&dest_path, repo)?;
+    let validated = validate_git_destination_with_approval(&dest_path, approval_context)?;
+    validate_existing_git_repository(&dest_path, repo, validated.protected)?;
     let active_branch = current_git_branch(&dest_path)?;
     let remote_ref = format!("refs/remotes/origin/{branch}");
     let local_ref = format!("refs/heads/{branch}");
@@ -5936,28 +6556,30 @@ fn clone_git_repository(
     repo: &str,
     dest_path: &Path,
     branch: Option<&str>,
+    approval_context: GitDestinationApprovalContext<'_>,
 ) -> Result<ApplyStepResult> {
     if let Some(branch) = branch {
         validate_git_branch_name(branch)?;
     }
-    let resolved_before = validate_resolved_git_destination(dest_path)?;
-    if let Some(parent) = dest_path.parent() {
+    let validated_before = validate_git_destination_with_approval(dest_path, approval_context)?;
+    if validated_before.protected {
+        protected_destination_parent_is_real(dest_path)?;
+    } else if let Some(parent) = dest_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create clone parent {}", parent.display()))?;
     }
-    let resolved_after = validate_resolved_git_destination(dest_path)?;
-    if resolved_after != resolved_before {
+    let validated_after = validate_git_destination_with_approval(dest_path, approval_context)?;
+    if validated_after.resolved_path != validated_before.resolved_path
+        || validated_after.protected != validated_before.protected
+    {
         bail!(
             "git destination changed while preparing clone: {}",
             dest_path.display()
         );
     }
     let mut command = Command::new("git");
-    command
-        .arg("-c")
-        .arg("core.hooksPath=/dev/null")
-        .arg("clone")
-        .arg("--no-recurse-submodules");
+    prepare_git_command(&mut command);
+    command.arg("clone").arg("--no-recurse-submodules");
     if let Some(branch) = branch {
         command.arg("--branch").arg(branch);
     }
@@ -5966,6 +6588,16 @@ fn clone_git_repository(
         .output()
         .with_context(|| format!("clone repository into {}", dest_path.display()))?;
     ensure_git_output_succeeded(output, "git clone")?;
+
+    if validated_before.protected {
+        revalidate_git_destination_after_action(dest_path, approval_context)?;
+        validate_existing_git_repository(dest_path, repo, true).with_context(|| {
+            format!(
+                "verify protected repository layout after clone at {}",
+                dest_path.display()
+            )
+        })?;
+    }
 
     let cloned_branch = match branch {
         Some(branch) => branch.to_owned(),
@@ -5991,7 +6623,11 @@ fn clone_git_repository(
     )))
 }
 
-fn validate_existing_git_repository(dest_path: &Path, expected_repo: &str) -> Result<()> {
+fn validate_existing_git_repository(
+    dest_path: &Path,
+    expected_repo: &str,
+    require_in_tree_git_dir: bool,
+) -> Result<()> {
     if !dest_path.is_dir() {
         bail!(
             "git destination exists but is not a directory: {}",
@@ -6026,6 +6662,9 @@ fn validate_existing_git_repository(dest_path: &Path, expected_repo: &str) -> Re
             dest_path.display()
         );
     }
+    if require_in_tree_git_dir {
+        validate_protected_git_repository_layout(dest_path, &canonical_dest)?;
+    }
     let origin = git_stdout(
         dest_path,
         &["remote", "get-url", "origin"],
@@ -6040,11 +6679,136 @@ fn validate_existing_git_repository(dest_path: &Path, expected_repo: &str) -> Re
     Ok(())
 }
 
+fn validate_protected_git_repository_layout(dest_path: &Path, canonical_dest: &Path) -> Result<()> {
+    let dot_git = dest_path.join(".git");
+    let dot_git_metadata = fs::symlink_metadata(&dot_git).with_context(|| {
+        format!(
+            "protected repository requires a real in-tree .git directory: {}",
+            dot_git.display()
+        )
+    })?;
+    if dot_git_metadata.file_type().is_symlink() || !dot_git_metadata.is_dir() {
+        bail!(
+            "protected repository requires a real in-tree .git directory: {}",
+            dot_git.display()
+        );
+    }
+    let canonical_dot_git = dot_git
+        .canonicalize()
+        .with_context(|| format!("canonicalize protected git directory {}", dot_git.display()))?;
+    for entry in WalkDir::new(&dot_git).follow_links(false) {
+        let entry = entry.with_context(|| {
+            format!("inspect protected git metadata tree {}", dot_git.display())
+        })?;
+        let file_type = entry.file_type();
+        if file_type.is_symlink() {
+            bail!(
+                "protected repository git metadata must not contain symlinks: {}",
+                entry.path().display()
+            );
+        }
+        if !file_type.is_file() && !file_type.is_dir() {
+            bail!(
+                "protected repository git metadata contains a special filesystem entry: {}",
+                entry.path().display()
+            );
+        }
+    }
+    validate_protected_git_execution_config(dest_path)?;
+    let absolute_git_dir = git_stdout(
+        dest_path,
+        &["rev-parse", "--absolute-git-dir"],
+        "inspect protected git directory",
+    )?;
+    let common_git_dir = git_stdout(
+        dest_path,
+        &["rev-parse", "--git-common-dir"],
+        "inspect protected common git directory",
+    )?;
+    let canonical_git_dir = canonicalize_git_reported_path(dest_path, &absolute_git_dir)
+        .context("canonicalize protected absolute git directory")?;
+    let canonical_common_dir = canonicalize_git_reported_path(dest_path, &common_git_dir)
+        .context("canonicalize protected common git directory")?;
+    if canonical_git_dir != canonical_dot_git
+        || !canonical_git_dir.starts_with(canonical_dest)
+        || !canonical_common_dir.starts_with(canonical_dest)
+    {
+        bail!(
+            "protected repository at {} uses a linked or external git directory",
+            dest_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn canonicalize_git_reported_path(work_tree: &Path, reported: &str) -> Result<PathBuf> {
+    let path = Path::new(reported.trim());
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        work_tree.join(path)
+    };
+    absolute
+        .canonicalize()
+        .with_context(|| format!("canonicalize git path {}", absolute.display()))
+}
+
+fn validate_protected_git_execution_config(cwd: &Path) -> Result<()> {
+    for scope in ["--local", "--worktree"] {
+        let output = git_output(
+            cwd,
+            &[
+                "config",
+                scope,
+                "--includes",
+                "--null",
+                "--name-only",
+                "--list",
+            ],
+        )?;
+        if !output.status.success() {
+            ensure_git_output_succeeded(output, "inspect protected git configuration")?;
+            unreachable!();
+        }
+        let keys = String::from_utf8(output.stdout)
+            .context("protected git configuration contains a non-UTF-8 key")?;
+        if let Some(key) = keys
+            .split_terminator('\0')
+            .find(|key| git_config_key_can_execute_process(key))
+        {
+            bail!(
+                "protected repository has executable Git configuration {}; remove it before granting access",
+                key
+            );
+        }
+    }
+    Ok(())
+}
+
+fn git_config_key_can_execute_process(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    if matches!(
+        key.as_str(),
+        "core.askpass" | "core.fsmonitor" | "core.gitproxy" | "core.sshcommand"
+    ) {
+        return true;
+    }
+    let segments = key.split('.').collect::<Vec<_>>();
+    matches!(
+        segments.as_slice(),
+        ["credential", .., "helper"]
+            | ["filter", .., "clean" | "smudge" | "process"]
+            | ["remote", .., "uploadpack"]
+    )
+}
+
 fn validate_git_branch_name(branch: &str) -> Result<()> {
     if branch.trim().is_empty() {
         bail!("git branch must not be empty");
     }
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    prepare_git_command(&mut command);
+    let output = command
         .args(["check-ref-format", "--branch", branch])
         .output()
         .context("validate git branch")?;
@@ -6149,14 +6913,48 @@ fn git_stdout(dest_path: &Path, args: &[&str], action: &str) -> Result<String> {
 }
 
 fn git_output(dest_path: &Path, args: &[&str]) -> Result<std::process::Output> {
-    Command::new("git")
-        .arg("-c")
-        .arg("core.hooksPath=/dev/null")
+    let mut command = Command::new("git");
+    prepare_git_command(&mut command);
+    command
         .arg("-C")
         .arg(dest_path)
         .args(args)
         .output()
         .with_context(|| format!("run git in {}", dest_path.display()))
+}
+
+fn prepare_git_command(command: &mut Command) {
+    command
+        .arg("-c")
+        .arg("core.hooksPath=/dev/null")
+        .arg("-c")
+        .arg("submodule.recurse=false")
+        .arg("-c")
+        .arg("fetch.recurseSubmodules=false")
+        .arg("-c")
+        .arg("protocol.ext.allow=never");
+    for (key, _) in std::env::vars_os() {
+        if git_environment_key_can_redirect_operation(&key.to_string_lossy()) {
+            command.env_remove(key);
+        }
+    }
+}
+
+fn git_environment_key_can_redirect_operation(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    matches!(
+        key.as_str(),
+        "GIT_DIR"
+            | "GIT_WORK_TREE"
+            | "GIT_COMMON_DIR"
+            | "GIT_OBJECT_DIRECTORY"
+            | "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+            | "GIT_INDEX_FILE"
+            | "GIT_NAMESPACE"
+            | "GIT_SHALLOW_FILE"
+            | "GIT_GRAFT_FILE"
+            | "GIT_QUARANTINE_PATH"
+    )
 }
 
 fn ensure_git_output_succeeded(output: std::process::Output, action: &str) -> Result<String> {
@@ -8208,6 +9006,18 @@ mod tests {
         }
     }
 
+    fn protected_documents_test_destination(label: &str) -> Option<PathBuf> {
+        let documents = dirs::home_dir()?.join("Documents");
+        if !documents.is_dir() {
+            return None;
+        }
+        let destination = documents.join(format!(
+            ".ppduster-runner-protected-{label}-test-{}",
+            std::process::id()
+        ));
+        (!destination.exists()).then_some(destination)
+    }
+
     /// Unit fixtures still use the compact legacy step builder. Import them
     /// explicitly before crossing the production graph-only runtime boundary.
     fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
@@ -9615,6 +10425,7 @@ mod tests {
         graph.validate().unwrap();
 
         preflight_graph_capabilities(
+            "test-task",
             &graph,
             &RunOptions {
                 apply: true,
@@ -11023,12 +11834,523 @@ mod tests {
             },
         );
 
-        let error = validate_destinations(&step).unwrap_err();
+        let error = validate_destinations("test-task", &step, &RunOptions::default()).unwrap_err();
 
         assert!(
             format!("{error:#}").contains("blocked by safety"),
             "unexpected error: {error:#}"
         );
+    }
+
+    #[test]
+    fn documents_git_approval_is_typed_exact_and_runtime_only() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let documents = home.join("Documents");
+        if !documents.is_dir() {
+            return;
+        }
+        let destination = documents.join(format!(
+            ".ppduster-protected-approval-test-{}",
+            std::process::id()
+        ));
+        if destination.exists() {
+            return;
+        }
+        let repository = "https://github.com/example/repository.git";
+        let step = plain_step(
+            "clone-repository",
+            Action::GitCloneIfMissing {
+                repo: repository.into(),
+                dest: destination.to_string_lossy().into_owned(),
+                branch: Some("main".into()),
+            },
+        );
+        let task = base_task(step.clone());
+
+        let error = run_task(&task, &RunOptions::default()).unwrap_err();
+        let required = error
+            .downcast_ref::<ProtectedPathApprovalRequired>()
+            .expect("protected destination must remain a typed error through anyhow contexts");
+        let request = required.request();
+        assert_eq!(request.task_id(), task.id);
+        assert_eq!(request.step_id(), step.id);
+        assert_eq!(
+            request.operation(),
+            ProtectedPathOperation::GitCloneIfMissing
+        );
+        assert_eq!(request.expected_repository(), repository);
+        assert_eq!(request.expected_branch(), Some("main"));
+        assert_eq!(request.requested_path(), destination);
+        assert_eq!(request.resolved_path(), destination);
+        assert_eq!(request.risk(), ProtectedPathRisk::UserDocuments);
+
+        let approval = request.approve().unwrap();
+        let options = RunOptions {
+            protected_path_approvals: vec![approval.clone()],
+            ..RunOptions::default()
+        };
+        let report = run_task(&task, &options).unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(!destination.exists(), "dry-run consent must not write");
+
+        let sibling = destination.with_file_name(format!(
+            "{}-sibling",
+            destination.file_name().unwrap().to_string_lossy()
+        ));
+        let sibling_task = base_task(plain_step(
+            "clone-repository",
+            Action::GitCloneIfMissing {
+                repo: repository.into(),
+                dest: sibling.to_string_lossy().into_owned(),
+                branch: Some("main".into()),
+            },
+        ));
+        let sibling_error = run_task(&sibling_task, &options).unwrap_err();
+        assert!(sibling_error
+            .downcast_ref::<ProtectedPathApprovalRequired>()
+            .is_some());
+
+        let changed_repo_task = base_task(plain_step(
+            "clone-repository",
+            Action::GitCloneIfMissing {
+                repo: "https://github.com/example/different.git".into(),
+                dest: destination.to_string_lossy().into_owned(),
+                branch: Some("main".into()),
+            },
+        ));
+        let changed_repo_error = run_task(&changed_repo_task, &options).unwrap_err();
+        assert!(changed_repo_error
+            .downcast_ref::<ProtectedPathApprovalRequired>()
+            .is_some());
+
+        let changed_branch_task = base_task(plain_step(
+            "clone-repository",
+            Action::GitCloneIfMissing {
+                repo: repository.into(),
+                dest: destination.to_string_lossy().into_owned(),
+                branch: Some("release".into()),
+            },
+        ));
+        let changed_branch_error = run_task(&changed_branch_task, &options).unwrap_err();
+        assert!(changed_branch_error
+            .downcast_ref::<ProtectedPathApprovalRequired>()
+            .is_some());
+
+        let changed_operation_task = base_task(plain_step(
+            "clone-repository",
+            Action::GitClone {
+                repo: repository.into(),
+                dest: destination.to_string_lossy().into_owned(),
+                branch: Some("main".into()),
+            },
+        ));
+        let changed_operation_error = run_task(&changed_operation_task, &options).unwrap_err();
+        assert!(changed_operation_error
+            .downcast_ref::<ProtectedPathApprovalRequired>()
+            .is_some());
+    }
+
+    #[test]
+    fn runtime_bound_graph_destination_preserves_typed_approval_request() {
+        let Some(destination) = protected_documents_test_destination("runtime-bound") else {
+            return;
+        };
+        let repository = "https://github.com/example/repository.git";
+        let inspect = plain_step(
+            "inspect-destination",
+            Action::GitInspect {
+                repo: repository.into(),
+                dest: destination.to_string_lossy().into_owned(),
+            },
+        );
+        let clone = plain_step(
+            "clone-destination",
+            Action::GitCloneIfMissing {
+                repo: repository.into(),
+                dest: std::env::temp_dir()
+                    .join("ppduster-runtime-binding-placeholder")
+                    .to_string_lossy()
+                    .into_owned(),
+                branch: Some("main".into()),
+            },
+        );
+        let graph = WorkflowGraph {
+            entries: vec![inspect.id.clone()],
+            nodes: vec![
+                action_node(inspect, BTreeMap::new()),
+                action_node(
+                    clone,
+                    BTreeMap::from([(
+                        "dest".into(),
+                        Binding::field(
+                            FieldRef::step("inspect-destination")
+                                .field("repository")
+                                .field("path"),
+                        ),
+                    )]),
+                ),
+            ],
+            edges: vec![GraphEdge::new(
+                "inspect-destination",
+                EdgePort::Success,
+                "clone-destination",
+            )],
+            ..WorkflowGraph::default()
+        };
+        graph.validate().unwrap();
+
+        let error = run_task(
+            &graph_task(graph),
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+        let request = error
+            .downcast_ref::<ProtectedPathApprovalRequired>()
+            .expect("runtime-bound graph approval must not be flattened into a failed report")
+            .request();
+        assert_eq!(request.step_id(), "clone-destination");
+        assert_eq!(request.requested_path(), destination);
+        assert_eq!(request.expected_repository(), repository);
+        assert_eq!(request.expected_branch(), Some("main"));
+        assert!(!destination.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_apply_approval_remains_a_typed_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "automation::runner::tests::stale_apply_approval_subprocess_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("HOME", temp.path())
+            .env("PPDUSTER_STALE_APPROVAL_HELPER", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stale approval helper failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper with an isolated HOME"]
+    fn stale_apply_approval_subprocess_helper() {
+        if std::env::var_os("PPDUSTER_STALE_APPROVAL_HELPER").is_none() {
+            return;
+        }
+        let home = dirs::home_dir().unwrap();
+        let documents = home.join("Documents");
+        let parent = documents.join("approved-parent");
+        let moved_parent = documents.join("moved-parent");
+        fs::create_dir_all(&parent).unwrap();
+        let destination = parent.join("repository");
+        let clone = plain_step(
+            "clone-after-anchor-change",
+            Action::GitCloneIfMissing {
+                repo: "https://github.com/example/repository.git".into(),
+                dest: destination.to_string_lossy().into_owned(),
+                branch: None,
+            },
+        );
+        let mut task = base_task(plain_step(
+            "move-approved-parent",
+            Action::RunCommand {
+                program: "/bin/mv".into(),
+                args: vec![
+                    parent.to_string_lossy().into_owned(),
+                    moved_parent.to_string_lossy().into_owned(),
+                ],
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        ));
+        task.steps.push(plain_step(
+            "replace-approved-parent",
+            Action::RunCommand {
+                program: "/bin/mkdir".into(),
+                args: vec![parent.to_string_lossy().into_owned()],
+                cwd: None,
+                env: BTreeMap::new(),
+                shell: ShellMode::Forbidden,
+            },
+        ));
+        task.steps.push(clone.clone());
+        let approval_error =
+            validate_destinations(&task.id, &clone, &RunOptions::default()).unwrap_err();
+        let approval = approval_error
+            .downcast_ref::<ProtectedPathApprovalRequired>()
+            .unwrap()
+            .request()
+            .approve()
+            .unwrap();
+
+        let error = run_step_sequence_with_interactivity(
+            &task,
+            &task.steps,
+            &RunOptions {
+                apply: true,
+                protected_path_approvals: vec![approval],
+                ..RunOptions::default()
+            },
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<ProtectedPathApprovalRequired>()
+                .is_some(),
+            "stale apply approval was flattened: {error:#}"
+        );
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn git_destination_snapshot_rejects_relative_and_parent_paths() {
+        assert!(capture_git_destination_snapshot(Path::new("relative/repository")).is_err());
+        let parent_path = std::env::temp_dir()
+            .join("scope")
+            .join("..")
+            .join("repository");
+        assert!(capture_git_destination_snapshot(&parent_path).is_err());
+    }
+
+    #[test]
+    fn protected_snapshot_detects_replaced_ancestor_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let anchor = temp.path().join("anchor");
+        fs::create_dir(&anchor).unwrap();
+        let destination = anchor.join("repository");
+        let snapshot = capture_git_destination_snapshot(&destination).unwrap();
+        let old_anchor = temp.path().join("old-anchor");
+        fs::rename(&anchor, &old_anchor).unwrap();
+        fs::create_dir(&anchor).unwrap();
+
+        let error = revalidate_destination_snapshot_identity(&snapshot).unwrap_err();
+        assert!(format!("{error:#}").contains("identity changed"));
+    }
+
+    #[test]
+    fn protected_destination_requires_existing_immediate_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("missing-parent").join("repository");
+        let error = protected_destination_parent_is_real(&destination).unwrap_err();
+        assert!(format!("{error:#}").contains("immediate parent to already exist"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_destination_rejects_every_symlink_component() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Documents");
+        let real = root.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = root.join("link");
+        symlink(&real, &link).unwrap();
+
+        let error = reject_symlink_components_below(&root, &link.join("repository")).unwrap_err();
+        assert!(format!("{error:#}").contains("symlink components"));
+    }
+
+    #[test]
+    fn protected_repository_requires_an_in_tree_git_directory() {
+        let repository = init_git_test_repository();
+        let checkout = repository._temp.path().join("checkout");
+        let checkout_arg = checkout.to_string_lossy().into_owned();
+        let remote_arg = repository.remote.to_string_lossy().into_owned();
+        test_git(
+            repository._temp.path(),
+            &[
+                "clone",
+                "--no-recurse-submodules",
+                &remote_arg,
+                &checkout_arg,
+            ],
+        );
+        validate_existing_git_repository(&checkout, &remote_arg, true).unwrap();
+
+        let linked = repository._temp.path().join("linked-worktree");
+        let linked_arg = linked.to_string_lossy().into_owned();
+        test_git(
+            &repository.seed,
+            &["worktree", "add", "--detach", &linked_arg],
+        );
+        let error = validate_existing_git_repository(&linked, &remote_arg, true).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("real in-tree .git directory"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_repository_rejects_symlinks_inside_git_metadata() {
+        use std::os::unix::fs::symlink;
+
+        let repository = init_git_test_repository();
+        let checkout = repository._temp.path().join("symlinked-metadata-checkout");
+        let checkout_arg = checkout.to_string_lossy().into_owned();
+        let remote_arg = repository.remote.to_string_lossy().into_owned();
+        test_git(
+            repository._temp.path(),
+            &[
+                "clone",
+                "--no-recurse-submodules",
+                &remote_arg,
+                &checkout_arg,
+            ],
+        );
+        let refs = checkout.join(".git/refs");
+        let external_refs = repository._temp.path().join("external-refs");
+        fs::rename(&refs, &external_refs).unwrap();
+        symlink(&external_refs, &refs).unwrap();
+
+        let error = validate_existing_git_repository(&checkout, &remote_arg, true).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("git metadata must not contain symlinks"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn protected_repository_rejects_executable_filter_config_before_git_mutation() {
+        let repository = init_git_test_repository();
+        let checkout = repository._temp.path().join("filter-checkout");
+        let checkout_arg = checkout.to_string_lossy().into_owned();
+        let remote_arg = repository.remote.to_string_lossy().into_owned();
+        test_git(
+            repository._temp.path(),
+            &[
+                "clone",
+                "--no-recurse-submodules",
+                &remote_arg,
+                &checkout_arg,
+            ],
+        );
+        let sentinel = repository._temp.path().join("filter-executed");
+        let filter = format!(
+            "sh -c 'touch {}; cat'",
+            sentinel.to_string_lossy().replace('\'', "'\\''")
+        );
+        test_git(&checkout, &["config", "filter.evil.smudge", &filter]);
+        fs::write(checkout.join(".gitattributes"), "state.txt filter=evil\n").unwrap();
+
+        let error = validate_existing_git_repository(&checkout, &remote_arg, true).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("executable Git configuration filter.evil.smudge"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            !sentinel.exists(),
+            "filter must be rejected before any Git mutation executes it"
+        );
+    }
+
+    #[test]
+    fn protected_repository_rejects_local_credential_helper() {
+        let repository = init_git_test_repository();
+        let checkout = repository._temp.path().join("credential-helper-checkout");
+        let checkout_arg = checkout.to_string_lossy().into_owned();
+        let remote_arg = repository.remote.to_string_lossy().into_owned();
+        test_git(
+            repository._temp.path(),
+            &[
+                "clone",
+                "--no-recurse-submodules",
+                &remote_arg,
+                &checkout_arg,
+            ],
+        );
+        test_git(
+            &checkout,
+            &["config", "credential.helper", "!echo untrusted-helper"],
+        );
+
+        let error = validate_existing_git_repository(&checkout, &remote_arg, true).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("executable Git configuration credential.helper"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn executable_git_config_key_detection_is_narrow_and_case_insensitive() {
+        for key in [
+            "filter.evil.clean",
+            "FILTER.evil.SMUDGE",
+            "filter.evil.process",
+            "credential.helper",
+            "credential.https://example.com.helper",
+            "Core.AskPass",
+            "core.fsmonitor",
+            "core.gitProxy",
+            "Core.SshCommand",
+            "remote.origin.uploadpack",
+        ] {
+            assert!(git_config_key_can_execute_process(key), "missed {key}");
+        }
+        for key in [
+            "filter.evil.required",
+            "core.hooksPath",
+            "credential.useHttpPath",
+            "remote.origin.url",
+        ] {
+            assert!(
+                !git_config_key_can_execute_process(key),
+                "overblocked {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_environment_scrubbing_preserves_auth_and_prompt_controls() {
+        for key in [
+            "GIT_DIR",
+            "git_work_tree",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_INDEX_FILE",
+            "GIT_QUARANTINE_PATH",
+        ] {
+            assert!(
+                git_environment_key_can_redirect_operation(key),
+                "missed {key}"
+            );
+        }
+        for key in [
+            "GIT_TERMINAL_PROMPT",
+            "GIT_ASKPASS",
+            "GIT_SSH_COMMAND",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+            "GIT_EXEC_PATH",
+            "GIT_TEMPLATE_DIR",
+            "GIT_TRACE2_EVENT",
+            "SSH_AUTH_SOCK",
+        ] {
+            assert!(
+                !git_environment_key_can_redirect_operation(key),
+                "auth/prompt regression for {key}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -11049,7 +12371,7 @@ mod tests {
             },
         );
 
-        let error = validate_destinations(&step).unwrap_err();
+        let error = validate_destinations("test-task", &step, &RunOptions::default()).unwrap_err();
 
         assert!(
             format!("{error:#}").contains("must not be a symlink"),

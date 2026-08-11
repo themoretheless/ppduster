@@ -48,8 +48,10 @@ pub use project::{
 pub use runner::{
     context_store_from_reports, describe_step, run_task, ActionOutcome, ActionPlan,
     AutomationError, GithubAccountOutput, GithubContextOutput, GithubRepositoriesOutput,
-    GithubRepositoryOutput, PathMetadataOutput, ProcessExitOutput, RunOptions, RunReport,
-    StepLogEntry, StepOutput, StepReport, StepStatus, StructuredStepOutput,
+    GithubRepositoryOutput, PathMetadataOutput, ProcessExitOutput, ProtectedPathApproval,
+    ProtectedPathApprovalRequest, ProtectedPathApprovalRequired, ProtectedPathOperation,
+    ProtectedPathRisk, RunOptions, RunReport, StepLogEntry, StepOutput, StepReport, StepStatus,
+    StructuredStepOutput,
 };
 pub use task::{
     Action, ActivateLicenseAction, AppBundleIdentity, AppStoreInstallAction, AppStoreOperation,

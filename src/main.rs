@@ -465,6 +465,7 @@ fn run() -> Result<()> {
                             allow_shell,
                             allow_elevation,
                             release_channel: channel.map(Into::into),
+                            protected_path_approvals: Vec::new(),
                         },
                     )?;
                     report::print_setup(&report, output)?;
