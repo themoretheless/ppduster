@@ -112,11 +112,16 @@ The design choices and the stratified review of 100 relevant repositories are do
 
 ppduster does not request or store a GitHub token. If `gh` is not authenticated, the
 picker offers **Sign in with GitHub** and starts `gh auth login --web --clipboard` in the
-background. GitHub CLI opens the browser, copies its one-time device code to the
-clipboard, owns the OAuth exchange and credential storage, and then ppduster reloads the
-repository list automatically. A copyable terminal command remains available as a
-fallback. The picker resolves `gh` only from absolute executable paths, bounds process
-runtime and output, and redacts diagnostics before showing them in the UI.
+background. After GitHub CLI has generated and copied its one-time device code, ppduster
+opens the fixed GitHub device-login page; GitHub CLI still owns the OAuth exchange and
+credential storage. The repository list reloads automatically after login. A copyable
+terminal command and a button to reopen the page remain available as fallbacks. The picker
+also detects a successful login completed by that terminal command, stops its superseded
+device flow, and reloads automatically. An active in-app login can be cancelled; ppduster
+terminates and reaps only the GitHub CLI process tree that it started, without logging out
+or stopping a separately copied Terminal command. It resolves `gh` only from absolute
+executable paths, bounds process runtime and output, and redacts diagnostics before showing
+them in the UI.
 
 ```bash
 cargo run --bin ppduster-ui

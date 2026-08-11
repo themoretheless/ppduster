@@ -28,7 +28,10 @@ use ppduster::automation::{
     WriteConflictPolicy, WriteFileAction,
 };
 use ppduster::automation::{ContextType, FieldSchema};
-use ppduster::github::{list_accessible_repositories, login_via_web, GithubRepository};
+use ppduster::github::{
+    list_accessible_repositories, login_via_web_with_device_flow_ready_and_cancellation,
+    GithubLoginCancellation, GithubLoginOutcome, GithubRepository,
+};
 use regex::RegexBuilder;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -113,6 +116,8 @@ const CANVAS_ZOOM_STEP: f32 = 1.2;
 const CANVAS_FIT_PADDING: f32 = 56.0;
 const GITHUB_LOGIN_COMMAND: &str =
     "gh auth login --hostname github.com --git-protocol https --web --clipboard";
+const GITHUB_DEVICE_LOGIN_URL: &str = "https://github.com/login/device";
+const GITHUB_EXTERNAL_LOGIN_HINT: &str = "Вход через Terminal будет обнаружен автоматически.";
 
 fn safety_badge(allow_shell: bool, allow_elevation: bool, dark: bool) -> (&'static str, Color32) {
     match (allow_shell, allow_elevation) {
@@ -4637,14 +4642,35 @@ fn graph_action_external_auth(action: &Action) -> Option<GraphExternalAuthContra
 struct GraphExternalAuthUiState {
     enabled: bool,
     authorizing: bool,
+    cancellation_requested: bool,
+    device_flow_ready: bool,
     checking: bool,
     status: GithubSessionStatus,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct GraphExternalAuthUiResponse {
+    authorization_requested: bool,
+    cancellation_requested: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct GraphActionEditorResponse {
     changed: bool,
     external_auth_request: Option<GraphExternalAuthContract>,
+    external_auth_cancellation_requested: bool,
+}
+
+fn github_authorization_cancel_button(ui: &mut egui::Ui, cancellation_requested: bool) -> bool {
+    ui.add_enabled(
+        !cancellation_requested,
+        egui::Button::new(if cancellation_requested {
+            "Отменяю вход…"
+        } else {
+            "Отменить вход"
+        }),
+    )
+    .clicked()
 }
 
 fn paint_graph_external_auth(
@@ -4652,10 +4678,10 @@ fn paint_graph_external_auth(
     contract: GraphExternalAuthContract,
     state: &GraphExternalAuthUiState,
     dark: bool,
-) -> bool {
+) -> GraphExternalAuthUiResponse {
     match contract.provider {
         ExternalAuthProvider::GithubCli => {
-            let mut requested = false;
+            let mut response = GraphExternalAuthUiResponse::default();
             Frame::new()
                 .fill(panel(dark))
                 .stroke(Stroke::new(1.0, line(dark)))
@@ -4671,7 +4697,11 @@ fn paint_graph_external_auth(
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let (label, color) = if state.authorizing {
-                                ("Выполняется вход…", PURPLE)
+                                if state.cancellation_requested {
+                                    ("Отменяется вход…", MUTED)
+                                } else {
+                                    ("Выполняется вход…", PURPLE)
+                                }
                             } else if state.checking {
                                 ("Проверяется…", PURPLE)
                             } else {
@@ -4699,8 +4729,14 @@ fn paint_graph_external_auth(
                         ui.horizontal(|ui| {
                             ui.spinner();
                             ui.label(
-                                RichText::new(if state.authorizing {
-                                    "Ожидаю подтверждения входа в браузере…"
+                                RichText::new(if state.cancellation_requested {
+                                    "Отменяю вход в GitHub…"
+                                } else if state.authorizing {
+                                    if state.device_flow_ready {
+                                        "Ожидаю подтверждения входа в браузере…"
+                                    } else {
+                                        "Получаю одноразовый код GitHub…"
+                                    }
                                 } else {
                                     "Проверяю доступ текущей сессии GitHub CLI…"
                                 })
@@ -4708,6 +4744,31 @@ fn paint_graph_external_auth(
                                 .color(MUTED),
                             );
                         });
+                        if state.authorizing
+                            && !state.cancellation_requested
+                            && state.device_flow_ready
+                            && ui
+                                .button("Открыть страницу входа ещё раз")
+                                .clicked()
+                        {
+                            ui.ctx()
+                                .open_url(egui::OpenUrl::new_tab(GITHUB_DEVICE_LOGIN_URL));
+                        }
+                        if state.authorizing && !state.cancellation_requested {
+                            ui.label(
+                                RichText::new(GITHUB_EXTERNAL_LOGIN_HINT)
+                                    .size(8.0)
+                                .color(MUTED),
+                            );
+                        }
+                        if state.authorizing
+                            && github_authorization_cancel_button(
+                                ui,
+                                state.cancellation_requested,
+                            )
+                        {
+                            response.cancellation_requested = true;
+                        }
                     } else {
                         if ui
                             .add_enabled(
@@ -4717,7 +4778,7 @@ fn paint_graph_external_auth(
                             )
                             .clicked()
                         {
-                            requested = true;
+                            response.authorization_requested = true;
                         }
                         if matches!(&state.status, GithubSessionStatus::Succeeded) {
                             ui.label(
@@ -4739,7 +4800,7 @@ fn paint_graph_external_auth(
                         }
                     }
                 });
-            requested
+            response
         }
     }
 }
@@ -4791,6 +4852,7 @@ fn paint_graph_action_editor(
 ) -> GraphActionEditorResponse {
     let mut changed = false;
     let mut external_auth_request = None;
+    let mut external_auth_cancellation_requested = false;
     ui.label(RichText::new("Название блока").size(9.0).color(MUTED));
     changed |= ui
         .add(egui::TextEdit::singleline(&mut node.step.name).desired_width(ui.available_width()))
@@ -5001,9 +5063,11 @@ fn paint_graph_action_editor(
     }
     ui.label(RichText::new("Аутентификация").size(9.0).color(MUTED));
     if let Some(contract) = graph_action_external_auth(&node.step.action) {
-        if paint_graph_external_auth(ui, contract, external_auth_state, dark) {
+        let response = paint_graph_external_auth(ui, contract, external_auth_state, dark);
+        if response.authorization_requested {
             external_auth_request = Some(contract);
         }
+        external_auth_cancellation_requested = response.cancellation_requested;
     } else {
         egui::ComboBox::from_id_salt(("graph-step-auth", &node.step.id))
             .selected_text(auth_policy_label(node.step.auth))
@@ -5113,6 +5177,7 @@ fn paint_graph_action_editor(
     GraphActionEditorResponse {
         changed,
         external_auth_request,
+        external_auth_cancellation_requested,
     }
 }
 
@@ -5125,11 +5190,23 @@ struct GithubPickerState {
     loaded_once: bool,
     loading: bool,
     authorizing: bool,
+    auth_cancellation_requested: bool,
+    device_flow_ready: bool,
     error: Option<String>,
     receiver: Option<Receiver<Result<Vec<GithubRepository>, String>>>,
-    auth_receiver: Option<Receiver<Result<(), String>>>,
+    auth_receiver: Option<Receiver<GithubAuthorizationEvent>>,
+    auth_cancellation: Option<GithubLoginCancellation>,
+    auth_worker: Option<std::thread::JoinHandle<()>>,
+    auth_previous_status: Option<GithubSessionStatus>,
+    auth_previous_error: Option<Option<String>>,
     authorization_intent: GithubAuthorizationIntent,
     auth_status: GithubSessionStatus,
+}
+
+#[derive(Debug)]
+enum GithubAuthorizationEvent {
+    DeviceFlowReady,
+    Finished(Result<GithubLoginOutcome, String>),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -5183,9 +5260,15 @@ impl Default for GithubPickerState {
             loaded_once: false,
             loading: false,
             authorizing: false,
+            auth_cancellation_requested: false,
+            device_flow_ready: false,
             error: None,
             receiver: None,
             auth_receiver: None,
+            auth_cancellation: None,
+            auth_worker: None,
+            auth_previous_status: None,
+            auth_previous_error: None,
             authorization_intent: GithubAuthorizationIntent::RepositoryPicker,
             auth_status: GithubSessionStatus::Unknown,
         }
@@ -5246,6 +5329,17 @@ struct ScenarioApp {
     graph_picker_port: Option<EdgePort>,
     block_picker_search: String,
     readonly_canvas_views: BTreeMap<String, CanvasView>,
+}
+
+impl Drop for ScenarioApp {
+    fn drop(&mut self) {
+        if let Some(cancellation) = self.github_picker.auth_cancellation.take() {
+            cancellation.cancel();
+        }
+        if let Some(worker) = self.github_picker.auth_worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 impl ScenarioApp {
@@ -5340,6 +5434,14 @@ impl ScenarioApp {
     }
 
     fn invalidate_plan(&mut self) {
+        if self.github_picker.authorizing
+            && matches!(
+                self.github_picker.authorization_intent,
+                GithubAuthorizationIntent::RetryScenario
+            )
+        {
+            self.request_github_authorization_cancellation();
+        }
         self.report = None;
         self.report_applied = false;
         self.plan_error = None;
@@ -5446,6 +5548,7 @@ impl ScenarioApp {
     }
 
     fn close_custom_project(&mut self) {
+        self.request_github_authorization_cancellation();
         self.custom_project = None;
         self.project_path = None;
         self.project_dirty = false;
@@ -5500,6 +5603,7 @@ impl ScenarioApp {
         if self.running {
             return;
         }
+        self.request_github_authorization_cancellation();
         self.reset_run_permissions();
         let task = Task {
             id: "custom-scenario".into(),
@@ -6084,16 +6188,78 @@ impl ScenarioApp {
         }
         let (sender, receiver) = mpsc::channel();
         let repaint = ctx.clone();
-        std::thread::spawn(move || {
-            let result = login_via_web().map_err(|error| format!("{error:#}"));
-            let _ = sender.send(result);
+        let cancellation = GithubLoginCancellation::new();
+        let worker_cancellation = cancellation.clone();
+        let worker = std::thread::spawn(move || {
+            let ready_sender = sender.clone();
+            let ready_repaint = repaint.clone();
+            let result = login_via_web_with_device_flow_ready_and_cancellation(
+                move || {
+                    let _ = ready_sender.send(GithubAuthorizationEvent::DeviceFlowReady);
+                    ready_repaint.request_repaint();
+                },
+                worker_cancellation,
+            )
+            .map_err(|error| format!("{error:#}"));
             repaint.request_repaint();
+            let _ = sender.send(GithubAuthorizationEvent::Finished(result));
         });
         self.github_picker.auth_receiver = Some(receiver);
+        self.github_picker.auth_cancellation = Some(cancellation);
+        self.github_picker.auth_worker = Some(worker);
+        self.github_picker.auth_previous_status = Some(self.github_picker.auth_status.clone());
+        self.github_picker.auth_previous_error = Some(self.github_picker.error.clone());
         self.github_picker.authorizing = true;
+        self.github_picker.auth_cancellation_requested = false;
+        self.github_picker.device_flow_ready = false;
         self.github_picker.authorization_intent = intent;
         self.github_picker.error = None;
         self.github_picker.auth_status = GithubSessionStatus::Unknown;
+    }
+
+    fn cancel_github_authorization(&mut self, ctx: &egui::Context) {
+        if self.request_github_authorization_cancellation() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn request_github_authorization_cancellation(&mut self) -> bool {
+        if !self.github_picker.authorizing || self.github_picker.auth_cancellation_requested {
+            return false;
+        }
+        let Some(cancellation) = &self.github_picker.auth_cancellation else {
+            return false;
+        };
+        self.github_picker.auth_cancellation_requested = true;
+        self.github_picker.device_flow_ready = false;
+        cancellation.cancel();
+        true
+    }
+
+    fn finish_github_authorization(
+        &mut self,
+    ) -> (Option<GithubSessionStatus>, Option<Option<String>>) {
+        let previous_status = self.github_picker.auth_previous_status.take();
+        let previous_error = self.github_picker.auth_previous_error.take();
+        self.github_picker.authorizing = false;
+        self.github_picker.auth_cancellation_requested = false;
+        self.github_picker.device_flow_ready = false;
+        self.github_picker.auth_receiver = None;
+        self.github_picker.auth_cancellation = None;
+        if let Some(worker) = self.github_picker.auth_worker.take() {
+            let _ = worker.join();
+        }
+        (previous_status, previous_error)
+    }
+
+    fn finish_cancelled_github_authorization(&mut self) {
+        let (previous_status, previous_error) = self.finish_github_authorization();
+        if let Some(status) = previous_status {
+            self.github_picker.auth_status = status;
+        }
+        if let Some(error) = previous_error {
+            self.github_picker.error = error;
+        }
     }
 
     fn poll_github_authorization(&mut self, ctx: &egui::Context) {
@@ -6101,10 +6267,20 @@ impl ScenarioApp {
             return;
         };
         match receiver.try_recv() {
-            Ok(Ok(())) => {
+            Ok(GithubAuthorizationEvent::DeviceFlowReady) => {
+                if !self.github_picker.auth_cancellation_requested
+                    && !self.github_picker.device_flow_ready
+                {
+                    self.github_picker.device_flow_ready = true;
+                    ctx.open_url(egui::OpenUrl::new_tab(GITHUB_DEVICE_LOGIN_URL));
+                }
+                ctx.request_repaint();
+            }
+            Ok(GithubAuthorizationEvent::Finished(Ok(GithubLoginOutcome::Authenticated)))
+                if !self.github_picker.auth_cancellation_requested =>
+            {
                 let intent = self.github_picker.authorization_intent;
-                self.github_picker.authorizing = false;
-                self.github_picker.auth_receiver = None;
+                let _ = self.finish_github_authorization();
                 self.github_picker.auth_status = GithubSessionStatus::Succeeded;
                 match github_authorization_follow_up(intent) {
                     GithubAuthorizationFollowUp::LoadRepositories => {
@@ -6114,20 +6290,35 @@ impl ScenarioApp {
                     GithubAuthorizationFollowUp::InvalidatePlan => self.invalidate_plan(),
                 }
             }
-            Ok(Err(error)) => {
-                self.github_picker.auth_status = GithubSessionStatus::Failed(error);
-                self.github_picker.authorizing = false;
-                self.github_picker.auth_receiver = None;
+            Ok(GithubAuthorizationEvent::Finished(Ok(
+                GithubLoginOutcome::Authenticated | GithubLoginOutcome::Cancelled,
+            ))) => {
+                // Once cancellation is requested, the user's intent wins over a
+                // late successful completion and no automatic follow-up runs.
+                self.finish_cancelled_github_authorization();
+            }
+            Ok(GithubAuthorizationEvent::Finished(Err(error))) => {
+                let cancellation_requested = self.github_picker.auth_cancellation_requested;
+                if cancellation_requested {
+                    self.finish_cancelled_github_authorization();
+                } else {
+                    let _ = self.finish_github_authorization();
+                    self.github_picker.auth_status = GithubSessionStatus::Failed(error);
+                }
             }
             Err(mpsc::TryRecvError::Empty) => {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                self.github_picker.auth_status = GithubSessionStatus::Failed(
-                    "Фоновая авторизация GitHub неожиданно завершилась".into(),
-                );
-                self.github_picker.authorizing = false;
-                self.github_picker.auth_receiver = None;
+                let cancellation_requested = self.github_picker.auth_cancellation_requested;
+                if cancellation_requested {
+                    self.finish_cancelled_github_authorization();
+                } else {
+                    let _ = self.finish_github_authorization();
+                    self.github_picker.auth_status = GithubSessionStatus::Failed(
+                        "Фоновая авторизация GitHub неожиданно завершилась".into(),
+                    );
+                }
             }
         }
     }
@@ -6369,6 +6560,7 @@ impl ScenarioApp {
     }
 
     fn open_custom_project(&mut self, mut project: ScenarioProject) {
+        self.request_github_authorization_cancellation();
         self.reset_run_permissions();
         make_project_external(&mut project.entries);
         let selected = first_scenario_path(&project.entries, &mut Vec::new());
@@ -7840,9 +8032,12 @@ impl ScenarioApp {
         let mut open_graph_attach = None;
         let mut incoming_edge_changes = Vec::new();
         let mut external_auth_request = None;
+        let mut external_auth_cancellation_requested = false;
         let external_auth_state = GraphExternalAuthUiState {
             enabled: !self.running && self.github_picker.is_idle(),
             authorizing: self.github_picker.authorizing,
+            cancellation_requested: self.github_picker.auth_cancellation_requested,
+            device_flow_ready: self.github_picker.device_flow_ready,
             checking: self.github_picker.loading,
             status: self.github_picker.auth_status.clone(),
         };
@@ -7958,6 +8153,8 @@ impl ScenarioApp {
                             );
                             changed |= response.changed;
                             external_auth_request = response.external_auth_request;
+                            external_auth_cancellation_requested =
+                                response.external_auth_cancellation_requested;
                             ui.add_space(12.0);
                             changed |= paint_composer_conditions(
                                 ui,
@@ -8545,7 +8742,9 @@ impl ScenarioApp {
                 );
             }
         }
-        if let Some(request) = external_auth_request {
+        if external_auth_cancellation_requested {
+            self.cancel_github_authorization(ui.ctx());
+        } else if let Some(request) = external_auth_request {
             self.start_github_authorization(ui.ctx(), request.intent);
         }
         if changed {
@@ -8676,6 +8875,7 @@ impl ScenarioApp {
             }
         }
         let mut request_github_authorization = false;
+        let mut cancel_github_authorization = false;
         if let Some(error) = &self.plan_error {
             ui.add_space(8.0);
             error_box(ui, error, self.dark);
@@ -8708,11 +8908,35 @@ impl ScenarioApp {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label(
-                            RichText::new("Ожидаю подтверждения входа в браузере…")
+                            RichText::new(if self.github_picker.auth_cancellation_requested {
+                                "Отменяю вход в GitHub…"
+                            } else if self.github_picker.device_flow_ready {
+                                "Ожидаю подтверждения входа в браузере…"
+                            } else {
+                                "Получаю одноразовый код GitHub…"
+                            })
+                            .size(8.0)
+                            .color(MUTED),
+                        );
+                    });
+                    if !self.github_picker.auth_cancellation_requested
+                        && self.github_picker.device_flow_ready
+                        && ui.button("Открыть страницу входа ещё раз").clicked()
+                    {
+                        ui.ctx()
+                            .open_url(egui::OpenUrl::new_tab(GITHUB_DEVICE_LOGIN_URL));
+                    }
+                    if !self.github_picker.auth_cancellation_requested {
+                        ui.label(
+                            RichText::new(GITHUB_EXTERNAL_LOGIN_HINT)
                                 .size(8.0)
                                 .color(MUTED),
                         );
-                    });
+                    }
+                    cancel_github_authorization |= github_authorization_cancel_button(
+                        ui,
+                        self.github_picker.auth_cancellation_requested,
+                    );
                 } else if matches!(
                     self.github_picker.authorization_intent,
                     GithubAuthorizationIntent::RetryScenario
@@ -8723,7 +8947,9 @@ impl ScenarioApp {
                 }
             }
         }
-        if request_github_authorization {
+        if cancel_github_authorization {
+            self.cancel_github_authorization(ui.ctx());
+        } else if request_github_authorization {
             self.start_github_authorization(ui.ctx(), GithubAuthorizationIntent::RetryScenario);
         }
     }
@@ -9384,6 +9610,7 @@ impl ScenarioApp {
         let mut configuration_changed = false;
         let mut request_refresh = false;
         let mut request_authorization = false;
+        let mut cancel_authorization = false;
         let mut close = false;
 
         egui::Modal::new(Id::new("github-repository-picker"))
@@ -9506,15 +9733,40 @@ impl ScenarioApp {
                         ui.add_space(30.0);
                         ui.spinner();
                         ui.label(
-                            RichText::new("Ожидаю завершения входа в браузере…")
-                                .color(MUTED),
-                        );
-                        ui.label(
-                            RichText::new(
-                                "Одноразовый код скопирован в буфер обмена. После входа список обновится автоматически.",
-                            )
-                            .size(9.0)
+                            RichText::new(if self.github_picker.auth_cancellation_requested {
+                                "Отменяю вход в GitHub…"
+                            } else if self.github_picker.device_flow_ready {
+                                "Ожидаю завершения входа в браузере…"
+                            } else {
+                                "Получаю одноразовый код GitHub…"
+                            })
                             .color(MUTED),
+                        );
+                        if !self.github_picker.auth_cancellation_requested
+                            && self.github_picker.device_flow_ready
+                        {
+                            ui.label(
+                                RichText::new(
+                                    "Одноразовый код скопирован в буфер обмена. После входа список обновится автоматически.",
+                                )
+                                .size(9.0)
+                                .color(MUTED),
+                            );
+                            if ui.button("Открыть страницу входа ещё раз").clicked() {
+                                ui.ctx()
+                                    .open_url(egui::OpenUrl::new_tab(GITHUB_DEVICE_LOGIN_URL));
+                            }
+                        }
+                        if !self.github_picker.auth_cancellation_requested {
+                            ui.label(
+                                RichText::new(GITHUB_EXTERNAL_LOGIN_HINT)
+                                    .size(9.0)
+                                    .color(MUTED),
+                            );
+                        }
+                        cancel_authorization |= github_authorization_cancel_button(
+                            ui,
+                            self.github_picker.auth_cancellation_requested,
                         );
                         ui.add_space(30.0);
                     });
@@ -9667,7 +9919,8 @@ impl ScenarioApp {
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .add(
+                            .add_enabled(
+                                !self.github_picker.authorizing,
                                 egui::Button::new(
                                     RichText::new("Готово").strong().color(Color32::WHITE),
                                 )
@@ -9694,7 +9947,9 @@ impl ScenarioApp {
         if request_refresh {
             self.start_github_repository_load(ctx);
         }
-        if request_authorization {
+        if cancel_authorization {
+            self.cancel_github_authorization(ctx);
+        } else if request_authorization {
             self.start_github_authorization(ctx, GithubAuthorizationIntent::RepositoryPicker);
         }
         if configuration_changed {
@@ -14379,7 +14634,13 @@ mod tests {
             ComposerCanvas::default(),
         ));
         app.project_dirty = true;
+        let cancellation = GithubLoginCancellation::new();
+        let cancellation_observer = cancellation.clone();
+        app.github_picker.authorizing = true;
+        app.github_picker.auth_cancellation = Some(cancellation);
         assert!(!app.request_project_action(PendingProjectAction::Close));
+        assert!(!cancellation_observer.is_cancelled());
+        assert!(!app.github_picker.auth_cancellation_requested);
         assert!(app.custom_project.is_some());
         assert_eq!(
             app.pending_project_action,
@@ -14387,9 +14648,50 @@ mod tests {
         );
 
         assert!(!app.perform_project_action(PendingProjectAction::Close));
+        assert!(cancellation_observer.is_cancelled());
+        assert!(app.github_picker.auth_cancellation_requested);
         assert!(app.custom_project.is_none());
         assert!(!app.project_dirty);
         assert!(app.project_path.is_none());
+    }
+
+    #[test]
+    fn starting_a_new_project_cancels_active_github_authorization() {
+        let mut app = library_app_for_test(vec![gui_supported_task_for_test()]);
+        let cancellation = GithubLoginCancellation::new();
+        let cancellation_observer = cancellation.clone();
+        app.github_picker.authorizing = true;
+        app.github_picker.device_flow_ready = true;
+        app.github_picker.auth_cancellation = Some(cancellation);
+
+        app.start_custom_project();
+
+        assert!(cancellation_observer.is_cancelled());
+        assert!(app.github_picker.auth_cancellation_requested);
+        assert!(!app.github_picker.device_flow_ready);
+        assert!(app.custom_project.is_some());
+    }
+
+    #[test]
+    fn dropping_app_cancels_and_joins_github_authorization_worker() {
+        let mut app = library_app_for_test(vec![gui_supported_task_for_test()]);
+        let cancellation = GithubLoginCancellation::new();
+        let worker_cancellation = cancellation.clone();
+        let worker_finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_finished_clone = std::sync::Arc::clone(&worker_finished);
+        let worker = std::thread::spawn(move || {
+            while !worker_cancellation.is_cancelled() {
+                std::thread::yield_now();
+            }
+            worker_finished_clone.store(true, std::sync::atomic::Ordering::Release);
+        });
+        app.github_picker.authorizing = true;
+        app.github_picker.auth_cancellation = Some(cancellation);
+        app.github_picker.auth_worker = Some(worker);
+
+        drop(app);
+
+        assert!(worker_finished.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[test]
@@ -19414,21 +19716,13 @@ task:
         fn render_editor(
             ctx: &egui::Context,
             node: &mut ActionNode,
+            auth_state: &GraphExternalAuthUiState,
             events: Vec<egui::Event>,
         ) -> (egui::FullOutput, GraphActionEditorResponse) {
             let mut response = GraphActionEditorResponse::default();
             let output = ctx.run_ui(input(events), |ui| {
                 ui.set_width(360.0);
-                response = paint_graph_action_editor(
-                    ui,
-                    node,
-                    &BTreeMap::new(),
-                    &GraphExternalAuthUiState {
-                        enabled: true,
-                        ..Default::default()
-                    },
-                    true,
-                );
+                response = paint_graph_action_editor(ui, node, &BTreeMap::new(), auth_state, true);
             });
             (output, response)
         }
@@ -19456,7 +19750,12 @@ task:
 
         let ctx = egui::Context::default();
         configure_styles(&ctx, egui::ThemePreference::Dark);
-        let (mut initial, response) = render_editor(&ctx, &mut action, Vec::new());
+        let idle_auth_state = GraphExternalAuthUiState {
+            enabled: true,
+            ..Default::default()
+        };
+        let (mut initial, response) =
+            render_editor(&ctx, &mut action, &idle_auth_state, Vec::new());
         assert_eq!(response.external_auth_request, None);
         let button_center = initial
             .shapes
@@ -19474,6 +19773,7 @@ task:
         let (mut pressed, response) = render_editor(
             &ctx,
             &mut action,
+            &idle_auth_state,
             vec![egui::Event::PointerMoved(button_center), pointer(true)],
         );
         assert_eq!(response.external_auth_request, None);
@@ -19481,6 +19781,7 @@ task:
         let (mut released, response) = render_editor(
             &ctx,
             &mut action,
+            &idle_auth_state,
             vec![egui::Event::PointerMoved(button_center), pointer(false)],
         );
         released.textures_delta.clear();
@@ -19489,6 +19790,51 @@ task:
             !response.changed,
             "authentication must not mutate the graph"
         );
+
+        let authorizing_state = GraphExternalAuthUiState {
+            authorizing: true,
+            device_flow_ready: true,
+            ..Default::default()
+        };
+        let (mut authorizing, response) =
+            render_editor(&ctx, &mut action, &authorizing_state, Vec::new());
+        assert!(!response.external_auth_cancellation_requested);
+        let cancel_center = authorizing
+            .shapes
+            .iter()
+            .find_map(|clipped| button_text_center(&clipped.shape, "Отменить вход"))
+            .expect("an active GitHub login must render a cancellation button");
+        authorizing.textures_delta.clear();
+        let cancel_pointer = |pressed| egui::Event::PointerButton {
+            pos: cancel_center,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let (mut pressed, response) = render_editor(
+            &ctx,
+            &mut action,
+            &authorizing_state,
+            vec![
+                egui::Event::PointerMoved(cancel_center),
+                cancel_pointer(true),
+            ],
+        );
+        assert!(!response.external_auth_cancellation_requested);
+        pressed.textures_delta.clear();
+        let (mut released, response) = render_editor(
+            &ctx,
+            &mut action,
+            &authorizing_state,
+            vec![
+                egui::Event::PointerMoved(cancel_center),
+                cancel_pointer(false),
+            ],
+        );
+        released.textures_delta.clear();
+        assert!(response.external_auth_cancellation_requested);
+        assert_eq!(response.external_auth_request, None);
+        assert!(!response.changed, "cancellation must not mutate the graph");
     }
 
     #[test]
@@ -19523,7 +19869,11 @@ task:
         app.github_picker.authorizing = true;
         app.github_picker.authorization_intent = GithubAuthorizationIntent::AuthenticateOnly;
         let (sender, receiver) = mpsc::channel();
-        sender.send(Ok(())).unwrap();
+        sender
+            .send(GithubAuthorizationEvent::Finished(Ok(
+                GithubLoginOutcome::Authenticated,
+            )))
+            .unwrap();
         app.github_picker.auth_receiver = Some(receiver);
 
         app.poll_github_authorization(&egui::Context::default());
@@ -19538,6 +19888,213 @@ task:
         assert!(!app.report_applied);
         assert!(app.plan_error.is_none());
         assert!(!app.confirm_run);
+        assert!(!app.running);
+        assert!(app.run_receiver.is_none());
+    }
+
+    #[test]
+    fn github_device_flow_ready_opens_fixed_url_once_and_keeps_authorizing() {
+        let task = github_repository_composer_task(1);
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            task,
+            ComposerCanvas::default(),
+        ));
+        app.github_picker.authorizing = true;
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(GithubAuthorizationEvent::DeviceFlowReady)
+            .unwrap();
+        sender
+            .send(GithubAuthorizationEvent::DeviceFlowReady)
+            .unwrap();
+        app.github_picker.auth_receiver = Some(receiver);
+
+        let ctx = egui::Context::default();
+        let mut first = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.poll_github_authorization(ui.ctx());
+        });
+
+        assert!(app.github_picker.authorizing);
+        assert!(app.github_picker.device_flow_ready);
+        assert!(app.github_picker.auth_receiver.is_some());
+        assert_eq!(
+            first.platform_output.commands,
+            vec![egui::OutputCommand::OpenUrl(egui::OpenUrl::new_tab(
+                GITHUB_DEVICE_LOGIN_URL,
+            ))]
+        );
+        first.textures_delta.clear();
+
+        let mut duplicate = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.poll_github_authorization(ui.ctx());
+        });
+        assert!(duplicate.platform_output.commands.is_empty());
+        duplicate.textures_delta.clear();
+        assert!(app.github_picker.authorizing);
+        assert!(app.github_picker.device_flow_ready);
+    }
+
+    #[test]
+    fn github_cancellation_stays_pending_ignores_ready_and_restores_previous_state() {
+        let task = github_repository_composer_task(1);
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            task,
+            ComposerCanvas::default(),
+        ));
+        let previous_status = GithubSessionStatus::Failed("previous auth failure".into());
+        let previous_error = Some("previous picker failure".to_owned());
+        let cancellation = GithubLoginCancellation::new();
+        let cancellation_observer = cancellation.clone();
+        let (sender, receiver) = mpsc::channel();
+        app.github_picker.authorizing = true;
+        app.github_picker.device_flow_ready = true;
+        app.github_picker.auth_status = GithubSessionStatus::Unknown;
+        app.github_picker.error = None;
+        app.github_picker.auth_previous_status = Some(previous_status.clone());
+        app.github_picker.auth_previous_error = Some(previous_error.clone());
+        app.github_picker.auth_cancellation = Some(cancellation);
+        app.github_picker.auth_receiver = Some(receiver);
+
+        let ctx = egui::Context::default();
+        app.cancel_github_authorization(&ctx);
+        app.cancel_github_authorization(&ctx);
+
+        assert!(cancellation_observer.is_cancelled());
+        assert!(app.github_picker.authorizing);
+        assert!(app.github_picker.auth_cancellation_requested);
+        assert!(!app.github_picker.device_flow_ready);
+        assert!(app.github_picker.auth_receiver.is_some());
+
+        sender
+            .send(GithubAuthorizationEvent::DeviceFlowReady)
+            .unwrap();
+        let mut ignored_ready = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.poll_github_authorization(ui.ctx());
+        });
+        assert!(ignored_ready.platform_output.commands.is_empty());
+        ignored_ready.textures_delta.clear();
+        assert!(app.github_picker.authorizing);
+        assert!(app.github_picker.auth_cancellation_requested);
+        assert!(!app.github_picker.device_flow_ready);
+
+        sender
+            .send(GithubAuthorizationEvent::Finished(Ok(
+                GithubLoginOutcome::Cancelled,
+            )))
+            .unwrap();
+        app.poll_github_authorization(&ctx);
+
+        assert!(app.github_picker.is_idle());
+        assert!(!app.github_picker.auth_cancellation_requested);
+        assert!(app.github_picker.auth_receiver.is_none());
+        assert!(app.github_picker.auth_cancellation.is_none());
+        assert_eq!(app.github_picker.auth_status, previous_status);
+        assert_eq!(app.github_picker.error, previous_error);
+    }
+
+    #[test]
+    fn github_terminal_event_joins_authorization_worker() {
+        let task = github_repository_composer_task(1);
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            task,
+            ComposerCanvas::default(),
+        ));
+        let worker_finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_finished_clone = std::sync::Arc::clone(&worker_finished);
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            worker_finished_clone.store(true, std::sync::atomic::Ordering::Release);
+        });
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(GithubAuthorizationEvent::Finished(Ok(
+                GithubLoginOutcome::Cancelled,
+            )))
+            .unwrap();
+        app.github_picker.authorizing = true;
+        app.github_picker.auth_worker = Some(worker);
+        app.github_picker.auth_receiver = Some(receiver);
+
+        app.poll_github_authorization(&egui::Context::default());
+
+        assert!(worker_finished.load(std::sync::atomic::Ordering::Acquire));
+        assert!(app.github_picker.auth_worker.is_none());
+        assert!(app.github_picker.is_idle());
+    }
+
+    #[test]
+    fn late_github_success_after_cancellation_has_no_follow_up() {
+        let task = github_repository_composer_task(1);
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            task,
+            ComposerCanvas::default(),
+        ));
+        let stale_report = run_report_with_errors(vec![
+            "GitHub CLI is not authenticated; run gh auth login".into(),
+        ]);
+        app.report = Some(stale_report.clone());
+        app.report_applied = true;
+        app.plan_error = Some("stale plan".into());
+        app.confirm_run = true;
+        app.github_picker.authorizing = true;
+        app.github_picker.auth_cancellation_requested = true;
+        app.github_picker.authorization_intent = GithubAuthorizationIntent::AuthenticateOnly;
+        app.github_picker.auth_previous_status = Some(GithubSessionStatus::Unknown);
+        app.github_picker.auth_previous_error = Some(None);
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(GithubAuthorizationEvent::Finished(Ok(
+                GithubLoginOutcome::Authenticated,
+            )))
+            .unwrap();
+        app.github_picker.auth_receiver = Some(receiver);
+
+        app.poll_github_authorization(&egui::Context::default());
+
+        assert!(app.github_picker.is_idle());
+        assert_eq!(app.github_picker.auth_status, GithubSessionStatus::Unknown);
+        assert_eq!(
+            app.report.as_ref().map(|report| &report.errors),
+            Some(&stale_report.errors)
+        );
+        assert!(app.report_applied);
+        assert_eq!(app.plan_error.as_deref(), Some("stale plan"));
+        assert!(app.confirm_run);
+        assert!(!app.running);
+        assert!(app.run_receiver.is_none());
+    }
+
+    #[test]
+    fn changing_selection_cancels_retry_authorization_and_late_success_cannot_run() {
+        let first = gui_supported_task_for_test();
+        let mut second = first.clone();
+        second.id = "second-task".into();
+        second.name = "Second task".into();
+        let mut app = library_app_for_test(vec![first, second]);
+        let cancellation = GithubLoginCancellation::new();
+        let cancellation_observer = cancellation.clone();
+        let (sender, receiver) = mpsc::channel();
+        app.github_picker.authorizing = true;
+        app.github_picker.authorization_intent = GithubAuthorizationIntent::RetryScenario;
+        app.github_picker.auth_cancellation = Some(cancellation);
+        app.github_picker.auth_receiver = Some(receiver);
+        app.github_picker.auth_previous_status = Some(GithubSessionStatus::Unknown);
+        app.github_picker.auth_previous_error = Some(None);
+
+        assert!(app.select_library_task(1));
+        assert!(cancellation_observer.is_cancelled());
+        assert!(app.github_picker.auth_cancellation_requested);
+        assert_eq!(app.selected_task, 1);
+
+        sender
+            .send(GithubAuthorizationEvent::Finished(Ok(
+                GithubLoginOutcome::Authenticated,
+            )))
+            .unwrap();
+        app.poll_github_authorization(&egui::Context::default());
+
+        assert!(app.github_picker.is_idle());
+        assert_eq!(app.selected_task, 1);
         assert!(!app.running);
         assert!(app.run_receiver.is_none());
     }
