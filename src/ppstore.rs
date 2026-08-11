@@ -1036,7 +1036,8 @@ mod tests {
             42,
             InstallOperation::Get,
             Some("RU"),
-            Duration::from_secs(2),
+            // This case verifies the process contract, not timeout behavior.
+            Duration::from_secs(10),
         )
         .unwrap();
         assert_eq!(outcome, InstallOutcome::Applied("status queued".into()));
@@ -1075,7 +1076,8 @@ mod tests {
             42,
             InstallOperation::Install,
             None,
-            Duration::from_secs(2),
+            // This case verifies error sanitization, not timeout behavior.
+            Duration::from_secs(10),
         )
         .unwrap_err()
         .to_string();

@@ -5725,13 +5725,7 @@ impl ScenarioApp {
             else {
                 return;
             };
-            let result = serde_yaml::to_string(&ScenarioProjectFile { project })
-                .map_err(anyhow::Error::from)
-                .and_then(|yaml| {
-                    fs::write(&path, yaml)
-                        .map_err(anyhow::Error::from)
-                        .with_context(|| format!("не удалось сохранить {}", path.display()))
-                });
+            let result = write_project_file(&path, &project);
             self.file_message = Some(match result {
                 Ok(()) => (false, format!("Проект сохранён: {}", path.display())),
                 Err(error) => (true, format!("{error:#}")),
@@ -5776,22 +5770,18 @@ impl ScenarioApp {
         else {
             return;
         };
-        let loaded = fs::read_to_string(&path)
-            .with_context(|| format!("не удалось прочитать {}", path.display()))
-            .and_then(|yaml| load_project_yaml(&yaml))
-            .and_then(|project| {
-                // Canvas scope errors remain editable after load; full
-                // validation still blocks plan, run, and save until fixed.
-                validate_project_for_editing(&project).map_err(anyhow::Error::msg)?;
-                Ok(project)
-            });
-        let mut project = match loaded {
+        let project = match read_project_file(&path) {
             Ok(project) => project,
             Err(error) => {
                 self.file_message = Some((true, format!("{error:#}")));
                 return;
             }
         };
+        self.open_custom_project(project);
+        self.file_message = Some((false, format!("Проект загружен: {}", path.display())));
+    }
+
+    fn open_custom_project(&mut self, mut project: ScenarioProject) {
         make_project_external(&mut project.entries);
         let selected = first_scenario_path(&project.entries, &mut Vec::new());
         self.custom_project = Some(project);
@@ -5813,7 +5803,7 @@ impl ScenarioApp {
             .is_some_and(|task| task.graph.is_none() && !task.steps.is_empty())
             .then_some(0);
         self.load_error = None;
-        self.file_message = Some((false, format!("Проект загружен: {}", path.display())));
+        self.invalidate_plan();
     }
 
     fn block_picker(&mut self, ctx: &egui::Context) {
@@ -12419,6 +12409,23 @@ fn error_box(ui: &mut egui::Ui, error: &str, dark: bool) {
         });
 }
 
+fn write_project_file(path: &Path, project: &ScenarioProject) -> anyhow::Result<()> {
+    let yaml = serde_yaml::to_string(&ScenarioProjectFile {
+        project: project.clone(),
+    })?;
+    fs::write(path, yaml).with_context(|| format!("не удалось сохранить {}", path.display()))
+}
+
+fn read_project_file(path: &Path) -> anyhow::Result<ScenarioProject> {
+    let yaml = fs::read_to_string(path)
+        .with_context(|| format!("не удалось прочитать {}", path.display()))?;
+    let project = load_project_yaml(&yaml)?;
+    // Draft graph errors remain editable after load; full validation still
+    // blocks plan, run, and save until the user repairs them.
+    validate_project_for_editing(&project).map_err(anyhow::Error::msg)?;
+    Ok(project)
+}
+
 fn load_tasks() -> anyhow::Result<TaskPack> {
     load_tasks_with_files(&[])
 }
@@ -12651,6 +12658,385 @@ mod tests {
             block_picker_search: String::new(),
             readonly_canvas_views: BTreeMap::new(),
         }
+    }
+
+    fn selected_graph_mut_for_test(app: &mut ScenarioApp) -> &mut WorkflowGraph {
+        let selected = app
+            .selected_project_scenario
+            .clone()
+            .expect("test app must have a selected scenario");
+        app.custom_project
+            .as_mut()
+            .and_then(|project| project.scenario_mut(&selected))
+            .and_then(|task| task.graph.as_mut())
+            .expect("selected test scenario must be graph-native")
+    }
+
+    fn selected_action_mut_for_test<'a>(
+        app: &'a mut ScenarioApp,
+        node_id: &str,
+    ) -> &'a mut ActionNode {
+        let GraphNode::Action(node) = graph_node_mut(selected_graph_mut_for_test(app), node_id)
+            .unwrap_or_else(|| panic!("test graph has no node {node_id}"))
+        else {
+            panic!("test node {node_id} is not an action")
+        };
+        node.as_mut()
+    }
+
+    fn reported_step_for_test<'a>(report: &'a RunReport, step_id: &str) -> &'a StepReport {
+        report
+            .steps
+            .iter()
+            .find(|step| step.step_id == step_id)
+            .unwrap_or_else(|| panic!("run report has no step {step_id}"))
+    }
+
+    #[test]
+    fn typical_custom_project_round_trips_plans_and_applies_end_to_end() {
+        let temp = tempfile::tempdir().unwrap();
+        let existing_path = temp.path().to_string_lossy().into_owned();
+        let created = temp.path().join("created-by-editor-e2e");
+        let created_path = created.to_string_lossy().into_owned();
+        let project_path = temp.path().join("typical-project.ppduster.yaml");
+        let mut app = composer_app_for_test(ScenarioProject {
+            id: "placeholder".into(),
+            name: "Placeholder".into(),
+            description: String::new(),
+            canvases: BTreeMap::new(),
+            entries: Vec::new(),
+        });
+
+        app.start_custom_project();
+        assert_eq!(app.selected_project_scenario, Some(vec![0, 0]));
+
+        app.open_graph_block_picker(ComposerGraphAttach::RootStart);
+        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        let source_id = app.selected_node.clone().unwrap();
+        selected_action_mut_for_test(&mut app, &source_id)
+            .bindings
+            .insert("path".into(), Binding::literal(existing_path.clone()));
+
+        app.open_graph_block_picker(ComposerGraphAttach::RootAfter {
+            node_id: source_id.clone(),
+        });
+        assert_eq!(app.graph_picker_port, Some(EdgePort::Success));
+        app.add_graph_composer_block(ComposerGraphBlockKind::If);
+        let if_id = app.selected_node.clone().unwrap();
+        let GraphNode::If(if_node) =
+            graph_node_mut(selected_graph_mut_for_test(&mut app), &if_id).unwrap()
+        else {
+            panic!("expected an if node")
+        };
+        if_node.condition = ExpressionV1::Ref {
+            reference: ReferenceV1::Context {
+                field: FieldRef::step(&source_id).field("exists"),
+            },
+        };
+
+        app.open_graph_block_picker(ComposerGraphAttach::NestedStart {
+            scope: ComposerGraphNestedScope::IfThen {
+                owner_id: if_id.clone(),
+            },
+        });
+        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        let then_id = app.selected_node.clone().unwrap();
+        selected_action_mut_for_test(&mut app, &then_id)
+            .bindings
+            .insert(
+                "path".into(),
+                Binding::field(FieldRef::step(&source_id).field("path")),
+            );
+
+        app.open_graph_block_picker(ComposerGraphAttach::NestedStart {
+            scope: ComposerGraphNestedScope::IfElse {
+                owner_id: if_id.clone(),
+            },
+        });
+        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        let else_id = app.selected_node.clone().unwrap();
+        selected_action_mut_for_test(&mut app, &else_id)
+            .bindings
+            .insert("path".into(), Binding::literal(existing_path.clone()));
+
+        app.open_graph_block_picker(ComposerGraphAttach::RootAfter {
+            node_id: if_id.clone(),
+        });
+        assert_eq!(app.graph_picker_port, Some(EdgePort::Completed));
+        app.add_graph_composer_block(ComposerGraphBlockKind::ForEach);
+        let loop_id = app.selected_node.clone().unwrap();
+        let GraphNode::ForEach(loop_node) =
+            graph_node_mut(selected_graph_mut_for_test(&mut app), &loop_id).unwrap()
+        else {
+            panic!("expected a for-each node")
+        };
+        loop_node.collection = Binding::literal(serde_json::json!([false, true]));
+        assert!(matches!(
+            app.graph_picker_attach,
+            Some(ComposerGraphAttach::NestedStart {
+                scope: ComposerGraphNestedScope::ForEachBody { .. }
+            })
+        ));
+        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        let loop_action_id = app.selected_node.clone().unwrap();
+        let loop_action = selected_action_mut_for_test(&mut app, &loop_action_id);
+        loop_action
+            .bindings
+            .insert("path".into(), Binding::literal(existing_path.clone()));
+        loop_action.bindings.insert(
+            "recursive_size".into(),
+            Binding::field(FieldRef::loop_item(&loop_id)),
+        );
+
+        app.open_graph_block_picker(ComposerGraphAttach::RootAfter {
+            node_id: loop_id.clone(),
+        });
+        app.add_graph_composer_block(ComposerGraphBlockKind::Switch);
+        let switch_id = app.selected_node.clone().unwrap();
+        let GraphNode::Switch(switch_node) =
+            graph_node_mut(selected_graph_mut_for_test(&mut app), &switch_id).unwrap()
+        else {
+            panic!("expected a switch node")
+        };
+        switch_node.selector = Binding::field(FieldRef::step(&source_id).field("kind"));
+        switch_node.cases[0].values = vec![serde_json::json!("directory")];
+
+        app.open_graph_block_picker(ComposerGraphAttach::NestedStart {
+            scope: ComposerGraphNestedScope::SwitchCase {
+                owner_id: switch_id.clone(),
+                case_id: "case-1".into(),
+            },
+        });
+        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        let case_id = app.selected_node.clone().unwrap();
+        selected_action_mut_for_test(&mut app, &case_id)
+            .bindings
+            .insert("path".into(), Binding::literal(existing_path.clone()));
+
+        app.open_graph_block_picker(ComposerGraphAttach::NestedStart {
+            scope: ComposerGraphNestedScope::SwitchDefault {
+                owner_id: switch_id.clone(),
+            },
+        });
+        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        let default_id = app.selected_node.clone().unwrap();
+        selected_action_mut_for_test(&mut app, &default_id)
+            .bindings
+            .insert("path".into(), Binding::literal(existing_path.clone()));
+
+        app.open_graph_block_picker(ComposerGraphAttach::RootAfter {
+            node_id: switch_id.clone(),
+        });
+        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        let branch_a_id = app.selected_node.clone().unwrap();
+        selected_action_mut_for_test(&mut app, &branch_a_id)
+            .bindings
+            .insert("path".into(), Binding::literal(existing_path.clone()));
+
+        app.open_graph_block_picker(ComposerGraphAttach::RootAfter {
+            node_id: switch_id.clone(),
+        });
+        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        let branch_b_id = app.selected_node.clone().unwrap();
+        selected_action_mut_for_test(&mut app, &branch_b_id)
+            .bindings
+            .insert("path".into(), Binding::literal(existing_path.clone()));
+
+        app.open_graph_block_picker(ComposerGraphAttach::RootAfter {
+            node_id: branch_a_id.clone(),
+        });
+        app.add_graph_composer_block(ComposerGraphBlockKind::Join);
+        let join_id = app.selected_node.clone().unwrap();
+        graph_set_incoming_edge(
+            selected_graph_mut_for_test(&mut app),
+            &join_id,
+            &branch_b_id,
+            Some(EdgePort::Success),
+        )
+        .unwrap();
+
+        app.open_graph_block_picker(ComposerGraphAttach::RootAfter {
+            node_id: join_id.clone(),
+        });
+        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::CreateDirectory));
+        let create_id = app.selected_node.clone().unwrap();
+        selected_action_mut_for_test(&mut app, &create_id)
+            .bindings
+            .insert("path".into(), Binding::literal(created_path));
+        app.invalidate_plan();
+
+        let expected_view = CanvasView {
+            pan: CanvasPoint { x: 36.0, y: -24.0 },
+            zoom: 1.4,
+        };
+        app.custom_project
+            .as_mut()
+            .unwrap()
+            .canvases
+            .get_mut("custom-scenario")
+            .unwrap()
+            .view = expected_view;
+
+        let project = app.custom_project.as_ref().unwrap();
+        validate_project(project).unwrap();
+        let project_before = serde_yaml::to_string(&ScenarioProjectFile {
+            project: project.clone(),
+        })
+        .unwrap();
+        write_project_file(&project_path, project).unwrap();
+
+        let loaded = read_project_file(&project_path).unwrap();
+        app.open_custom_project(loaded);
+        assert_eq!(app.selected_project_scenario, Some(vec![0, 0]));
+        let loaded_project = app.custom_project.as_ref().unwrap();
+        assert_eq!(
+            serde_yaml::to_string(&ScenarioProjectFile {
+                project: loaded_project.clone(),
+            })
+            .unwrap(),
+            project_before
+        );
+        assert_eq!(
+            loaded_project.canvases["custom-scenario"].view,
+            expected_view
+        );
+
+        app.build_plan();
+        assert_eq!(app.plan_error.as_deref(), None);
+        assert!(!app.report_applied);
+        assert!(!created.exists());
+        let planned = app.report.as_ref().expect("plan report");
+        assert!(planned.errors.is_empty(), "{:?}", planned.errors);
+        let then_runtime_id = format!("{if_id}[then]/{then_id}");
+        let else_runtime_id = format!("{if_id}[else]/{else_id}");
+        let loop_plan_id = format!("{loop_id}[*]/{loop_action_id}");
+        let case_runtime_id = format!("{switch_id}[case:case-1]/{case_id}");
+        let default_runtime_id = format!("{switch_id}[default]/{default_id}");
+        for step_id in [
+            source_id.as_str(),
+            then_runtime_id.as_str(),
+            else_runtime_id.as_str(),
+            if_id.as_str(),
+            loop_plan_id.as_str(),
+            loop_id.as_str(),
+            case_runtime_id.as_str(),
+            default_runtime_id.as_str(),
+            switch_id.as_str(),
+            branch_a_id.as_str(),
+            branch_b_id.as_str(),
+            join_id.as_str(),
+            create_id.as_str(),
+        ] {
+            reported_step_for_test(planned, step_id);
+        }
+        for step_id in [
+            if_id.as_str(),
+            loop_plan_id.as_str(),
+            loop_id.as_str(),
+            switch_id.as_str(),
+            join_id.as_str(),
+            create_id.as_str(),
+        ] {
+            assert!(matches!(
+                reported_step_for_test(planned, step_id).status,
+                StepStatus::Pending
+            ));
+        }
+        let planned_action_ids = planned
+            .plans
+            .iter()
+            .map(|plan| plan.step_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            planned_action_ids,
+            BTreeSet::from([loop_plan_id.as_str(), create_id.as_str()])
+        );
+
+        let context = egui::Context::default();
+        app.confirm_run = true;
+        app.start_run(&context);
+        assert!(app.running);
+        assert!(!app.confirm_run);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while app.running && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+            app.poll_run(&context);
+        }
+        app.poll_run(&context);
+
+        assert!(!app.running, "run timed out: {:?}", app.plan_error);
+        assert_eq!(app.plan_error.as_deref(), None);
+        assert!(app.report_applied);
+        assert!(created.is_dir());
+        let report = app.report.as_ref().expect("applied report");
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        for step_id in [
+            source_id.as_str(),
+            then_runtime_id.as_str(),
+            if_id.as_str(),
+            loop_id.as_str(),
+            case_runtime_id.as_str(),
+            switch_id.as_str(),
+            branch_a_id.as_str(),
+            branch_b_id.as_str(),
+            join_id.as_str(),
+        ] {
+            assert!(matches!(
+                reported_step_for_test(report, step_id).status,
+                StepStatus::Satisfied
+            ));
+        }
+        assert!(report
+            .steps
+            .iter()
+            .all(|step| step.step_id != else_runtime_id));
+        assert!(report
+            .steps
+            .iter()
+            .all(|step| step.step_id != default_runtime_id));
+        let first_loop_id = format!("{loop_id}[1]/{loop_action_id}");
+        let second_loop_id = format!("{loop_id}[2]/{loop_action_id}");
+        let Some(StepOutput::PathMetadata(source)) =
+            reported_step_for_test(report, &source_id).output.as_ref()
+        else {
+            panic!("source inspection must publish path metadata")
+        };
+        let Some(StepOutput::PathMetadata(then_output)) =
+            reported_step_for_test(report, &then_runtime_id)
+                .output
+                .as_ref()
+        else {
+            panic!("bound then inspection must publish path metadata")
+        };
+        assert_eq!(source.path, temp.path());
+        assert_eq!(then_output.path, temp.path());
+        let Some(StepOutput::PathMetadata(first_loop)) =
+            reported_step_for_test(report, &first_loop_id)
+                .output
+                .as_ref()
+        else {
+            panic!("first loop inspection must publish path metadata")
+        };
+        let Some(StepOutput::PathMetadata(second_loop)) =
+            reported_step_for_test(report, &second_loop_id)
+                .output
+                .as_ref()
+        else {
+            panic!("second loop inspection must publish path metadata")
+        };
+        assert_eq!(first_loop.path, temp.path());
+        assert_eq!(second_loop.path, temp.path());
+        assert_eq!(first_loop.size_bytes, None);
+        assert!(second_loop.size_bytes.is_some());
+        let join = reported_step_for_test(report, &join_id);
+        assert_eq!(
+            join.summary,
+            "joined all 2 incoming paths (0 skipped by control flow)"
+        );
+        assert!(matches!(
+            reported_step_for_test(report, &create_id).status,
+            StepStatus::Applied
+        ));
     }
 
     #[test]
