@@ -4298,7 +4298,19 @@ fn paint_graph_literal_editor(
     widget_id: (&str, &str),
     value: &mut serde_json::Value,
 ) -> bool {
+    paint_graph_typed_literal_editor(ui, widget_id, value, None)
+}
+
+fn paint_graph_typed_literal_editor(
+    ui: &mut egui::Ui,
+    widget_id: (&str, &str),
+    value: &mut serde_json::Value,
+    value_type: Option<&ContextType>,
+) -> bool {
     match value {
+        serde_json::Value::String(value) if value_type.is_some_and(is_directory_path_type) => {
+            paint_directory_path_literal(ui, value)
+        }
         serde_json::Value::String(value) => ui
             .add(egui::TextEdit::singleline(value).desired_width(ui.available_width()))
             .changed(),
@@ -4361,6 +4373,92 @@ fn paint_graph_literal_editor(
             changed
         }
     }
+}
+
+fn is_directory_path_type(value_type: &ContextType) -> bool {
+    matches!(
+        value_type,
+        ContextType::String {
+            format: Some(SemanticFormat::DirectoryPath)
+        }
+    )
+}
+
+fn paint_directory_path_literal(ui: &mut egui::Ui, value: &mut String) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let button_width = 82.0;
+        let spacing = ui.spacing().item_spacing.x;
+        let edit_width = (ui.available_width() - button_width - spacing).max(80.0);
+        changed |= ui
+            .add_sized(
+                [edit_width, ui.spacing().interact_size.y],
+                egui::TextEdit::singleline(value),
+            )
+            .changed();
+        if ui
+            .add_sized(
+                [button_width, ui.spacing().interact_size.y],
+                egui::Button::new("Выбрать…"),
+            )
+            .on_hover_text("Выбрать папку в системном диалоге")
+            .clicked()
+        {
+            changed |= pick_directory_literal(value);
+        }
+    });
+    changed
+}
+
+fn pick_directory_literal(value: &mut String) -> bool {
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Выберите папку")
+        .set_can_create_directories(true);
+    if let Some(directory) = directory_picker_start(value) {
+        dialog = dialog.set_directory(directory);
+    }
+    apply_picked_directory(value, dialog.pick_folder())
+}
+
+fn apply_picked_directory(value: &mut String, directory: Option<PathBuf>) -> bool {
+    let Some(directory) = directory else {
+        return false;
+    };
+    let Some(selected) = directory.to_str() else {
+        return false;
+    };
+    if value == selected {
+        return false;
+    }
+    value.clear();
+    value.push_str(selected);
+    true
+}
+
+fn directory_picker_start(value: &str) -> Option<PathBuf> {
+    let static_prefix = value.split("{{").next().unwrap_or_default().trim();
+    let fallback = || dirs::home_dir().filter(|path| path.is_dir());
+    if static_prefix.is_empty() {
+        return fallback();
+    }
+    let mut path = if static_prefix == "$HOME" || static_prefix == "~" {
+        dirs::home_dir()?
+    } else if let Some(suffix) = static_prefix
+        .strip_prefix("$HOME/")
+        .or_else(|| static_prefix.strip_prefix("~/"))
+    {
+        dirs::home_dir()?.join(suffix)
+    } else if static_prefix.starts_with('$') || static_prefix.starts_with('~') {
+        return fallback();
+    } else {
+        PathBuf::from(static_prefix)
+    };
+    while !path.is_dir() {
+        if !path.pop() {
+            return fallback();
+        }
+    }
+    Some(path)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4709,7 +4807,12 @@ fn paint_graph_action_editor(
         let mut selected_literal = None;
         if let Some(Binding::Literal { value }) = node.bindings.get_mut(&target) {
             if field.allowed_values.is_empty() {
-                changed |= paint_graph_literal_editor(ui, (&node.step.id, &target), value);
+                changed |= paint_graph_typed_literal_editor(
+                    ui,
+                    (&node.step.id, &target),
+                    value,
+                    Some(&field.value_type),
+                );
             } else {
                 egui::ComboBox::from_id_salt(("graph-enum-literal", &node.step.id, &target))
                     .selected_text(literal_value_label(value))
@@ -16604,6 +16707,89 @@ task:
         let nullable = fields.get("parent.nullable_value").unwrap();
         assert!(nullable.required);
         assert!(nullable.nullable);
+    }
+
+    #[test]
+    fn directory_picker_is_enabled_only_for_directory_path_inputs() {
+        assert!(is_directory_path_type(&ContextType::string(
+            SemanticFormat::DirectoryPath,
+        )));
+        for value_type in [
+            ContextType::String { format: None },
+            ContextType::string(SemanticFormat::Path),
+            ContextType::string(SemanticFormat::FilePath),
+            ContextType::string(SemanticFormat::GitUrl),
+        ] {
+            assert!(!is_directory_path_type(&value_type));
+        }
+
+        for kind in [
+            ActionKind::ForEachGitCloneIfMissing,
+            ActionKind::GitClone,
+            ActionKind::GitInspect,
+            ActionKind::GitCloneIfMissing,
+            ActionKind::GitFetch,
+            ActionKind::GitFastForward,
+        ] {
+            let definition = block_definition(kind);
+            let dest = definition
+                .input_schema
+                .field("dest")
+                .unwrap_or_else(|| panic!("{kind:?} must define dest"));
+            assert!(
+                is_directory_path_type(&dest.value_type),
+                "{kind:?}.dest must use the directory picker"
+            );
+        }
+    }
+
+    #[test]
+    fn picked_directory_replaces_manual_value_without_dirtying_cancel_or_reselection() {
+        let directory = tempfile::tempdir().unwrap();
+        let selected = directory.path().to_path_buf();
+        let selected_text = selected.to_str().unwrap().to_owned();
+        let mut value = "$HOME/Developer/{{repository.full_name}}".to_owned();
+
+        assert!(apply_picked_directory(&mut value, Some(selected.clone())));
+        assert_eq!(value, selected_text);
+        assert!(!apply_picked_directory(&mut value, None));
+        assert_eq!(value, selected_text);
+        assert!(!apply_picked_directory(&mut value, Some(selected)));
+        assert_eq!(value, selected_text);
+    }
+
+    #[test]
+    fn directory_picker_starts_at_the_nearest_existing_literal_ancestor() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("папка с пробелом");
+        fs::create_dir(&workspace).unwrap();
+
+        assert_eq!(
+            directory_picker_start(workspace.to_str().unwrap()),
+            Some(workspace.clone())
+        );
+        let templated = format!("{}/будущий/{{{{repository.name}}}}", workspace.display());
+        assert_eq!(directory_picker_start(&templated), Some(workspace.clone()));
+
+        let file = workspace.join("не папка.txt");
+        fs::write(&file, "test").unwrap();
+        assert_eq!(
+            directory_picker_start(file.to_str().unwrap()),
+            Some(workspace)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_picked_directory_does_not_destroy_manual_value() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut value = "$HOME/Developer/manual".to_owned();
+        let non_utf8 = PathBuf::from(OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]));
+
+        assert!(!apply_picked_directory(&mut value, Some(non_utf8)));
+        assert_eq!(value, "$HOME/Developer/manual");
     }
 
     #[test]
