@@ -6,6 +6,7 @@ pub mod graph;
 pub mod loader;
 mod package_registry;
 pub mod package_secrets;
+pub mod project;
 pub mod runner;
 pub mod task;
 
@@ -38,6 +39,11 @@ pub use graph::{
     WORKFLOW_GRAPH_VERSION,
 };
 pub use loader::{PackTrust, TaskPack, TaskSource};
+pub use project::{
+    first_scenario_path, load_project_yaml, make_project_external, project_entry,
+    project_entry_mut, project_group_entries, project_group_entries_mut, validate_project,
+    CanvasPoint, ComposerCanvas, ProjectEntry, ScenarioProject, ScenarioProjectFile,
+};
 pub use runner::{
     context_store_from_reports, describe_step, run_task, ActionOutcome, ActionPlan,
     AutomationError, GithubAccountOutput, GithubContextOutput, GithubRepositoriesOutput,
