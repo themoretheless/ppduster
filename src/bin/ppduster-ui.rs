@@ -7,15 +7,17 @@ use ppduster::automation::binding::validate_literal_binding;
 use ppduster::automation::block::default_step;
 use ppduster::automation::PackTrust;
 use ppduster::automation::{
-    block_definition, definition_for_action, describe_step, run_task, Action, ActionKind,
-    ActionNode, AuthPolicy, Binding, BlockPolicyCapabilities, ComparisonOperator,
+    block_definition, definition_for_action, describe_step, first_scenario_path, load_project_yaml,
+    make_project_external, project_group_entries, project_group_entries_mut, run_task,
+    validate_project as validate_project_structure, Action, ActionKind, ActionNode, AuthPolicy,
+    Binding, BlockPolicyCapabilities, CanvasPoint, CanvasView, ComparisonOperator, ComposerCanvas,
     ContextPathSegment, ContextScope, EdgePort, ElevationPolicy, ExpressionLimits, ExpressionV1,
     ExpressionValue, FieldRef, ForEachNode, GraphEdge, GraphNode, GraphValidationError,
     GraphValidationErrorKind, IfNode, IndeterminatePolicy, JoinMode, JoinNode, LoopFailurePolicy,
-    ObjectSchema, PolicyRequirement, ReferenceV1, ReleaseChannel, RuleOutcomePolicy, RunOptions,
-    RunReport, ScriptInterpreter, SemanticFormat, Sensitivity, Step, StepCondition, StepStatus,
-    SwitchCase, SwitchNode, Task, TaskFile, TaskPack, TaskSource, TemplatePart, TrustRequirement,
-    WorkflowGraph,
+    ObjectSchema, PolicyRequirement, ProjectEntry, ReferenceV1, ReleaseChannel, RuleOutcomePolicy,
+    RunOptions, RunReport, ScenarioProject, ScenarioProjectFile, ScriptInterpreter, SemanticFormat,
+    Sensitivity, Step, StepCondition, StepStatus, SwitchCase, SwitchNode, Task, TaskFile, TaskPack,
+    TaskSource, TemplatePart, TrustRequirement, WorkflowGraph,
 };
 #[cfg(test)]
 use ppduster::automation::{
@@ -26,7 +28,6 @@ use ppduster::automation::{
 use ppduster::automation::{ContextType, FieldSchema};
 use ppduster::github::{list_accessible_repositories, login_via_web, GithubRepository};
 use regex::RegexBuilder;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -104,55 +105,27 @@ struct ScenarioGroup {
     step_summaries: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ScenarioProjectFile {
-    project: ScenarioProject,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ScenarioProject {
-    id: String,
-    name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    entries: Vec<ProjectEntry>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    canvases: BTreeMap<String, ComposerCanvas>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-struct CanvasPoint {
-    x: f32,
-    y: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-struct CanvasView {
-    #[serde(default)]
-    pan: CanvasPoint,
-    #[serde(default = "default_canvas_zoom")]
-    zoom: f32,
-}
-
 const fn default_canvas_zoom() -> f32 {
     1.0
 }
 
-impl Default for CanvasView {
-    fn default() -> Self {
-        Self {
-            pan: CanvasPoint::default(),
-            zoom: default_canvas_zoom(),
-        }
-    }
+trait CanvasViewExt: Sized {
+    fn sanitized(self) -> Self;
+    fn transform(self, viewport: Rect) -> egui::emath::TSTransform;
+    #[cfg(test)]
+    fn world_to_screen(self, viewport: Rect, point: Pos2) -> Pos2;
+    fn screen_to_world(self, viewport: Rect, point: Pos2) -> Pos2;
+    #[cfg(test)]
+    fn screen_rect(self, viewport: Rect, rect: Rect) -> Rect;
+    fn visible_world_rect(self, viewport: Rect) -> Rect;
+    fn from_visible_world_rect(world: Rect, viewport: Rect) -> Self;
+    #[cfg(test)]
+    fn pan_by(&mut self, screen_delta: Vec2);
+    fn zoom_about(&mut self, viewport: Rect, anchor: Pos2, factor: f32);
+    fn fit(world_bounds: Rect, viewport: Rect, padding: f32) -> Self;
 }
 
-impl CanvasView {
-    fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
+impl CanvasViewExt for CanvasView {
     fn sanitized(mut self) -> Self {
         if !self.pan.x.is_finite() {
             self.pan.x = 0.0;
@@ -267,18 +240,6 @@ fn graph_canvas_world_bounds(canvas: &ComposerCanvas, node_size: Vec2) -> Rect {
     header_bounds.union(Rect::from_min_max(min, max))
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct ComposerCanvas {
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    positions: BTreeMap<String, CanvasPoint>,
-    /// Legacy v1 canvas wiring. Graph-native scenarios never read or write
-    /// this map: `WorkflowGraph::edges` is their sole execution topology.
-    #[serde(default, skip_serializing)]
-    parents: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "CanvasView::is_default")]
-    view: CanvasView,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ComposerGraphAttach {
     RootStart,
@@ -322,63 +283,6 @@ enum ComposerGraphBlockKind {
     If,
     Switch,
     Join,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
-enum ProjectEntry {
-    Group {
-        id: String,
-        name: String,
-        #[serde(default)]
-        entries: Vec<ProjectEntry>,
-    },
-    Scenario {
-        task: Box<Task>,
-    },
-}
-
-impl ScenarioProject {
-    fn scenario(&self, path: &[usize]) -> Option<&Task> {
-        project_entry(&self.entries, path).and_then(|entry| match entry {
-            ProjectEntry::Scenario { task } => Some(task.as_ref()),
-            ProjectEntry::Group { .. } => None,
-        })
-    }
-
-    fn scenario_mut(&mut self, path: &[usize]) -> Option<&mut Task> {
-        project_entry_mut(&mut self.entries, path).and_then(|entry| match entry {
-            ProjectEntry::Scenario { task } => Some(task.as_mut()),
-            ProjectEntry::Group { .. } => None,
-        })
-    }
-}
-
-fn project_entry<'a>(entries: &'a [ProjectEntry], path: &[usize]) -> Option<&'a ProjectEntry> {
-    let (index, rest) = path.split_first()?;
-    let entry = entries.get(*index)?;
-    if rest.is_empty() {
-        return Some(entry);
-    }
-    match entry {
-        ProjectEntry::Group { entries, .. } => project_entry(entries, rest),
-        ProjectEntry::Scenario { .. } => None,
-    }
-}
-
-fn project_entry_mut<'a>(
-    entries: &'a mut [ProjectEntry],
-    path: &[usize],
-) -> Option<&'a mut ProjectEntry> {
-    let (index, rest) = path.split_first()?;
-    let entry = entries.get_mut(*index)?;
-    if rest.is_empty() {
-        return Some(entry);
-    }
-    match entry {
-        ProjectEntry::Group { entries, .. } => project_entry_mut(entries, rest),
-        ProjectEntry::Scenario { .. } => None,
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -6128,32 +6032,6 @@ impl eframe::App for ScenarioApp {
     }
 }
 
-fn project_group_entries_mut<'a>(
-    project: &'a mut ScenarioProject,
-    path: &[usize],
-) -> Option<&'a mut Vec<ProjectEntry>> {
-    if path.is_empty() {
-        return Some(&mut project.entries);
-    }
-    match project_entry_mut(&mut project.entries, path)? {
-        ProjectEntry::Group { entries, .. } => Some(entries),
-        ProjectEntry::Scenario { .. } => None,
-    }
-}
-
-fn project_group_entries<'a>(
-    project: &'a ScenarioProject,
-    path: &[usize],
-) -> Option<&'a [ProjectEntry]> {
-    if path.is_empty() {
-        return Some(&project.entries);
-    }
-    match project_entry(&project.entries, path)? {
-        ProjectEntry::Group { entries, .. } => Some(entries),
-        ProjectEntry::Scenario { .. } => None,
-    }
-}
-
 fn paint_project_group_tree(
     ui: &mut egui::Ui,
     entries: &[ProjectEntry],
@@ -6203,17 +6081,6 @@ fn validate_project(project: &ScenarioProject) -> Result<(), String> {
     validate_project_canvases(&project.entries, &project.canvases)
 }
 
-fn validate_project_structure(project: &ScenarioProject) -> Result<(), String> {
-    if project.id.trim().is_empty() {
-        return Err("project id must not be empty".into());
-    }
-    if project.name.trim().is_empty() {
-        return Err(format!("project {} name must not be empty", project.id));
-    }
-    let mut ids = BTreeSet::new();
-    validate_project_entries(&project.entries, &mut ids)
-}
-
 fn validate_project_canvases(
     entries: &[ProjectEntry],
     canvases: &BTreeMap<String, ComposerCanvas>,
@@ -6233,87 +6100,6 @@ fn validate_project_canvases(
         }
     }
     Ok(())
-}
-
-fn validate_project_entries(
-    entries: &[ProjectEntry],
-    scenario_ids: &mut BTreeSet<String>,
-) -> Result<(), String> {
-    for entry in entries {
-        match entry {
-            ProjectEntry::Group { id, name, entries } => {
-                if id.trim().is_empty() || name.trim().is_empty() {
-                    return Err("project groups require id and name".into());
-                }
-                validate_project_entries(entries, scenario_ids)?;
-            }
-            ProjectEntry::Scenario { task } => {
-                if let Some(graph) = &task.graph {
-                    validate_graph_for_ui(task, graph)?;
-                }
-                task.validate()?;
-                if !scenario_ids.insert(task.id.clone()) {
-                    return Err(format!(
-                        "project contains duplicate scenario id {}",
-                        task.id
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn load_project_yaml(yaml: &str) -> anyhow::Result<ScenarioProject> {
-    if let Ok(file) = serde_yaml::from_str::<ScenarioProjectFile>(yaml) {
-        return Ok(file.project);
-    }
-    let task = serde_yaml::from_str::<TaskFile>(yaml)
-        .context("файл не является проектом или сценарием ppduster")?
-        .task;
-    let id = format!("{}-project", task.id);
-    let name = format!("Проект: {}", task.name);
-    Ok(ScenarioProject {
-        id,
-        name,
-        description: "Импортирован из одиночного сценария ppduster.".into(),
-        canvases: BTreeMap::new(),
-        entries: vec![ProjectEntry::Group {
-            id: "imported".into(),
-            name: "Импортированные сценарии".into(),
-            entries: vec![ProjectEntry::Scenario {
-                task: Box::new(task),
-            }],
-        }],
-    })
-}
-
-fn make_project_external(entries: &mut [ProjectEntry]) {
-    for entry in entries {
-        match entry {
-            ProjectEntry::Group { entries, .. } => make_project_external(entries),
-            ProjectEntry::Scenario { task } => {
-                task.trust = TrustRequirement::ExternalAllowed;
-                task.resolved_scenarios.clear();
-            }
-        }
-    }
-}
-
-fn first_scenario_path(entries: &[ProjectEntry], prefix: &mut Vec<usize>) -> Option<Vec<usize>> {
-    for (index, entry) in entries.iter().enumerate() {
-        prefix.push(index);
-        match entry {
-            ProjectEntry::Scenario { .. } => return Some(prefix.clone()),
-            ProjectEntry::Group { entries, .. } => {
-                if let Some(path) = first_scenario_path(entries, prefix) {
-                    return Some(path);
-                }
-            }
-        }
-        prefix.pop();
-    }
-    None
 }
 
 impl ScenarioApp {

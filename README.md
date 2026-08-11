@@ -122,6 +122,19 @@ runtime and output, and redacts diagnostics before showing them in the UI.
 cargo run --bin ppduster-ui
 ```
 
+## MCP scheme authoring
+
+[`ppduster-mcp`](packages/ppduster-mcp/README.md) is a standalone local stdio
+server that lets MCP clients inspect the typed block catalog, validate Scenario
+Flow schemes, and create `.ppduster.yaml` projects for this UI. It shares the
+same Rust project model and validators as ppduster, generates deterministic
+canvas positions, never executes a scenario, and never overwrites a file.
+
+```bash
+cargo install --locked --path packages/ppduster-mcp
+ppduster-mcp --output-dir /absolute/path/to/ppduster-projects
+```
+
 Create a native macOS application bundle:
 
 ```bash
