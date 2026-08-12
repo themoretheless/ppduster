@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "kebab-case")]
 pub enum ActionKind {
     GithubListRepositories,
+    GithubSelectRepositories,
     ForEach,
     ForEachGitCloneIfMissing,
     CreateDirectory,
@@ -42,8 +43,9 @@ pub enum ActionKind {
 }
 
 impl ActionKind {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::GithubListRepositories,
+        Self::GithubSelectRepositories,
         Self::ForEach,
         Self::ForEachGitCloneIfMissing,
         Self::CreateDirectory,
@@ -73,6 +75,7 @@ impl ActionKind {
     pub const fn id(self) -> &'static str {
         match self {
             Self::GithubListRepositories => "github-list-repositories",
+            Self::GithubSelectRepositories => "github-select-repositories",
             Self::ForEach => "for-each",
             Self::ForEachGitCloneIfMissing => "for-each-git-clone-if-missing",
             Self::CreateDirectory => "create-directory",
@@ -198,6 +201,7 @@ impl Action {
     pub const fn kind(&self) -> ActionKind {
         match self {
             Self::GithubListRepositories => ActionKind::GithubListRepositories,
+            Self::GithubSelectRepositories { .. } => ActionKind::GithubSelectRepositories,
             Self::ForEach { .. } => ActionKind::ForEach,
             Self::ForEachGitCloneIfMissing { .. } => ActionKind::ForEachGitCloneIfMissing,
             Self::CreateDirectory(_) => ActionKind::CreateDirectory,
@@ -247,6 +251,16 @@ pub fn default_action(kind: ActionKind) -> Result<Action, &'static str> {
     let destination = "$HOME/Developer/owner/repository".to_owned();
     Ok(match kind {
         ActionKind::GithubListRepositories => Action::GithubListRepositories,
+        ActionKind::GithubSelectRepositories => Action::GithubSelectRepositories {
+            github: crate::automation::task::GithubContextInput {
+                account: crate::automation::task::GithubAccountInput {
+                    login: "github-user".into(),
+                },
+                repositories: Vec::new(),
+            },
+            expected_account_login: "github-user".into(),
+            repository_ids: Vec::new(),
+        },
         ActionKind::ForEach | ActionKind::ForEachGitCloneIfMissing => {
             return Err("legacy foreach actions are not graph-v3 action blocks")
         }
@@ -398,6 +412,7 @@ pub fn default_step(kind: ActionKind, id: impl Into<String>) -> Result<Step, &'s
 pub const fn block_policy_capabilities(kind: ActionKind) -> BlockPolicyCapabilities {
     match kind {
         ActionKind::GithubListRepositories
+        | ActionKind::GithubSelectRepositories
         | ActionKind::ForEach
         | ActionKind::ForEachGitCloneIfMissing
         | ActionKind::CreateDirectory
@@ -437,6 +452,17 @@ pub fn block_definition(kind: ActionKind) -> BlockDefinition {
             "Получить репозитории аккаунта",
             "GitHub",
             schema("ppduster.github.repositories.inputs@1", []),
+            github_repositories_schema(),
+            true,
+            false,
+        ),
+        ActionKind::GithubSelectRepositories => (
+            "Выбрать репозитории GitHub",
+            "GitHub",
+            schema(
+                "ppduster.github.select-repositories.inputs@1",
+                [("github", req(github_context_type()))],
+            ),
             github_repositories_schema(),
             true,
             false,
@@ -966,12 +992,12 @@ fn github_repository_type() -> ContextType {
     ))
 }
 
-fn github_repositories_schema() -> ObjectSchema {
+fn github_context_type() -> ContextType {
     let account = ContextType::object(schema(
         "ppduster.github.account@1",
         [("login", req(identifier()))],
     ));
-    let github = ContextType::object(schema(
+    ContextType::object(schema(
         "ppduster.github.context@1",
         [
             ("account", req(account)),
@@ -980,8 +1006,14 @@ fn github_repositories_schema() -> ObjectSchema {
                 req(ContextType::array(github_repository_type())),
             ),
         ],
-    ));
-    schema("ppduster.github.repositories@1", [("github", req(github))])
+    ))
+}
+
+fn github_repositories_schema() -> ObjectSchema {
+    schema(
+        "ppduster.github.repositories@1",
+        [("github", req(github_context_type()))],
+    )
 }
 
 fn for_each_schema(id: &str) -> ObjectSchema {
@@ -1449,6 +1481,65 @@ mod tests {
         step.dangerous = true;
         assert!(!definition.policy.accepts(&step));
         assert!(step.validate().is_err());
+    }
+
+    #[test]
+    fn github_repository_selection_keeps_authored_policy_out_of_binding_schema() {
+        let definition = block_definition(ActionKind::GithubSelectRepositories);
+        assert_eq!(
+            definition
+                .input_schema
+                .fields
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["github"]
+        );
+        assert!(definition
+            .input_schema
+            .field("expected_account_login")
+            .is_none());
+        assert!(definition.input_schema.field("repository_ids").is_none());
+        assert_eq!(
+            definition.output_schema.id,
+            block_definition(ActionKind::GithubListRepositories)
+                .output_schema
+                .id
+        );
+
+        let mut action = default_action(ActionKind::GithubSelectRepositories).unwrap();
+        let Action::GithubSelectRepositories {
+            github,
+            expected_account_login,
+            repository_ids,
+        } = &mut action
+        else {
+            unreachable!()
+        };
+        assert_eq!(github.account.login, *expected_account_login);
+        assert!(github.repositories.is_empty());
+        assert!(repository_ids.is_empty());
+
+        github
+            .repositories
+            .push(crate::automation::task::GithubRepositoryInput {
+                id: "R_private".into(),
+                owner: "private-owner".into(),
+                name: "private-repository".into(),
+                full_name: "private-owner/private-repository".into(),
+                https_url: "https://github.com/private-owner/private-repository".into(),
+                ssh_url: "git@github.com:private-owner/private-repository.git".into(),
+                default_branch: Some("main".into()),
+                private: true,
+                archived: false,
+            });
+        let encoded = serde_json::to_value(&action).unwrap();
+        assert!(encoded["github"].get("repositories").is_none());
+        let decoded: Action = serde_json::from_value(encoded).unwrap();
+        let Action::GithubSelectRepositories { github, .. } = decoded else {
+            unreachable!()
+        };
+        assert!(github.repositories.is_empty());
     }
 
     #[test]

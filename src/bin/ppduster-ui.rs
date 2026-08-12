@@ -31,8 +31,8 @@ use ppduster::automation::{
 };
 use ppduster::automation::{ContextType, FieldSchema};
 use ppduster::github::{
-    list_accessible_repositories, login_via_web_with_device_flow_ready_and_cancellation,
-    GithubLoginCancellation, GithubLoginOutcome, GithubRepository,
+    get_account_repositories, login_via_web_with_device_flow_ready_and_cancellation,
+    GithubAccountRepositories, GithubLoginCancellation, GithubLoginOutcome, GithubRepository,
 };
 use regex::RegexBuilder;
 use sha2::{Digest, Sha256};
@@ -2815,6 +2815,20 @@ fn graph_make_node(
     };
     let step = default_step(kind, id).expect("palette contains only graph action kinds");
     let mut bindings = BTreeMap::new();
+    if matches!(kind, ActionKind::GithubSelectRepositories) {
+        if let Some(parent_id) = parent_id.filter(|parent_id| {
+            matches!(
+                graph_node(graph, parent_id),
+                Some(GraphNode::Action(parent))
+                    if matches!(parent.step.action, Action::GithubListRepositories)
+            )
+        }) {
+            bindings.insert(
+                "github".into(),
+                Binding::field(FieldRef::step(parent_id).field("github")),
+            );
+        }
+    }
     if let Some(loop_id) = owner_loop {
         if let Some(item_type) = graph_loop_item_type(graph, loop_id) {
             apply_loop_git_bindings(&step, &mut bindings, loop_id, &item_type);
@@ -4667,6 +4681,312 @@ struct GraphActionEditorResponse {
     external_auth_cancellation_requested: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct GithubAuthoringPreviewUiResponse {
+    load_requested: bool,
+    repin_account_requested: bool,
+    selected_repository_ids: Option<BTreeSet<String>>,
+}
+
+fn github_filter_source_key(
+    scenario_path: Option<&[usize]>,
+    scenario_id: &str,
+    node: &ActionNode,
+) -> Option<GithubAuthoringPreviewKey> {
+    let Action::GithubSelectRepositories { .. } = &node.step.action else {
+        return None;
+    };
+    let Binding::Field { field } = node.bindings.get("github")? else {
+        return None;
+    };
+    let ContextScope::Step { step_id } = &field.scope else {
+        return None;
+    };
+    let scenario_path = scenario_path?;
+    (field.segments == [ContextPathSegment::field("github")])
+        .then(|| GithubAuthoringPreviewKey::new(scenario_path.to_vec(), scenario_id, step_id))
+}
+
+fn github_preview_visible_repositories(
+    repositories: &[GithubRepository],
+    query: &str,
+) -> Vec<GithubRepository> {
+    let query = query.trim().to_lowercase();
+    repositories
+        .iter()
+        .filter(|repository| {
+            query.is_empty()
+                || repository.name_with_owner.to_lowercase().contains(&query)
+                || repository
+                    .owner_name
+                    .as_ref()
+                    .is_some_and(|name| name.to_lowercase().contains(&query))
+        })
+        .cloned()
+        .collect()
+}
+
+fn github_preview_account_matches(preview_login: Option<&str>, expected_login: &str) -> bool {
+    preview_login.is_none_or(|login| login == expected_login)
+}
+
+fn apply_github_filter_selection(
+    node: &mut ActionNode,
+    account_login: &str,
+    preview_repositories: &[GithubRepository],
+    selected_repository_ids: BTreeSet<String>,
+) -> bool {
+    let Action::GithubSelectRepositories {
+        github,
+        expected_account_login,
+        repository_ids,
+    } = &mut node.step.action
+    else {
+        return false;
+    };
+    let preview_ids = preview_repositories
+        .iter()
+        .map(|repository| repository.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut ordered_repository_ids = preview_repositories
+        .iter()
+        .filter(|repository| selected_repository_ids.contains(&repository.id))
+        .map(|repository| repository.id.clone())
+        .collect::<Vec<_>>();
+    ordered_repository_ids.extend(
+        repository_ids
+            .iter()
+            .filter(|id| {
+                selected_repository_ids.contains(*id) && !preview_ids.contains(id.as_str())
+            })
+            .cloned(),
+    );
+    github.account.login = account_login.to_owned();
+    github.repositories.clear();
+    *expected_account_login = account_login.to_owned();
+    *repository_ids = ordered_repository_ids;
+    true
+}
+
+fn paint_github_authoring_preview(
+    ui: &mut egui::Ui,
+    preview: Option<&GithubAuthoringPreview>,
+    loading: bool,
+    search: &mut String,
+    selected_repository_ids: Option<&BTreeSet<String>>,
+    account_matches_selection: bool,
+    dark: bool,
+) -> GithubAuthoringPreviewUiResponse {
+    let mut response = GithubAuthoringPreviewUiResponse::default();
+    ui.add_space(UI_SPACE_SM);
+    section_label(ui, "ПРЕДПРОСМОТР ДАННЫХ GITHUB");
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "Предпросмотр загружает доступные текущему аккаунту метаданные репозиториев через сессию GitHub CLI. Он хранится только в памяти и не запускает сценарий.",
+            )
+            .size(UI_TEXT_CAPTION)
+            .color(ui_tone(UiTone::Muted, dark)),
+        )
+        .wrap(),
+    );
+    ui.add_space(UI_SPACE_XS);
+    if ui
+        .add_enabled(
+            !loading,
+            egui::Button::new(if preview.is_some_and(|preview| preview.loaded_once) {
+                "Обновить предпросмотр"
+            } else {
+                "Загрузить предпросмотр"
+            })
+            .min_size(Vec2::new(ui.available_width(), 30.0)),
+        )
+        .clicked()
+    {
+        response.load_requested = true;
+    }
+    if loading {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(
+                RichText::new("Загружаю репозитории для предпросмотра…")
+                    .size(UI_TEXT_CAPTION)
+                    .color(ui_tone(UiTone::Muted, dark)),
+            );
+        });
+    }
+    if let Some(error) = preview.and_then(|preview| preview.error.as_deref()) {
+        ui.add_space(UI_SPACE_XS);
+        error_box(ui, error, dark);
+    }
+    let Some(preview) = preview.filter(|preview| preview.loaded_once) else {
+        return response;
+    };
+    ui.add_space(UI_SPACE_SM);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!(
+                "Аккаунт: {}",
+                preview.account_login.as_deref().unwrap_or("—")
+            ))
+            .strong()
+            .size(UI_TEXT_CAPTION)
+            .color(ui_tone(UiTone::Success, dark)),
+        );
+        ui.label(
+            RichText::new(format!("{} репозиториев", preview.repositories.len()))
+                .size(UI_TEXT_CAPTION)
+                .color(ui_tone(UiTone::Muted, dark)),
+        );
+    });
+    ui.add(
+        egui::TextEdit::singleline(search)
+            .hint_text("Поиск по owner/repository…")
+            .desired_width(f32::INFINITY),
+    );
+    let visible = github_preview_visible_repositories(&preview.repositories, search);
+    let mut selection = selected_repository_ids.cloned().unwrap_or_default();
+    let selection_enabled = selected_repository_ids.is_some() && account_matches_selection;
+    let mut selection_changed = false;
+    ScrollArea::vertical()
+        .id_salt("github-authoring-preview-list")
+        .max_height(280.0)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if visible.is_empty() {
+                ui.label(
+                    RichText::new("По этому запросу ничего не найдено.")
+                        .size(UI_TEXT_BODY)
+                        .color(ui_tone(UiTone::Muted, dark)),
+                );
+            }
+            for repository in &visible {
+                Frame::new()
+                    .fill(card(dark))
+                    .stroke(Stroke::new(1.0, line(dark)))
+                    .corner_radius(UI_RADIUS_CONTROL)
+                    .inner_margin(Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if selection_enabled {
+                                let mut selected = selection.contains(&repository.id);
+                                let can_select =
+                                    selected || selection.len() < MAX_SELECTED_GITHUB_REPOSITORIES;
+                                if ui
+                                    .add_enabled(
+                                        can_select,
+                                        egui::Checkbox::without_text(&mut selected),
+                                    )
+                                    .changed()
+                                {
+                                    if selected {
+                                        selection.insert(repository.id.clone());
+                                    } else {
+                                        selection.remove(&repository.id);
+                                    }
+                                    selection_changed = true;
+                                }
+                            }
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(&repository.name_with_owner)
+                                        .strong()
+                                        .size(UI_TEXT_BODY)
+                                        .color(text(dark)),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{}{}{}",
+                                        repository
+                                            .default_branch
+                                            .as_deref()
+                                            .unwrap_or("нет default"),
+                                        if repository.is_private {
+                                            " · PRIVATE"
+                                        } else {
+                                            " · PUBLIC"
+                                        },
+                                        if repository.is_archived {
+                                            " · ARCHIVED"
+                                        } else {
+                                            ""
+                                        }
+                                    ))
+                                    .monospace()
+                                    .size(UI_TEXT_CAPTION)
+                                    .color(ui_tone(UiTone::Muted, dark)),
+                                );
+                            });
+                        });
+                    });
+                ui.add_space(UI_SPACE_XS);
+            }
+        });
+    if selection_enabled {
+        let missing_selected = selection
+            .iter()
+            .filter(|id| {
+                !preview
+                    .repositories
+                    .iter()
+                    .any(|repository| &repository.id == *id)
+            })
+            .count();
+        ui.label(
+            RichText::new(format!("Выбрано: {}", selection.len()))
+                .strong()
+                .size(UI_TEXT_CAPTION)
+                .color(ui_tone(UiTone::Primary, dark)),
+        );
+        if missing_selected > 0 {
+            ui.label(
+                RichText::new(format!(
+                    "{missing_selected} выбранных ID отсутствуют в свежем предпросмотре. Обновите доступ или явно удалите их из выбора."
+                ))
+                .size(UI_TEXT_CAPTION)
+                .color(ui_tone(UiTone::Warning, dark)),
+            );
+            if ui.button("Удалить недоступные из выбора").clicked() {
+                let visible_ids = preview
+                    .repositories
+                    .iter()
+                    .map(|repository| repository.id.as_str())
+                    .collect::<BTreeSet<_>>();
+                selection.retain(|id| visible_ids.contains(id.as_str()));
+                selection_changed = true;
+            }
+        }
+        if selection.len() >= MAX_SELECTED_GITHUB_REPOSITORIES {
+            ui.label(
+                RichText::new(format!(
+                    "Достигнут лимит: {MAX_SELECTED_GITHUB_REPOSITORIES} репозиториев."
+                ))
+                .size(UI_TEXT_CAPTION)
+                .color(ui_tone(UiTone::Warning, dark)),
+            );
+        }
+    } else if selected_repository_ids.is_some() {
+        ui.label(
+            RichText::new(
+                "Выбор отключён, пока вы явно не перепривяжете фильтр к аккаунту предпросмотра.",
+            )
+            .size(UI_TEXT_CAPTION)
+            .color(ui_tone(UiTone::Warning, dark)),
+        );
+        let account_login = preview.account_login.as_deref().unwrap_or("этому аккаунту");
+        if ui
+            .button(format!("Сбросить выбор и привязать к {account_login}"))
+            .clicked()
+        {
+            response.repin_account_requested = true;
+        }
+    }
+    if selection_changed {
+        response.selected_repository_ids = Some(selection);
+    }
+    response
+}
+
 fn github_authorization_cancel_button(ui: &mut egui::Ui, cancellation_requested: bool) -> bool {
     ui.add_enabled(
         !cancellation_requested,
@@ -5199,7 +5519,8 @@ struct GithubPickerState {
     auth_cancellation_requested: bool,
     device_flow_ready: bool,
     error: Option<String>,
-    receiver: Option<Receiver<Result<Vec<GithubRepository>, String>>>,
+    receiver: Option<Receiver<Result<GithubAccountRepositories, String>>>,
+    repository_load_target: Option<GithubRepositoryLoadTarget>,
     auth_receiver: Option<Receiver<GithubAuthorizationEvent>>,
     auth_cancellation: Option<GithubLoginCancellation>,
     auth_worker: Option<std::thread::JoinHandle<()>>,
@@ -5207,6 +5528,44 @@ struct GithubPickerState {
     auth_previous_error: Option<Option<String>>,
     authorization_intent: GithubAuthorizationIntent,
     auth_status: GithubSessionStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct GithubAuthoringPreviewKey {
+    scenario_path: Vec<usize>,
+    scenario_id: String,
+    node_id: String,
+}
+
+impl GithubAuthoringPreviewKey {
+    fn new(
+        scenario_path: Vec<usize>,
+        scenario_id: impl Into<String>,
+        node_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            scenario_path,
+            scenario_id: scenario_id.into(),
+            node_id: node_id.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct GithubAuthoringPreview {
+    account_login: Option<String>,
+    repositories: Vec<GithubRepository>,
+    loaded_once: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GithubRepositoryLoadTarget {
+    Picker,
+    Authoring {
+        key: GithubAuthoringPreviewKey,
+        generation: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -5270,6 +5629,7 @@ impl Default for GithubPickerState {
             device_flow_ready: false,
             error: None,
             receiver: None,
+            repository_load_target: None,
             auth_receiver: None,
             auth_cancellation: None,
             auth_worker: None,
@@ -5325,6 +5685,9 @@ struct ScenarioApp {
     run_receiver: Option<Receiver<anyhow::Result<RunReport>>>,
     run_checks_github_auth: bool,
     github_picker: GithubPickerState,
+    github_authoring_previews: BTreeMap<GithubAuthoringPreviewKey, GithubAuthoringPreview>,
+    github_filter_searches: BTreeMap<GithubAuthoringPreviewKey, String>,
+    github_authoring_generation: u64,
     file_message: Option<(bool, String)>,
     custom_project: Option<ScenarioProject>,
     project_path: Option<PathBuf>,
@@ -5389,6 +5752,9 @@ impl ScenarioApp {
             run_receiver: None,
             run_checks_github_auth: false,
             github_picker: GithubPickerState::default(),
+            github_authoring_previews: BTreeMap::new(),
+            github_filter_searches: BTreeMap::new(),
+            github_authoring_generation: 0,
             file_message: None,
             custom_project: None,
             project_path: None,
@@ -5559,6 +5925,24 @@ impl ScenarioApp {
         self.invalidate_plan();
     }
 
+    fn invalidate_github_authoring_previews(&mut self) {
+        self.github_authoring_generation = self.github_authoring_generation.wrapping_add(1);
+        self.github_authoring_previews.clear();
+        self.github_filter_searches.clear();
+    }
+
+    fn github_preview_key_is_current(&self, key: &GithubAuthoringPreviewKey) -> bool {
+        self.custom_project
+            .as_ref()
+            .and_then(|project| project.scenario(&key.scenario_path))
+            .filter(|task| task.id == key.scenario_id)
+            .and_then(|task| task.graph.as_ref())
+            .and_then(|graph| graph_node(graph, &key.node_id))
+            .is_some_and(|node| {
+                matches!(node, GraphNode::Action(node) if matches!(node.step.action, Action::GithubListRepositories))
+            })
+    }
+
     fn close_custom_project(&mut self) {
         self.request_github_authorization_cancellation();
         self.custom_project = None;
@@ -5570,6 +5954,7 @@ impl ScenarioApp {
         self.selected_step = Some(0);
         self.selected_node = None;
         self.reset_run_permissions();
+        self.invalidate_github_authoring_previews();
         self.invalidate_plan();
     }
 
@@ -5650,6 +6035,7 @@ impl ScenarioApp {
         self.selected_node = None;
         self.github_picker.open = false;
         self.github_picker.selected_ids.clear();
+        self.invalidate_github_authoring_previews();
         self.invalidate_plan();
     }
 
@@ -6042,6 +6428,13 @@ impl ScenarioApp {
                 graph_node_ids(&nested)
             })
             .unwrap_or_default();
+        let removed_github_source = removed_ids.iter().any(|removed_id| {
+            matches!(
+                graph_node(graph, removed_id),
+                Some(GraphNode::Action(node))
+                    if matches!(node.step.action, Action::GithubListRepositories)
+            )
+        });
         match graph_remove_composer_node(graph, node_id) {
             Ok(true) => {}
             Ok(false) => return,
@@ -6061,6 +6454,9 @@ impl ScenarioApp {
             }
         }
         self.selected_node = None;
+        if removed_github_source {
+            self.invalidate_github_authoring_previews();
+        }
         self.mark_project_dirty();
     }
 
@@ -6081,6 +6477,7 @@ impl ScenarioApp {
         let mut new_path = path;
         new_path.push(entries.len() - 1);
         self.selected_project_group = new_path;
+        self.invalidate_github_authoring_previews();
         self.mark_project_dirty();
     }
 
@@ -6112,6 +6509,7 @@ impl ScenarioApp {
         self.selected_step = None;
         self.selected_node = None;
         self.reset_run_permissions();
+        self.invalidate_github_authoring_previews();
         self.mark_project_dirty();
     }
 
@@ -6133,26 +6531,64 @@ impl ScenarioApp {
         self.selected_step = None;
         self.selected_node = Some("list-repositories".into());
         self.reset_run_permissions();
+        self.invalidate_github_authoring_previews();
         self.mark_project_dirty();
     }
 
     fn start_github_repository_load(&mut self, ctx: &egui::Context) {
+        self.start_github_repository_load_for(ctx, GithubRepositoryLoadTarget::Picker);
+    }
+
+    fn start_github_authoring_preview_load(
+        &mut self,
+        ctx: &egui::Context,
+        key: GithubAuthoringPreviewKey,
+    ) {
+        if !self.github_picker.is_idle() || !self.github_preview_key_is_current(&key) {
+            return;
+        }
+        self.github_authoring_previews
+            .entry(key.clone())
+            .or_default()
+            .error = None;
+        self.start_github_repository_load_for(
+            ctx,
+            GithubRepositoryLoadTarget::Authoring {
+                key,
+                generation: self.github_authoring_generation,
+            },
+        );
+    }
+
+    fn start_github_repository_load_for(
+        &mut self,
+        ctx: &egui::Context,
+        target: GithubRepositoryLoadTarget,
+    ) {
         if !self.github_picker.is_idle() {
             return;
         }
-        if !self.github_picker.selected_ids.is_empty() {
+        if matches!(target, GithubRepositoryLoadTarget::Picker)
+            && !self.github_picker.selected_ids.is_empty()
+        {
             self.invalidate_plan();
         }
         let (sender, receiver) = mpsc::channel();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
-            let result = list_accessible_repositories().map_err(|error| format!("{error:#}"));
+            let result = get_account_repositories().map_err(|error| format!("{error:#}"));
             let _ = sender.send(result);
             repaint.request_repaint();
         });
         self.github_picker.receiver = Some(receiver);
+        self.github_picker.repository_load_target = Some(target);
         self.github_picker.loading = true;
-        self.github_picker.error = None;
+        if matches!(
+            self.github_picker.repository_load_target,
+            Some(GithubRepositoryLoadTarget::Picker)
+        ) {
+            self.github_picker.error = None;
+        }
     }
 
     fn poll_github_repository_load(&mut self, ctx: &egui::Context) {
@@ -6160,21 +6596,55 @@ impl ScenarioApp {
             return;
         };
         match receiver.try_recv() {
-            Ok(Ok(repositories)) => {
-                let selection_uses_loaded_metadata = !self.github_picker.selected_ids.is_empty();
-                self.github_picker.repositories = repositories;
-                self.github_picker.loaded_once = true;
-                self.github_picker.error = None;
+            Ok(Ok(account)) => {
+                let target = self
+                    .github_picker
+                    .repository_load_target
+                    .take()
+                    .unwrap_or(GithubRepositoryLoadTarget::Picker);
+                let selection_uses_loaded_metadata =
+                    matches!(target, GithubRepositoryLoadTarget::Picker)
+                        && !self.github_picker.selected_ids.is_empty();
+                if matches!(target, GithubRepositoryLoadTarget::Picker) {
+                    self.github_picker.repositories = account.repositories.clone();
+                    self.github_picker.loaded_once = true;
+                    self.github_picker.error = None;
+                }
                 self.github_picker.auth_status = GithubSessionStatus::Succeeded;
                 self.github_picker.loading = false;
                 self.github_picker.receiver = None;
+                if let GithubRepositoryLoadTarget::Authoring { key, generation } = target {
+                    if generation == self.github_authoring_generation
+                        && self.github_preview_key_is_current(&key)
+                    {
+                        self.github_authoring_previews.insert(
+                            key,
+                            GithubAuthoringPreview {
+                                account_login: Some(account.login),
+                                repositories: account.repositories,
+                                loaded_once: true,
+                                error: None,
+                            },
+                        );
+                    }
+                }
                 if selection_uses_loaded_metadata {
                     self.invalidate_plan();
                 }
             }
             Ok(Err(error)) => {
+                let target = self.github_picker.repository_load_target.take();
                 self.update_github_auth_status(std::slice::from_ref(&error), false);
-                self.github_picker.error = Some(error);
+                if let Some(GithubRepositoryLoadTarget::Authoring { key, generation }) = target {
+                    if generation == self.github_authoring_generation
+                        && self.github_preview_key_is_current(&key)
+                    {
+                        self.github_authoring_previews.entry(key).or_default().error =
+                            Some(error.clone());
+                    }
+                } else {
+                    self.github_picker.error = Some(error);
+                }
                 self.github_picker.loading = false;
                 self.github_picker.receiver = None;
             }
@@ -6182,8 +6652,18 @@ impl ScenarioApp {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                self.github_picker.error =
-                    Some("Фоновая загрузка репозиториев неожиданно завершилась".into());
+                let error = "Фоновая загрузка репозиториев неожиданно завершилась".to_owned();
+                if let Some(GithubRepositoryLoadTarget::Authoring { key, generation }) =
+                    self.github_picker.repository_load_target.take()
+                {
+                    if generation == self.github_authoring_generation
+                        && self.github_preview_key_is_current(&key)
+                    {
+                        self.github_authoring_previews.entry(key).or_default().error = Some(error);
+                    }
+                } else {
+                    self.github_picker.error = Some(error);
+                }
                 self.github_picker.loading = false;
                 self.github_picker.receiver = None;
             }
@@ -6646,6 +7126,7 @@ impl ScenarioApp {
             .is_some_and(|task| task.graph.is_none() && !task.steps.is_empty())
             .then_some(0);
         self.load_error = None;
+        self.invalidate_github_authoring_previews();
         self.invalidate_plan();
     }
 
@@ -8096,6 +8577,8 @@ impl ScenarioApp {
         let mut incoming_edge_changes = Vec::new();
         let mut external_auth_request = None;
         let mut external_auth_cancellation_requested = false;
+        let mut authoring_preview_load_request = None;
+        let mut github_filter_selection_change = None;
         let external_auth_state = GraphExternalAuthUiState {
             enabled: !self.running && self.github_picker.is_idle(),
             authorizing: self.github_picker.authorizing,
@@ -8114,6 +8597,7 @@ impl ScenarioApp {
             else {
                 return;
             };
+            let scenario_id = task.id.clone();
             ui.label(
                 RichText::new("Пользовательский сценарий")
                     .strong()
@@ -8207,6 +8691,7 @@ impl ScenarioApp {
                     };
                     match node {
                         GraphNode::Action(node) => {
+                            let action_before_editor = node.step.action.clone();
                             let response = paint_graph_action_editor(
                                 ui,
                                 node,
@@ -8218,6 +8703,109 @@ impl ScenarioApp {
                             external_auth_request = response.external_auth_request;
                             external_auth_cancellation_requested =
                                 response.external_auth_cancellation_requested;
+                            if matches!(action_before_editor, Action::GithubListRepositories) {
+                                let key = GithubAuthoringPreviewKey::new(
+                                    selected_path.clone().unwrap_or_default(),
+                                    &scenario_id,
+                                    &node.step.id,
+                                );
+                                let loading = self.github_picker.loading
+                                    && self.github_picker.repository_load_target.as_ref()
+                                        == Some(&GithubRepositoryLoadTarget::Authoring {
+                                            key: key.clone(),
+                                            generation: self.github_authoring_generation,
+                                        });
+                                let preview = self.github_authoring_previews.get(&key);
+                                let search =
+                                    self.github_filter_searches.entry(key.clone()).or_default();
+                                let preview_response = paint_github_authoring_preview(
+                                    ui, preview, loading, search, None, true, self.dark,
+                                );
+                                if preview_response.load_requested {
+                                    authoring_preview_load_request = Some(key);
+                                }
+                            } else if let Action::GithubSelectRepositories {
+                                expected_account_login,
+                                repository_ids,
+                                ..
+                            } = &node.step.action
+                            {
+                                let key = github_filter_source_key(
+                                    selected_path.as_deref(),
+                                    &scenario_id,
+                                    node,
+                                );
+                                if let Some(key) = key {
+                                    let loading = self.github_picker.loading
+                                        && self.github_picker.repository_load_target.as_ref()
+                                            == Some(&GithubRepositoryLoadTarget::Authoring {
+                                                key: key.clone(),
+                                                generation: self.github_authoring_generation,
+                                            });
+                                    let preview = self.github_authoring_previews.get(&key);
+                                    let preview_login = preview
+                                        .and_then(|preview| preview.account_login.as_deref());
+                                    let account_matches = github_preview_account_matches(
+                                        preview_login,
+                                        expected_account_login,
+                                    );
+                                    if !account_matches {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "Предпросмотр открыт для другого аккаунта: {}. Текущая политика ожидает {}. Выберите репозитории заново.",
+                                                preview_login.unwrap_or_default(),
+                                                expected_account_login
+                                            ))
+                                            .size(UI_TEXT_CAPTION)
+                                            .color(ui_tone(UiTone::Warning, self.dark)),
+                                        );
+                                    }
+                                    let filter_search_key = GithubAuthoringPreviewKey::new(
+                                        selected_path.clone().unwrap_or_default(),
+                                        &scenario_id,
+                                        &node.step.id,
+                                    );
+                                    let search = self
+                                        .github_filter_searches
+                                        .entry(filter_search_key)
+                                        .or_default();
+                                    let selected =
+                                        repository_ids.iter().cloned().collect::<BTreeSet<_>>();
+                                    let preview_response = paint_github_authoring_preview(
+                                        ui,
+                                        preview,
+                                        loading,
+                                        search,
+                                        Some(&selected),
+                                        account_matches,
+                                        self.dark,
+                                    );
+                                    if preview_response.load_requested {
+                                        authoring_preview_load_request = Some(key.clone());
+                                    }
+                                    if preview_response.repin_account_requested {
+                                        github_filter_selection_change = Some((
+                                            node.step.id.clone(),
+                                            key.clone(),
+                                            BTreeSet::new(),
+                                        ));
+                                    }
+                                    if let Some(selection) =
+                                        preview_response.selected_repository_ids
+                                    {
+                                        github_filter_selection_change =
+                                            Some((node.step.id.clone(), key, selection));
+                                    }
+                                } else {
+                                    ui.label(
+                                        RichText::new(
+                                            "Подключите вход github целиком от предыдущего блока «Получить репозитории аккаунта».",
+                                        )
+                                        .size(UI_TEXT_CAPTION)
+                                        .color(ui_tone(UiTone::Warning, self.dark)),
+                                    );
+                                }
+                            }
                             ui.add_space(12.0);
                             changed |= paint_composer_conditions(
                                 ui,
@@ -8810,6 +9398,33 @@ impl ScenarioApp {
         } else if let Some(request) = external_auth_request {
             self.start_github_authorization(ui.ctx(), request.intent);
         }
+        if let Some(key) = authoring_preview_load_request {
+            self.start_github_authoring_preview_load(ui.ctx(), key);
+        }
+        if let Some((node_id, key, selection)) = github_filter_selection_change {
+            let preview = self
+                .github_authoring_previews
+                .get(&key)
+                .and_then(|preview| {
+                    preview
+                        .account_login
+                        .clone()
+                        .map(|login| (login, preview.repositories.clone()))
+                });
+            let selected_path = self.selected_project_scenario.clone();
+            if let (Some((login, preview_repositories)), Some(GraphNode::Action(node))) = (
+                preview,
+                self.custom_project
+                    .as_mut()
+                    .and_then(|project| project.scenario_mut(selected_path.as_deref()?))
+                    .and_then(|task| task.graph.as_mut())
+                    .and_then(|graph| graph_node_mut(graph, &node_id)),
+            ) {
+                if apply_github_filter_selection(node, &login, &preview_repositories, selection) {
+                    self.mark_project_dirty();
+                }
+            }
+        }
         if changed {
             self.mark_project_dirty();
         }
@@ -8832,7 +9447,10 @@ impl ScenarioApp {
                     Ok(false)
                 };
                 match result {
-                    Ok(true) => self.mark_project_dirty(),
+                    Ok(true) => {
+                        self.invalidate_github_authoring_previews();
+                        self.mark_project_dirty();
+                    }
                     Ok(false) => {}
                     Err(error) => self.file_message = Some((true, error)),
                 }
@@ -13590,7 +14208,9 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, dark: bool) {
 
 fn action_color(action: &Action, dark: bool) -> Color32 {
     match action {
-        Action::GithubListRepositories => ui_tone(UiTone::Primary, dark),
+        Action::GithubListRepositories | Action::GithubSelectRepositories { .. } => {
+            ui_tone(UiTone::Primary, dark)
+        }
         Action::ForEach { .. } => ui_tone(UiTone::Success, dark),
         Action::ForEachGitCloneIfMissing { .. } => ui_tone(UiTone::Primary, dark),
         Action::CreateDirectory(_) | Action::InspectPath(_) | Action::WriteFile(_) => {
@@ -13620,6 +14240,7 @@ fn action_color(action: &Action, dark: bool) -> Color32 {
 fn action_icon(action: &Action) -> &'static str {
     match action {
         Action::GithubListRepositories => "GH",
+        Action::GithubSelectRepositories { .. } => "GH✓",
         Action::ForEach { .. } => "∀",
         Action::ForEachGitCloneIfMissing { .. } => "⌘",
         Action::CreateDirectory(_) => "+DIR",
@@ -13652,6 +14273,7 @@ fn action_icon(action: &Action) -> &'static str {
 fn action_eyebrow(action: &Action) -> &'static str {
     match action {
         Action::GithubListRepositories => "Репозитории GitHub",
+        Action::GithubSelectRepositories { .. } => "Выбор GitHub",
         Action::ForEach { .. } => "Цикл",
         Action::ForEachGitCloneIfMissing { .. } => "Клонирование в цикле",
         Action::CreateDirectory(_) => "Папка",
@@ -13887,6 +14509,7 @@ fn action_supports_gui_run(action: &Action) -> bool {
         | Action::RunScript { .. }
         | Action::ConfigurePackageRegistryFiles { .. } => false,
         Action::GithubListRepositories
+        | Action::GithubSelectRepositories { .. }
         | Action::ForEach { .. }
         | Action::ForEachGitCloneIfMissing { .. }
         | Action::CreateDirectory(_)
@@ -14234,11 +14857,121 @@ impl<'a> EditableProjectFile<'a> {
     }
 }
 
+fn validate_github_authoring_privacy(project: &ScenarioProject) -> anyhow::Result<()> {
+    fn validate_graph(
+        graph: &WorkflowGraph,
+        scenario_root: &WorkflowGraph,
+        scenario_id: &str,
+    ) -> anyhow::Result<()> {
+        for node in &graph.nodes {
+            if let GraphNode::Action(action) = node {
+                if let Action::GithubSelectRepositories {
+                    github,
+                    expected_account_login,
+                    ..
+                } = &action.step.action
+                {
+                    anyhow::ensure!(
+                        action.step.bindings.is_empty(),
+                        "сценарий {scenario_id}, блок {}: graph-v3 selector не должен сохранять встроенные step.bindings; используйте только ActionNode.bindings",
+                        action.step.id
+                    );
+                    anyhow::ensure!(
+                        github.repositories.is_empty(),
+                        "сценарий {scenario_id}, блок {}: предпросмотр GitHub хранится только в памяти; очистите github.repositories",
+                        action.step.id
+                    );
+                    anyhow::ensure!(
+                        github.account.login == *expected_account_login,
+                        "сценарий {scenario_id}, блок {}: логин-заглушка GitHub должен совпадать с ожидаемым аккаунтом",
+                        action.step.id
+                    );
+                    anyhow::ensure!(
+                        action.bindings.len() == 1,
+                        "сценарий {scenario_id}, блок {}: сохранение требует единственную прямую привязку github от блока получения репозиториев",
+                        action.step.id
+                    );
+                    let exact_binding =
+                        action
+                            .bindings
+                            .first_key_value()
+                            .is_some_and(|(target, binding)| {
+                                target == "github"
+                                    && matches!(
+                                        binding,
+                                        Binding::Field { field }
+                                            if matches!(field.scope, ContextScope::Step { .. })
+                                                && field.segments
+                                                    == [ContextPathSegment::field("github")]
+                                    )
+                            });
+                    anyhow::ensure!(
+                        exact_binding,
+                        "сценарий {scenario_id}, блок {}: github должен быть прямой whole-field привязкой от блока получения репозиториев; literal/template сохранять нельзя",
+                        action.step.id
+                    );
+                    let Binding::Field { field } = action.bindings.get("github").unwrap() else {
+                        unreachable!("exact binding checked above")
+                    };
+                    let ContextScope::Step { step_id } = &field.scope else {
+                        unreachable!("exact binding checked above")
+                    };
+                    anyhow::ensure!(
+                        matches!(
+                            graph_node(scenario_root, step_id),
+                            Some(GraphNode::Action(source))
+                                if matches!(source.step.action, Action::GithubListRepositories)
+                        ),
+                        "сценарий {scenario_id}, блок {}: источник github должен быть блоком получения репозиториев в той же графовой области",
+                        action.step.id
+                    );
+                }
+            }
+            match node {
+                GraphNode::ForEach(node) => validate_graph(&node.body, scenario_root, scenario_id)?,
+                GraphNode::If(node) => {
+                    validate_graph(&node.then_graph, scenario_root, scenario_id)?;
+                    if let Some(graph) = &node.else_graph {
+                        validate_graph(graph, scenario_root, scenario_id)?;
+                    }
+                }
+                GraphNode::Switch(node) => {
+                    for case in &node.cases {
+                        validate_graph(&case.graph, scenario_root, scenario_id)?;
+                    }
+                    if let Some(graph) = &node.default {
+                        validate_graph(graph, scenario_root, scenario_id)?;
+                    }
+                }
+                GraphNode::Action(_) | GraphNode::Join(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_entries(entries: &[ProjectEntry]) -> anyhow::Result<()> {
+        for entry in entries {
+            match entry {
+                ProjectEntry::Group { entries, .. } => validate_entries(entries)?,
+                ProjectEntry::Scenario { task } => {
+                    if let Some(graph) = &task.graph {
+                        validate_graph(graph, graph, &task.id)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    validate_entries(&project.entries)
+}
+
 fn write_project_file(path: &Path, project: &ScenarioProject) -> anyhow::Result<()> {
     // Project authoring deliberately permits structurally sound but not yet
     // runnable graphs. Standalone Task serialization stays strict; this
     // project-specific wire preserves an in-progress graph so it can be
     // reopened and repaired before plan/apply validation.
+    validate_github_authoring_privacy(project)?;
     let yaml = serde_yaml::to_string(&EditableProjectFile::from_project(project)?)?;
     let parent = path
         .parent()
@@ -14533,6 +15266,9 @@ mod tests {
             run_receiver: None,
             run_checks_github_auth: false,
             github_picker: GithubPickerState::default(),
+            github_authoring_previews: BTreeMap::new(),
+            github_filter_searches: BTreeMap::new(),
+            github_authoring_generation: 0,
             file_message: None,
             custom_project: Some(project),
             project_path: None,
@@ -15046,6 +15782,154 @@ mod tests {
         assert!(!app.project_dirty);
         assert!(path.is_file());
         assert!(read_project_file(&path).is_ok());
+    }
+
+    #[test]
+    fn project_save_rejects_github_selector_literal_metadata_before_writing() {
+        let mut graph = WorkflowGraph::default();
+        let source_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GithubListRepositories),
+        )
+        .unwrap();
+        let selector_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootAfter { node_id: source_id },
+            Some(EdgePort::Success),
+            ComposerGraphBlockKind::Action(ActionKind::GithubSelectRepositories),
+        )
+        .unwrap();
+        let Some(GraphNode::Action(selector)) = graph_node_mut(&mut graph, &selector_id) else {
+            panic!("GitHub selector expected");
+        };
+        selector.bindings.insert(
+            "github".into(),
+            Binding::literal(serde_json::json!({
+                "account": { "login": "private-user" },
+                "repositories": [{
+                    "id": "R_sensitive",
+                    "owner": "private-org",
+                    "name": "unannounced-product",
+                    "full_name": "private-org/unannounced-product",
+                    "https_url": "https://github.com/private-org/unannounced-product",
+                    "ssh_url": "git@github.com:private-org/unannounced-product.git",
+                    "default_branch": "main",
+                    "private": true,
+                    "archived": false
+                }]
+            })),
+        );
+        let project = composer_project_with_canvas(
+            graph_authoring_test_task("privacy", graph),
+            ComposerCanvas::default(),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("project.ppduster.yaml");
+        fs::write(&destination, "last known good contents").unwrap();
+
+        let error = write_project_file(&destination, &project).unwrap_err();
+
+        assert!(format!("{error:#}").contains("literal/template"));
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "last known good contents"
+        );
+        assert!(!fs::read_to_string(&destination)
+            .unwrap()
+            .contains("unannounced-product"));
+    }
+
+    #[test]
+    fn project_save_rejects_sensitive_github_metadata_in_selector_step_bindings() {
+        let mut graph = WorkflowGraph::default();
+        let source_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GithubListRepositories),
+        )
+        .unwrap();
+        let selector_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootAfter { node_id: source_id },
+            Some(EdgePort::Success),
+            ComposerGraphBlockKind::Action(ActionKind::GithubSelectRepositories),
+        )
+        .unwrap();
+        let Some(GraphNode::Action(selector)) = graph_node_mut(&mut graph, &selector_id) else {
+            panic!("GitHub selector expected");
+        };
+        const SENSITIVE_SENTINEL: &str = "private-org/stealth-step-binding-repository";
+        selector.step.bindings.insert(
+            "github".into(),
+            Binding::literal(serde_json::json!({
+                "account": { "login": "private-user" },
+                "repositories": [{
+                    "id": "R_sensitive_step_binding",
+                    "owner": "private-org",
+                    "name": "stealth-step-binding-repository",
+                    "full_name": SENSITIVE_SENTINEL,
+                    "https_url": "https://github.com/private-org/stealth-step-binding-repository",
+                    "ssh_url": "git@github.com:private-org/stealth-step-binding-repository.git",
+                    "default_branch": "main",
+                    "private": true,
+                    "archived": false
+                }]
+            })),
+        );
+        let project = composer_project_with_canvas(
+            graph_authoring_test_task("step-binding-privacy", graph),
+            ComposerCanvas::default(),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("project.ppduster.yaml");
+        fs::write(&destination, "last known good contents").unwrap();
+
+        let error = write_project_file(&destination, &project).unwrap_err();
+
+        assert!(format!("{error:#}").contains("step.bindings"));
+        let persisted = fs::read_to_string(&destination).unwrap();
+        assert_eq!(persisted, "last known good contents");
+        assert!(!persisted.contains(SENSITIVE_SENTINEL));
+    }
+
+    #[test]
+    fn project_save_rejects_github_selector_account_mismatch_but_keeps_other_drafts_editable() {
+        let mut graph = WorkflowGraph::default();
+        let source_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GithubListRepositories),
+        )
+        .unwrap();
+        let selector_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootAfter { node_id: source_id },
+            Some(EdgePort::Success),
+            ComposerGraphBlockKind::Action(ActionKind::GithubSelectRepositories),
+        )
+        .unwrap();
+        let Some(GraphNode::Action(selector)) = graph_node_mut(&mut graph, &selector_id) else {
+            panic!("GitHub selector expected");
+        };
+        let Action::GithubSelectRepositories {
+            expected_account_login,
+            ..
+        } = &mut selector.step.action
+        else {
+            unreachable!()
+        };
+        *expected_account_login = "different-user".into();
+        let project = composer_project_with_canvas(
+            graph_authoring_test_task("mismatch", graph),
+            ComposerCanvas::default(),
+        );
+
+        let error = validate_github_authoring_privacy(&project).unwrap_err();
+        assert!(format!("{error:#}").contains("логин-заглушка"));
     }
 
     #[test]
@@ -18538,14 +19422,26 @@ task:
 
     #[test]
     fn graph_authoring_matrix_covers_every_action_at_root_and_in_foreach() {
-        let action_kinds = ActionKind::ALL
+        let all_action_kinds = ActionKind::ALL
             .into_iter()
             .filter(|kind| kind.is_graph_action())
             .collect::<Vec<_>>();
         assert_eq!(
+            all_action_kinds.len(),
+            24,
+            "update the authoring matrix for new actions"
+        );
+        // The GitHub selector is intentionally context-dependent and has its
+        // own source -> selector authoring test below. A standalone/root or
+        // arbitrary loop-body instance is an invalid draft by design.
+        let action_kinds = all_action_kinds
+            .into_iter()
+            .filter(|kind| *kind != ActionKind::GithubSelectRepositories)
+            .collect::<Vec<_>>();
+        assert_eq!(
             action_kinds.len(),
             23,
-            "update the authoring matrix for new actions"
+            "update the context-free authoring matrix for new actions"
         );
 
         for kind in action_kinds {
@@ -18808,6 +19704,7 @@ task:
                         | ActionKind::GitCloneIfMissing
                         | ActionKind::GitFetch
                         | ActionKind::GitFastForward
+                        | ActionKind::GithubSelectRepositories
                 )
         }) {
             let id = graph_insert_composer_block(
@@ -19828,7 +20725,7 @@ task:
         // The raw leaf schema has 77 inputs. The three required identity
         // leaves are intentionally represented by one atomic object control,
         // eliminating two unsafe partial controls.
-        assert_eq!(offered, 75, "update the manual-input authoring matrix");
+        assert_eq!(offered, 77, "update the manual-input authoring matrix");
     }
 
     #[test]
@@ -20714,6 +21611,339 @@ task:
         assert!(!app.run_checks_github_auth);
         assert!(!app.running);
         assert!(app.run_receiver.is_none());
+    }
+
+    #[test]
+    fn github_authoring_preview_search_is_case_insensitive_and_matches_owner() {
+        let mut alpha = github_repository("R_alpha", "acme/Alpha", "main");
+        alpha.owner_name = Some("Example Team".into());
+        let beta = github_repository("R_beta", "octocat/beta", "main");
+        let repositories = vec![alpha, beta];
+
+        let by_name = github_preview_visible_repositories(&repositories, "ALPHA");
+        assert_eq!(
+            by_name
+                .iter()
+                .map(|repo| repo.id.as_str())
+                .collect::<Vec<_>>(),
+            ["R_alpha"]
+        );
+
+        let by_owner = github_preview_visible_repositories(&repositories, "example team");
+        assert_eq!(
+            by_owner
+                .iter()
+                .map(|repo| repo.id.as_str())
+                .collect::<Vec<_>>(),
+            ["R_alpha"]
+        );
+
+        assert_eq!(
+            github_preview_visible_repositories(&repositories, "").len(),
+            repositories.len()
+        );
+    }
+
+    #[test]
+    fn github_filter_preview_key_uses_exact_scenario_path_and_whole_source_output() {
+        let mut selector = ActionNode {
+            step: default_step(ActionKind::GithubSelectRepositories, "selector").unwrap(),
+            bindings: BTreeMap::from([(
+                "github".into(),
+                Binding::field(FieldRef::step("source").field("github")),
+            )]),
+        };
+        assert_eq!(
+            github_filter_source_key(Some(&[2, 4]), "duplicate-task-id", &selector),
+            Some(GithubAuthoringPreviewKey::new(
+                vec![2, 4],
+                "duplicate-task-id",
+                "source"
+            ))
+        );
+        assert!(github_filter_source_key(None, "duplicate-task-id", &selector).is_none());
+
+        selector.bindings.insert(
+            "github".into(),
+            Binding::field(
+                FieldRef::step("source")
+                    .field("github")
+                    .field("repositories"),
+            ),
+        );
+        assert!(github_filter_source_key(Some(&[2, 4]), "duplicate-task-id", &selector).is_none());
+    }
+
+    #[test]
+    fn adding_github_selector_after_list_auto_binds_the_whole_github_context() {
+        let mut graph = WorkflowGraph::default();
+        let source_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GithubListRepositories),
+        )
+        .unwrap();
+        let selector_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootAfter {
+                node_id: source_id.clone(),
+            },
+            Some(EdgePort::Success),
+            ComposerGraphBlockKind::Action(ActionKind::GithubSelectRepositories),
+        )
+        .unwrap();
+
+        let Some(GraphNode::Action(selector)) = graph_node(&graph, &selector_id) else {
+            panic!("GitHub selector action expected");
+        };
+        assert_eq!(
+            selector.bindings,
+            BTreeMap::from([(
+                "github".into(),
+                Binding::field(FieldRef::step(&source_id).field("github")),
+            )])
+        );
+        graph.validate().unwrap();
+    }
+
+    #[test]
+    fn authoring_preview_load_is_isolated_from_picker_state() {
+        let task = github_repository_composer_task(1);
+        let task_id = task.id.clone();
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            task,
+            ComposerCanvas::default(),
+        ));
+        let key = GithubAuthoringPreviewKey::new(vec![0], task_id, "list-repositories");
+        let picker_repository = github_repository("R_picker", "picker/unchanged", "main");
+        app.github_picker.repositories = vec![picker_repository.clone()];
+        app.github_picker.loaded_once = true;
+        app.github_picker.error = Some("picker error remains isolated".into());
+
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(GithubAccountRepositories {
+                login: "preview-user".into(),
+                repositories: vec![github_repository(
+                    "R_preview",
+                    "preview/only-in-memory",
+                    "main",
+                )],
+            }))
+            .unwrap();
+        app.github_picker.receiver = Some(receiver);
+        app.github_picker.loading = true;
+        app.github_picker.repository_load_target = Some(GithubRepositoryLoadTarget::Authoring {
+            key: key.clone(),
+            generation: app.github_authoring_generation,
+        });
+
+        app.poll_github_repository_load(&egui::Context::default());
+
+        let preview = app.github_authoring_previews.get(&key).unwrap();
+        assert_eq!(preview.account_login.as_deref(), Some("preview-user"));
+        assert_eq!(preview.repositories[0].id, "R_preview");
+        assert_eq!(app.github_picker.repositories, [picker_repository]);
+        assert!(app.github_picker.loaded_once);
+        assert_eq!(
+            app.github_picker.error.as_deref(),
+            Some("picker error remains isolated")
+        );
+    }
+
+    #[test]
+    fn stale_authoring_preview_response_is_discarded_after_generation_change() {
+        let task = github_repository_composer_task(1);
+        let task_id = task.id.clone();
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            task,
+            ComposerCanvas::default(),
+        ));
+        let key = GithubAuthoringPreviewKey::new(vec![0], task_id, "list-repositories");
+        let stale_generation = app.github_authoring_generation;
+        app.invalidate_github_authoring_previews();
+
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(GithubAccountRepositories {
+                login: "stale-user".into(),
+                repositories: vec![github_repository("R_stale", "stale/repository", "main")],
+            }))
+            .unwrap();
+        app.github_picker.receiver = Some(receiver);
+        app.github_picker.loading = true;
+        app.github_picker.repository_load_target = Some(GithubRepositoryLoadTarget::Authoring {
+            key: key.clone(),
+            generation: stale_generation,
+        });
+
+        app.poll_github_repository_load(&egui::Context::default());
+
+        assert!(!app.github_authoring_previews.contains_key(&key));
+        assert!(!app.github_picker.loading);
+        assert!(app.github_picker.receiver.is_none());
+    }
+
+    #[test]
+    fn deleting_and_recreating_nested_github_source_rejects_late_same_id_response() {
+        let mut graph = WorkflowGraph::default();
+        let loop_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::ForEach,
+        )
+        .unwrap();
+        let scope = ComposerGraphNestedScope::ForEachBody { owner_id: loop_id };
+        let source_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::NestedStart {
+                scope: scope.clone(),
+            },
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GithubListRepositories),
+        )
+        .unwrap();
+        let task = graph_authoring_test_task("nested-preview", graph);
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            task,
+            ComposerCanvas::default(),
+        ));
+        app.selected_node = Some(source_id.clone());
+        let key = GithubAuthoringPreviewKey::new(vec![0], "nested-preview", &source_id);
+        app.github_authoring_previews.insert(
+            key.clone(),
+            GithubAuthoringPreview {
+                account_login: Some("before-delete".into()),
+                loaded_once: true,
+                ..GithubAuthoringPreview::default()
+            },
+        );
+        let stale_generation = app.github_authoring_generation;
+
+        app.remove_composer_node(&source_id);
+
+        assert!(app.github_authoring_previews.is_empty());
+        assert_ne!(app.github_authoring_generation, stale_generation);
+        let recreated_id = {
+            let graph = app
+                .custom_project
+                .as_mut()
+                .unwrap()
+                .scenario_mut(&[0])
+                .unwrap()
+                .graph
+                .as_mut()
+                .unwrap();
+            graph_insert_composer_block(
+                graph,
+                &ComposerGraphAttach::NestedStart { scope },
+                None,
+                ComposerGraphBlockKind::Action(ActionKind::GithubListRepositories),
+            )
+            .unwrap()
+        };
+        assert_eq!(recreated_id, source_id);
+        assert!(app.github_preview_key_is_current(&key));
+
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(GithubAccountRepositories {
+                login: "late-old-session".into(),
+                repositories: vec![github_repository("R_late", "late/repository", "main")],
+            }))
+            .unwrap();
+        app.github_picker.receiver = Some(receiver);
+        app.github_picker.loading = true;
+        app.github_picker.repository_load_target = Some(GithubRepositoryLoadTarget::Authoring {
+            key: key.clone(),
+            generation: stale_generation,
+        });
+
+        app.poll_github_repository_load(&egui::Context::default());
+
+        assert!(!app.github_authoring_previews.contains_key(&key));
+    }
+
+    #[test]
+    fn authoring_preview_metadata_is_not_serialized_into_the_project() {
+        let task = github_repository_composer_task(1);
+        let task_id = task.id.clone();
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            task,
+            ComposerCanvas::default(),
+        ));
+        let before = serde_yaml::to_string(app.custom_project.as_ref().unwrap()).unwrap();
+        app.github_authoring_previews.insert(
+            GithubAuthoringPreviewKey::new(vec![0], task_id, "list-repositories"),
+            GithubAuthoringPreview {
+                account_login: Some("preview-only-user".into()),
+                repositories: vec![github_repository(
+                    "R_preview_only",
+                    "preview/metadata-must-not-persist",
+                    "main",
+                )],
+                loaded_once: true,
+                error: None,
+            },
+        );
+
+        let after = serde_yaml::to_string(app.custom_project.as_ref().unwrap()).unwrap();
+        assert_eq!(after, before);
+        assert!(!after.contains("R_preview_only"));
+        assert!(!after.contains("metadata-must-not-persist"));
+    }
+
+    #[test]
+    fn account_mismatch_requires_explicit_repin_and_repin_clears_old_selection() {
+        let mut selector = ActionNode {
+            step: default_step(ActionKind::GithubSelectRepositories, "selector").unwrap(),
+            bindings: BTreeMap::from([(
+                "github".into(),
+                Binding::field(FieldRef::step("source").field("github")),
+            )]),
+        };
+        assert!(!github_preview_account_matches(
+            Some("new-account"),
+            "github-user"
+        ));
+        let Action::GithubSelectRepositories {
+            expected_account_login,
+            repository_ids,
+            ..
+        } = &selector.step.action
+        else {
+            unreachable!()
+        };
+        assert_eq!(expected_account_login, "github-user");
+        assert!(repository_ids.is_empty());
+
+        assert!(apply_github_filter_selection(
+            &mut selector,
+            "new-account",
+            &[
+                github_repository("R_2", "owner/two", "main"),
+                github_repository("R_1", "owner/one", "main"),
+            ],
+            BTreeSet::from(["R_2".into(), "R_1".into()]),
+        ));
+        let Action::GithubSelectRepositories {
+            github,
+            expected_account_login,
+            repository_ids,
+        } = &selector.step.action
+        else {
+            unreachable!()
+        };
+        assert_eq!(github.account.login, "new-account");
+        assert!(github.repositories.is_empty());
+        assert_eq!(expected_account_login, "new-account");
+        assert_eq!(repository_ids, &["R_2", "R_1"]);
+        assert!(github_preview_account_matches(
+            Some("new-account"),
+            expected_account_login
+        ));
     }
 
     #[test]

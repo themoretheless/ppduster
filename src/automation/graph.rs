@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::binding::{parse_binding_target, resolve_binding, BindingLimits};
-use super::block::definition_for_action;
+use super::block::{definition_for_action, ActionKind};
 use super::context::{
     Binding, ContextOrigin, ContextPathSegment, ContextProvenance, ContextScope, ContextStore,
     ContextType, ContextValue, FieldRef, FieldSchema, ObjectSchema, ResolvedSchemaOwned,
@@ -21,7 +21,7 @@ use super::context::{
 use super::expression::{
     check_rule, ExpressionLimits, ExpressionV1, ExpressionValue, ReferenceV1, RuleExprV1,
 };
-use super::task::{Action, AuthPolicy, ElevationPolicy, Step, StepCondition};
+use super::task::{Action, AuthPolicy, ElevationPolicy, GithubContextInput, Step, StepCondition};
 
 /// Current serialized workflow graph version.
 pub const WORKFLOW_GRAPH_VERSION: u32 = 3;
@@ -1426,6 +1426,7 @@ impl fmt::Display for GraphValidationErrorKind {
 struct GraphValidator {
     global_ids: BTreeMap<String, String>,
     global_output_schemas: BTreeMap<String, ObjectSchema>,
+    global_action_kinds: BTreeMap<String, ActionKind>,
     global_script_exit_codes: BTreeMap<String, Option<BTreeSet<u32>>>,
     errors: Vec<GraphValidationError>,
     error_limit_reached: bool,
@@ -2108,6 +2109,9 @@ impl GraphValidator {
             }
 
             if let GraphNode::Action(action) = node {
+                self.global_action_kinds
+                    .entry(id.into())
+                    .or_insert_with(|| action.step.action.kind());
                 self.global_output_schemas
                     .entry(id.into())
                     .or_insert_with(|| definition_for_action(&action.step.action).output_schema);
@@ -2445,6 +2449,20 @@ impl GraphValidator {
                             &dominators,
                         );
                     }
+                    if let Action::GithubSelectRepositories {
+                        github,
+                        expected_account_login,
+                        ..
+                    } = &action.step.action
+                    {
+                        self.validate_github_repository_selection(
+                            action,
+                            github,
+                            expected_account_login,
+                            node_id,
+                            &node_path,
+                        );
+                    }
                     for condition in [action.step.when.as_ref(), action.step.require.as_ref()]
                         .into_iter()
                         .flatten()
@@ -2717,6 +2735,82 @@ impl GraphValidator {
                 }
                 GraphNode::Join(_) => {}
             }
+        }
+    }
+
+    fn validate_github_repository_selection(
+        &mut self,
+        action: &ActionNode,
+        placeholder: &GithubContextInput,
+        expected_account_login: &str,
+        node: &str,
+        path: &str,
+    ) {
+        if !placeholder.repositories.is_empty() {
+            self.error(
+                path,
+                GraphValidationErrorKind::InvalidAction {
+                    node: node.into(),
+                    message: "github-select-repositories must not persist repository preview metadata; keep github.repositories empty and bind live data from the upstream list block".into(),
+                },
+            );
+        }
+        if placeholder.account.login != expected_account_login {
+            self.error(
+                path,
+                GraphValidationErrorKind::InvalidAction {
+                    node: node.into(),
+                    message: "github-select-repositories placeholder account login must equal expected_account_login".into(),
+                },
+            );
+        }
+
+        if action.bindings.len() != 1 {
+            self.error(
+                path,
+                GraphValidationErrorKind::InvalidAction {
+                    node: node.into(),
+                    message: "github-select-repositories requires exactly one binding: the whole github field from an upstream github-list-repositories block".into(),
+                },
+            );
+            return;
+        }
+        let Some((target, binding)) = action.bindings.first_key_value() else {
+            return;
+        };
+        let target_is_github = parse_binding_target(target, BindingLimits::default())
+            .is_ok_and(|segments| segments == [ContextPathSegment::field("github")]);
+        let Binding::Field { field } = binding else {
+            self.error(
+                path,
+                GraphValidationErrorKind::InvalidAction {
+                    node: node.into(),
+                    message: "github-select-repositories github input must be a direct structural field binding".into(),
+                },
+            );
+            return;
+        };
+        let ContextScope::Step { step_id: producer } = &field.scope else {
+            self.error(
+                path,
+                GraphValidationErrorKind::InvalidAction {
+                    node: node.into(),
+                    message: "github-select-repositories github input must come directly from an action step".into(),
+                },
+            );
+            return;
+        };
+        let source_is_whole_github = field.segments == [ContextPathSegment::field("github")];
+        let producer_is_repository_list =
+            self.global_action_kinds.get(producer) == Some(&ActionKind::GithubListRepositories);
+        if !target_is_github || !source_is_whole_github || !producer_is_repository_list {
+            self.error(
+                path,
+                GraphValidationErrorKind::InvalidAction {
+                    node: node.into(),
+                    message: "github-select-repositories requires an exact whole-field binding github <- <upstream github-list-repositories>.github".into(),
+                },
+            );
         }
     }
 
@@ -4402,6 +4496,23 @@ mod tests {
         }))
     }
 
+    fn repository_selection(id: &str, producer: &str) -> GraphNode {
+        GraphNode::Action(Box::new(ActionNode {
+            step: default_step(ActionKind::GithubSelectRepositories, id).unwrap(),
+            bindings: BTreeMap::from([(
+                "github".into(),
+                Binding::field(FieldRef::step(producer).field("github")),
+            )]),
+        }))
+    }
+
+    fn mutating_directory_action(id: &str) -> GraphNode {
+        GraphNode::Action(Box::new(ActionNode {
+            step: default_step(ActionKind::CreateDirectory, id).unwrap(),
+            bindings: BTreeMap::new(),
+        }))
+    }
+
     fn identifier_action_with_ref(id: &str, field: FieldRef) -> GraphNode {
         let mut consumer = step(id);
         consumer.action = Action::BrewInstall {
@@ -4516,6 +4627,133 @@ mod tests {
             vec![GraphEdge::new("list", EdgePort::Success, "clone")],
         );
         assert!(graph.validate().is_ok());
+    }
+
+    #[test]
+    fn github_selection_requires_exact_list_binding_and_guards_mutations() {
+        let valid = graph(
+            &["list"],
+            vec![
+                action("list"),
+                repository_selection("select", "list"),
+                mutating_directory_action("mutate"),
+            ],
+            vec![
+                GraphEdge::new("list", EdgePort::Success, "select"),
+                GraphEdge::new("select", EdgePort::Success, "mutate"),
+            ],
+        );
+        assert!(valid.validate().is_ok(), "{:?}", valid.validate());
+
+        let parallel_mutation = graph(
+            &["list", "mutate"],
+            vec![
+                action("list"),
+                repository_selection("select", "list"),
+                mutating_directory_action("mutate"),
+            ],
+            vec![GraphEdge::new("list", EdgePort::Success, "select")],
+        );
+        assert!(
+            parallel_mutation.validate().is_ok(),
+            "an independent entry is not selected-data dependent"
+        );
+
+        let failure_route = graph(
+            &["list"],
+            vec![
+                action("list"),
+                repository_selection("select", "list"),
+                mutating_directory_action("mutate"),
+            ],
+            vec![
+                GraphEdge::new("list", EdgePort::Success, "select"),
+                GraphEdge::new("select", EdgePort::Failure, "mutate"),
+            ],
+        );
+        assert!(
+            failure_route.validate().is_ok(),
+            "explicit failure recovery remains valid"
+        );
+    }
+
+    #[test]
+    fn github_selection_rejects_policy_overrides_and_persisted_preview_data() {
+        let mut override_node = repository_selection("select", "list");
+        let GraphNode::Action(override_action) = &mut override_node else {
+            unreachable!()
+        };
+        override_action.bindings.insert(
+            "expected_account_login".into(),
+            Binding::literal("attacker"),
+        );
+        let override_graph = graph(
+            &["list"],
+            vec![action("list"), override_node],
+            vec![GraphEdge::new("list", EdgePort::Success, "select")],
+        );
+        let result = override_graph.validate();
+        assert!(has_error(&result, |kind| matches!(
+            kind,
+            GraphValidationErrorKind::UnknownBindingField { node, field }
+                if node == "select" && field == "expected_account_login"
+        )));
+
+        let mut preview_node = repository_selection("select", "list");
+        let GraphNode::Action(preview_action) = &mut preview_node else {
+            unreachable!()
+        };
+        let Action::GithubSelectRepositories { github, .. } = &mut preview_action.step.action
+        else {
+            unreachable!()
+        };
+        github
+            .repositories
+            .push(super::super::task::GithubRepositoryInput {
+                id: "R_1".into(),
+                owner: "owner".into(),
+                name: "repo".into(),
+                full_name: "owner/repo".into(),
+                https_url: "https://github.com/owner/repo".into(),
+                ssh_url: "git@github.com:owner/repo.git".into(),
+                default_branch: Some("main".into()),
+                private: false,
+                archived: false,
+            });
+        let preview_graph = graph(
+            &["list"],
+            vec![action("list"), preview_node],
+            vec![GraphEdge::new("list", EdgePort::Success, "select")],
+        );
+        let result = preview_graph.validate();
+        assert!(has_error(&result, |kind| matches!(
+            kind,
+            GraphValidationErrorKind::InvalidAction { node, message }
+                if node == "select" && message.contains("must not persist")
+        )));
+
+        let mut guarded_node = repository_selection("select", "list");
+        let GraphNode::Action(guarded_action) = &mut guarded_node else {
+            unreachable!()
+        };
+        guarded_action.step.when = Some(StepCondition::Path {
+            path: "/tmp".into(),
+            expect: super::super::task::PathExpectation {
+                exists: Some(false),
+                ..super::super::task::PathExpectation::default()
+            },
+        });
+        let guarded_graph = graph(
+            &["list"],
+            vec![action("list"), guarded_node],
+            vec![GraphEdge::new("list", EdgePort::Success, "select")],
+        );
+        let result = guarded_graph.validate();
+        assert!(has_error(&result, |kind| matches!(
+            kind,
+            GraphValidationErrorKind::InvalidAction { node, message }
+                if node == "select" && message.contains("cannot declare when, require, or check")
+        )));
     }
 
     #[test]

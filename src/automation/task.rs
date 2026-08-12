@@ -10,7 +10,7 @@ use crate::automation::graph::{
 use crate::rules::Platform;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -821,10 +821,61 @@ fn default_script_success_exit_codes() -> Vec<u32> {
     vec![0]
 }
 
+const MAX_GITHUB_ACCOUNT_LOGIN_BYTES: usize = 256;
+const MAX_SELECTED_GITHUB_REPOSITORIES: usize = 200;
+const MAX_GITHUB_REPOSITORY_ID_BYTES: usize = 1_024;
+
+/// Public, non-secret GitHub context accepted by repository-selection blocks.
+///
+/// This mirrors the stable `ppduster.github.context@1` output contract. It is
+/// embedded in the action only as a schema-valid authoring placeholder and is
+/// replaced by the required structural binding from a repository-list block at
+/// runtime.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubContextInput {
+    pub account: GithubAccountInput,
+    #[serde(default, skip_serializing)]
+    pub repositories: Vec<GithubRepositoryInput>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubAccountInput {
+    pub login: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubRepositoryInput {
+    /// Opaque GitHub GraphQL node ID.
+    pub id: String,
+    pub owner: String,
+    pub name: String,
+    pub full_name: String,
+    pub https_url: String,
+    pub ssh_url: String,
+    #[serde(default)]
+    pub default_branch: Option<String>,
+    pub private: bool,
+    pub archived: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Action {
     GithubListRepositories,
+    GithubSelectRepositories {
+        /// Must be structurally bound from the whole `github` output of an
+        /// upstream `github-list-repositories` action.
+        github: GithubContextInput,
+        /// Account captured while authoring. Runtime requires an exact match
+        /// with the freshly listed upstream account before publishing output.
+        expected_account_login: String,
+        /// Exact opaque GraphQL node IDs selected while authoring.
+        #[serde(default)]
+        repository_ids: Vec<String>,
+    },
     ForEach {
         source_step: String,
         array_path: String,
@@ -1280,6 +1331,67 @@ impl Step {
                     return Err(format!(
                         "step {} github-list-repositories must be read-only and must not request authentication or elevation",
                         self.id
+                    ));
+                }
+            }
+            Action::GithubSelectRepositories {
+                expected_account_login,
+                repository_ids,
+                ..
+            } => {
+                if !matches!(self.auth, AuthPolicy::None)
+                    || !matches!(self.allow_elevation, ElevationPolicy::Forbidden)
+                    || self.dangerous
+                {
+                    return Err(format!(
+                        "step {} github-select-repositories must be read-only and must not request authentication or elevation",
+                        self.id
+                    ));
+                }
+                if self.when.is_some() || self.require.is_some() || self.check.is_some() {
+                    return Err(format!(
+                        "step {} github-select-repositories cannot declare when, require, or check guards because downstream success requires a freshly validated selection output",
+                        self.id
+                    ));
+                }
+                if expected_account_login.is_empty()
+                    || expected_account_login.len() > MAX_GITHUB_ACCOUNT_LOGIN_BYTES
+                    || !expected_account_login.chars().all(|character| {
+                        character.is_alphanumeric() || matches!(character, '-' | '_' | '.')
+                    })
+                {
+                    return Err(format!(
+                        "step {} github-select-repositories requires a non-empty expected account login of at most {} bytes",
+                        self.id, MAX_GITHUB_ACCOUNT_LOGIN_BYTES
+                    ));
+                }
+                if repository_ids.len() > MAX_SELECTED_GITHUB_REPOSITORIES {
+                    return Err(format!(
+                        "step {} github-select-repositories selects {} repositories; limit is {}",
+                        self.id,
+                        repository_ids.len(),
+                        MAX_SELECTED_GITHUB_REPOSITORIES
+                    ));
+                }
+                let mut unique = BTreeSet::new();
+                if let Some(invalid) = repository_ids.iter().find(|repository_id| {
+                    repository_id.is_empty()
+                        || repository_id.len() > MAX_GITHUB_REPOSITORY_ID_BYTES
+                        || repository_id.contains('\0')
+                }) {
+                    return Err(format!(
+                        "step {} github-select-repositories contains an invalid repository ID of {} bytes",
+                        self.id,
+                        invalid.len()
+                    ));
+                }
+                if let Some(duplicate) = repository_ids
+                    .iter()
+                    .find(|repository_id| !unique.insert(repository_id.as_str()))
+                {
+                    return Err(format!(
+                        "step {} github-select-repositories contains duplicate repository ID {:?}",
+                        self.id, duplicate
                     ));
                 }
             }
@@ -1962,6 +2074,89 @@ mod tests {
     #[test]
     fn package_registry_action_validates() {
         package_registry_step().validate().unwrap();
+    }
+
+    #[test]
+    fn github_selection_policy_is_bounded_and_rejects_duplicate_ids() {
+        let selection = |login: String, repository_ids: Vec<String>| Step {
+            id: "select".into(),
+            name: String::new(),
+            bindings: BTreeMap::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
+            action: Action::GithubSelectRepositories {
+                github: GithubContextInput {
+                    account: GithubAccountInput {
+                        login: login.clone(),
+                    },
+                    repositories: Vec::new(),
+                },
+                expected_account_login: login,
+                repository_ids,
+            },
+        };
+
+        selection("octocat".into(), Vec::new()).validate().unwrap();
+        assert!(selection(String::new(), Vec::new())
+            .validate()
+            .unwrap_err()
+            .contains("non-empty expected account"));
+        assert!(
+            selection("octocat".into(), vec!["R_1".into(), "R_1".into()])
+                .validate()
+                .unwrap_err()
+                .contains("duplicate repository ID")
+        );
+        assert!(selection(
+            "octocat".into(),
+            vec!["R".repeat(MAX_GITHUB_REPOSITORY_ID_BYTES + 1)]
+        )
+        .validate()
+        .unwrap_err()
+        .contains("invalid repository ID"));
+        assert!(selection(
+            "octocat".into(),
+            (0..=MAX_SELECTED_GITHUB_REPOSITORIES)
+                .map(|index| format!("R_{index}"))
+                .collect()
+        )
+        .validate()
+        .unwrap_err()
+        .contains("limit is"));
+
+        for guard in ["when", "require", "check"] {
+            let mut guarded = selection("octocat".into(), Vec::new());
+            match guard {
+                "when" => {
+                    guarded.when = Some(StepCondition::Path {
+                        path: "/tmp".into(),
+                        expect: PathExpectation {
+                            exists: Some(false),
+                            ..PathExpectation::default()
+                        },
+                    });
+                }
+                "require" => {
+                    guarded.require = Some(StepCondition::Path {
+                        path: "/tmp".into(),
+                        expect: PathExpectation {
+                            exists: Some(true),
+                            ..PathExpectation::default()
+                        },
+                    });
+                }
+                "check" => guarded.check = Some(Check::default()),
+                _ => unreachable!(),
+            }
+            assert!(guarded
+                .validate()
+                .unwrap_err()
+                .contains("cannot declare when, require, or check"));
+        }
     }
 
     #[test]

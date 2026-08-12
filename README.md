@@ -86,6 +86,22 @@ block. Its typed output contains `github.account.login` and `github.repositories
 Each repository exposes `id`, `owner`, `name`, `full_name`, `https_url`, `ssh_url`,
 `default_branch`, `private`, and `archived`.
 
+The source block's inspector can sign in through GitHub CLI and **Load preview** without
+checking a plan, applying a plan, or executing the graph. The authoring preview can also
+be refreshed from the inspector of a downstream read-only **Select GitHub repositories**
+block. Add that block directly after **Get account repositories** to bind its complete
+`github` input automatically, then search the preview and select the required repositories.
+The selector publishes the same typed `github.account` and `github.repositories[]` shape,
+so a following **For each** block can use the filtered `github.repositories` array.
+
+Preview account and repository metadata exist only in application memory. The project YAML
+stores only the expected account login and the selected opaque GitHub repository node IDs;
+it stores neither the preview, credentials, nor a GitHub token. At runtime the upstream
+source obtains a fresh repository list through GitHub CLI. The selector requires the fresh
+account login to match and resolves every saved ID from that fresh list. A changed account,
+missing repository, or revoked access fails before any downstream mutation instead of using
+stale preview metadata or silently substituting another repository.
+
 To pass one concrete repository to a later **Check Git repository** block, select that
 block and use **Input context** for `Repository URL`: choose **From context**, select
 the earlier `github.repositories[]` output, enter the one-based element number, and

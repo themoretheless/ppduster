@@ -56,9 +56,10 @@ pub use runner::{
 pub use task::{
     Action, ActivateLicenseAction, AppBundleIdentity, AppStoreInstallAction, AppStoreOperation,
     ArchiveFormat, AuthPolicy, BambuStudioReleaseAction, Check, Checksum, CopyPathAction,
-    CreateDirectoryAction, ElevationPolicy, EncryptedSecretsSpec, IndeterminatePolicy,
-    InspectPathAction, LicenseMethod, LicenseProvider, NpmRegistryFileSpec, NugetRegistryFileSpec,
-    PathExpectation, PathKind, ReleaseChannel, RemovePathAction, RuleOutcomePolicy,
-    ScriptInterpreter, ShellMode, Step, StepCondition, Task, TaskFile, TaskMigrationError,
-    TrustRequirement, WriteConflictPolicy, WriteFileAction, TASK_FORMAT_VERSION,
+    CreateDirectoryAction, ElevationPolicy, EncryptedSecretsSpec, GithubAccountInput,
+    GithubContextInput, GithubRepositoryInput, IndeterminatePolicy, InspectPathAction,
+    LicenseMethod, LicenseProvider, NpmRegistryFileSpec, NugetRegistryFileSpec, PathExpectation,
+    PathKind, ReleaseChannel, RemovePathAction, RuleOutcomePolicy, ScriptInterpreter, ShellMode,
+    Step, StepCondition, Task, TaskFile, TaskMigrationError, TrustRequirement, WriteConflictPolicy,
+    WriteFileAction, TASK_FORMAT_VERSION,
 };

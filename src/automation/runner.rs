@@ -14,9 +14,9 @@ use crate::automation::graph::{
 use crate::automation::package_registry;
 use crate::automation::task::{
     Action, AppBundleIdentity, AppStoreOperation, ArchiveFormat, AuthPolicy, ElevationPolicy,
-    IndeterminatePolicy, InspectPathAction, LicenseMethod, LicenseProvider, PathExpectation,
-    PathKind, ReleaseChannel, ScriptInterpreter, ShellMode, Step, StepCondition, Task,
-    WriteConflictPolicy,
+    GithubContextInput, GithubRepositoryInput, IndeterminatePolicy, InspectPathAction,
+    LicenseMethod, LicenseProvider, PathExpectation, PathKind, ReleaseChannel, ScriptInterpreter,
+    ShellMode, Step, StepCondition, Task, WriteConflictPolicy,
 };
 use crate::github::get_account_repositories;
 use crate::ppstore::{self, InstallOutcome};
@@ -599,6 +599,7 @@ fn context_path(raw: &str) -> String {
 fn legacy_action_output(step: &Step, changed: bool) -> Option<StepOutput> {
     let output = match &step.action {
         Action::GithubListRepositories
+        | Action::GithubSelectRepositories { .. }
         | Action::InspectPath(_)
         | Action::RunCommand { .. }
         | Action::RunScript { .. } => return None,
@@ -1974,6 +1975,7 @@ fn binding_affects_preflight_policy(action: &Action, target: &str) -> bool {
         | Action::InstallDmg { .. }
         | Action::InstallPkg { .. } => true,
         Action::GithubListRepositories
+        | Action::GithubSelectRepositories { .. }
         | Action::ForEach { .. }
         | Action::ForEachGitCloneIfMissing { .. }
         | Action::BrewInstall { .. }
@@ -4345,6 +4347,15 @@ pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
         Action::GithubListRepositories => {
             "list repositories visible to the GitHub CLI account and return the account login plus typed GitHub repository metadata".into()
         }
+        Action::GithubSelectRepositories {
+            expected_account_login,
+            repository_ids,
+            ..
+        } => format!(
+            "select {} repository/repositories by exact GitHub node ID from the freshly listed account {:?}; fail if the account or any selected ID changed",
+            repository_ids.len(),
+            expected_account_login
+        ),
         Action::ForEach {
             source_step,
             array_path,
@@ -4950,6 +4961,11 @@ fn prompt_once(message: &str) -> Result<()> {
 fn apply_step(task_id: &str, step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
     match &step.action {
         Action::GithubListRepositories => apply_github_list_repositories(),
+        Action::GithubSelectRepositories {
+            github,
+            expected_account_login,
+            repository_ids,
+        } => apply_github_select_repositories(github, expected_account_login, repository_ids),
         Action::ForEach { .. } | Action::ForEachGitCloneIfMissing { .. } => {
             bail!("foreach actions must be executed by the scenario runner")
         }
@@ -5127,6 +5143,76 @@ fn apply_github_list_repositories() -> Result<ApplyStepResult> {
             },
         }),
     })
+}
+
+fn apply_github_select_repositories(
+    github: &GithubContextInput,
+    expected_account_login: &str,
+    repository_ids: &[String],
+) -> Result<ApplyStepResult> {
+    if github.account.login != expected_account_login {
+        bail!(
+            "GitHub repository selection was authored for account {:?}, but the freshly listed account is {:?}; refresh the repository preview and confirm the selection again",
+            expected_account_login,
+            github.account.login
+        );
+    }
+
+    let mut repositories_by_id = BTreeMap::new();
+    for repository in &github.repositories {
+        if repositories_by_id
+            .insert(repository.id.as_str(), repository)
+            .is_some()
+        {
+            bail!(
+                "fresh GitHub repository output contains duplicate node ID {:?}",
+                repository.id
+            );
+        }
+    }
+
+    let mut selected = Vec::with_capacity(repository_ids.len());
+    for repository_id in repository_ids {
+        let repository = repositories_by_id.get(repository_id.as_str()).ok_or_else(|| {
+            anyhow!(
+                "selected GitHub repository ID {:?} is no longer visible to account {:?}; refresh the repository preview and confirm the selection again",
+                repository_id,
+                expected_account_login
+            )
+        })?;
+        selected.push(github_repository_input_output(repository));
+    }
+
+    let summary = format!(
+        "selected {} GitHub repositories for account {}",
+        selected.len(),
+        expected_account_login
+    );
+    Ok(ApplyStepResult::AppliedWithOutput {
+        summary,
+        output: StepOutput::GithubRepositories(GithubRepositoriesOutput {
+            github: GithubContextOutput {
+                account: GithubAccountOutput {
+                    login: github.account.login.clone(),
+                },
+                repositories: selected,
+            },
+        }),
+    })
+}
+
+fn github_repository_input_output(repository: &GithubRepositoryInput) -> GithubRepositoryOutput {
+    GithubRepositoryOutput {
+        id: repository.id.clone(),
+        owner: repository.owner.clone(),
+        name: repository.name.clone(),
+        full_name: repository.full_name.clone(),
+        https_url: repository.https_url.clone(),
+        ssh_url: repository.ssh_url.clone(),
+        default_branch: repository.default_branch.clone(),
+        private: repository.private,
+        archived: repository.archived,
+    }
 }
 
 fn apply_create_directory(raw_path: &str) -> Result<ApplyStepResult> {
@@ -13509,6 +13595,250 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
         assert_eq!(repository["default_branch"], "main");
         assert_eq!(repository["private"], true);
         assert_eq!(repository["archived"], false);
+    }
+
+    fn github_selection_repository(id: &str, name: &str) -> GithubRepositoryInput {
+        GithubRepositoryInput {
+            id: id.into(),
+            owner: "owner".into(),
+            name: name.into(),
+            full_name: format!("owner/{name}"),
+            https_url: format!("https://github.com/owner/{name}"),
+            ssh_url: format!("git@github.com:owner/{name}.git"),
+            default_branch: Some("main".into()),
+            private: false,
+            archived: false,
+        }
+    }
+
+    fn github_selection_input() -> GithubContextInput {
+        GithubContextInput {
+            account: crate::automation::task::GithubAccountInput {
+                login: "octocat".into(),
+            },
+            repositories: vec![
+                github_selection_repository("R_alpha", "alpha"),
+                github_selection_repository("R_beta", "beta"),
+            ],
+        }
+    }
+
+    fn github_selection_source_context(input: &GithubContextInput) -> ContextValue {
+        let output = StepOutput::GithubRepositories(GithubRepositoriesOutput {
+            github: GithubContextOutput {
+                account: GithubAccountOutput {
+                    login: input.account.login.clone(),
+                },
+                repositories: input
+                    .repositories
+                    .iter()
+                    .map(github_repository_input_output)
+                    .collect(),
+            },
+        });
+        ContextValue::new(
+            output.context_value().unwrap(),
+            ContextProvenance::step("list"),
+        )
+        .with_schema(
+            crate::automation::block::block_definition(
+                crate::automation::block::ActionKind::GithubListRepositories,
+            )
+            .output_schema,
+        )
+    }
+
+    #[test]
+    fn github_selection_filters_exact_ids_in_authored_order() {
+        let result = apply_github_select_repositories(
+            &github_selection_input(),
+            "octocat",
+            &["R_beta".into(), "R_alpha".into()],
+        )
+        .unwrap();
+        let ApplyStepResult::AppliedWithOutput { output, .. } = result else {
+            panic!("expected typed selection output")
+        };
+        let StepOutput::GithubRepositories(output) = output else {
+            panic!("expected GitHub repositories output")
+        };
+        assert_eq!(output.github.account.login, "octocat");
+        assert_eq!(
+            output
+                .github
+                .repositories
+                .iter()
+                .map(|repository| repository.id.as_str())
+                .collect::<Vec<_>>(),
+            ["R_beta", "R_alpha"]
+        );
+    }
+
+    #[test]
+    fn github_selection_fails_closed_on_account_or_repository_drift() {
+        let input = github_selection_input();
+        let account_error =
+            apply_github_select_repositories(&input, "another-user", &["R_alpha".into()])
+                .unwrap_err();
+        assert!(format!("{account_error:#}").contains("authored for account"));
+
+        let repository_error =
+            apply_github_select_repositories(&input, "octocat", &["R_missing".into()]).unwrap_err();
+        assert!(format!("{repository_error:#}").contains("no longer visible"));
+
+        let mut duplicate_input = input;
+        duplicate_input
+            .repositories
+            .push(github_selection_repository("R_alpha", "duplicate"));
+        let duplicate_error =
+            apply_github_select_repositories(&duplicate_input, "octocat", &["R_alpha".into()])
+                .unwrap_err();
+        assert!(format!("{duplicate_error:#}").contains("duplicate node ID"));
+    }
+
+    #[test]
+    fn graph_runtime_materializes_and_publishes_github_selection_output() {
+        let placeholder = GithubContextInput {
+            account: crate::automation::task::GithubAccountInput {
+                login: "octocat".into(),
+            },
+            repositories: Vec::new(),
+        };
+        let selector = plain_step(
+            "select",
+            Action::GithubSelectRepositories {
+                github: placeholder,
+                expected_account_login: "octocat".into(),
+                repository_ids: vec!["R_beta".into()],
+            },
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["select".into()],
+            nodes: vec![action_node(
+                selector,
+                BTreeMap::from([(
+                    "github".into(),
+                    Binding::field(FieldRef::step("list").field("github")),
+                )]),
+            )],
+            ..WorkflowGraph::default()
+        };
+        let task = graph_task(graph.clone());
+        let options = RunOptions {
+            apply: true,
+            ..RunOptions::default()
+        };
+        let mut runtime = GraphRuntime {
+            task: &task,
+            opts: &options,
+            terminal_interactive: false,
+            accumulator: GraphRunAccumulator::default(),
+            budget: GraphExecutionBudget::default(),
+        };
+        let input = github_selection_input();
+        let context = github_selection_source_context(&input);
+        let mut scope = GraphScopeState::default();
+        scope.values.insert(
+            ContextScope::Step {
+                step_id: "list".into(),
+            },
+            context,
+        );
+
+        let invocation = runtime.execute_graph(&graph, &mut scope, "", 1).unwrap();
+        assert!(!invocation.failed);
+        let selection = scope
+            .values
+            .get(&ContextScope::Step {
+                step_id: "select".into(),
+            })
+            .expect("selector must publish typed output");
+        assert_eq!(selection.value["github"]["account"]["login"], "octocat");
+        assert_eq!(
+            selection.value["github"]["repositories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|repository| repository["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["R_beta"]
+        );
+    }
+
+    #[test]
+    fn stale_github_selection_does_not_activate_its_success_edge_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("must-not-be-created");
+        let placeholder = GithubContextInput {
+            account: crate::automation::task::GithubAccountInput {
+                login: "octocat".into(),
+            },
+            repositories: Vec::new(),
+        };
+        let selector = plain_step(
+            "select",
+            Action::GithubSelectRepositories {
+                github: placeholder,
+                expected_account_login: "octocat".into(),
+                repository_ids: vec!["R_missing".into()],
+            },
+        );
+        let mutation = plain_step(
+            "mutate",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: target.to_string_lossy().into_owned(),
+            }),
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["select".into()],
+            nodes: vec![
+                action_node(
+                    selector,
+                    BTreeMap::from([(
+                        "github".into(),
+                        Binding::field(FieldRef::step("list").field("github")),
+                    )]),
+                ),
+                action_node(mutation, BTreeMap::new()),
+            ],
+            edges: vec![GraphEdge::new("select", EdgePort::Success, "mutate")],
+            ..WorkflowGraph::default()
+        };
+        let task = graph_task(graph.clone());
+        let options = RunOptions {
+            apply: true,
+            ..RunOptions::default()
+        };
+        let mut runtime = GraphRuntime {
+            task: &task,
+            opts: &options,
+            terminal_interactive: false,
+            accumulator: GraphRunAccumulator::default(),
+            budget: GraphExecutionBudget::default(),
+        };
+        let input = github_selection_input();
+        let context = github_selection_source_context(&input);
+        let mut scope = GraphScopeState::default();
+        scope.values.insert(
+            ContextScope::Step {
+                step_id: "list".into(),
+            },
+            context,
+        );
+
+        let invocation = runtime.execute_graph(&graph, &mut scope, "", 1).unwrap();
+        assert!(invocation.failed);
+        assert!(!target.exists());
+        assert!(runtime
+            .accumulator
+            .steps
+            .iter()
+            .all(|report| report.step_id != "mutate"));
+        assert!(runtime
+            .accumulator
+            .errors
+            .iter()
+            .any(|error| error.contains("no longer visible")));
     }
 
     #[test]

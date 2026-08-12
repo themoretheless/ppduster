@@ -67,6 +67,18 @@ fn input_leaves(kind: ActionKind) -> Vec<(String, FieldSchema)> {
     leaves
 }
 
+fn independently_literal_bindable_leaves(kind: ActionKind) -> Vec<(String, FieldSchema)> {
+    // The selector consumes the whole live GitHub context through one exact
+    // structural binding. Partial/literal bindings would bypass its producer
+    // and account-pin invariants, so they intentionally do not participate in
+    // the generic literal-input matrix.
+    if kind == ActionKind::GithubSelectRepositories {
+        Vec::new()
+    } else {
+        input_leaves(kind)
+    }
+}
+
 fn materialize_literals(
     kind: ActionKind,
     suffix: &str,
@@ -236,7 +248,7 @@ fn manual_literal(kind: ActionKind, target: &str) -> Option<Value> {
 #[test]
 fn every_executable_default_step_materializes_and_round_trips() {
     let kinds = executable_action_kinds().collect::<Vec<_>>();
-    assert_eq!(kinds.len(), 23, "update the default-input matrix");
+    assert_eq!(kinds.len(), 24, "update the default-input matrix");
 
     for kind in kinds {
         let materialized = materialize_literals(kind, "default", []).unwrap_or_else(|error| {
@@ -252,7 +264,7 @@ fn every_independently_safe_schema_leaf_materializes_and_round_trips() {
     let mut safe_count = 0;
 
     for kind in executable_action_kinds() {
-        for (target, field) in input_leaves(kind) {
+        for (target, field) in independently_literal_bindable_leaves(kind) {
             leaf_count += 1;
             let value = manual_literal(kind, &target).unwrap_or_else(|| {
                 panic!("missing manual-literal fixture for {}.{target}", kind.id())
@@ -292,7 +304,7 @@ fn every_action_materializes_all_compatible_manual_fields_together() {
     for kind in executable_action_kinds() {
         action_count += 1;
         let mut literals = Vec::new();
-        for (target, field) in input_leaves(kind) {
+        for (target, field) in independently_literal_bindable_leaves(kind) {
             let value = manual_literal(kind, &target).unwrap_or_else(|| {
                 panic!(
                     "missing grouped manual-literal fixture for {}.{target}",
@@ -322,8 +334,29 @@ fn every_action_materializes_all_compatible_manual_fields_together() {
         );
     }
 
-    assert_eq!(action_count, 23, "update the grouped action matrix");
+    assert_eq!(action_count, 24, "update the grouped action matrix");
     assert_eq!(binding_count, 75, "update grouped manual fixtures");
+}
+
+#[test]
+fn github_selection_exposes_only_the_structural_context_as_bindable_input() {
+    let definition = block_definition(ActionKind::GithubSelectRepositories);
+    assert_eq!(
+        definition
+            .input_schema
+            .fields
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["github"]
+    );
+    for static_policy_field in ["expected_account_login", "repository_ids"] {
+        assert!(
+            definition.input_schema.field(static_policy_field).is_none(),
+            "static selector policy {static_policy_field} must not be bindable"
+        );
+    }
+    assert!(independently_literal_bindable_leaves(ActionKind::GithubSelectRepositories).is_empty());
 }
 
 #[test]
