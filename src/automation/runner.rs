@@ -1631,6 +1631,64 @@ struct GraphExecutionBudget {
     loop_iterations: usize,
 }
 
+/// Write intents projected while every iteration of one `for-each` is
+/// preflighted. The action ID is part of the key because graph edges can make
+/// different action nodes mutually exclusive. This deliberately answers the
+/// narrower question needed here: can repeated executions of this write-file
+/// block disagree about the content of one destination?
+#[derive(Debug, Default)]
+struct LoopPreflightEffects {
+    write_files: BTreeMap<(String, PathBuf), [u8; 32]>,
+}
+
+impl LoopPreflightEffects {
+    fn record(&mut self, step: &Step) -> Result<()> {
+        let Action::WriteFile(action) = &step.action else {
+            return Ok(());
+        };
+        let path = validate_safe_mutation_path(&action.path, "write-file")?;
+        let requested: [u8; 32] = Sha256::digest(action.content.as_bytes()).into();
+        let destination_exists = match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                bail!(
+                    "write-file destination is not a regular file: {}",
+                    path.display()
+                );
+            }
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect write destination {}", path.display()));
+            }
+        };
+        let effective_path = resolve_through_existing_ancestor(&path)?;
+        let key = (step.id.clone(), effective_path.clone());
+        if let Some(projected) = self.write_files.get_mut(&key) {
+            if *projected != requested && matches!(action.on_conflict, WriteConflictPolicy::Fail) {
+                bail!(
+                    "repeated write-file block {} resolves to {} with different content; bind path to a per-item value or move the write after the loop (replace keeps only the last result)",
+                    step.id,
+                    effective_path.display()
+                );
+            }
+            *projected = requested;
+        } else {
+            if destination_exists
+                && !file_matches_bytes(&path, action.content.as_bytes())?
+                && matches!(action.on_conflict, WriteConflictPolicy::Fail)
+            {
+                bail!(
+                    "write-file destination has different content before loop execution: {}",
+                    path.display()
+                );
+            }
+            self.write_files.insert(key, requested);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GraphSignal {
     Successful,
@@ -2799,6 +2857,7 @@ impl GraphRuntime<'_> {
         if preflight_budget.node_activations > GRAPH_MAX_NODE_ACTIVATIONS {
             bail!("workflow graph preflight exceeds {GRAPH_MAX_NODE_ACTIVATIONS} node activations");
         }
+        let mut preflight_effects = LoopPreflightEffects::default();
         for (index, item) in items.iter().enumerate() {
             let mut child_scope = scope.clone();
             insert_loop_value(
@@ -2831,6 +2890,7 @@ impl GraphRuntime<'_> {
                 &mut child_scope,
                 depth,
                 &mut preflight_budget,
+                &mut preflight_effects,
             )
             .with_context(|| {
                 format!(
@@ -2910,6 +2970,7 @@ impl GraphRuntime<'_> {
         scope: &mut GraphScopeState,
         depth: usize,
         budget: &mut GraphExecutionBudget,
+        effects: &mut LoopPreflightEffects,
     ) -> Result<()> {
         if depth > GRAPH_MAX_DEPTH {
             bail!("workflow graph nesting exceeds {GRAPH_MAX_DEPTH}");
@@ -2950,6 +3011,7 @@ impl GraphRuntime<'_> {
                         self.opts,
                         self.terminal_interactive,
                     )?;
+                    effects.record(&materialized)?;
                     insert_action_schema(&mut scope.schemas, &materialized);
                 }
                 GraphNode::ForEach(node) => {
@@ -3018,6 +3080,7 @@ impl GraphRuntime<'_> {
                             &mut child_scope,
                             depth + 1,
                             budget,
+                            effects,
                         )?;
                     }
                 }
@@ -3027,6 +3090,7 @@ impl GraphRuntime<'_> {
                         &mut scope.clone(),
                         depth + 1,
                         budget,
+                        effects,
                     )?,
                     RuleEvaluation::False => {
                         if let Some(graph) = node.else_graph.as_deref() {
@@ -3035,6 +3099,7 @@ impl GraphRuntime<'_> {
                                 &mut scope.clone(),
                                 depth + 1,
                                 budget,
+                                effects,
                             )?;
                         }
                     }
@@ -3066,7 +3131,13 @@ impl GraphRuntime<'_> {
                         .with_context(|| {
                             format!("switch {} matched no case during loop preflight", node.id)
                         })?;
-                    self.preflight_iteration_graph(graph, &mut scope.clone(), depth + 1, budget)?;
+                    self.preflight_iteration_graph(
+                        graph,
+                        &mut scope.clone(),
+                        depth + 1,
+                        budget,
+                        effects,
+                    )?;
                 }
                 GraphNode::Join(_) => {}
             }
@@ -10200,6 +10271,125 @@ mod tests {
 
         assert!(format!("{error:#}").contains("iteration 2 failed preflight"));
         assert!(!safe.exists());
+    }
+
+    #[test]
+    fn foreach_rejects_conflicting_write_file_effects_before_first_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("same.txt");
+        let action = plain_step(
+            "write",
+            Action::WriteFile(WriteFileAction {
+                path: destination.to_string_lossy().into_owned(),
+                content: "placeholder".into(),
+                on_conflict: WriteConflictPolicy::Fail,
+            }),
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["items".into()],
+            nodes: vec![GraphNode::ForEach(ForEachNode {
+                id: "items".into(),
+                collection: Binding::literal(serde_json::json!(["first", "second"])),
+                item_alias: "item".into(),
+                index_alias: None,
+                concurrency: 1,
+                on_error: LoopFailurePolicy::Stop,
+                body: Box::new(one_action_graph(
+                    action,
+                    BTreeMap::from([(
+                        "content".into(),
+                        Binding::interpolated([TemplatePart::field(FieldRef::loop_item("items"))]),
+                    )]),
+                )),
+            })],
+            ..WorkflowGraph::default()
+        };
+
+        let error = run_task(
+            &graph_task(graph),
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("iteration 2 failed preflight"),
+            "{message}"
+        );
+        assert!(message.contains("repeated write-file block"), "{message}");
+        assert!(
+            !destination.exists(),
+            "conflicting loop writes must fail before the first mutation"
+        );
+    }
+
+    #[test]
+    fn foreach_projected_write_file_effects_honor_replace_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("same.txt");
+        let action = plain_step(
+            "write",
+            Action::WriteFile(WriteFileAction {
+                path: destination.to_string_lossy().into_owned(),
+                content: "placeholder".into(),
+                on_conflict: WriteConflictPolicy::Replace,
+            }),
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["items".into()],
+            nodes: vec![GraphNode::ForEach(ForEachNode {
+                id: "items".into(),
+                collection: Binding::literal(serde_json::json!(["first", "second"])),
+                item_alias: "item".into(),
+                index_alias: None,
+                concurrency: 1,
+                on_error: LoopFailurePolicy::Stop,
+                body: Box::new(one_action_graph(
+                    action,
+                    BTreeMap::from([(
+                        "content".into(),
+                        Binding::interpolated([TemplatePart::field(FieldRef::loop_item("items"))]),
+                    )]),
+                )),
+            })],
+            ..WorkflowGraph::default()
+        };
+
+        let report = apply_test_task(&graph_task(graph));
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(fs::read_to_string(destination).unwrap(), "second");
+    }
+
+    #[test]
+    fn loop_write_preflight_uses_projected_content_after_replace() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("same.txt");
+        fs::write(&destination, "original").unwrap();
+        let replace = plain_step(
+            "write",
+            Action::WriteFile(WriteFileAction {
+                path: destination.to_string_lossy().into_owned(),
+                content: "replacement".into(),
+                on_conflict: WriteConflictPolicy::Replace,
+            }),
+        );
+        let fail_with_projected_content = plain_step(
+            "write",
+            Action::WriteFile(WriteFileAction {
+                path: destination.to_string_lossy().into_owned(),
+                content: "replacement".into(),
+                on_conflict: WriteConflictPolicy::Fail,
+            }),
+        );
+        let mut effects = LoopPreflightEffects::default();
+
+        effects.record(&replace).unwrap();
+        effects.record(&fail_with_projected_content).unwrap();
+        assert_eq!(fs::read_to_string(destination).unwrap(), "original");
     }
 
     #[test]

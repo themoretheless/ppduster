@@ -578,6 +578,7 @@ fn validate_string_format(value: &str, format: SemanticFormat) -> Result<(), Str
         SemanticFormat::GitRef => valid_git_ref(value),
         SemanticFormat::RepositoryName => valid_repository_name(value),
         SemanticFormat::Identifier => valid_identifier(value),
+        SemanticFormat::OpaqueIdentifier => !value.is_empty(),
     };
     if valid {
         Ok(())
@@ -696,6 +697,52 @@ mod tests {
 
     fn github_context() -> ContextStore {
         github_context_with_names("acme", "service", "acme/service")
+    }
+
+    #[test]
+    fn github_repository_collection_accepts_opaque_node_ids() {
+        let schema = block_definition(ActionKind::GithubListRepositories).output_schema;
+        let value = serde_json::json!({
+            "github": {
+                "account": { "login": "octocat" },
+                "repositories": [{
+                    "id": "MDEwOlJlcG9zaXRvcnkxMjM0NTY3ODk=",
+                    "owner": "acme",
+                    "name": "service",
+                    "full_name": "acme/service",
+                    "https_url": "https://github.com/acme/service.git",
+                    "ssh_url": "git@github.com:acme/service.git",
+                    "default_branch": "main",
+                    "private": false,
+                    "archived": false
+                }]
+            }
+        });
+        let mut store = ContextStore::default();
+        store.insert(
+            ContextScope::Step {
+                step_id: "list".into(),
+            },
+            ContextValue::new(value, ContextProvenance::step("list")).with_schema(schema),
+        );
+        let collection = FieldRef::step("list").field("github").field("repositories");
+        let expected = ResolvedSchemaOwned {
+            value_type: ContextType::array(ContextType::Any),
+            required: true,
+            nullable: false,
+            sensitivity: Sensitivity::Secret,
+            allowed_values: Vec::new(),
+        };
+
+        let resolved = resolve_binding(
+            &Binding::field(collection),
+            &expected,
+            &store,
+            BindingLimits::default(),
+        )
+        .expect("GitHub node IDs must be treated as opaque strings");
+
+        assert_eq!(resolved.value[0]["id"], "MDEwOlJlcG9zaXRvcnkxMjM0NTY3ODk=");
     }
 
     fn clone_step() -> Step {

@@ -34,6 +34,7 @@ pub enum SemanticFormat {
     GitRef,
     RepositoryName,
     Identifier,
+    OpaqueIdentifier,
 }
 
 /// Structural type information shared by the runner, expression checker, and

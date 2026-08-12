@@ -5,7 +5,9 @@ use eframe::egui::{
     Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Layout, Margin, Pos2, Rect, RichText,
     ScrollArea, Sense, Stroke, StrokeKind, Vec2,
 };
-use ppduster::automation::binding::validate_literal_binding;
+use ppduster::automation::binding::{
+    parse_binding_target, validate_literal_binding, BindingLimits,
+};
 use ppduster::automation::block::default_step;
 use ppduster::automation::PackTrust;
 use ppduster::automation::{
@@ -21,13 +23,13 @@ use ppduster::automation::{
     ProtectedPathRisk, ReferenceV1, ReleaseChannel, RuleOutcomePolicy, RunOptions, RunReport,
     ScenarioProject, ScriptInterpreter, SemanticFormat, Sensitivity, Step, StepCondition,
     StepStatus, SwitchCase, SwitchNode, Task, TaskFile, TaskPack, TaskSource, TemplatePart,
-    TrustRequirement, WorkflowGraph,
+    TrustRequirement, WorkflowGraph, WriteConflictPolicy,
 };
 #[cfg(test)]
 use ppduster::automation::{
     ContextStore, CopyPathAction, CreateDirectoryAction, InspectPathAction, RemovePathAction,
     ScenarioProjectFile, StepLogEntry, StepOutput, StepReport, StructuredStepOutput,
-    WriteConflictPolicy, WriteFileAction,
+    WriteFileAction,
 };
 use ppduster::automation::{ContextType, FieldSchema};
 use ppduster::github::{
@@ -115,14 +117,23 @@ const COMPACT_LIBRARY_WIDTH: f32 = 220.0;
 const WIDE_LIBRARY_WIDTH: f32 = 270.0;
 const COMPACT_INSPECTOR_WIDTH: f32 = 340.0;
 const WIDE_INSPECTOR_WIDTH: f32 = 360.0;
+const WORKSPACE_PROJECT_RAIL_WIDTH: f32 = 52.0;
+const WORKSPACE_PROJECT_DRAWER_WIDTH: f32 = 272.0;
+const WORKSPACE_OVERLAY_BREAKPOINT: f32 = 1360.0;
 const CANVAS_MIN_ZOOM: f32 = 0.35;
 const CANVAS_MAX_ZOOM: f32 = 2.5;
 const CANVAS_ZOOM_STEP: f32 = 1.2;
 const CANVAS_FIT_PADDING: f32 = 56.0;
+const GRAPH_NODE_SIZE: Vec2 = Vec2::new(208.0, 88.0);
+const GRAPH_NODE_HORIZONTAL_STRIDE: f32 = 260.0;
+const GRAPH_NODE_BRANCH_STRIDE: f32 = 132.0;
+const GRAPH_NODE_PORT_HIT_SIZE: f32 = 28.0;
+const GRAPH_NODE_PORT_VISUAL_RADIUS: f32 = 10.0;
 const GITHUB_LOGIN_COMMAND: &str =
     "gh auth login --hostname github.com --git-protocol https --web --clipboard";
 const GITHUB_DEVICE_LOGIN_URL: &str = "https://github.com/login/device";
 const GITHUB_EXTERNAL_LOGIN_HINT: &str = "Вход через Terminal будет обнаружен автоматически.";
+const RUNNING_CLOSE_MESSAGE: &str = "Сценарий выполняется. Дождитесь завершения перед закрытием.";
 
 fn safety_badge(allow_shell: bool, allow_elevation: bool, dark: bool) -> (&'static str, Color32) {
     match (allow_shell, allow_elevation) {
@@ -146,6 +157,21 @@ fn workspace_panel_widths(viewport_width: f32) -> (f32, f32) {
             wide_fraction,
         ),
     )
+}
+
+fn workspace_project_drawer_overlays(viewport_width: f32) -> bool {
+    viewport_width < WORKSPACE_OVERLAY_BREAKPOINT
+}
+
+fn open_workspace_project_drawer(
+    drawer_open: &mut bool,
+    inspector_open: &mut bool,
+    viewport_width: f32,
+) {
+    *drawer_open = true;
+    if workspace_project_drawer_overlays(viewport_width) {
+        *inspector_open = false;
+    }
 }
 
 /// Keep inspector widgets inside the fixed right panel even when schemas,
@@ -299,19 +325,19 @@ impl CanvasViewExt for CanvasView {
     }
 }
 
-fn graph_canvas_world_bounds(canvas: &ComposerCanvas, node_size: Vec2) -> Rect {
-    let header_bounds = Rect::from_min_size(Pos2::new(80.0, 88.0), Vec2::new(520.0, 80.0));
+fn graph_canvas_world_bounds(canvas: &ComposerCanvas) -> Rect {
+    let header_bounds = Rect::from_min_size(Pos2::new(80.0, 88.0), Vec2::new(420.0, 80.0));
     let mut points = canvas.positions.values();
     let Some(first) = points.next() else {
-        return header_bounds.union(Rect::from_min_size(Pos2::new(80.0, 250.0), node_size));
+        return header_bounds.union(Rect::from_min_size(Pos2::new(80.0, 250.0), GRAPH_NODE_SIZE));
     };
     let mut min = Pos2::new(first.x, first.y);
-    let mut max = min + node_size;
+    let mut max = min + GRAPH_NODE_SIZE;
     for point in points {
         min.x = min.x.min(point.x);
         min.y = min.y.min(point.y);
-        max.x = max.x.max(point.x + node_size.x);
-        max.y = max.y.max(point.y + node_size.y);
+        max.x = max.x.max(point.x + GRAPH_NODE_SIZE.x);
+        max.y = max.y.max(point.y + GRAPH_NODE_SIZE.y);
     }
     header_bounds.union(Rect::from_min_max(min, max))
 }
@@ -702,6 +728,158 @@ fn binding_references_loop_item(binding: &Binding, loop_id: &str) -> bool {
             .iter()
             .any(|part| matches!(part, TemplatePart::Field { field } if references_loop(field))),
         Binding::Literal { .. } | Binding::Template { .. } => false,
+    }
+}
+
+fn graph_top_level_binding<'a>(node: &'a ActionNode, target: &str) -> Option<&'a Binding> {
+    node.bindings.iter().find_map(|(candidate, binding)| {
+        let segments = parse_binding_target(candidate, BindingLimits::default()).ok()?;
+        matches!(
+            segments.as_slice(),
+            [ContextPathSegment::Field { name }] if name == target
+        )
+        .then_some(binding)
+    })
+}
+
+fn graph_enclosing_loop_ids(graph: &WorkflowGraph, target_id: &str) -> BTreeSet<String> {
+    fn visit(
+        graph: &WorkflowGraph,
+        target_id: &str,
+        active: &BTreeSet<String>,
+    ) -> Option<BTreeSet<String>> {
+        for node in &graph.nodes {
+            if node.id() == target_id {
+                return Some(active.clone());
+            }
+            let found = match node {
+                GraphNode::ForEach(node) => {
+                    let mut nested = active.clone();
+                    nested.insert(node.id.clone());
+                    visit(&node.body, target_id, &nested)
+                }
+                GraphNode::If(node) => visit(&node.then_graph, target_id, active).or_else(|| {
+                    node.else_graph
+                        .as_deref()
+                        .and_then(|graph| visit(graph, target_id, active))
+                }),
+                GraphNode::Switch(node) => node
+                    .cases
+                    .iter()
+                    .find_map(|case| visit(&case.graph, target_id, active))
+                    .or_else(|| {
+                        node.default
+                            .as_deref()
+                            .and_then(|graph| visit(graph, target_id, active))
+                    }),
+                GraphNode::Action(_) | GraphNode::Join(_) => None,
+            };
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    visit(graph, target_id, &BTreeSet::new()).unwrap_or_default()
+}
+
+fn binding_loop_dimensions(binding: &Binding, graph: Option<&WorkflowGraph>) -> BTreeSet<String> {
+    fn add_field(
+        dimensions: &mut BTreeSet<String>,
+        field: &FieldRef,
+        graph: Option<&WorkflowGraph>,
+    ) {
+        match &field.scope {
+            ContextScope::LoopItem { step_id } => {
+                dimensions.insert(
+                    step_id
+                        .strip_suffix("::index")
+                        .unwrap_or(step_id)
+                        .to_owned(),
+                );
+            }
+            ContextScope::Step { step_id } => {
+                if let Some(graph) = graph {
+                    dimensions.extend(graph_enclosing_loop_ids(graph, step_id));
+                }
+            }
+            ContextScope::Scenario => {}
+        }
+    }
+
+    let mut dimensions = BTreeSet::new();
+    match binding {
+        Binding::Field { field } => add_field(&mut dimensions, field, graph),
+        Binding::Interpolated { parts } => {
+            for part in parts {
+                if let TemplatePart::Field { field } = part {
+                    add_field(&mut dimensions, field, graph);
+                }
+            }
+        }
+        Binding::Literal { .. } | Binding::Template { .. } => {}
+    }
+    dimensions
+}
+
+fn statically_bound_string(binding: &Binding) -> Option<String> {
+    match binding {
+        Binding::Literal { value } => value.as_str().map(ToOwned::to_owned),
+        Binding::Template { template } => Some(template.clone()),
+        Binding::Interpolated { parts }
+            if parts
+                .iter()
+                .all(|part| matches!(part, TemplatePart::Literal { .. })) =>
+        {
+            Some(
+                parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        TemplatePart::Literal { value } => Some(value.as_str()),
+                        TemplatePart::Field { .. } => None,
+                    })
+                    .collect(),
+            )
+        }
+        Binding::Field { .. } | Binding::Interpolated { .. } => None,
+    }
+}
+
+fn graph_write_file_loop_path_warning(
+    graph: Option<&WorkflowGraph>,
+    node: &ActionNode,
+) -> Option<&'static str> {
+    let Action::WriteFile(action) = &node.step.action else {
+        return None;
+    };
+    let content_dimensions = graph_top_level_binding(node, "content")
+        .map(|binding| binding_loop_dimensions(binding, graph))
+        .unwrap_or_default();
+    let path_dimensions = graph_top_level_binding(node, "path")
+        .map(|binding| binding_loop_dimensions(binding, graph))
+        .unwrap_or_default();
+    if content_dimensions.is_empty() || content_dimensions.is_subset(&path_dimensions) {
+        return None;
+    }
+    match graph_top_level_binding(node, "on_conflict") {
+        Some(binding) => match statically_bound_string(binding).as_deref() {
+            Some("replace") => Some(
+                "Путь не различает все итерации: для каждого совпавшего пути останется результат последней итерации.",
+            ),
+            Some("fail") => Some(
+                "Путь не различает все итерации. Если две итерации дадут один путь и разное содержимое, запуск остановится до первой записи. Сделайте путь уникальным или вынесите запись после цикла; режим «replace» сохранит только последний результат.",
+            ),
+            _ => Some(
+                "Путь не различает все итерации. Результат определяется динамической политикой конфликта; безопаснее сделать путь уникальным или вынести запись после цикла.",
+            ),
+        },
+        None if matches!(action.on_conflict, WriteConflictPolicy::Replace) => Some(
+            "Путь не различает все итерации: для каждого совпавшего пути останется результат последней итерации.",
+        ),
+        None => Some(
+            "Путь не различает все итерации. Если две итерации дадут один путь и разное содержимое, запуск остановится до первой записи. Сделайте путь уникальным или вынесите запись после цикла; режим «replace» сохранит только последний результат.",
+        ),
     }
 }
 
@@ -2578,10 +2756,10 @@ fn default_graph_canvas(graph: &WorkflowGraph) -> ComposerCanvas {
         canvas.positions.insert(
             node.id.clone(),
             CanvasPoint {
-                x: parent.x + 286.0,
+                x: parent.x + GRAPH_NODE_HORIZONTAL_STRIDE,
                 y: parent.y
                     + if iteration {
-                        158.0
+                        GRAPH_NODE_BRANCH_STRIDE
                     } else {
                         branch_offset(index)
                     },
@@ -4020,6 +4198,7 @@ fn literal_prototype_for_type(value_type: &ContextType, path: &str) -> serde_jso
             Some(SemanticFormat::GitRef) => "main".into(),
             Some(SemanticFormat::RepositoryName) => "owner/repository".into(),
             Some(SemanticFormat::Identifier) => "value".into(),
+            Some(SemanticFormat::OpaqueIdentifier) => "opaque-id".into(),
             None if path.ends_with("version") => "1.0".into(),
             None if path.ends_with("app_name") => "Application.app".into(),
             None => "value".into(),
@@ -4853,6 +5032,7 @@ fn paint_graph_action_editor(
     node: &mut ActionNode,
     options: &BTreeMap<String, Vec<ComposerGraphBindingOption>>,
     external_auth_state: &GraphExternalAuthUiState,
+    graph: Option<&WorkflowGraph>,
     dark: bool,
 ) -> GraphActionEditorResponse {
     let mut changed = false;
@@ -5040,6 +5220,13 @@ fn paint_graph_action_editor(
                 apply_literal_policy_implications(&mut node.step, &target, value);
             }
         }
+    }
+    if let Some(warning) = graph_write_file_loop_path_warning(graph, node) {
+        ui.add(
+            egui::Label::new(RichText::new(warning).size(8.0).color(ORANGE))
+                .wrap()
+                .selectable(false),
+        );
     }
     ui.add_space(8.0);
     section_label(ui, "ПОЛИТИКИ ШАГА");
@@ -5254,6 +5441,21 @@ enum PendingProjectAction {
     Quit,
 }
 
+#[derive(Debug, Clone)]
+struct PreparedPlan {
+    task: Task,
+    options: RunOptions,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+enum WorkspaceBottomTab {
+    #[default]
+    Problems,
+    Plan,
+    Result,
+    Logs,
+}
+
 impl Default for GithubPickerState {
     fn default() -> Self {
         Self {
@@ -5315,6 +5517,7 @@ struct ScenarioApp {
     allow_elevation: bool,
     report: Option<RunReport>,
     report_applied: bool,
+    prepared_plan: Option<PreparedPlan>,
     plan_error: Option<String>,
     protected_path_approvals: Vec<ProtectedPathApproval>,
     pending_protected_path_approval: Option<ProtectedPathApprovalRequest>,
@@ -5331,6 +5534,10 @@ struct ScenarioApp {
     pending_project_action: Option<PendingProjectAction>,
     selected_project_scenario: Option<Vec<usize>>,
     selected_project_group: Vec<usize>,
+    workspace_project_drawer_open: bool,
+    workspace_inspector_open: bool,
+    workspace_bottom_expanded: bool,
+    workspace_bottom_tab: WorkspaceBottomTab,
     block_picker_parent: Option<String>,
     graph_picker_attach: Option<ComposerGraphAttach>,
     graph_picker_port: Option<EdgePort>,
@@ -5379,6 +5586,7 @@ impl ScenarioApp {
             allow_elevation: false,
             report: None,
             report_applied: false,
+            prepared_plan: None,
             plan_error: None,
             protected_path_approvals: Vec::new(),
             pending_protected_path_approval: None,
@@ -5395,6 +5603,10 @@ impl ScenarioApp {
             pending_project_action: None,
             selected_project_scenario: None,
             selected_project_group: Vec::new(),
+            workspace_project_drawer_open: false,
+            workspace_inspector_open: false,
+            workspace_bottom_expanded: false,
+            workspace_bottom_tab: WorkspaceBottomTab::Problems,
             block_picker_parent: None,
             graph_picker_attach: None,
             graph_picker_port: None,
@@ -5453,6 +5665,7 @@ impl ScenarioApp {
         }
         self.report = None;
         self.report_applied = false;
+        self.prepared_plan = None;
         self.plan_error = None;
         self.protected_path_approvals.clear();
         self.pending_protected_path_approval = None;
@@ -5478,6 +5691,7 @@ impl ScenarioApp {
 
     fn reset_selection_for_task(&mut self, task: &Task) {
         self.reset_run_permissions();
+        self.workspace_inspector_open = false;
         if task.is_template() {
             self.selected_step = Some(0);
             self.selected_node = None;
@@ -5561,6 +5775,10 @@ impl ScenarioApp {
     fn close_custom_project(&mut self) {
         self.request_github_authorization_cancellation();
         self.custom_project = None;
+        self.workspace_project_drawer_open = false;
+        self.workspace_inspector_open = false;
+        self.workspace_bottom_expanded = false;
+        self.workspace_bottom_tab = WorkspaceBottomTab::Problems;
         self.project_path = None;
         self.project_dirty = false;
         self.pending_project_action = None;
@@ -5602,6 +5820,10 @@ impl ScenarioApp {
     }
 
     fn defer_viewport_close_if_dirty(&mut self) -> bool {
+        if self.running {
+            self.file_message = Some((true, RUNNING_CLOSE_MESSAGE.into()));
+            return true;
+        }
         if self.custom_project.is_some() && self.project_dirty {
             self.pending_project_action = Some(PendingProjectAction::Quit);
             true
@@ -5645,6 +5867,10 @@ impl ScenarioApp {
         self.pending_project_action = None;
         self.selected_project_scenario = Some(vec![0, 0]);
         self.selected_project_group = vec![0];
+        self.workspace_project_drawer_open = true;
+        self.workspace_inspector_open = false;
+        self.workspace_bottom_expanded = false;
+        self.workspace_bottom_tab = WorkspaceBottomTab::Problems;
         self.selected_step = None;
         self.selected_node = None;
         self.github_picker.open = false;
@@ -5708,8 +5934,13 @@ impl ScenarioApp {
                         canvas.positions.insert(
                             id,
                             CanvasPoint {
-                                x: parent.x + 286.0,
-                                y: parent.y + if iteration_offset { 158.0 } else { 0.0 },
+                                x: parent.x + GRAPH_NODE_HORIZONTAL_STRIDE,
+                                y: parent.y
+                                    + if iteration_offset {
+                                        GRAPH_NODE_BRANCH_STRIDE
+                                    } else {
+                                        0.0
+                                    },
                             },
                         );
                     }
@@ -5808,7 +6039,7 @@ impl ScenarioApp {
             canvas.positions.insert(
                 id,
                 CanvasPoint {
-                    x: parent_position.x + 286.0,
+                    x: parent_position.x + GRAPH_NODE_HORIZONTAL_STRIDE,
                     y: (parent_position.y + branch).max(40.0),
                 },
             );
@@ -5851,6 +6082,7 @@ impl ScenarioApp {
                     });
                 }
                 self.selected_node = Some(id.clone());
+                self.workspace_inspector_open = true;
                 self.selected_step = None;
                 if let Some(project) = self.custom_project.as_mut() {
                     let canvas = project.canvases.entry(task_id).or_default();
@@ -5873,8 +6105,13 @@ impl ScenarioApp {
                     canvas.positions.insert(
                         id,
                         CanvasPoint {
-                            x: parent.x + 286.0,
-                            y: parent.y + if iteration_offset { 158.0 } else { 0.0 },
+                            x: parent.x + GRAPH_NODE_HORIZONTAL_STRIDE,
+                            y: parent.y
+                                + if iteration_offset {
+                                    GRAPH_NODE_BRANCH_STRIDE
+                                } else {
+                                    0.0
+                                },
                         },
                     );
                 }
@@ -5978,10 +6215,10 @@ impl ScenarioApp {
             canvas.positions.insert(
                 node.id.clone(),
                 CanvasPoint {
-                    x: parent.x + 286.0,
+                    x: parent.x + GRAPH_NODE_HORIZONTAL_STRIDE,
                     y: parent.y
                         + if iteration {
-                            158.0
+                            GRAPH_NODE_BRANCH_STRIDE
                         } else {
                             branch_offset(index)
                         },
@@ -6060,6 +6297,7 @@ impl ScenarioApp {
             }
         }
         self.selected_node = None;
+        self.workspace_inspector_open = false;
         self.mark_project_dirty();
     }
 
@@ -6197,6 +6435,7 @@ impl ScenarioApp {
         if !self.github_picker.is_idle() {
             return;
         }
+        self.invalidate_plan();
         let (sender, receiver) = mpsc::channel();
         let repaint = ctx.clone();
         let cancellation = GithubLoginCancellation::new();
@@ -6297,7 +6536,7 @@ impl ScenarioApp {
                     GithubAuthorizationFollowUp::LoadRepositories => {
                         self.start_github_repository_load(ctx);
                     }
-                    GithubAuthorizationFollowUp::RunScenario => self.start_run(ctx),
+                    GithubAuthorizationFollowUp::RunScenario => self.build_plan(),
                     GithubAuthorizationFollowUp::InvalidatePlan => self.invalidate_plan(),
                 }
             }
@@ -6345,12 +6584,14 @@ impl ScenarioApp {
 
     fn build_plan_with_current_path_approvals(&mut self) {
         self.report_applied = false;
+        self.prepared_plan = None;
         self.pending_protected_path_approval = None;
         if let Some(project) = &self.custom_project {
             if let Err(error) = validate_project(project) {
                 self.report = None;
                 self.protected_path_approvals.clear();
                 self.plan_error = Some(error);
+                self.reveal_workspace_bottom(WorkspaceBottomTab::Problems);
                 return;
             }
         }
@@ -6360,15 +6601,23 @@ impl ScenarioApp {
                 self.report = None;
                 self.protected_path_approvals.clear();
                 self.plan_error = Some(format!("{error:#}"));
+                self.reveal_workspace_bottom(WorkspaceBottomTab::Problems);
                 return;
             }
         };
         let checks_github_repository_access = task_checks_github_repository_access(&task);
-        match run_task(&task, &self.options_for(&task, false)) {
+        let plan_options = self.options_for(&task, false);
+        match run_task(&task, &plan_options) {
             Ok(report) => {
                 self.update_github_auth_status(&report.errors, checks_github_repository_access);
-                if !report.errors.is_empty() {
+                if report.errors.is_empty() {
+                    let mut options = plan_options;
+                    options.apply = true;
+                    self.prepared_plan = Some(PreparedPlan { task, options });
+                    self.reveal_workspace_bottom(WorkspaceBottomTab::Plan);
+                } else {
                     self.protected_path_approvals.clear();
+                    self.reveal_workspace_bottom(WorkspaceBottomTab::Problems);
                 }
                 self.report = Some(report);
                 self.plan_error = None;
@@ -6384,6 +6633,7 @@ impl ScenarioApp {
                     self.update_github_auth_status(std::slice::from_ref(&error), false);
                     self.protected_path_approvals.clear();
                     self.plan_error = Some(error);
+                    self.reveal_workspace_bottom(WorkspaceBottomTab::Problems);
                 }
             }
         }
@@ -6403,30 +6653,17 @@ impl ScenarioApp {
     }
 
     fn start_run(&mut self, ctx: &egui::Context) {
+        let Some(prepared) = self.prepared_plan.clone() else {
+            self.plan_error =
+                Some("Проверенный план устарел или отсутствует. Проверьте план ещё раз.".into());
+            self.confirm_run = false;
+            self.reveal_workspace_bottom(WorkspaceBottomTab::Problems);
+            return;
+        };
+        let PreparedPlan { task, options } = prepared;
         self.report = None;
         self.report_applied = false;
-        self.run_checks_github_auth = false;
-        if let Some(project) = &self.custom_project {
-            if let Err(error) = validate_project(project) {
-                self.protected_path_approvals.clear();
-                self.pending_protected_path_approval = None;
-                self.plan_error = Some(error);
-                self.confirm_run = false;
-                return;
-            }
-        }
-        let task = match self.resolved_selected_task() {
-            Ok(task) => task,
-            Err(error) => {
-                self.protected_path_approvals.clear();
-                self.pending_protected_path_approval = None;
-                self.plan_error = Some(format!("{error:#}"));
-                self.confirm_run = false;
-                return;
-            }
-        };
         self.run_checks_github_auth = task_checks_github_repository_access(&task);
-        let options = self.options_for(&task, true);
         let (sender, receiver) = mpsc::channel();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
@@ -6438,6 +6675,7 @@ impl ScenarioApp {
         self.running = true;
         self.confirm_run = false;
         self.plan_error = None;
+        self.workspace_bottom_tab = WorkspaceBottomTab::Result;
     }
 
     fn poll_run(&mut self, ctx: &egui::Context) {
@@ -6446,22 +6684,32 @@ impl ScenarioApp {
         };
         match receiver.try_recv() {
             Ok(Ok(report)) => {
+                self.clear_running_close_message();
                 self.update_github_auth_status(&report.errors, self.run_checks_github_auth);
+                let failed = !report.errors.is_empty();
                 self.report = Some(report);
                 self.report_applied = true;
+                self.prepared_plan = None;
                 self.protected_path_approvals.clear();
                 self.pending_protected_path_approval = None;
                 self.running = false;
                 self.run_receiver = None;
                 self.run_checks_github_auth = false;
+                self.reveal_workspace_bottom(if failed {
+                    WorkspaceBottomTab::Problems
+                } else {
+                    WorkspaceBottomTab::Result
+                });
             }
             Ok(Err(error)) => {
+                self.clear_running_close_message();
                 let protected_path_request = error
                     .downcast_ref::<ProtectedPathApprovalRequired>()
                     .map(|required| required.request().clone());
                 self.protected_path_approvals.clear();
                 self.report = None;
                 self.report_applied = false;
+                self.prepared_plan = None;
                 self.confirm_run = false;
                 if let Some(request) = protected_path_request {
                     // The destination changed after planning, or a new exact
@@ -6474,6 +6722,7 @@ impl ScenarioApp {
                     self.update_github_auth_status(std::slice::from_ref(&error), false);
                     self.pending_protected_path_approval = None;
                     self.plan_error = Some(error);
+                    self.reveal_workspace_bottom(WorkspaceBottomTab::Problems);
                 }
                 self.running = false;
                 self.run_receiver = None;
@@ -6481,13 +6730,26 @@ impl ScenarioApp {
             }
             Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
             Err(mpsc::TryRecvError::Disconnected) => {
+                self.clear_running_close_message();
                 self.protected_path_approvals.clear();
                 self.pending_protected_path_approval = None;
                 self.plan_error = Some("Фоновый запуск неожиданно завершился".into());
+                self.prepared_plan = None;
                 self.running = false;
                 self.run_receiver = None;
                 self.run_checks_github_auth = false;
+                self.reveal_workspace_bottom(WorkspaceBottomTab::Problems);
             }
+        }
+    }
+
+    fn clear_running_close_message(&mut self) {
+        if self
+            .file_message
+            .as_ref()
+            .is_some_and(|(_, message)| message == RUNNING_CLOSE_MESSAGE)
+        {
+            self.file_message = None;
         }
     }
 
@@ -6632,6 +6894,7 @@ impl ScenarioApp {
             .as_ref()
             .map(|path| path[..path.len().saturating_sub(1)].to_vec())
             .unwrap_or_default();
+        self.workspace_project_drawer_open = true;
         let selected_task = selected.as_ref().and_then(|path| {
             self.custom_project
                 .as_ref()
@@ -6644,6 +6907,9 @@ impl ScenarioApp {
         self.selected_step = selected_task
             .is_some_and(|task| task.graph.is_none() && !task.steps.is_empty())
             .then_some(0);
+        self.workspace_inspector_open = false;
+        self.workspace_bottom_expanded = false;
+        self.workspace_bottom_tab = WorkspaceBottomTab::Problems;
         self.load_error = None;
         self.invalidate_plan();
     }
@@ -6867,6 +7133,7 @@ impl eframe::App for ScenarioApp {
             self.save_selected_scenario();
         }
         self.top_bar(ui);
+        self.workspace_bottom_dock(ui);
         self.left_library(ui);
         self.right_inspector(ui);
         self.canvas(ui);
@@ -6885,6 +7152,10 @@ impl ScenarioApp {
         let Some(action) = self.pending_project_action else {
             return;
         };
+        if self.running {
+            self.pending_project_action = None;
+            return;
+        }
         egui::Modal::new(Id::new("confirm-discard-project"))
             .frame(
                 Frame::popup(&ctx.global_style())
@@ -7115,15 +7386,24 @@ impl ScenarioApp {
         #[cfg(target_os = "macos")]
         let horizontal_margin = Margin {
             left: 84,
-            right: 16,
-            top: 10,
-            bottom: 10,
+            right: 12,
+            top: 6,
+            bottom: 6,
         };
         #[cfg(not(target_os = "macos"))]
-        let horizontal_margin = Margin::symmetric(16, 10);
+        let horizontal_margin = Margin::symmetric(12, 6);
+
+        let breadcrumb = self.selected_task().map(|task| {
+            let project = self
+                .custom_project
+                .as_ref()
+                .map(|project| project.name.as_str())
+                .unwrap_or("Библиотека");
+            (project.to_owned(), task.name.clone(), task.id.clone())
+        });
 
         egui::Panel::top("topbar")
-            .exact_size(68.0)
+            .exact_size(52.0)
             .frame(
                 Frame::new()
                     .fill(surface(self.dark))
@@ -7146,94 +7426,61 @@ impl ScenarioApp {
                 ui.horizontal(|ui| {
                     Frame::new()
                         .fill(if self.dark { Color32::WHITE } else { INK })
-                        .corner_radius(10)
-                        .inner_margin(Margin::symmetric(10, 8))
+                        .corner_radius(UI_RADIUS_CONTROL)
+                        .inner_margin(Margin::symmetric(8, 6))
                         .show(ui, |ui| {
-                            ui.label(RichText::new("PP").strong().size(12.0).color(if self.dark {
+                            ui.label(RichText::new("PP").strong().size(11.0).color(if self.dark {
                                 INK
                             } else {
                                 Color32::WHITE
                             }));
                         });
-                    ui.vertical(|ui| {
-                        ui.add_space(2.0);
+                    ui.label(
+                        RichText::new("PPDUSTER")
+                            .strong()
+                            .size(UI_TEXT_BODY)
+                            .color(text(self.dark)),
+                    );
+
+                    if let Some((project, task, task_id)) = breadcrumb {
+                        ui.add_space(UI_SPACE_MD);
                         ui.label(
-                            RichText::new("PPDUSTER")
-                                .strong()
-                                .size(12.0)
-                                .color(text(self.dark)),
-                        );
-                        ui.label(
-                            RichText::new("РЕДАКТОР СЦЕНАРИЕВ")
-                                .size(9.0)
+                            RichText::new(project)
+                                .size(UI_TEXT_BODY)
                                 .color(ui_tone(UiTone::Muted, self.dark)),
                         );
-                    });
-
-                    ui.add_space(28.0);
-                    if let Some(task) = self.selected_task() {
-                        let step_count = self
-                            .task_pack
-                            .as_ref()
-                            .and_then(|pack| pack.resolve(&task.id).ok())
-                            .map(|resolved| task_action_steps(&resolved).len())
-                            .unwrap_or_else(|| task_action_steps(task).len());
-                        let structure = if task.is_template() {
-                            format!(
-                                "{} · {} сценариев · {} шагов",
-                                task.id,
-                                task.scenarios.len(),
-                                step_count
+                        ui.label(
+                            RichText::new("/")
+                                .size(UI_TEXT_BODY)
+                                .color(ui_tone(UiTone::Muted, self.dark)),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(task)
+                                    .strong()
+                                    .size(UI_TEXT_BODY)
+                                    .color(text(self.dark)),
                             )
-                        } else {
-                            format!("{} · {} шагов", task.id, step_count)
-                        };
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(
-                                        self.custom_project
-                                            .as_ref()
-                                            .map(|project| project.name.as_str())
-                                            .unwrap_or("Библиотека"),
-                                    )
-                                    .size(11.0)
-                                    .color(ui_tone(UiTone::Muted, self.dark)),
-                                );
-                                ui.label(
-                                    RichText::new("/")
-                                        .size(11.0)
-                                        .color(ui_tone(UiTone::Muted, self.dark)),
-                                );
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&task.name)
-                                            .strong()
-                                            .size(12.0)
-                                            .color(text(self.dark)),
-                                    )
-                                    .truncate(),
-                                )
-                                .on_hover_text(&task.name);
-                            });
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(structure)
-                                        .monospace()
-                                        .size(9.0)
-                                        .color(ui_tone(UiTone::Muted, self.dark)),
-                                )
-                                .truncate(),
-                            );
-                        });
+                            .truncate(),
+                        )
+                        .on_hover_text(task_id);
+                        if self.custom_project.is_some() && self.project_dirty {
+                            ui.label(
+                                RichText::new("●")
+                                    .size(8.0)
+                                    .color(ui_tone(UiTone::Warning, self.dark)),
+                            )
+                            .on_hover_text("Есть несохранённые изменения");
+                        }
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .button(if self.dark {
-                                "☀  Светлая"
+                            .button(if self.dark { "☀" } else { "☾" })
+                            .on_hover_text(if self.dark {
+                                "Включить светлую тему"
                             } else {
-                                "☾  Тёмная"
+                                "Включить тёмную тему"
                             })
                             .clicked()
                         {
@@ -7246,6 +7493,10 @@ impl ScenarioApp {
                                     egui::ThemePreference::Light
                                 },
                             );
+                        }
+                        if self.custom_project.is_some() {
+                            self.project_file_menu(ui);
+                            self.workspace_plan_run_controls(ui);
                         }
                         let (safety_label, safety_color) =
                             safety_badge(self.allow_shell, self.allow_elevation, self.dark);
@@ -7267,7 +7518,343 @@ impl ScenarioApp {
             });
     }
 
+    fn project_file_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Проект ▾", |ui| {
+            if ui
+                .add_enabled(!self.running, egui::Button::new("Открыть…"))
+                .clicked()
+            {
+                let _ = self.request_project_action(PendingProjectAction::Load);
+                ui.close();
+            }
+            if ui
+                .add_enabled(!self.running, egui::Button::new("Сохранить"))
+                .clicked()
+            {
+                self.save_selected_scenario();
+                ui.close();
+            }
+            if ui
+                .add_enabled(!self.running, egui::Button::new("Сохранить как…"))
+                .clicked()
+            {
+                self.save_custom_project_as();
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .add_enabled(!self.running, egui::Button::new("Закрыть проект"))
+                .clicked()
+            {
+                let _ = self.request_project_action(PendingProjectAction::Close);
+                ui.close();
+            }
+        });
+    }
+
+    fn reveal_workspace_bottom(&mut self, tab: WorkspaceBottomTab) {
+        if self.custom_project.is_some() {
+            self.workspace_bottom_tab = tab;
+            self.workspace_bottom_expanded = true;
+        }
+    }
+
+    fn workspace_problem_count(&self) -> usize {
+        let validation =
+            self.custom_project
+                .as_ref()
+                .is_some_and(|project| validate_project(project).is_err()) as usize;
+        validation
+            + usize::from(self.plan_error.is_some())
+            + usize::from(
+                self.file_message
+                    .as_ref()
+                    .is_some_and(|(is_error, _)| *is_error),
+            )
+            + self.report.as_ref().map_or(0, |report| report.errors.len())
+    }
+
+    fn workspace_bottom_dock(&mut self, root: &mut egui::Ui) {
+        if self.custom_project.is_none() {
+            return;
+        }
+        let expanded = self.workspace_bottom_expanded;
+        let mut panel = egui::Panel::bottom("workspace-bottom-dock")
+            .frame(
+                Frame::new()
+                    .fill(surface(self.dark))
+                    .stroke(Stroke::new(1.0, line(self.dark)))
+                    .inner_margin(Margin::symmetric(14, 8)),
+            )
+            .resizable(expanded);
+        panel = if expanded {
+            panel.default_size(210.0).size_range(140.0..=360.0)
+        } else {
+            panel.exact_size(38.0)
+        };
+        panel.show(root, |ui| {
+            let problem_count = self.workspace_problem_count();
+            let mut selected_tab = None;
+            ui.horizontal(|ui| {
+                for (tab, label) in [
+                    (
+                        WorkspaceBottomTab::Problems,
+                        format!("Проблемы · {problem_count}"),
+                    ),
+                    (WorkspaceBottomTab::Plan, "План".to_owned()),
+                    (WorkspaceBottomTab::Result, "Результат".to_owned()),
+                    (WorkspaceBottomTab::Logs, "Логи".to_owned()),
+                ] {
+                    if ui
+                        .selectable_label(self.workspace_bottom_tab == tab, label)
+                        .clicked()
+                    {
+                        selected_tab = Some(tab);
+                    }
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .small_button(if expanded { "⌄" } else { "⌃" })
+                        .on_hover_text(if expanded {
+                            "Свернуть нижнюю панель"
+                        } else {
+                            "Развернуть нижнюю панель"
+                        })
+                        .clicked()
+                    {
+                        self.workspace_bottom_expanded = !expanded;
+                    }
+                });
+            });
+            if let Some(tab) = selected_tab {
+                if self.workspace_bottom_tab == tab {
+                    self.workspace_bottom_expanded = !expanded;
+                } else {
+                    self.workspace_bottom_tab = tab;
+                    self.workspace_bottom_expanded = true;
+                }
+            }
+            if !expanded {
+                return;
+            }
+            ui.separator();
+            ScrollArea::vertical()
+                .id_salt(("workspace-bottom-content", self.workspace_bottom_tab))
+                .auto_shrink([false, false])
+                .show(ui, |ui| match self.workspace_bottom_tab {
+                    WorkspaceBottomTab::Problems => self.workspace_problems_tab(ui),
+                    WorkspaceBottomTab::Plan => self.workspace_plan_tab(ui),
+                    WorkspaceBottomTab::Result => self.workspace_result_tab(ui),
+                    WorkspaceBottomTab::Logs => self.workspace_logs_tab(ui),
+                });
+        });
+    }
+
+    fn workspace_problems_tab(&mut self, ui: &mut egui::Ui) {
+        let mut shown = false;
+        if let Some(error) = self
+            .custom_project
+            .as_ref()
+            .and_then(|project| validate_project(project).err())
+        {
+            shown = true;
+            error_box(ui, &error, self.dark);
+            ui.add_space(UI_SPACE_XS);
+        }
+        if let Some(error) = &self.plan_error {
+            shown = true;
+            error_box(ui, error, self.dark);
+            ui.add_space(UI_SPACE_XS);
+        }
+        if let Some((true, message)) = &self.file_message {
+            shown = true;
+            error_box(ui, message, self.dark);
+            ui.add_space(UI_SPACE_XS);
+        }
+        if let Some(report) = &self.report {
+            for error in &report.errors {
+                shown = true;
+                error_box(ui, error, self.dark);
+                ui.add_space(UI_SPACE_XS);
+            }
+        }
+        if !shown {
+            ui.label(RichText::new("Проблем нет").strong().color(CYAN));
+            ui.label(
+                RichText::new("Проверка структуры и последний запуск не обнаружили ошибок.")
+                    .size(UI_TEXT_CAPTION)
+                    .color(MUTED),
+            );
+        }
+
+        let auth_needed = self
+            .report
+            .as_ref()
+            .is_some_and(github_report_needs_authorization);
+        if auth_needed {
+            ui.add_space(UI_SPACE_SM);
+            if ui
+                .add_enabled(
+                    self.github_picker.is_idle() && !self.running,
+                    egui::Button::new("Войти через GitHub и проверить снова"),
+                )
+                .clicked()
+            {
+                self.start_github_authorization(ui.ctx(), GithubAuthorizationIntent::RetryScenario);
+            }
+        }
+        if self.github_picker.authorizing
+            && matches!(
+                self.github_picker.authorization_intent,
+                GithubAuthorizationIntent::RetryScenario
+            )
+        {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    RichText::new(if self.github_picker.device_flow_ready {
+                        "Ожидаю подтверждения входа в браузере…"
+                    } else {
+                        "Получаю одноразовый код GitHub…"
+                    })
+                    .size(UI_TEXT_CAPTION)
+                    .color(MUTED),
+                );
+            });
+            if github_authorization_cancel_button(
+                ui,
+                self.github_picker.auth_cancellation_requested,
+            ) {
+                self.cancel_github_authorization(ui.ctx());
+            }
+        }
+    }
+
+    fn workspace_plan_tab(&mut self, ui: &mut egui::Ui) {
+        let permissions_changed = ui
+            .add_enabled_ui(!self.running, |ui| {
+                paint_run_permission_controls(ui, &mut self.allow_elevation, &mut self.allow_shell)
+            })
+            .inner;
+        if self.running {
+            ui.label(
+                RichText::new("Разрешения зафиксированы проверенным планом до конца запуска.")
+                    .size(UI_TEXT_CAPTION)
+                    .color(MUTED),
+            );
+        }
+        if permissions_changed {
+            self.invalidate_plan();
+        }
+        ui.add_space(UI_SPACE_SM);
+        if let Some(report) = self.report.as_ref().filter(|_| !self.report_applied) {
+            ui.label(
+                RichText::new(if report.errors.is_empty() {
+                    format!("План готов · {} операций", report.plans.len())
+                } else {
+                    format!("План содержит ошибок: {}", report.errors.len())
+                })
+                .strong()
+                .color(if report.errors.is_empty() {
+                    CYAN
+                } else {
+                    ORANGE
+                }),
+            );
+            for plan in &report.plans {
+                Frame::new()
+                    .fill(panel(self.dark))
+                    .corner_radius(UI_RADIUS_CONTROL)
+                    .inner_margin(Margin::symmetric(10, 7))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(&plan.step_name).strong().size(UI_TEXT_BODY));
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&plan.summary)
+                                    .size(UI_TEXT_CAPTION)
+                                    .color(MUTED),
+                            )
+                            .wrap(),
+                        );
+                    });
+                ui.add_space(4.0);
+            }
+        } else {
+            ui.label(RichText::new("План не проверен").strong().color(MUTED));
+            ui.label(
+                RichText::new("Нажмите «Проверить план» в верхней панели.")
+                    .size(UI_TEXT_CAPTION)
+                    .color(MUTED),
+            );
+        }
+    }
+
+    fn workspace_result_tab(&mut self, ui: &mut egui::Ui) {
+        if self.running {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Сценарий выполняется…").strong());
+            });
+            ui.label(
+                RichText::new("Результаты появятся после завершения запуска.")
+                    .size(UI_TEXT_CAPTION)
+                    .color(MUTED),
+            );
+            return;
+        }
+        if let Some(report) = self.report.as_ref().filter(|_| self.report_applied) {
+            paint_composer_run_report(ui, report, self.selected_node.as_deref(), true, self.dark);
+        } else {
+            ui.label(RichText::new("Запусков ещё не было").strong().color(MUTED));
+        }
+    }
+
+    fn workspace_logs_tab(&mut self, ui: &mut egui::Ui) {
+        let Some(report) = self.report.as_ref().filter(|_| self.report_applied) else {
+            ui.label(RichText::new("Логи появятся после запуска.").color(MUTED));
+            return;
+        };
+        let indices = self
+            .selected_node
+            .as_deref()
+            .map(|node_id| report_step_indices_for_node(report, node_id))
+            .filter(|indices| !indices.is_empty())
+            .unwrap_or_else(|| (0..report.steps.len()).collect());
+        for index in indices {
+            let step = &report.steps[index];
+            egui::CollapsingHeader::new(format!(
+                "{} · {} · {}",
+                step.step_name,
+                step.status.as_str(),
+                step.step_id
+            ))
+            .default_open(matches!(&step.status, StepStatus::Failed))
+            .show(ui, |ui| {
+                if step.logs.is_empty() {
+                    ui.label(
+                        RichText::new("Нет сообщений")
+                            .size(UI_TEXT_CAPTION)
+                            .color(MUTED),
+                    );
+                } else {
+                    for log in &step.logs {
+                        paint_bounded_code_lines(
+                            ui,
+                            &log.message,
+                            UI_TEXT_CAPTION,
+                            text(self.dark),
+                        );
+                    }
+                }
+            });
+        }
+    }
+
     fn left_library(&mut self, root: &mut egui::Ui) {
+        if self.custom_project.is_some() {
+            self.project_workspace_navigation(root);
+            return;
+        }
         let (library_width, _) = workspace_panel_widths(root.max_rect().width());
         egui::Panel::left("library")
             .default_size(library_width)
@@ -7282,10 +7869,6 @@ impl ScenarioApp {
             .show(root, |ui| {
                 ui.label(RichText::new("БИБЛИОТЕКА").strong().size(10.0).color(MUTED));
                 ui.add_space(4.0);
-                if self.custom_project.is_some() {
-                    self.composer_palette(ui);
-                    return;
-                }
                 ui.label(
                     RichText::new("Сценарии")
                         .strong()
@@ -7401,17 +7984,99 @@ impl ScenarioApp {
             });
     }
 
+    fn project_workspace_navigation(&mut self, root: &mut egui::Ui) {
+        let workspace_rect = root.max_rect();
+        let drawer_overlays = workspace_project_drawer_overlays(workspace_rect.width());
+        egui::Panel::left("project-workspace-rail")
+            .exact_size(WORKSPACE_PROJECT_RAIL_WIDTH)
+            .frame(
+                Frame::new()
+                    .fill(surface(self.dark))
+                    .stroke(Stroke::new(1.0, line(self.dark)))
+                    .inner_margin(Margin::symmetric(6, 10)),
+            )
+            .show(root, |ui| {
+                ui.vertical_centered(|ui| {
+                    let toggle = ui
+                        .add_sized(
+                            [40.0, 40.0],
+                            egui::Button::new("☰").selected(self.workspace_project_drawer_open),
+                        )
+                        .on_hover_text(if self.workspace_project_drawer_open {
+                            "Скрыть сценарии"
+                        } else {
+                            "Показать сценарии"
+                        });
+                    if toggle.clicked() {
+                        self.workspace_project_drawer_open = !self.workspace_project_drawer_open;
+                        if drawer_overlays && self.workspace_project_drawer_open {
+                            self.workspace_inspector_open = false;
+                        }
+                    }
+                    ui.add_space(UI_SPACE_SM);
+                    if ui
+                        .add_sized([40.0, 40.0], egui::Button::new("＋"))
+                        .on_hover_text("Добавить сценарий")
+                        .clicked()
+                    {
+                        open_workspace_project_drawer(
+                            &mut self.workspace_project_drawer_open,
+                            &mut self.workspace_inspector_open,
+                            workspace_rect.width(),
+                        );
+                    }
+                });
+            });
+
+        if !self.workspace_project_drawer_open {
+            return;
+        }
+        if drawer_overlays {
+            let ctx = root.ctx().clone();
+            let drawer_pos = Pos2::new(
+                workspace_rect.left() + WORKSPACE_PROJECT_RAIL_WIDTH,
+                workspace_rect.top(),
+            );
+            egui::Area::new(Id::new("project-workspace-drawer-overlay"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(drawer_pos)
+                .movable(false)
+                .constrain_to(workspace_rect)
+                .show(&ctx, |ui| {
+                    Frame::new()
+                        .fill(surface(self.dark))
+                        .stroke(Stroke::new(1.0, line(self.dark)))
+                        .inner_margin(Margin::same(14))
+                        .show(ui, |ui| {
+                            ui.set_width(WORKSPACE_PROJECT_DRAWER_WIDTH - 28.0);
+                            ui.set_height((workspace_rect.height() - 28.0).max(0.0));
+                            self.composer_palette(ui);
+                        });
+                });
+        } else {
+            egui::Panel::left("project-workspace-drawer")
+                .exact_size(WORKSPACE_PROJECT_DRAWER_WIDTH)
+                .frame(
+                    Frame::new()
+                        .fill(surface(self.dark))
+                        .stroke(Stroke::new(1.0, line(self.dark)))
+                        .inner_margin(Margin::same(14)),
+                )
+                .show(root, |ui| self.composer_palette(ui));
+        }
+    }
+
     fn composer_palette(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("Конструктор")
+                RichText::new("Сценарии")
                     .strong()
-                    .size(22.0)
+                    .size(18.0)
                     .color(text(self.dark)),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Закрыть").clicked() {
-                    let _ = self.request_project_action(PendingProjectAction::Close);
+                if ui.button("×").on_hover_text("Свернуть панель").clicked() {
+                    self.workspace_project_drawer_open = false;
                 }
             });
         });
@@ -7426,7 +8091,7 @@ impl ScenarioApp {
         ui.label(
             RichText::new(project_name)
                 .strong()
-                .size(14.0)
+                .size(UI_TEXT_BODY)
                 .color(text(self.dark)),
         );
         ui.horizontal(|ui| {
@@ -7460,60 +8125,41 @@ impl ScenarioApp {
                 .on_hover_text(path.display().to_string());
             }
         });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!self.running, egui::Button::new("Загрузить…"))
-                .clicked()
-            {
-                let _ = self.request_project_action(PendingProjectAction::Load);
-            }
-            if ui
-                .add_enabled(!self.running, egui::Button::new("Сохранить"))
-                .clicked()
-            {
-                self.save_selected_scenario();
-            }
-        });
-        if ui
-            .add_enabled(!self.running, egui::Button::new("Сохранить как…"))
-            .clicked()
-        {
-            self.save_custom_project_as();
-        }
         if let Some((is_error, message)) = &self.file_message {
-            ui.label(
-                RichText::new(message)
-                    .size(8.0)
-                    .color(if *is_error { ORANGE } else { CYAN }),
-            );
-        }
-        ui.add_space(8.0);
-        section_label(ui, "ПРОЕКТ");
-        ui.horizontal(|ui| {
-            if ui.button("＋ Группа").clicked() {
-                self.add_project_group();
-            }
-            if ui.button("＋ Сценарий").clicked() {
-                self.add_project_scenario();
-            }
-        });
-        if ui
-            .add_enabled(
-                !self.running,
-                egui::Button::new("＋ GitHub · репозитории аккаунта")
-                    .min_size(Vec2::new(ui.available_width(), 30.0)),
+            ui.add(
+                egui::Label::new(RichText::new(message).size(8.0).color(if *is_error {
+                    ORANGE
+                } else {
+                    CYAN
+                }))
+                .truncate(),
             )
-            .clicked()
-        {
-            self.add_github_project_scenario();
+            .on_hover_text(message);
         }
+        ui.add_space(UI_SPACE_MD);
+        ui.add_enabled_ui(!self.running, |ui| {
+            ui.menu_button("＋ Добавить", |ui| {
+                if ui.button("Группу").clicked() {
+                    self.add_project_group();
+                    ui.close();
+                }
+                if ui.button("Сценарий").clicked() {
+                    self.add_project_scenario();
+                    ui.close();
+                }
+                if ui.button("GitHub · репозитории аккаунта").clicked() {
+                    self.add_github_project_scenario();
+                    ui.close();
+                }
+            });
+        });
         ui.add_space(4.0);
         let project = self.custom_project.clone().expect("project checked above");
         let mut tree_action = None;
+        let tree_height = (ui.available_height() - 230.0).clamp(120.0, 360.0);
         ScrollArea::vertical()
             .id_salt("project-group-tree")
-            .max_height(240.0)
+            .max_height(tree_height)
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 paint_project_tree(
@@ -7529,14 +8175,86 @@ impl ScenarioApp {
                     },
                 );
             });
-        match tree_action {
-            Some(ProjectTreeAction::SelectGroup(path)) => {
-                self.select_project_group(&project, path);
-            }
+        let selection_changed = match tree_action {
+            Some(ProjectTreeAction::SelectGroup(path)) => self.select_project_group(&project, path),
             Some(ProjectTreeAction::SelectScenario(path)) => {
-                self.select_project_scenario(&project, path);
+                self.select_project_scenario(&project, path)
             }
-            None => {}
+            None => false,
+        };
+        if selection_changed && workspace_project_drawer_overlays(ui.ctx().content_rect().width()) {
+            self.workspace_project_drawer_open = false;
+        }
+
+        ui.add_space(UI_SPACE_SM);
+        let selected_path = self.selected_project_scenario.clone();
+        let dark = self.dark;
+        let running = self.running;
+        let mut scenario_changed = false;
+        egui::CollapsingHeader::new("Настройки сценария")
+            .default_open(false)
+            .show(ui, |ui| {
+                let Some(task) = self
+                    .custom_project
+                    .as_mut()
+                    .and_then(|project| project.scenario_mut(selected_path.as_deref()?))
+                else {
+                    ui.label(
+                        RichText::new("Выберите сценарий")
+                            .size(UI_TEXT_CAPTION)
+                            .color(ui_tone(UiTone::Muted, dark)),
+                    );
+                    return;
+                };
+                ui.add_enabled_ui(!running, |ui| {
+                    ui.label(
+                        RichText::new("Название")
+                            .size(UI_TEXT_CAPTION)
+                            .color(ui_tone(UiTone::Muted, dark)),
+                    );
+                    scenario_changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(&mut task.name)
+                                .desired_width(ui.available_width()),
+                        )
+                        .changed();
+                    ui.label(
+                        RichText::new("ID")
+                            .size(UI_TEXT_CAPTION)
+                            .color(ui_tone(UiTone::Muted, dark)),
+                    );
+                    Frame::new()
+                        .fill(code_surface(dark))
+                        .corner_radius(UI_RADIUS_CONTROL)
+                        .inner_margin(Margin::symmetric(8, 6))
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&task.id)
+                                        .monospace()
+                                        .size(UI_TEXT_CAPTION)
+                                        .color(text(dark)),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text("Стабильный ID сценария доступен только для чтения");
+                        });
+                    ui.label(
+                        RichText::new("Описание")
+                            .size(UI_TEXT_CAPTION)
+                            .color(ui_tone(UiTone::Muted, dark)),
+                    );
+                    scenario_changed |= ui
+                        .add(
+                            egui::TextEdit::multiline(&mut task.description)
+                                .desired_rows(3)
+                                .desired_width(ui.available_width()),
+                        )
+                        .changed();
+                });
+            });
+        if scenario_changed {
+            self.mark_project_dirty();
         }
     }
 
@@ -7552,7 +8270,7 @@ impl ScenarioApp {
         let resolution_error = resolved.as_ref().err().map(String::as_str);
         let plan_enabled = validation_error.is_none()
             && resolved_task.is_some()
-            && !self.github_picker.loading
+            && self.github_picker.is_idle()
             && !self.running;
         let run_blocker = run_disabled_reason(RunGate {
             validation_error: validation_error.as_deref(),
@@ -7563,7 +8281,13 @@ impl ScenarioApp {
             plan_error: self.plan_error.as_deref(),
             github_loading: self.github_picker.loading,
             running: self.running,
-            github_auth_ready: github_selection_auth_ready(&self.github_picker),
+            github_auth_ready: self.github_picker.is_idle()
+                && github_selection_auth_ready(&self.github_picker),
+        })
+        .or_else(|| {
+            self.prepared_plan
+                .is_none()
+                .then(|| "Проверенный план устарел. Проверьте его снова.".to_owned())
         });
         let mut plan_clicked = false;
         let mut run_clicked = false;
@@ -7644,7 +8368,110 @@ impl ScenarioApp {
         }
     }
 
+    fn workspace_plan_run_controls(&mut self, ui: &mut egui::Ui) {
+        let validation_error = self
+            .custom_project
+            .as_ref()
+            .and_then(|project| validate_project(project).err());
+        let resolved = self
+            .resolved_selected_task()
+            .map_err(|error| format!("{error:#}"));
+        let resolved_task = resolved.as_ref().ok();
+        let plan_enabled = validation_error.is_none()
+            && resolved_task.is_some()
+            && self.github_picker.is_idle()
+            && !self.running;
+        let plan_ready = self.prepared_plan.is_some()
+            && self
+                .report
+                .as_ref()
+                .is_some_and(|report| !self.report_applied && report.errors.is_empty());
+
+        if self.running {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    RichText::new("Выполняется…")
+                        .size(UI_TEXT_CAPTION)
+                        .color(CYAN),
+                );
+            });
+            return;
+        }
+
+        let run_blocker = run_disabled_reason(RunGate {
+            validation_error: validation_error.as_deref(),
+            resolved_task,
+            resolution_error: resolved.as_ref().err().map(String::as_str),
+            report: self.report.as_ref(),
+            report_applied: self.report_applied,
+            plan_error: self.plan_error.as_deref(),
+            github_loading: self.github_picker.loading,
+            running: self.running,
+            github_auth_ready: self.github_picker.is_idle()
+                && github_selection_auth_ready(&self.github_picker),
+        })
+        .or_else(|| (!plan_ready).then(|| "Сначала проверьте актуальный план.".to_owned()));
+
+        let run = ui
+            .add_enabled(
+                run_blocker.is_none(),
+                egui::Button::new(RichText::new("Запустить").strong())
+                    .fill(ui_tone(UiTone::Warning, self.dark)),
+            )
+            .on_disabled_hover_text(run_blocker.as_deref().unwrap_or_default());
+        let check = ui.add_enabled(
+            plan_enabled,
+            egui::Button::new(if plan_ready {
+                "Проверить снова"
+            } else {
+                "Проверить план"
+            }),
+        );
+        ui.label(
+            RichText::new(if plan_ready {
+                "✓ План готов"
+            } else if let Some(report) = &self.report {
+                if report.errors.is_empty() {
+                    "План неактуален"
+                } else {
+                    "Есть ошибки"
+                }
+            } else {
+                "План не проверен"
+            })
+            .strong()
+            .size(UI_TEXT_CAPTION)
+            .color(if plan_ready { CYAN } else { MUTED }),
+        );
+        if run.clicked() {
+            self.confirm_run = true;
+        }
+        if check.clicked() {
+            self.build_plan();
+        }
+    }
+
     fn right_inspector(&mut self, root: &mut egui::Ui) {
+        let custom = self.custom_project.is_some();
+        if custom && (!self.workspace_inspector_open || self.selected_node.is_none()) {
+            return;
+        }
+        let inspector_title = self
+            .selected_task()
+            .and_then(|task| task.graph.as_ref())
+            .and_then(|graph| {
+                self.selected_node
+                    .as_deref()
+                    .and_then(|id| graph_node(graph, id))
+            })
+            .map(|node| match node {
+                GraphNode::Action(node) => step_title(&node.step),
+                GraphNode::ForEach(_) => "Для каждого элемента".to_owned(),
+                GraphNode::If(_) => "Условие".to_owned(),
+                GraphNode::Switch(_) => "Выбор ветки".to_owned(),
+                GraphNode::Join(_) => "Объединение веток".to_owned(),
+            });
         let (_, inspector_width) = workspace_panel_widths(root.max_rect().width());
         egui::Panel::right("inspector")
             .default_size(inspector_width)
@@ -7657,13 +8484,31 @@ impl ScenarioApp {
                     .inner_margin(Margin::same(16)),
             )
             .show(root, |ui| {
-                ui.label(RichText::new("ИНСПЕКТОР").strong().size(10.0).color(MUTED));
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(inspector_title.as_deref().unwrap_or("ИНСПЕКТОР"))
+                                .strong()
+                                .size(if custom { UI_TEXT_BODY } else { UI_TEXT_CAPTION })
+                                .color(if custom { text(self.dark) } else { MUTED }),
+                        )
+                        .truncate(),
+                    );
+                    if custom
+                        && ui
+                            .button("×")
+                            .on_hover_text("Скрыть инспектор")
+                            .clicked()
+                    {
+                        self.workspace_inspector_open = false;
+                    }
+                });
                 ui.add_space(6.0);
-                if self.selected_task().is_some() {
+                if !custom && self.selected_task().is_some() {
                     self.inspector_action_bar(ui);
                     ui.add_space(8.0);
                 }
-                if self.custom_project.is_some() {
+                if custom {
                     bounded_inspector_scroll(ui, "composer-inspector-scroll", |ui| {
                         self.composer_inspector(ui);
                     });
@@ -7772,17 +8617,19 @@ impl ScenarioApp {
                     {
                         section_label(ui, "КАНАЛ РЕЛИЗА");
                         let channel_before = self.channel;
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(
-                                &mut self.channel,
-                                ReleaseChannel::Release,
-                                "Release",
-                            );
-                            ui.selectable_value(
-                                &mut self.channel,
-                                ReleaseChannel::Beta,
-                                "Beta",
-                            );
+                        ui.add_enabled_ui(!self.running, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(
+                                    &mut self.channel,
+                                    ReleaseChannel::Release,
+                                    "Release",
+                                );
+                                ui.selectable_value(
+                                    &mut self.channel,
+                                    ReleaseChannel::Beta,
+                                    "Beta",
+                                );
+                            });
                         });
                         if self.channel != channel_before {
                             self.invalidate_plan();
@@ -7898,11 +8745,15 @@ impl ScenarioApp {
                     }
                     ui.add_space(14.0);
 
-                    let permissions_changed = paint_run_permission_controls(
-                        ui,
-                        &mut self.allow_elevation,
-                        &mut self.allow_shell,
-                    );
+                    let permissions_changed = ui
+                        .add_enabled_ui(!self.running, |ui| {
+                            paint_run_permission_controls(
+                                ui,
+                                &mut self.allow_elevation,
+                                &mut self.allow_shell,
+                            )
+                        })
+                        .inner;
                     if permissions_changed {
                         self.invalidate_plan();
                     }
@@ -8087,6 +8938,23 @@ impl ScenarioApp {
     }
 
     fn composer_inspector(&mut self, ui: &mut egui::Ui) {
+        if self.running {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    RichText::new("Настройки заблокированы на время запуска")
+                        .size(UI_TEXT_CAPTION)
+                        .color(MUTED),
+                );
+            });
+            ui.add_space(UI_SPACE_SM);
+        }
+        ui.add_enabled_ui(!self.running, |ui| {
+            self.composer_inspector_contents(ui);
+        });
+    }
+
+    fn composer_inspector_contents(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
         let mut remove_node = None;
         let mut remove_optional_scope = None;
@@ -8113,48 +8981,6 @@ impl ScenarioApp {
             else {
                 return;
             };
-            ui.label(
-                RichText::new("Пользовательский сценарий")
-                    .strong()
-                    .size(18.0)
-                    .color(text(self.dark)),
-            );
-            ui.add_space(10.0);
-            section_label(ui, "СЦЕНАРИЙ");
-            ui.label(RichText::new("Название").size(9.0).color(MUTED));
-            changed |= ui
-                .add(egui::TextEdit::singleline(&mut task.name).desired_width(ui.available_width()))
-                .changed();
-            ui.label(RichText::new("ID сценария").size(9.0).color(MUTED));
-            Frame::new()
-                .fill(code_surface(self.dark))
-                .corner_radius(8)
-                .inner_margin(Margin::symmetric(10, 7))
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&task.id)
-                                .monospace()
-                                .size(10.0)
-                                .color(text(self.dark)),
-                        )
-                        .truncate(),
-                    )
-                    .on_hover_text(
-                        "ID является стабильным ключом сценария и его канваса; в редакторе он не меняется.",
-                    );
-                });
-            ui.label(RichText::new("Описание").size(9.0).color(MUTED));
-            changed |= ui
-                .add(
-                    egui::TextEdit::multiline(&mut task.description)
-                        .desired_rows(3)
-                        .desired_width(ui.available_width()),
-                )
-                .changed();
-            ui.add_space(12.0);
-
-            section_label(ui, "ВЫБРАННЫЙ БЛОК");
             if let (Some(graph_snapshot), Some(node_id)) =
                 (task.graph.clone(), selected_node.as_deref())
             {
@@ -8211,6 +9037,7 @@ impl ScenarioApp {
                                 node,
                                 &action_options,
                                 &external_auth_state,
+                                Some(&graph_snapshot),
                                 self.dark,
                             );
                             changed |= response.changed;
@@ -8903,117 +9730,6 @@ impl ScenarioApp {
                 );
             }
         }
-
-        ui.add_space(14.0);
-        let permissions_changed =
-            paint_run_permission_controls(ui, &mut self.allow_elevation, &mut self.allow_shell);
-        if permissions_changed {
-            self.invalidate_plan();
-        }
-        ui.add_space(14.0);
-        let validation = self
-            .custom_project
-            .as_ref()
-            .ok_or_else(|| "проект не выбран".to_owned())
-            .and_then(validate_project);
-        match &validation {
-            Ok(()) => {
-                ui.label(
-                    RichText::new("Сценарий корректен и готов к проверке плана.")
-                        .size(9.0)
-                        .color(CYAN),
-                );
-            }
-            Err(error) => {
-                section_label(ui, "НУЖНО ИСПРАВИТЬ");
-                ui.label(
-                    RichText::new(
-                        "Черновик можно сохранить, но проверка плана и запуск пока заблокированы.",
-                    )
-                    .size(UI_TEXT_CAPTION)
-                    .color(ui_tone(UiTone::Warning, self.dark)),
-                );
-                error_box(ui, error, self.dark);
-            }
-        }
-        let mut request_github_authorization = false;
-        let mut cancel_github_authorization = false;
-        if let Some(error) = &self.plan_error {
-            ui.add_space(8.0);
-            error_box(ui, error, self.dark);
-        } else if let Some(report) = &self.report {
-            paint_composer_run_report(
-                ui,
-                report,
-                self.selected_node.as_deref(),
-                self.report_applied,
-                self.dark,
-            );
-            if github_report_needs_authorization(report) {
-                ui.add_space(8.0);
-                if ui
-                    .add_enabled(
-                        self.github_picker.is_idle() && !self.running,
-                        egui::Button::new("Войти через GitHub и повторить")
-                            .min_size(Vec2::new(ui.available_width(), 32.0)),
-                    )
-                    .clicked()
-                {
-                    request_github_authorization = true;
-                }
-                if self.github_picker.authorizing
-                    && matches!(
-                        self.github_picker.authorization_intent,
-                        GithubAuthorizationIntent::RetryScenario
-                    )
-                {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(
-                            RichText::new(if self.github_picker.auth_cancellation_requested {
-                                "Отменяю вход в GitHub…"
-                            } else if self.github_picker.device_flow_ready {
-                                "Ожидаю подтверждения входа в браузере…"
-                            } else {
-                                "Получаю одноразовый код GitHub…"
-                            })
-                            .size(8.0)
-                            .color(MUTED),
-                        );
-                    });
-                    if !self.github_picker.auth_cancellation_requested
-                        && self.github_picker.device_flow_ready
-                        && ui.button("Открыть страницу входа ещё раз").clicked()
-                    {
-                        ui.ctx()
-                            .open_url(egui::OpenUrl::new_tab(GITHUB_DEVICE_LOGIN_URL));
-                    }
-                    if !self.github_picker.auth_cancellation_requested {
-                        ui.label(
-                            RichText::new(GITHUB_EXTERNAL_LOGIN_HINT)
-                                .size(8.0)
-                                .color(MUTED),
-                        );
-                    }
-                    cancel_github_authorization |= github_authorization_cancel_button(
-                        ui,
-                        self.github_picker.auth_cancellation_requested,
-                    );
-                } else if matches!(
-                    self.github_picker.authorization_intent,
-                    GithubAuthorizationIntent::RetryScenario
-                ) {
-                    if let Some(error) = self.github_picker.auth_status.error() {
-                        error_box(ui, error, self.dark);
-                    }
-                }
-            }
-        }
-        if cancel_github_authorization {
-            self.cancel_github_authorization(ui.ctx());
-        } else if request_github_authorization {
-            self.start_github_authorization(ui.ctx(), GithubAuthorizationIntent::RetryScenario);
-        }
     }
 
     fn graph_composer_canvas(
@@ -9025,8 +9741,8 @@ impl ScenarioApp {
         editable: bool,
     ) {
         let (nodes, edges) = graph_visual_model(graph);
-        let node_size = Vec2::new(232.0, 116.0);
-        let world_bounds = graph_canvas_world_bounds(canvas, node_size);
+        let node_size = GRAPH_NODE_SIZE;
+        let world_bounds = graph_canvas_world_bounds(canvas);
         let readonly_view_key = task.id.clone();
         let mut view = if editable {
             canvas.view.sanitized()
@@ -9142,11 +9858,13 @@ impl ScenarioApp {
 
             if let Some(position) = positions.get("start") {
                 let rect = Rect::from_min_size(*position, node_size);
-                let drag = ui.interact(
-                    rect,
-                    Id::new(("graph-start", task.id.as_str())),
-                    Sense::click_and_drag(),
-                );
+                let drag = ui
+                    .interact(
+                        rect,
+                        Id::new(("graph-start", task.id.as_str())),
+                        Sense::click_and_drag(),
+                    )
+                    .on_hover_text("Начало сценария");
                 if drag.dragged_by(egui::PointerButton::Middle) {
                     child_consumed_drag = true;
                     space_pan_delta += drag.drag_delta();
@@ -9158,27 +9876,21 @@ impl ScenarioApp {
                         self.drag_composer_node(&task.id, "start", drag.drag_delta());
                     }
                 }
-                painter.rect_filled(rect, 13.0, panel(self.dark));
-                painter.rect_stroke(rect, 13.0, Stroke::new(2.0, CYAN), StrokeKind::Inside);
-                painter.text(
-                    rect.left_top() + Vec2::new(18.0, 22.0),
-                    Align2::LEFT_TOP,
-                    "СТАРТ",
-                    FontId::proportional(10.0),
-                    CYAN,
-                );
-                painter.text(
-                    rect.left_top() + Vec2::new(18.0, 48.0),
-                    Align2::LEFT_TOP,
+                paint_node_shell(&painter, rect, CYAN, false, self.dark);
+                paint_compact_graph_node_header(
+                    &painter,
+                    rect,
+                    "▶",
+                    "Старт",
                     "Начало сценария",
-                    FontId::proportional(17.0),
-                    text(self.dark),
+                    CYAN,
+                    self.dark,
                 );
-                let plus_rect = Rect::from_center_size(
-                    Pos2::new(rect.right() - 20.0, rect.center().y),
-                    Vec2::splat(30.0),
-                );
-                if editable {
+                let plus_rect = compact_graph_node_layout(rect).primary_port;
+                let port_visible =
+                    graph_ports_visible(editable, false, drag.hovered(), drag.has_focus())
+                        || (editable && graph.entries.is_empty());
+                if port_visible {
                     paint_graph_plus(&painter, plus_rect, "+", self.dark);
                 }
                 if editable
@@ -9194,18 +9906,33 @@ impl ScenarioApp {
                 }
             }
 
-            for (index, node) in nodes.iter().enumerate() {
+            for node in &nodes {
                 let Some(position) = positions.get(&node.id) else {
                     continue;
                 };
                 let rect = Rect::from_min_size(*position, node_size);
-                let interaction = ui.interact(
-                    rect,
-                    Id::new(("graph-node", task.id.as_str(), node.id.as_str())),
-                    Sense::click_and_drag(),
-                );
+                let hover_title = match &node.card {
+                    ComposerGraphCard::Action(step) => step_title(step),
+                    ComposerGraphCard::ForEach { item_alias, .. } => {
+                        format!("Для каждого {item_alias}")
+                    }
+                    ComposerGraphCard::If => "Если / иначе".into(),
+                    ComposerGraphCard::Switch => "Switch".into(),
+                    ComposerGraphCard::Join => "Join".into(),
+                };
+                let interaction = ui
+                    .interact(
+                        rect,
+                        Id::new(("graph-node", task.id.as_str(), node.id.as_str())),
+                        Sense::click_and_drag(),
+                    )
+                    .on_hover_text(format!("{hover_title}\nID: {}", node.id));
                 if interaction.clicked_by(egui::PointerButton::Primary) {
                     self.selected_node = Some(node.id.clone());
+                    self.workspace_inspector_open = true;
+                    if workspace_project_drawer_overlays(ui.ctx().content_rect().width()) {
+                        self.workspace_project_drawer_open = false;
+                    }
                     self.selected_step = None;
                 }
                 if interaction.dragged_by(egui::PointerButton::Middle) {
@@ -9220,78 +9947,75 @@ impl ScenarioApp {
                     }
                 }
                 let status = self.report.as_ref().and_then(|report| {
-                    report
-                        .steps
-                        .iter()
-                        .find(|step| step.step_id == node.id)
+                    report_step_indices_for_node(report, &node.id)
+                        .first()
+                        .and_then(|index| report.steps.get(*index))
                         .map(|step| &step.status)
                 });
+                let selected = self.selected_node.as_deref() == Some(node.id.as_str());
                 match &node.card {
-                    ComposerGraphCard::Action(step) => paint_step_node(
-                        &painter,
-                        rect,
-                        step,
-                        index,
-                        self.selected_node.as_deref() == Some(node.id.as_str()),
-                        status,
-                        self.dark,
-                    ),
-                    card => paint_graph_control_node(
-                        &painter,
-                        rect,
-                        &node.id,
-                        card,
-                        self.selected_node.as_deref() == Some(node.id.as_str()),
-                        status,
-                        self.dark,
-                    ),
+                    ComposerGraphCard::Action(step) => {
+                        paint_step_node(&painter, rect, step, selected, status, self.dark)
+                    }
+                    card => {
+                        paint_graph_control_node(&painter, rect, card, selected, status, self.dark)
+                    }
                 }
 
                 if !editable {
                     continue;
                 }
+                let ports_visible = graph_ports_visible(
+                    editable,
+                    selected,
+                    interaction.hovered(),
+                    interaction.has_focus(),
+                );
 
                 match &node.card {
                     ComposerGraphCard::ForEach { body_empty, .. } => {
-                        let body_rect = Rect::from_center_size(
-                            Pos2::new(rect.right() - 18.0, rect.top() + 38.0),
-                            Vec2::splat(28.0),
-                        );
-                        let completed_rect = Rect::from_center_size(
-                            Pos2::new(rect.right() - 18.0, rect.bottom() - 28.0),
-                            Vec2::splat(28.0),
-                        );
-                        painter.text(
-                            body_rect.left_center() - Vec2::new(8.0, 0.0),
-                            Align2::RIGHT_CENTER,
-                            "для item",
-                            FontId::proportional(8.0),
-                            CYAN,
-                        );
-                        painter.text(
-                            completed_rect.left_center() - Vec2::new(8.0, 0.0),
-                            Align2::RIGHT_CENTER,
-                            "после",
-                            FontId::proportional(8.0),
-                            if *body_empty { MUTED } else { PURPLE },
-                        );
-                        paint_graph_plus(&painter, body_rect, "∀", self.dark);
-                        if *body_empty {
-                            painter.circle_filled(completed_rect.center(), 12.0, panel(self.dark));
-                            painter.circle_stroke(
-                                completed_rect.center(),
-                                12.0,
-                                Stroke::new(1.0, MUTED),
+                        let (body_rect, completed_rect) = compact_graph_split_ports(rect);
+                        if ports_visible {
+                            painter.text(
+                                body_rect.left_center() - Vec2::new(6.0, 0.0),
+                                Align2::RIGHT_CENTER,
+                                "item",
+                                FontId::proportional(UI_TEXT_CAPTION),
+                                ui_tone(UiTone::Success, self.dark),
                             );
                             painter.text(
-                                completed_rect.center(),
-                                Align2::CENTER_CENTER,
-                                "–",
-                                FontId::proportional(16.0),
-                                MUTED,
+                                completed_rect.left_center() - Vec2::new(6.0, 0.0),
+                                Align2::RIGHT_CENTER,
+                                "после",
+                                FontId::proportional(UI_TEXT_CAPTION),
+                                if *body_empty {
+                                    ui_tone(UiTone::Muted, self.dark)
+                                } else {
+                                    ui_tone(UiTone::Primary, self.dark)
+                                },
                             );
-                        } else {
-                            paint_graph_plus(&painter, completed_rect, "+", self.dark);
+                            paint_graph_plus(&painter, body_rect, "∀", self.dark);
+                            if *body_empty {
+                                painter.circle_filled(
+                                    completed_rect.center(),
+                                    GRAPH_NODE_PORT_VISUAL_RADIUS,
+                                    panel(self.dark),
+                                );
+                                painter.circle_stroke(
+                                    completed_rect.center(),
+                                    GRAPH_NODE_PORT_VISUAL_RADIUS,
+                                    Stroke::new(1.0, ui_tone(UiTone::Muted, self.dark)),
+                                );
+                                painter.text(
+                                    completed_rect.center(),
+                                    Align2::CENTER_CENTER,
+                                    "–",
+                                    FontId::proportional(UI_TEXT_BODY + 1.0),
+                                    ui_tone(UiTone::Muted, self.dark),
+                                );
+                            } else {
+                                paint_graph_plus(&painter, completed_rect, "+", self.dark);
+                            }
                         }
                         if ui
                             .interact(
@@ -9339,11 +10063,10 @@ impl ScenarioApp {
                         }
                     }
                     _ => {
-                        let plus_rect = Rect::from_center_size(
-                            Pos2::new(rect.right() - 18.0, rect.center().y),
-                            Vec2::splat(28.0),
-                        );
-                        paint_graph_plus(&painter, plus_rect, "+", self.dark);
+                        let plus_rect = compact_graph_node_layout(rect).primary_port;
+                        if ports_visible {
+                            paint_graph_plus(&painter, plus_rect, "+", self.dark);
+                        }
                         if ui
                             .interact(
                                 plus_rect,
@@ -9486,9 +10209,13 @@ impl ScenarioApp {
                         let node_size = if task.is_template() {
                             Vec2::new(258.0, 154.0)
                         } else {
-                            Vec2::new(232.0, 116.0)
+                            GRAPH_NODE_SIZE
                         };
-                        let node_stride = if task.is_template() { 318.0 } else { 286.0 };
+                        let node_stride = if task.is_template() {
+                            318.0
+                        } else {
+                            GRAPH_NODE_HORIZONTAL_STRIDE
+                        };
                         let canvas_extent = composer_canvas.as_ref().map(|canvas| {
                             canvas
                                 .positions
@@ -9591,7 +10318,6 @@ impl ScenarioApp {
                                     &painter,
                                     rect,
                                     step,
-                                    index,
                                     selected,
                                     self.report
                                         .as_ref()
@@ -10228,6 +10954,7 @@ impl ScenarioApp {
             "Доступ к защищённому пути не разрешён. Чтобы запросить его снова, проверьте план."
                 .into(),
         );
+        self.reveal_workspace_bottom(WorkspaceBottomTab::Problems);
     }
 
     fn approve_pending_protected_path_approval(&mut self) {
@@ -10249,6 +10976,7 @@ impl ScenarioApp {
                 self.plan_error = Some(format!(
                     "Не удалось подтвердить защищённый путь: {error:#}. Проверьте план снова."
                 ));
+                self.reveal_workspace_bottom(WorkspaceBottomTab::Problems);
             }
         }
     }
@@ -10792,6 +11520,7 @@ fn semantic_format_label(format: SemanticFormat) -> &'static str {
         SemanticFormat::GitRef => "git-ref",
         SemanticFormat::RepositoryName => "repository-name",
         SemanticFormat::Identifier => "identifier",
+        SemanticFormat::OpaqueIdentifier => "opaque-identifier",
     }
 }
 
@@ -13035,7 +13764,7 @@ fn branch_offset(sibling_index: usize) -> f32 {
     if sibling_index == 0 {
         return 0.0;
     }
-    let distance = sibling_index.div_ceil(2) as f32 * 158.0;
+    let distance = sibling_index.div_ceil(2) as f32 * GRAPH_NODE_BRANCH_STRIDE;
     if sibling_index % 2 == 1 {
         distance
     } else {
@@ -13120,13 +13849,123 @@ fn paint_graph_connector(
 }
 
 fn paint_graph_plus(painter: &egui::Painter, rect: Rect, label: &str, dark: bool) {
-    painter.circle_filled(rect.center(), 11.0, ui_tone(UiTone::Primary, dark));
+    painter.circle_filled(
+        rect.center(),
+        GRAPH_NODE_PORT_VISUAL_RADIUS,
+        ui_tone(UiTone::Primary, dark),
+    );
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional(UI_TEXT_NODE_TITLE),
+        FontId::proportional(UI_TEXT_BODY + 1.0),
         on_primary(dark),
+    );
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompactGraphNodeLayout {
+    icon: Rect,
+    eyebrow: Pos2,
+    title: Pos2,
+    status: Pos2,
+    primary_port: Rect,
+}
+
+fn compact_graph_node_layout(rect: Rect) -> CompactGraphNodeLayout {
+    CompactGraphNodeLayout {
+        icon: Rect::from_min_size(rect.min + Vec2::new(16.0, 15.0), Vec2::splat(32.0)),
+        eyebrow: rect.min + Vec2::new(60.0, 14.0),
+        title: rect.min + Vec2::new(60.0, 31.0),
+        status: Pos2::new(rect.left() + 60.0, rect.bottom() - 15.0),
+        primary_port: Rect::from_center_size(
+            Pos2::new(rect.right() - 16.0, rect.center().y),
+            Vec2::splat(GRAPH_NODE_PORT_HIT_SIZE),
+        ),
+    }
+}
+
+fn compact_graph_split_ports(rect: Rect) -> (Rect, Rect) {
+    (
+        Rect::from_center_size(
+            Pos2::new(rect.right() - 16.0, rect.top() + 23.0),
+            Vec2::splat(GRAPH_NODE_PORT_HIT_SIZE),
+        ),
+        Rect::from_center_size(
+            Pos2::new(rect.right() - 16.0, rect.bottom() - 21.0),
+            Vec2::splat(GRAPH_NODE_PORT_HIT_SIZE),
+        ),
+    )
+}
+
+fn graph_ports_visible(editable: bool, selected: bool, hovered: bool, focused: bool) -> bool {
+    editable && (selected || hovered || focused)
+}
+
+fn paint_compact_graph_node_header(
+    painter: &egui::Painter,
+    rect: Rect,
+    icon: &str,
+    eyebrow: &str,
+    title: &str,
+    accent: Color32,
+    dark: bool,
+) {
+    let layout = compact_graph_node_layout(rect);
+    painter.rect_filled(
+        layout.icon,
+        CornerRadius::same(UI_RADIUS_CONTROL),
+        translucent(accent, if dark { 48 } else { 22 }),
+    );
+    painter.text(
+        layout.icon.center(),
+        Align2::CENTER_CENTER,
+        icon,
+        FontId::proportional(UI_TEXT_BODY + 1.0),
+        accent,
+    );
+    painter.text(
+        layout.eyebrow,
+        Align2::LEFT_TOP,
+        truncate(eyebrow, 19),
+        FontId::proportional(UI_TEXT_CAPTION),
+        ui_tone(UiTone::Muted, dark),
+    );
+    painter.text(
+        layout.title,
+        Align2::LEFT_TOP,
+        truncate(title, 16),
+        FontId::proportional(UI_TEXT_NODE_TITLE),
+        text(dark),
+    );
+}
+
+fn paint_compact_node_status(
+    painter: &egui::Painter,
+    rect: Rect,
+    status: Option<&StepStatus>,
+    dark: bool,
+) {
+    let Some(status) = status else {
+        return;
+    };
+    let (label, color) = match status {
+        StepStatus::Satisfied => ("Готово", ui_tone(UiTone::Success, dark)),
+        StepStatus::Applied => ("Выполнено", ui_tone(UiTone::Success, dark)),
+        StepStatus::Failed => ("Ошибка", ui_tone(UiTone::Danger, dark)),
+        StepStatus::Skipped => ("Пропущено", ui_tone(UiTone::Muted, dark)),
+        StepStatus::Running => ("Выполняется", ui_tone(UiTone::Warning, dark)),
+        StepStatus::WaitingForAttention => ("Нужен ввод", ui_tone(UiTone::Warning, dark)),
+        StepStatus::Pending => ("Ожидает", ui_tone(UiTone::Muted, dark)),
+    };
+    let origin = compact_graph_node_layout(rect).status;
+    painter.circle_filled(origin + Vec2::new(3.0, 0.0), 3.0, color);
+    painter.text(
+        origin + Vec2::new(11.0, 0.0),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(UI_TEXT_CAPTION),
+        color,
     );
 }
 
@@ -13169,7 +14008,6 @@ fn paint_node_shell(
 fn paint_graph_control_node(
     painter: &egui::Painter,
     rect: Rect,
-    id: &str,
     card_kind: &ComposerGraphCard,
     selected: bool,
     status: Option<&StepStatus>,
@@ -13198,41 +14036,8 @@ fn paint_graph_control_node(
         ComposerGraphCard::Action(_) => unreachable!("actions use paint_step_node"),
     };
     paint_node_shell(painter, rect, accent, selected, dark);
-    let icon_rect = Rect::from_min_size(rect.min + Vec2::new(20.0, 20.0), Vec2::new(38.0, 38.0));
-    painter.rect_filled(
-        icon_rect,
-        CornerRadius::same(UI_RADIUS_CONTROL),
-        translucent(accent, if dark { 48 } else { 22 }),
-    );
-    painter.text(
-        icon_rect.center(),
-        Align2::CENTER_CENTER,
-        icon,
-        FontId::proportional(15.0),
-        accent,
-    );
-    painter.text(
-        rect.min + Vec2::new(70.0, 18.0),
-        Align2::LEFT_TOP,
-        eyebrow,
-        FontId::proportional(UI_TEXT_CAPTION),
-        ui_tone(UiTone::Muted, dark),
-    );
-    painter.text(
-        rect.min + Vec2::new(70.0, 36.0),
-        Align2::LEFT_TOP,
-        truncate(&title, 19),
-        FontId::proportional(UI_TEXT_NODE_TITLE),
-        text(dark),
-    );
-    painter.text(
-        rect.min + Vec2::new(20.0, 88.0),
-        Align2::LEFT_TOP,
-        truncate(id, 14),
-        FontId::monospace(UI_TEXT_CAPTION),
-        ui_tone(UiTone::Muted, dark),
-    );
-    paint_status_badge(painter, rect, status, dark);
+    paint_compact_graph_node_header(painter, rect, icon, eyebrow, &title, accent, dark);
+    paint_compact_node_status(painter, rect, status, dark);
 }
 
 fn graph_control_summary(ui: &mut egui::Ui, kind: &str, id: &str, dark: bool) {
@@ -13468,49 +14273,22 @@ fn paint_step_node(
     painter: &egui::Painter,
     rect: Rect,
     step: &Step,
-    index: usize,
     selected: bool,
     status: Option<&StepStatus>,
     dark: bool,
 ) {
     let accent = action_color(&step.action, dark);
     paint_node_shell(painter, rect, accent, selected, dark);
-
-    let icon_rect = Rect::from_min_size(rect.min + Vec2::new(20.0, 20.0), Vec2::new(38.0, 38.0));
-    painter.rect_filled(
-        icon_rect,
-        CornerRadius::same(UI_RADIUS_CONTROL),
-        translucent(accent, if dark { 48 } else { 22 }),
-    );
-    painter.text(
-        icon_rect.center(),
-        Align2::CENTER_CENTER,
+    paint_compact_graph_node_header(
+        painter,
+        rect,
         action_icon(&step.action),
-        FontId::proportional(14.0),
+        action_eyebrow(&step.action),
+        &step_title(step),
         accent,
+        dark,
     );
-    painter.text(
-        rect.min + Vec2::new(70.0, 18.0),
-        Align2::LEFT_TOP,
-        action_eyebrow(&step.action).to_uppercase(),
-        FontId::proportional(UI_TEXT_CAPTION),
-        ui_tone(UiTone::Muted, dark),
-    );
-    painter.text(
-        rect.min + Vec2::new(70.0, 36.0),
-        Align2::LEFT_TOP,
-        truncate(&step_title(step), 19),
-        FontId::proportional(UI_TEXT_NODE_TITLE),
-        text(dark),
-    );
-    painter.text(
-        rect.min + Vec2::new(20.0, 88.0),
-        Align2::LEFT_TOP,
-        format!("{:02}  {}", index + 1, truncate(&step.id, 14)),
-        FontId::monospace(UI_TEXT_CAPTION),
-        ui_tone(UiTone::Muted, dark),
-    );
-    paint_status_badge(painter, rect, status, dark);
+    paint_compact_node_status(painter, rect, status, dark);
 }
 
 fn paint_status_badge(
@@ -13991,18 +14769,22 @@ fn library_run_report_heading(report: &RunReport, applied: bool) -> String {
     }
 }
 
-fn report_step_index_for_node(report: &RunReport, node_id: &str) -> Option<usize> {
-    report
+fn report_step_indices_for_node(report: &RunReport, node_id: &str) -> Vec<usize> {
+    let mut indices = report
         .steps
         .iter()
-        .position(|step| step.step_id == node_id)
-        .or_else(|| {
-            report.steps.iter().position(|step| {
-                step.step_id
+        .enumerate()
+        .filter_map(|(index, step)| {
+            (step.step_id == node_id
+                || step
+                    .step_id
                     .rsplit_once('/')
-                    .is_some_and(|(_, authoring_id)| authoring_id == node_id)
-            })
+                    .is_some_and(|(_, authoring_id)| authoring_id == node_id))
+            .then_some(index)
         })
+        .collect::<Vec<_>>();
+    indices.sort_by_key(|index| !matches!(&report.steps[*index].status, StepStatus::Failed));
+    indices
 }
 
 fn paint_composer_run_report(
@@ -14043,14 +14825,30 @@ fn paint_composer_run_report(
         }
     }
 
-    let Some(step) = selected_node
-        .and_then(|node_id| report_step_index_for_node(report, node_id))
-        .and_then(|index| report.steps.get(index))
-    else {
+    let Some(node_id) = selected_node else {
+        return;
+    };
+    let indices = report_step_indices_for_node(report, node_id);
+    let Some(step) = indices.first().and_then(|index| report.steps.get(*index)) else {
         return;
     };
     ui.add_space(8.0);
     section_label(ui, "РЕЗУЛЬТАТ ВЫБРАННОГО БЛОКА");
+    if indices.len() > 1 {
+        let failed_count = indices
+            .iter()
+            .filter(|index| matches!(&report.steps[**index].status, StepStatus::Failed))
+            .count();
+        ui.label(
+            RichText::new(format!(
+                "Выполнений: {} · с ошибкой: {failed_count}",
+                indices.len()
+            ))
+            .strong()
+            .size(UI_TEXT_CAPTION)
+            .color(if failed_count > 0 { ORANGE } else { CYAN }),
+        );
+    }
     ui.add(
         egui::Label::new(RichText::new(&step.summary).size(9.0).color(
             if matches!(&step.status, StepStatus::Failed) {
@@ -14062,6 +14860,49 @@ fn paint_composer_run_report(
         .truncate(),
     )
     .on_hover_text(&step.summary);
+    ui.label(
+        RichText::new(&step.step_id)
+            .monospace()
+            .size(UI_TEXT_CAPTION)
+            .color(MUTED),
+    );
+
+    if indices.len() > 1 {
+        egui::CollapsingHeader::new("Все исполнения блока")
+            .default_open(false)
+            .show(ui, |ui| {
+                for index in &indices {
+                    let execution = &report.steps[*index];
+                    egui::CollapsingHeader::new(format!(
+                        "{} · {}",
+                        execution.status.as_str(),
+                        execution.step_id
+                    ))
+                    .id_salt(("selected-node-execution", &execution.step_id))
+                    .default_open(matches!(&execution.status, StepStatus::Failed))
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&execution.summary)
+                                    .size(UI_TEXT_CAPTION)
+                                    .color(text(dark)),
+                            )
+                            .wrap(),
+                        );
+                        for log in &execution.logs {
+                            paint_bounded_code_lines(ui, &log.message, UI_TEXT_CAPTION, MUTED);
+                        }
+                        if let Some(output) = &execution.output {
+                            let json =
+                                serde_json::to_string_pretty(output).unwrap_or_else(|error| {
+                                    format!("Не удалось вывести контекст: {error}")
+                                });
+                            paint_composer_output_json(ui, &execution.step_id, &json, dark);
+                        }
+                    });
+                }
+            });
+    }
 
     if !step.logs.is_empty() {
         egui::CollapsingHeader::new(format!("Логи блока · {}", step.logs.len()))
@@ -14522,6 +15363,7 @@ mod tests {
             allow_elevation: false,
             report: None,
             report_applied: false,
+            prepared_plan: None,
             plan_error: None,
             protected_path_approvals: Vec::new(),
             pending_protected_path_approval: None,
@@ -14538,6 +15380,10 @@ mod tests {
             pending_project_action: None,
             selected_project_scenario: Some(vec![0]),
             selected_project_group: Vec::new(),
+            workspace_project_drawer_open: true,
+            workspace_inspector_open: false,
+            workspace_bottom_expanded: false,
+            workspace_bottom_tab: WorkspaceBottomTab::Problems,
             block_picker_parent: None,
             graph_picker_attach: None,
             graph_picker_port: None,
@@ -14997,8 +15843,10 @@ mod tests {
             .unwrap();
         app.run_receiver = Some(receiver);
         app.running = true;
+        app.file_message = Some((true, RUNNING_CLOSE_MESSAGE.into()));
         app.poll_run(&ctx);
         assert!(app.protected_path_approvals.is_empty());
+        assert!(app.file_message.is_none());
 
         app.protected_path_approvals.push(approval.clone());
         let (sender, receiver) = mpsc::channel();
@@ -15119,6 +15967,7 @@ mod tests {
 
         assert!(!app.allow_shell);
         assert!(!app.allow_elevation);
+        assert!(app.workspace_project_drawer_open);
         app.allow_shell = true;
         app.allow_elevation = true;
 
@@ -15126,6 +15975,7 @@ mod tests {
 
         assert!(!app.allow_shell);
         assert!(!app.allow_elevation);
+        assert!(!app.workspace_project_drawer_open);
         app.allow_shell = true;
         app.allow_elevation = true;
 
@@ -15133,6 +15983,7 @@ mod tests {
 
         assert!(!app.allow_shell);
         assert!(!app.allow_elevation);
+        assert!(app.workspace_project_drawer_open);
 
         app.allow_shell = true;
         app.allow_elevation = true;
@@ -15244,6 +16095,14 @@ mod tests {
         assert!(!clean.defer_viewport_close_if_dirty());
         assert_eq!(clean.pending_project_action, None);
         assert!(clean.custom_project.is_some());
+
+        clean.running = true;
+        assert!(clean.defer_viewport_close_if_dirty());
+        assert!(clean.custom_project.is_some());
+        assert!(clean
+            .file_message
+            .as_ref()
+            .is_some_and(|(is_error, error)| *is_error && error.contains("Дождитесь завершения")));
     }
 
     #[test]
@@ -15344,16 +16203,32 @@ mod tests {
     }
 
     #[test]
-    fn graph_report_detail_resolves_exact_and_nested_runtime_step_ids() {
+    fn graph_report_detail_resolves_all_exact_and_nested_runtime_step_ids() {
         let report = run_report_for_ui_test(
-            &["exact", "if-1[then]/nested", "loop-1[2]/inspect-item"],
+            &[
+                "exact",
+                "if-1[then]/nested",
+                "loop-1[1]/inspect-item",
+                "loop-1[2]/inspect-item",
+            ],
             &[],
         );
 
-        assert_eq!(report_step_index_for_node(&report, "exact"), Some(0));
-        assert_eq!(report_step_index_for_node(&report, "nested"), Some(1));
-        assert_eq!(report_step_index_for_node(&report, "inspect-item"), Some(2));
-        assert_eq!(report_step_index_for_node(&report, "missing"), None);
+        assert_eq!(report_step_indices_for_node(&report, "exact"), vec![0]);
+        assert_eq!(report_step_indices_for_node(&report, "nested"), vec![1]);
+        assert_eq!(
+            report_step_indices_for_node(&report, "inspect-item"),
+            vec![2, 3]
+        );
+        assert!(report_step_indices_for_node(&report, "missing").is_empty());
+
+        let mut failed_report = report;
+        failed_report.steps[3].status = StepStatus::Failed;
+        assert_eq!(
+            report_step_indices_for_node(&failed_report, "inspect-item"),
+            vec![3, 2],
+            "the failed iteration must be selected before an earlier success"
+        );
     }
 
     #[test]
@@ -15790,15 +16665,109 @@ mod tests {
         let viewport_width = 1012.0;
         let (library_width, inspector_width) = workspace_panel_widths(viewport_width);
         let canvas_width = viewport_width - library_width - inspector_width;
+        let project_canvas_width = viewport_width - WORKSPACE_PROJECT_RAIL_WIDTH - inspector_width;
 
         assert!(library_width <= 230.0);
         assert!(inspector_width >= 340.0);
         assert!(canvas_width >= 440.0);
+        assert!(workspace_project_drawer_overlays(viewport_width));
+        assert!(project_canvas_width >= 615.0);
+        assert!(!workspace_project_drawer_overlays(
+            WORKSPACE_OVERLAY_BREAKPOINT
+        ));
+
+        let mut drawer_open = false;
+        let mut inspector_open = true;
+        open_workspace_project_drawer(&mut drawer_open, &mut inspector_open, viewport_width);
+        assert!(drawer_open);
+        assert!(
+            !inspector_open,
+            "compact overlays must be mutually exclusive"
+        );
+
+        inspector_open = true;
+        open_workspace_project_drawer(
+            &mut drawer_open,
+            &mut inspector_open,
+            WORKSPACE_OVERLAY_BREAKPOINT,
+        );
+        assert!(inspector_open, "wide layouts can show both side panels");
 
         assert_eq!(
             workspace_panel_widths(WIDE_VIEWPORT_WIDTH),
             (WIDE_LIBRARY_WIDTH, WIDE_INSPECTOR_WIDTH)
         );
+    }
+
+    #[test]
+    fn compact_graph_card_geometry_keeps_copy_and_ports_inside_the_hit_rect() {
+        assert_eq!(GRAPH_NODE_SIZE, Vec2::new(208.0, 88.0));
+        let rect = Rect::from_min_size(Pos2::new(40.0, 60.0), GRAPH_NODE_SIZE);
+        let layout = compact_graph_node_layout(rect);
+        assert!(rect.contains_rect(layout.icon));
+        assert!(rect.contains(layout.eyebrow));
+        assert!(rect.contains(layout.title));
+        assert!(rect.contains(layout.status));
+        assert!(rect.contains_rect(layout.primary_port));
+        assert_eq!(layout.primary_port.size(), Vec2::splat(28.0));
+
+        let (body, completed) = compact_graph_split_ports(rect);
+        assert!(rect.contains_rect(body));
+        assert!(rect.contains_rect(completed));
+        assert!(!body.intersects(completed));
+        assert!(body.width() >= 28.0, "port targets must remain easy to hit");
+
+        assert!(!graph_ports_visible(true, false, false, false));
+        assert!(graph_ports_visible(true, true, false, false));
+        assert!(graph_ports_visible(true, false, true, false));
+        assert!(graph_ports_visible(true, false, false, true));
+        assert!(!graph_ports_visible(false, true, true, true));
+    }
+
+    #[test]
+    fn graph_world_bounds_follow_compact_card_extents() {
+        let canvas = ComposerCanvas {
+            positions: BTreeMap::from([
+                ("start".into(), CanvasPoint { x: 80.0, y: 250.0 }),
+                ("far".into(), CanvasPoint { x: 720.0, y: 430.0 }),
+            ]),
+            ..ComposerCanvas::default()
+        };
+
+        let bounds = graph_canvas_world_bounds(&canvas);
+        assert_eq!(bounds.left(), 80.0);
+        assert_eq!(bounds.top(), 88.0);
+        assert_eq!(bounds.right(), 720.0 + GRAPH_NODE_SIZE.x);
+        assert_eq!(bounds.bottom(), 430.0 + GRAPH_NODE_SIZE.y);
+    }
+
+    #[test]
+    fn compact_node_render_adds_status_only_when_runtime_has_one() {
+        fn render(status: Option<StepStatus>) -> usize {
+            let ctx = egui::Context::default();
+            configure_styles(&ctx, egui::ThemePreference::Dark);
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 180.0))),
+                ..Default::default()
+            };
+            let step = composer_step(ComposerBlockKind::WriteFile, "write-file-1".into());
+            let mut output = ctx.run_ui(input, |ui| {
+                paint_step_node(
+                    ui.painter(),
+                    Rect::from_min_size(Pos2::new(40.0, 40.0), GRAPH_NODE_SIZE),
+                    &step,
+                    false,
+                    status.as_ref(),
+                    true,
+                );
+            });
+            output.textures_delta.clear();
+            output.shapes.len()
+        }
+
+        let idle_shapes = render(None);
+        let running_shapes = render(Some(StepStatus::Running));
+        assert_eq!(running_shapes, idle_shapes + 2);
     }
 
     fn assert_pos_close(actual: Pos2, expected: Pos2) {
@@ -16160,12 +17129,12 @@ positions:
             .expect("Scene layer transform")
             * response.rect;
         assert!(
-            (screen_rect.width() - 232.0 * 1.2).abs() < 0.1,
+            (screen_rect.width() - GRAPH_NODE_SIZE.x * 1.2).abs() < 0.1,
             "unexpected response rect {:?}",
             screen_rect
         );
         assert!(
-            (screen_rect.height() - 116.0 * 1.2).abs() < 0.1,
+            (screen_rect.height() - GRAPH_NODE_SIZE.y * 1.2).abs() < 0.1,
             "unexpected response rect {:?}",
             screen_rect
         );
@@ -16541,6 +17510,7 @@ positions:
                                     &mut node,
                                     &options,
                                     &GraphExternalAuthUiState::default(),
+                                    None,
                                     true,
                                 );
                                 section_label(ui, "SWITCH · ДЛИННЫЙ CASE");
@@ -18704,6 +19674,110 @@ task:
     }
 
     #[test]
+    fn write_file_editor_warns_when_loop_content_uses_one_static_path() {
+        let mut node = ActionNode {
+            step: default_step(ActionKind::WriteFile, "write").unwrap(),
+            bindings: BTreeMap::from([(
+                "/content".into(),
+                Binding::field(FieldRef::loop_item("repositories").field("full_name")),
+            )]),
+        };
+
+        assert!(graph_write_file_loop_path_warning(None, &node)
+            .unwrap()
+            .contains("остановится до первой записи"));
+
+        node.bindings.insert(
+            "/path".into(),
+            Binding::interpolated([
+                TemplatePart::literal("$HOME/Developer/project/"),
+                TemplatePart::field(FieldRef::loop_item("repositories").field("name")),
+                TemplatePart::literal(".txt"),
+            ]),
+        );
+        assert!(graph_write_file_loop_path_warning(None, &node).is_none());
+
+        node.bindings.insert(
+            "/content".into(),
+            Binding::field(FieldRef::loop_item("inner").field("value")),
+        );
+        node.bindings.insert(
+            "/path".into(),
+            Binding::field(FieldRef::loop_item("outer").field("path")),
+        );
+        assert!(graph_write_file_loop_path_warning(None, &node).is_some());
+
+        node.bindings.insert(
+            "/content".into(),
+            Binding::field(FieldRef::loop_item("inner::index")),
+        );
+        node.bindings.insert(
+            "/path".into(),
+            Binding::field(FieldRef::loop_item("inner").field("path")),
+        );
+        assert!(graph_write_file_loop_path_warning(None, &node).is_none());
+
+        node.bindings.insert(
+            "/content".into(),
+            Binding::field(FieldRef::loop_item("repositories").field("full_name")),
+        );
+        node.bindings.remove("/path");
+        node.bindings
+            .insert("/on_conflict".into(), Binding::template("replace"));
+        assert!(graph_write_file_loop_path_warning(None, &node)
+            .unwrap()
+            .contains("последней итерации"));
+
+        node.bindings.insert(
+            "/on_conflict".into(),
+            Binding::interpolated([TemplatePart::literal("re"), TemplatePart::literal("place")]),
+        );
+        assert!(graph_write_file_loop_path_warning(None, &node)
+            .unwrap()
+            .contains("последней итерации"));
+    }
+
+    #[test]
+    fn write_file_warning_tracks_step_outputs_from_enclosing_loop() {
+        let producer = ActionNode {
+            step: default_step(ActionKind::InspectPath, "producer").unwrap(),
+            bindings: BTreeMap::new(),
+        };
+        let graph = WorkflowGraph {
+            nodes: vec![GraphNode::ForEach(ForEachNode {
+                id: "repositories".into(),
+                collection: Binding::literal(serde_json::json!([])),
+                item_alias: "repository".into(),
+                index_alias: None,
+                concurrency: 1,
+                on_error: LoopFailurePolicy::Stop,
+                body: Box::new(WorkflowGraph {
+                    nodes: vec![GraphNode::Action(Box::new(producer))],
+                    ..WorkflowGraph::default()
+                }),
+            })],
+            ..WorkflowGraph::default()
+        };
+        let mut writer = ActionNode {
+            step: default_step(ActionKind::WriteFile, "write").unwrap(),
+            bindings: BTreeMap::from([
+                (
+                    "content".into(),
+                    Binding::field(FieldRef::step("producer").field("path")),
+                ),
+                (
+                    "path".into(),
+                    Binding::field(FieldRef::loop_item("repositories").field("path")),
+                ),
+            ]),
+        };
+
+        assert!(graph_write_file_loop_path_warning(Some(&graph), &writer).is_none());
+        writer.bindings.remove("path");
+        assert!(graph_write_file_loop_path_warning(Some(&graph), &writer).is_some());
+    }
+
+    #[test]
     fn github_loop_materializes_all_git_recipes_without_nullable_required_branch_flow() {
         for kind in [
             ActionKind::GitClone,
@@ -20242,7 +21316,8 @@ task:
             let mut response = GraphActionEditorResponse::default();
             let output = ctx.run_ui(input(events), |ui| {
                 ui.set_width(360.0);
-                response = paint_graph_action_editor(ui, node, &BTreeMap::new(), auth_state, true);
+                response =
+                    paint_graph_action_editor(ui, node, &BTreeMap::new(), auth_state, None, true);
             });
             (output, response)
         }

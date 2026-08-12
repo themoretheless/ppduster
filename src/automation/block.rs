@@ -951,7 +951,11 @@ fn github_repository_type() -> ContextType {
     ContextType::object(schema(
         "ppduster.github.repository@1",
         [
-            ("id", req(identifier())),
+            // GitHub node IDs are opaque values. Older repositories can still
+            // expose the legacy Base64 form (for example, `MDEwOl...=`), which
+            // is intentionally broader than ppduster's local Identifier
+            // contract for step IDs and aliases.
+            ("id", req(string(SemanticFormat::OpaqueIdentifier))),
             ("owner", req(string(SemanticFormat::RepositoryName))),
             ("name", req(string(SemanticFormat::RepositoryName))),
             ("full_name", req(string(SemanticFormat::RepositoryName))),
