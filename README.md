@@ -60,6 +60,9 @@ starts with a permanent Start block. Its plus button, and the plus button on eve
 block, opens a block picker that displays the planned typed
 output contract for downstream graph bindings. Blocks can be dragged freely around the
 canvas. Adding from the same plus button more than once creates multiple outgoing branches.
+Picker search indexes each card's stable ID, bilingual search terms, and input/output
+attributes. English and Russian keyboard layouts are interchangeable, so `git`, `гит`,
+and a physical-key query such as `пше` resolve the same Git cards.
 Connections are written directly to `WorkflowGraph.edges`; canvas coordinates are separate
 view metadata and never become runtime control flow. New scenarios use one canonical wire
 format: task `format_version: 3` with a layout-free `workflow_graph` version 3. The constructor

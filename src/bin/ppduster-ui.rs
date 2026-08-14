@@ -14,16 +14,16 @@ use ppduster::automation::{
     block_definition, definition_for_action, describe_step, first_scenario_path, load_project_yaml,
     make_project_external, project_group_entries, project_group_entries_mut, run_task,
     validate_project as validate_project_structure, Action, ActionKind, ActionNode, AuthPolicy,
-    Binding, BlockPolicyCapabilities, CanvasPoint, CanvasView, ComparisonOperator, ComposerCanvas,
-    ContextPathSegment, ContextScope, EdgePort, ElevationPolicy, ExpressionLimits, ExpressionV1,
-    ExpressionValue, FieldRef, ForEachNode, GraphEdge, GraphNode, GraphValidationError,
-    GraphValidationErrorKind, IfNode, IndeterminatePolicy, JoinMode, JoinNode, LoopFailurePolicy,
-    ObjectSchema, PolicyRequirement, ProjectEntry, ProtectedPathApproval,
-    ProtectedPathApprovalRequest, ProtectedPathApprovalRequired, ProtectedPathOperation,
-    ProtectedPathRisk, ReferenceV1, ReleaseChannel, RuleOutcomePolicy, RunOptions, RunReport,
-    ScenarioProject, ScriptInterpreter, SemanticFormat, Sensitivity, Step, StepCondition,
-    StepStatus, SwitchCase, SwitchNode, Task, TaskFile, TaskPack, TaskSource, TemplatePart,
-    TrustRequirement, WorkflowGraph, WriteConflictPolicy,
+    Binding, BlockDefinition, BlockPolicyCapabilities, CanvasPoint, CanvasView, ComparisonOperator,
+    ComposerCanvas, ContextPathSegment, ContextScope, EdgePort, ElevationPolicy, ExpressionLimits,
+    ExpressionV1, ExpressionValue, FieldRef, ForEachNode, GraphEdge, GraphNode,
+    GraphValidationError, GraphValidationErrorKind, IfNode, IndeterminatePolicy, JoinMode,
+    JoinNode, LoopFailurePolicy, ObjectSchema, PolicyRequirement, ProjectEntry,
+    ProtectedPathApproval, ProtectedPathApprovalRequest, ProtectedPathApprovalRequired,
+    ProtectedPathOperation, ProtectedPathRisk, ReferenceV1, ReleaseChannel, RuleOutcomePolicy,
+    RunOptions, RunReport, ScenarioProject, ScriptInterpreter, SemanticFormat, Sensitivity, Step,
+    StepCondition, StepStatus, SwitchCase, SwitchNode, Task, TaskFile, TaskPack, TaskSource,
+    TemplatePart, TrustRequirement, WorkflowGraph, WriteConflictPolicy,
 };
 #[cfg(test)]
 use ppduster::automation::{
@@ -7476,11 +7476,10 @@ impl ScenarioApp {
                 }
                 ui.add(
                     egui::TextEdit::singleline(&mut self.block_picker_search)
-                        .hint_text("Поиск доступного блока…")
+                        .hint_text("Название, ID, атрибут или другая раскладка…")
                         .desired_width(f32::INFINITY),
                 );
                 ui.add_space(10.0);
-                let query = self.block_picker_search.trim().to_lowercase();
                 ScrollArea::vertical()
                     .id_salt("composer-block-picker-list")
                     .max_height(list_height)
@@ -7492,12 +7491,7 @@ impl ScenarioApp {
                             (ComposerGraphBlockKind::Join, "Объединить ветви"),
                         ]
                         .into_iter()
-                        .map(|(kind, title)| {
-                            let mut definition = block_definition(ActionKind::ForEach);
-                            definition.title = title.into();
-                            definition.category = "Логика".into();
-                            (kind, definition)
-                        });
+                        .map(|(kind, title)| (kind, graph_control_definition(kind, title)));
                         let graph_definitions = graph_controls
                             .chain(
                                 ActionKind::ALL
@@ -7513,12 +7507,10 @@ impl ScenarioApp {
                             .collect::<Vec<_>>();
                         for (graph_kind, definition) in graph_definitions {
                             let context_lines = schema_context_lines(&definition.output_schema);
-                            let context_search = context_lines.join(" ");
-                            if !query.is_empty()
-                                && !definition.title.to_lowercase().contains(&query)
-                                && !definition.category.to_lowercase().contains(&query)
-                                && !context_search.to_lowercase().contains(&query)
-                            {
+                            if !block_picker_definition_matches(
+                                &definition,
+                                &self.block_picker_search,
+                            ) {
                                 continue;
                             }
                             let response = Frame::new()
@@ -12017,6 +12009,158 @@ fn schema_context_lines(schema: &ObjectSchema) -> Vec<String> {
     let mut lines = Vec::new();
     collect_schema_context_lines(schema, "", &mut lines);
     lines
+}
+
+const ENGLISH_KEYBOARD_LAYOUT: &str = "`qwertyuiop[]asdfghjkl;'zxcvbnm,./";
+const RUSSIAN_KEYBOARD_LAYOUT: &str = "ёйцукенгшщзхъфывапролджэячсмитьбю.";
+
+fn translate_keyboard_layout(input: &str, source: &str, target: &str) -> String {
+    input
+        .chars()
+        .map(|character| {
+            source
+                .chars()
+                .position(|candidate| candidate == character)
+                .and_then(|index| target.chars().nth(index))
+                .unwrap_or(character)
+        })
+        .collect()
+}
+
+fn english_to_russian_layout(input: &str) -> String {
+    translate_keyboard_layout(input, ENGLISH_KEYBOARD_LAYOUT, RUSSIAN_KEYBOARD_LAYOUT)
+}
+
+fn russian_to_english_layout(input: &str) -> String {
+    translate_keyboard_layout(input, RUSSIAN_KEYBOARD_LAYOUT, ENGLISH_KEYBOARD_LAYOUT)
+}
+
+/// Accept exactly one substituted character after a keyboard-layout swap.
+/// This keeps typo tolerance deliberately narrow while covering a query such
+/// as `пшк`: the physical-key conversion is `gir`, one key away from `git`.
+fn differs_by_one_character(left: &str, right: &str) -> bool {
+    if left.chars().count() < 3 || left.chars().count() != right.chars().count() {
+        return false;
+    }
+    left.chars()
+        .zip(right.chars())
+        .filter(|(left, right)| left != right)
+        .take(2)
+        .count()
+        == 1
+}
+
+fn searchable_text_matches<'a>(query: &str, fields: impl IntoIterator<Item = &'a str>) -> bool {
+    let normalized_query = query.trim().to_lowercase();
+    let query_terms = normalized_query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if query_terms.is_empty() {
+        return true;
+    }
+
+    let haystack = fields
+        .into_iter()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let haystack_terms = haystack
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+
+    query_terms.into_iter().all(|query_term| {
+        let swapped = [
+            english_to_russian_layout(query_term),
+            russian_to_english_layout(query_term),
+        ];
+        haystack.contains(query_term)
+            || swapped.iter().any(|candidate| {
+                candidate != query_term
+                    && (haystack.contains(candidate)
+                        || haystack_terms
+                            .iter()
+                            .any(|term| differs_by_one_character(candidate, term)))
+            })
+    })
+}
+
+fn block_picker_definition_matches(definition: &BlockDefinition, query: &str) -> bool {
+    let input_context = schema_context_lines(&definition.input_schema);
+    let output_context = schema_context_lines(&definition.output_schema);
+    searchable_text_matches(
+        query,
+        [definition.title.as_str(), definition.category.as_str()]
+            .into_iter()
+            .chain(definition.search_terms.iter().map(String::as_str))
+            .chain(input_context.iter().map(String::as_str))
+            .chain(output_context.iter().map(String::as_str)),
+    )
+}
+
+fn graph_control_search_terms(kind: ComposerGraphBlockKind) -> &'static [&'static str] {
+    match kind {
+        ComposerGraphBlockKind::ForEach => &[
+            "for-each",
+            "for each",
+            "foreach",
+            "loop",
+            "iteration",
+            "array",
+            "для каждого",
+            "цикл",
+            "итерация",
+            "массив",
+        ],
+        ComposerGraphBlockKind::If => &[
+            "if",
+            "condition",
+            "conditional",
+            "then",
+            "else",
+            "если",
+            "условие",
+            "иначе",
+            "ветвление",
+        ],
+        ComposerGraphBlockKind::Switch => &[
+            "switch",
+            "case",
+            "match",
+            "selector",
+            "branch",
+            "выбор",
+            "вариант",
+            "значение",
+            "ветка",
+        ],
+        ComposerGraphBlockKind::Join => &[
+            "join",
+            "merge",
+            "combine",
+            "branches",
+            "объединить",
+            "слить",
+            "ветви",
+            "синхронизация",
+        ],
+        ComposerGraphBlockKind::Action(_) => &[],
+    }
+}
+
+fn graph_control_definition(
+    kind: ComposerGraphBlockKind,
+    title: impl Into<String>,
+) -> BlockDefinition {
+    let mut definition = block_definition(ActionKind::ForEach);
+    definition.title = title.into();
+    definition.category = "Логика".into();
+    definition.search_terms = graph_control_search_terms(kind)
+        .iter()
+        .map(|term| (*term).into())
+        .collect();
+    definition
 }
 
 /// Make nested context paths easier to scan without changing their copyable
@@ -19008,6 +19152,54 @@ task:
         assert!(path
             .iter()
             .any(|line| line == "sha256 : string<sha256> | null (optional)"));
+    }
+
+    #[test]
+    fn keyboard_layout_conversion_covers_russian_and_english_keys() {
+        assert_eq!(english_to_russian_layout("git"), "пше");
+        assert_eq!(russian_to_english_layout("пше"), "git");
+        assert_eq!(english_to_russian_layout("qwerty[];'"), "йцукенхъжэ");
+        assert_eq!(russian_to_english_layout("ёхъжэбю"), "`[];',.");
+    }
+
+    #[test]
+    fn block_picker_search_uses_ids_attributes_schemas_and_keyboard_layout() {
+        let git = block_definition(ActionKind::GitInspect);
+        for query in ["git", "GIT-INSPECT", "гит", "пше", "пшк", "git репозиторий"]
+        {
+            assert!(
+                block_picker_definition_matches(&git, query),
+                "Git card must match {query:?}"
+            );
+        }
+        assert!(!block_picker_definition_matches(&git, "homebrew package"));
+
+        let download = block_definition(ActionKind::DownloadFile);
+        assert!(block_picker_definition_matches(
+            &download,
+            "checksum sha256"
+        ));
+
+        assert!(searchable_text_matches("git", ["пше"]));
+        assert!(searchable_text_matches("пше", ["git"]));
+        assert!(searchable_text_matches("", ["anything"]));
+    }
+
+    #[test]
+    fn structural_control_cards_keep_independent_search_attributes() {
+        let if_card = graph_control_definition(ComposerGraphBlockKind::If, "Если / иначе");
+        let switch_card =
+            graph_control_definition(ComposerGraphBlockKind::Switch, "Выбор по значению");
+        let join_card = graph_control_definition(ComposerGraphBlockKind::Join, "Объединить ветви");
+
+        assert!(block_picker_definition_matches(&if_card, "condition"));
+        assert!(block_picker_definition_matches(&switch_card, "switch case"));
+        assert!(block_picker_definition_matches(
+            &join_card,
+            "merge branches"
+        ));
+        assert!(!block_picker_definition_matches(&if_card, "foreach loop"));
+        assert!(!block_picker_definition_matches(&switch_card, "join merge"));
     }
 
     #[test]
