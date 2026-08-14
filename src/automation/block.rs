@@ -15,7 +15,9 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "kebab-case")]
 pub enum ActionKind {
     GithubListRepositories,
+    GithubPreviewRepositories,
     GithubSelectRepositories,
+    SelectArrayItems,
     ForEach,
     ForEachGitCloneIfMissing,
     CreateDirectory,
@@ -43,9 +45,11 @@ pub enum ActionKind {
 }
 
 impl ActionKind {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 28] = [
         Self::GithubListRepositories,
+        Self::GithubPreviewRepositories,
         Self::GithubSelectRepositories,
+        Self::SelectArrayItems,
         Self::ForEach,
         Self::ForEachGitCloneIfMissing,
         Self::CreateDirectory,
@@ -75,7 +79,9 @@ impl ActionKind {
     pub const fn id(self) -> &'static str {
         match self {
             Self::GithubListRepositories => "github-list-repositories",
+            Self::GithubPreviewRepositories => "github-preview-repositories",
             Self::GithubSelectRepositories => "github-select-repositories",
+            Self::SelectArrayItems => "select-array-items",
             Self::ForEach => "for-each",
             Self::ForEachGitCloneIfMissing => "for-each-git-clone-if-missing",
             Self::CreateDirectory => "create-directory",
@@ -207,7 +213,9 @@ impl Action {
     pub const fn kind(&self) -> ActionKind {
         match self {
             Self::GithubListRepositories => ActionKind::GithubListRepositories,
+            Self::GithubPreviewRepositories { .. } => ActionKind::GithubPreviewRepositories,
             Self::GithubSelectRepositories { .. } => ActionKind::GithubSelectRepositories,
+            Self::SelectArrayItems { .. } => ActionKind::SelectArrayItems,
             Self::ForEach { .. } => ActionKind::ForEach,
             Self::ForEachGitCloneIfMissing { .. } => ActionKind::ForEachGitCloneIfMissing,
             Self::CreateDirectory(_) => ActionKind::CreateDirectory,
@@ -241,7 +249,11 @@ pub fn block_definitions() -> Vec<BlockDefinition> {
 }
 
 pub fn definition_for_action(action: &Action) -> BlockDefinition {
-    block_definition(action.kind())
+    match action {
+        Action::SelectArrayItems { item_type, .. } => array_selection_definition(item_type.clone()),
+        Action::GithubPreviewRepositories { .. } => github_snapshot_definition(),
+        _ => block_definition(action.kind()),
+    }
 }
 
 /// Construct a schema-valid editable prototype for an executable block.
@@ -257,6 +269,9 @@ pub fn default_action(kind: ActionKind) -> Result<Action, &'static str> {
     let destination = "$HOME/Developer/owner/repository".to_owned();
     Ok(match kind {
         ActionKind::GithubListRepositories => Action::GithubListRepositories,
+        ActionKind::GithubPreviewRepositories => Action::GithubPreviewRepositories {
+            selected_repositories: Vec::new(),
+        },
         ActionKind::GithubSelectRepositories => Action::GithubSelectRepositories {
             github: crate::automation::task::GithubContextInput {
                 account: crate::automation::task::GithubAccountInput {
@@ -266,6 +281,11 @@ pub fn default_action(kind: ActionKind) -> Result<Action, &'static str> {
             },
             expected_account_login: "github-user".into(),
             repository_ids: Vec::new(),
+        },
+        ActionKind::SelectArrayItems => Action::SelectArrayItems {
+            source: None,
+            item_type: ContextType::STRING,
+            selected_items: Vec::new(),
         },
         ActionKind::ForEach | ActionKind::ForEachGitCloneIfMissing => {
             return Err("legacy foreach actions are not graph-v3 action blocks")
@@ -418,7 +438,9 @@ pub fn default_step(kind: ActionKind, id: impl Into<String>) -> Result<Step, &'s
 pub const fn block_policy_capabilities(kind: ActionKind) -> BlockPolicyCapabilities {
     match kind {
         ActionKind::GithubListRepositories
+        | ActionKind::GithubPreviewRepositories
         | ActionKind::GithubSelectRepositories
+        | ActionKind::SelectArrayItems
         | ActionKind::ForEach
         | ActionKind::ForEachGitCloneIfMissing
         | ActionKind::CreateDirectory
@@ -462,6 +484,9 @@ pub fn block_definition(kind: ActionKind) -> BlockDefinition {
             true,
             false,
         ),
+        ActionKind::GithubPreviewRepositories => {
+            return github_snapshot_definition();
+        }
         ActionKind::GithubSelectRepositories => (
             "Выбрать репозитории GitHub",
             "GitHub",
@@ -473,6 +498,10 @@ pub fn block_definition(kind: ActionKind) -> BlockDefinition {
             true,
             false,
         ),
+        ActionKind::SelectArrayItems => {
+            let definition = array_selection_definition(ContextType::Any);
+            return definition;
+        }
         ActionKind::ForEach => (
             "Для каждого элемента",
             "Логика",
@@ -753,6 +782,15 @@ fn block_search_terms(kind: ActionKind) -> Vec<String> {
             "получить репозитории",
             "репозитории аккаунта",
         ],
+        ActionKind::GithubPreviewRepositories => &[
+            "github",
+            "гитхаб",
+            "repository snapshot",
+            "saved repositories",
+            "выбрать репозитории",
+            "сохраненные репозитории",
+            "снимок репозиториев",
+        ],
         ActionKind::GithubSelectRepositories => &[
             "github",
             "гитхаб",
@@ -762,6 +800,14 @@ fn block_search_terms(kind: ActionKind) -> Vec<String> {
             "выбрать репозитории",
             "выбор репозиториев",
             "репозитории github",
+        ],
+        ActionKind::SelectArrayItems => &[
+            "array",
+            "data selection",
+            "select array items",
+            "массив",
+            "выбрать элементы массива",
+            "выбор данных",
         ],
         ActionKind::ForEach => &[
             "for each",
@@ -967,6 +1013,54 @@ fn block_search_terms(kind: ActionKind) -> Vec<String> {
         .chain(aliases.iter().copied())
         .map(str::to_owned)
         .collect()
+}
+
+fn github_snapshot_definition() -> BlockDefinition {
+    let mut repository = github_repository_type();
+    let ContextType::Object {
+        schema: repository_schema,
+    } = &mut repository
+    else {
+        unreachable!("GitHub repository type is an object")
+    };
+    repository_schema
+        .fields
+        .get_mut("private")
+        .expect("GitHub repository has private")
+        .allowed_values = vec![serde_json::json!(false)];
+    BlockDefinition {
+        kind: ActionKind::GithubPreviewRepositories,
+        schema_version: 2,
+        title: "Выбрать репозитории GitHub".into(),
+        category: "GitHub".into(),
+        search_terms: block_search_terms(ActionKind::GithubPreviewRepositories),
+        input_schema: schema("ppduster.github.preview-repositories.inputs@1", []),
+        output_schema: schema(
+            "ppduster.github.selected-repositories@1",
+            [("repositories", req(ContextType::array(repository)))],
+        ),
+        read_only: true,
+        may_use_secrets: false,
+        policy: block_policy_capabilities(ActionKind::GithubPreviewRepositories),
+    }
+}
+
+fn array_selection_definition(item_type: ContextType) -> BlockDefinition {
+    BlockDefinition {
+        kind: ActionKind::SelectArrayItems,
+        schema_version: 1,
+        title: "Выбрать элементы массива".into(),
+        category: "Данные".into(),
+        search_terms: block_search_terms(ActionKind::SelectArrayItems),
+        input_schema: schema("ppduster.array.selection.inputs@1", []),
+        output_schema: schema(
+            "ppduster.array.selection@1",
+            [("items", req(ContextType::array(item_type)))],
+        ),
+        read_only: true,
+        may_use_secrets: false,
+        policy: block_policy_capabilities(ActionKind::SelectArrayItems),
+    }
 }
 
 fn schema<const N: usize>(id: impl Into<String>, fields: [(&str, FieldSchema); N]) -> ObjectSchema {
@@ -1555,7 +1649,16 @@ mod tests {
         assert_eq!(definitions.len(), ActionKind::ALL.len());
         for (kind, definition) in ActionKind::ALL.into_iter().zip(definitions) {
             assert_eq!(definition.kind, kind);
-            assert_eq!(definition.schema_version, 1);
+            let expected_schema_version = match kind {
+                ActionKind::GithubPreviewRepositories => 2,
+                _ => 1,
+            };
+            assert_eq!(
+                definition.schema_version,
+                expected_schema_version,
+                "registry schema version changed for {} without updating its explicit contract",
+                kind.id()
+            );
             assert!(definition.input_schema.id.is_some());
             assert!(definition.output_schema.id.is_some());
             assert_eq!(
@@ -1833,6 +1936,59 @@ mod tests {
             unreachable!()
         };
         assert!(github.repositories.is_empty());
+    }
+
+    #[test]
+    fn github_preview_publishes_the_persisted_public_selection() {
+        let preview = block_definition(ActionKind::GithubPreviewRepositories);
+        assert!(preview.read_only);
+        assert!(preview.input_schema.fields.is_empty());
+        assert!(preview.output_schema.field("repositories").is_some());
+        assert_eq!(
+            preview.output_schema.id.as_deref(),
+            Some("ppduster.github.selected-repositories@1")
+        );
+    }
+
+    #[test]
+    fn array_selection_definition_preserves_the_declared_item_type() {
+        let item_type = ContextType::object(
+            ObjectSchema::new("example.item@1")
+                .with_field("name", FieldSchema::required(ContextType::STRING)),
+        );
+        let action = Action::SelectArrayItems {
+            source: None,
+            item_type: item_type.clone(),
+            selected_items: vec![serde_json::json!({ "name": "alpha" })],
+        };
+        let definition = definition_for_action(&action);
+        assert!(definition.read_only);
+        assert!(definition.input_schema.fields.is_empty());
+        assert_eq!(
+            definition.output_schema.id.as_deref(),
+            Some("ppduster.array.selection@1")
+        );
+        assert_eq!(
+            definition.output_schema.field("items").unwrap().value_type,
+            ContextType::array(item_type)
+        );
+    }
+
+    #[test]
+    fn array_selection_default_step_is_a_valid_empty_string_snapshot() {
+        let step = default_step(ActionKind::SelectArrayItems, "select-items").unwrap();
+        let Action::SelectArrayItems {
+            source,
+            item_type,
+            selected_items,
+        } = &step.action
+        else {
+            unreachable!()
+        };
+        assert!(source.is_none());
+        assert_eq!(item_type, &ContextType::STRING);
+        assert!(selected_items.is_empty());
+        step.validate().unwrap();
     }
 
     #[test]

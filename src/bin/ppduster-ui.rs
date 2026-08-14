@@ -9,6 +9,7 @@ use ppduster::automation::binding::{
     parse_binding_target, validate_literal_binding, BindingLimits,
 };
 use ppduster::automation::block::default_step;
+use ppduster::automation::graph::ScenarioVariable;
 use ppduster::automation::PackTrust;
 use ppduster::automation::{
     block_definition, definition_for_action, describe_step, first_scenario_path, load_project_yaml,
@@ -16,9 +17,9 @@ use ppduster::automation::{
     validate_project as validate_project_structure, Action, ActionKind, ActionNode, AuthPolicy,
     Binding, BlockDefinition, BlockPolicyCapabilities, CanvasPoint, CanvasView, ComparisonOperator,
     ComposerCanvas, ContextPathSegment, ContextScope, EdgePort, ElevationPolicy, ExpressionLimits,
-    ExpressionV1, ExpressionValue, FieldRef, ForEachNode, GraphEdge, GraphNode,
-    GraphValidationError, GraphValidationErrorKind, IfNode, IndeterminatePolicy, JoinMode,
-    JoinNode, LoopFailurePolicy, ObjectSchema, PolicyRequirement, ProjectEntry,
+    ExpressionV1, ExpressionValue, FieldRef, ForEachNode, GithubRepositoryInput, GraphEdge,
+    GraphNode, GraphValidationError, GraphValidationErrorKind, IfNode, IndeterminatePolicy,
+    JoinMode, JoinNode, LoopFailurePolicy, ObjectSchema, PolicyRequirement, ProjectEntry,
     ProtectedPathApproval, ProtectedPathApprovalRequest, ProtectedPathApprovalRequired,
     ProtectedPathOperation, ProtectedPathRisk, ReferenceV1, ReleaseChannel, RuleOutcomePolicy,
     RunOptions, RunReport, ScenarioProject, ScriptInterpreter, SemanticFormat, Sensitivity, Step,
@@ -385,6 +386,10 @@ enum ComposerGraphBlockKind {
     If,
     Switch,
     Join,
+}
+
+fn action_kind_visible_in_authoring_palette(kind: ActionKind) -> bool {
+    kind.is_graph_action() && !matches!(kind, ActionKind::GithubSelectRepositories)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2311,6 +2316,410 @@ struct ComposerGraphBindingOption {
     sensitivity: Sensitivity,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GraphInterpolationOption {
+    label: String,
+    field: FieldRef,
+    value_type: ContextType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GraphInterpolationCompletion {
+    replace_start: usize,
+    replace_end: usize,
+    fragment: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct GraphInterpolationScope {
+    project_session_generation: u64,
+    project_id: String,
+    scenario_path: Vec<usize>,
+    scenario_id: String,
+}
+
+impl GraphInterpolationScope {
+    fn new(
+        project_session_generation: u64,
+        project_id: impl Into<String>,
+        scenario_path: Vec<usize>,
+        scenario_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            project_session_generation,
+            project_id: project_id.into(),
+            scenario_path,
+            scenario_id: scenario_id.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct GraphInterpolationEditorState {
+    text: String,
+    baseline: Binding,
+    rendered_baseline: String,
+    selected_suggestion: usize,
+    completion_fragment: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArraySnapshotSourceOption {
+    label: String,
+    source: FieldRef,
+    item_type: ContextType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ArraySnapshotEditorKey {
+    scenario_path: Vec<usize>,
+    scenario_id: String,
+    node_id: String,
+}
+
+impl ArraySnapshotEditorKey {
+    fn new(
+        scenario_path: Vec<usize>,
+        scenario_id: impl Into<String>,
+        node_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            scenario_path,
+            scenario_id: scenario_id.into(),
+            node_id: node_id.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ArraySnapshotEditorState {
+    baseline: Vec<serde_json::Value>,
+    draft: String,
+}
+
+impl ArraySnapshotEditorState {
+    fn sync(&mut self, selected_items: &[serde_json::Value]) {
+        if self.draft.is_empty() || self.baseline != selected_items {
+            self.baseline = selected_items.to_vec();
+            self.draft = pretty_json_array(selected_items);
+        }
+    }
+
+    fn accept(&mut self, selected_items: &[serde_json::Value]) {
+        self.baseline = selected_items.to_vec();
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ScenarioVariableEditorState {
+    baseline: Option<String>,
+    draft: String,
+}
+
+impl ScenarioVariableEditorState {
+    fn sync(&mut self, current: Option<&str>, suggested: &str) {
+        if self.draft.is_empty() || self.baseline.as_deref() != current {
+            self.baseline = current.map(str::to_owned);
+            self.draft = current.unwrap_or(suggested).to_owned();
+        }
+    }
+
+    fn accept(&mut self, name: &str) {
+        self.baseline = Some(name.to_owned());
+        self.draft = name.to_owned();
+    }
+}
+
+fn paint_scenario_array_variable_editor(
+    ui: &mut egui::Ui,
+    graph: &WorkflowGraph,
+    current_name: Option<&str>,
+    state: &mut ScenarioVariableEditorState,
+    dark: bool,
+) -> Option<String> {
+    state.sync(current_name, "selected_repositories");
+    ui.add_space(UI_SPACE_SM);
+    section_label(ui, "ПУБЛИЧНЫЙ КОНТЕКСТ");
+    ui.label(
+        RichText::new("Имя переменной массива")
+            .size(UI_TEXT_CAPTION)
+            .color(ui_tone(UiTone::Muted, dark)),
+    );
+    let edit = ui.add(
+        egui::TextEdit::singleline(&mut state.draft)
+            .desired_width(ui.available_width())
+            .hint_text("selected_repositories"),
+    );
+    let error = scenario_variable_name_error(graph, current_name, &state.draft);
+    if let Some(error) = &error {
+        ui.add(
+            egui::Label::new(
+                RichText::new(error)
+                    .size(UI_TEXT_CAPTION)
+                    .color(ui_tone(UiTone::Warning, dark)),
+            )
+            .wrap(),
+        );
+    } else {
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!("Циклы и следующие блоки увидят {}[].", state.draft))
+                    .size(UI_TEXT_CAPTION)
+                    .color(ui_tone(UiTone::Muted, dark)),
+            )
+            .wrap(),
+        );
+    }
+    let changed = state.baseline.as_deref() != Some(state.draft.as_str());
+    let enter = edit.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+    let save = ui
+        .add_enabled(
+            changed && error.is_none(),
+            egui::Button::new("Сохранить имя"),
+        )
+        .clicked();
+    (save || (enter && changed && error.is_none())).then(|| state.draft.clone())
+}
+
+fn pretty_json_array(items: &[serde_json::Value]) -> String {
+    serde_json::to_string_pretty(items).unwrap_or_else(|_| "[]".into())
+}
+
+fn parse_array_snapshot_draft(
+    draft: &str,
+    item_type: &ContextType,
+) -> Result<Vec<serde_json::Value>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(draft).map_err(|error| format!("JSON: {error}"))?;
+    let items = value
+        .as_array()
+        .cloned()
+        .ok_or_else(|| "Снимок должен быть JSON-массивом.".to_owned())?;
+    validate_literal_binding(
+        &serde_json::Value::Array(items.clone()),
+        &FieldSchema::required(ContextType::array(item_type.clone())),
+    )
+    .map_err(|error| format!("Значения не соответствуют типу источника: {error}"))?;
+    Ok(items)
+}
+
+fn array_snapshot_item_type_is_supported(item_type: &ContextType) -> bool {
+    let probe = Step {
+        id: "array-snapshot-type-probe".into(),
+        name: String::new(),
+        bindings: BTreeMap::new(),
+        auth: AuthPolicy::None,
+        check: None,
+        dangerous: false,
+        allow_elevation: ElevationPolicy::Forbidden,
+        when: None,
+        require: None,
+        action: Action::SelectArrayItems {
+            source: None,
+            item_type: item_type.clone(),
+            selected_items: Vec::new(),
+        },
+    };
+    probe.validate().is_ok()
+}
+
+fn set_array_snapshot_source(
+    step: &mut Step,
+    source: &FieldRef,
+    next_item_type: &ContextType,
+) -> bool {
+    let Action::SelectArrayItems {
+        source: current,
+        item_type,
+        selected_items,
+    } = &mut step.action
+    else {
+        return false;
+    };
+    if current.as_ref() == Some(source) && item_type == next_item_type {
+        return false;
+    }
+    *current = Some(source.clone());
+    *item_type = next_item_type.clone();
+    selected_items.clear();
+    true
+}
+
+fn apply_array_snapshot_draft(node: &mut ActionNode, draft: &str) -> Result<bool, String> {
+    let Action::SelectArrayItems {
+        item_type,
+        selected_items,
+        ..
+    } = &node.step.action
+    else {
+        return Ok(false);
+    };
+    let next = parse_array_snapshot_draft(draft, item_type)?;
+    let mut candidate = node.step.clone();
+    let Action::SelectArrayItems {
+        selected_items: candidate_items,
+        ..
+    } = &mut candidate.action
+    else {
+        unreachable!("candidate preserves action kind")
+    };
+    *candidate_items = next.clone();
+    candidate.validate()?;
+    if *selected_items == next {
+        return Ok(false);
+    }
+    let Action::SelectArrayItems { selected_items, .. } = &mut node.step.action else {
+        unreachable!("validated action preserves action kind")
+    };
+    *selected_items = next;
+    Ok(true)
+}
+
+fn paint_array_snapshot_editor(
+    ui: &mut egui::Ui,
+    node: &mut ActionNode,
+    sources: &[ArraySnapshotSourceOption],
+    state: &mut ArraySnapshotEditorState,
+    dark: bool,
+) -> bool {
+    let (current_source, item_type, selected_items) = match &node.step.action {
+        Action::SelectArrayItems {
+            source,
+            item_type,
+            selected_items,
+        } => (source.clone(), item_type.clone(), selected_items.clone()),
+        _ => return false,
+    };
+    state.sync(&selected_items);
+    let mut changed = false;
+
+    section_label(ui, "ИСТОЧНИК МАССИВА");
+    let selected_source_label = current_source
+        .as_ref()
+        .and_then(|source| {
+            sources
+                .iter()
+                .find(|option| &option.source == source)
+                .map(|option| option.label.clone())
+        })
+        .or_else(|| current_source.as_ref().map(field_ref_label))
+        .unwrap_or_else(|| "Не выбран".into());
+    egui::ComboBox::from_id_salt(("array-snapshot-source", &node.step.id))
+        .selected_text(selected_source_label)
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            for option in sources {
+                let selected = current_source.as_ref() == Some(&option.source);
+                if ui.selectable_label(selected, &option.label).clicked()
+                    && set_array_snapshot_source(&mut node.step, &option.source, &option.item_type)
+                {
+                    state.baseline.clear();
+                    state.draft = "[]".into();
+                    changed = true;
+                }
+            }
+        });
+    if sources.is_empty() {
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "До этого блока нет доминирующего публичного типизированного массива. Добавьте источник раньше в той же ветке.",
+                )
+                .size(UI_TEXT_CAPTION)
+                .color(ui_tone(UiTone::Warning, dark)),
+            )
+            .wrap(),
+        );
+    }
+    let active_item_type = match &node.step.action {
+        Action::SelectArrayItems { item_type, .. } => item_type.clone(),
+        _ => item_type,
+    };
+    ui.label(
+        RichText::new(format!(
+            "Тип элемента: {}",
+            context_type_label(&active_item_type, false, false)
+        ))
+        .monospace()
+        .size(UI_TEXT_CAPTION)
+        .color(ui_tone(UiTone::Muted, dark)),
+    );
+
+    ui.add_space(UI_SPACE_SM);
+    section_label(ui, "СОХРАНЁННЫЙ СНИМОК");
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "Этот JSON хранится в параметрах блока и виден после повторного открытия проекта. Порядок и повторяющиеся элементы сохраняются; запуск публикует именно этот массив.",
+            )
+            .size(UI_TEXT_CAPTION)
+            .color(ui_tone(UiTone::Muted, dark)),
+        )
+        .wrap(),
+    );
+    ui.add(
+        egui::TextEdit::multiline(&mut state.draft)
+            .id_salt(("array-snapshot-json", &node.step.id))
+            .font(egui::TextStyle::Monospace)
+            .char_limit(1024 * 1024)
+            .desired_rows(8)
+            .desired_width(ui.available_width()),
+    );
+    let parsed = parse_array_snapshot_draft(&state.draft, &active_item_type);
+    match &parsed {
+        Ok(items) => {
+            ui.label(
+                RichText::new(format!("Элементов в черновике: {}", items.len()))
+                    .size(UI_TEXT_CAPTION)
+                    .color(ui_tone(UiTone::Primary, dark)),
+            );
+        }
+        Err(error) => {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(error)
+                        .size(UI_TEXT_CAPTION)
+                        .color(ui_tone(UiTone::Warning, dark)),
+                )
+                .wrap(),
+            );
+        }
+    }
+    ui.horizontal(|ui| {
+        let can_apply = parsed.as_ref().is_ok_and(|items| items != &state.baseline);
+        if ui
+            .add_enabled(can_apply, egui::Button::new("Сохранить снимок"))
+            .clicked()
+        {
+            match apply_array_snapshot_draft(node, &state.draft) {
+                Ok(applied) => {
+                    if let Action::SelectArrayItems { selected_items, .. } = &node.step.action {
+                        state.accept(selected_items);
+                    }
+                    changed |= applied;
+                }
+                Err(error) => {
+                    ui.label(
+                        RichText::new(error)
+                            .size(UI_TEXT_CAPTION)
+                            .color(ui_tone(UiTone::Warning, dark)),
+                    );
+                }
+            }
+        }
+        if ui
+            .add_enabled(
+                state.draft != pretty_json_array(&state.baseline),
+                egui::Button::new("Отменить правки"),
+            )
+            .clicked()
+        {
+            state.draft = pretty_json_array(&state.baseline);
+        }
+    });
+    changed
+}
+
 fn graph_node_ids(graph: &WorkflowGraph) -> BTreeSet<String> {
     fn visit(graph: &WorkflowGraph, ids: &mut BTreeSet<String>) {
         for node in &graph.nodes {
@@ -2791,6 +3200,45 @@ fn graph_action_output_array(
     ))
 }
 
+fn graph_action_named_output_array(
+    graph: &WorkflowGraph,
+    node_id: &str,
+) -> Option<(Binding, String, ContextType)> {
+    let (binding, alias, item_type) = graph_action_output_array(graph, node_id)?;
+    let Binding::Field { field: source } = &binding else {
+        return Some((binding, alias, item_type));
+    };
+    let Some(name) = graph_scenario_variable_name_for_source(graph, source) else {
+        return Some((binding, alias, item_type));
+    };
+    Some((
+        Binding::field(FieldRef::scenario().field(name)),
+        alias,
+        item_type,
+    ))
+}
+
+fn graph_action_authoring_array(
+    graph: &WorkflowGraph,
+    node_id: &str,
+) -> Option<(Binding, String, ContextType)> {
+    let GraphNode::Action(node) = graph_node(graph, node_id)? else {
+        return None;
+    };
+    if matches!(node.step.action, Action::GithubListRepositories) {
+        return Some((
+            Binding::field(
+                FieldRef::step(node_id)
+                    .field("github")
+                    .field("repositories"),
+            ),
+            "repository".into(),
+            github_repository_snapshot_type(),
+        ));
+    }
+    graph_action_output_array(graph, node_id)
+}
+
 fn graph_loop_item_type(graph: &WorkflowGraph, loop_id: &str) -> Option<ContextType> {
     let GraphNode::ForEach(node) = graph_node(graph, loop_id)? else {
         return None;
@@ -2822,9 +3270,62 @@ fn graph_field_context_type(
         ContextScope::LoopItem { step_id } => {
             graph_loop_item_type_at_depth(graph, step_id, depth + 1)?
         }
-        ContextScope::Scenario => return None,
+        ContextScope::Scenario => {
+            let Some(ContextPathSegment::Field { name }) = field.segments.first() else {
+                return None;
+            };
+            let variable = graph.variables.get(name)?;
+            let source_type = graph_field_context_type(graph, &variable.source, depth + 1)?;
+            return context_type_at_path(&source_type, &field.segments[1..]);
+        }
     };
     context_type_at_path(&root, &field.segments)
+}
+
+fn graph_field_display_label(graph: &WorkflowGraph, field: &FieldRef) -> String {
+    let (mut label, segments) = match &field.scope {
+        ContextScope::Scenario => (String::new(), field.segments.as_slice()),
+        ContextScope::LoopItem { step_id } => {
+            let (loop_id, index) = step_id
+                .strip_suffix("::index")
+                .map_or((step_id.as_str(), false), |loop_id| (loop_id, true));
+            let alias = match graph_node(graph, loop_id) {
+                Some(GraphNode::ForEach(node)) if index => node
+                    .index_alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{}_index", node.item_alias)),
+                Some(GraphNode::ForEach(node)) => node.item_alias.clone(),
+                _ => return field_ref_label(field),
+            };
+            (alias, field.segments.as_slice())
+        }
+        ContextScope::Step { .. } => return field_ref_label(field),
+    };
+    for segment in segments {
+        match segment {
+            ContextPathSegment::Field { name } => {
+                if !label.is_empty() {
+                    label.push('.');
+                }
+                label.push_str(name);
+            }
+            ContextPathSegment::Index { index } => label.push_str(&format!("[{index}]")),
+        }
+    }
+    label
+}
+
+fn graph_context_binding_widget_text(
+    graph: &WorkflowGraph,
+    binding: &Binding,
+    size: f32,
+) -> egui::WidgetText {
+    match binding {
+        Binding::Field { field } => {
+            context_widget_layout_job(&graph_field_display_label(graph, field), size).into()
+        }
+        _ => binding_label(binding).into(),
+    }
 }
 
 fn graph_loop_item_type_at_depth(
@@ -2938,7 +3439,7 @@ fn graph_make_node(
 ) -> GraphNode {
     if matches!(kind, ComposerGraphBlockKind::ForEach) {
         let (collection, item_alias_base, _) = parent_id
-            .and_then(|parent| graph_action_output_array(graph, parent))
+            .and_then(|parent| graph_action_named_output_array(graph, parent))
             .unwrap_or_else(|| {
                 (
                     Binding::literal(serde_json::json!([])),
@@ -2991,8 +3492,17 @@ fn graph_make_node(
     let ComposerGraphBlockKind::Action(kind) = kind else {
         unreachable!("control nodes handled above")
     };
-    let step = default_step(kind, id).expect("palette contains only graph action kinds");
+    let mut step = default_step(kind, id).expect("palette contains only graph action kinds");
     let mut bindings = BTreeMap::new();
+    if matches!(kind, ActionKind::SelectArrayItems) {
+        if let Some((Binding::Field { field }, _, item_type)) =
+            parent_id.and_then(|parent| graph_action_authoring_array(graph, parent))
+        {
+            if array_snapshot_item_type_is_supported(&item_type) {
+                set_array_snapshot_source(&mut step, &field, &item_type);
+            }
+        }
+    }
     if matches!(kind, ActionKind::GithubSelectRepositories) {
         if let Some(parent_id) = parent_id.filter(|parent_id| {
             matches!(
@@ -3085,6 +3595,246 @@ fn first_free_loop_alias(graph: &WorkflowGraph, base: &str, exclude_node: Option
         .expect("unbounded loop alias sequence has a free value")
 }
 
+fn apply_foreach_array_selection(
+    graph: &WorkflowGraph,
+    node: &mut ForEachNode,
+    binding: &Binding,
+    suggested_alias: &str,
+) -> bool {
+    if node.collection == *binding {
+        return false;
+    }
+    node.collection = binding.clone();
+    if node.item_alias.trim().is_empty() || node.item_alias == "item" {
+        node.item_alias = first_free_loop_alias(graph, suggested_alias, Some(&node.id));
+    }
+    true
+}
+
+fn scenario_variable_name_is_valid(value: &str) -> bool {
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    (first == '_' || first.is_alphabetic())
+        && characters.all(|character| character == '_' || character.is_alphanumeric())
+}
+
+fn graph_scenario_variable_name_for_source<'a>(
+    graph: &'a WorkflowGraph,
+    source: &FieldRef,
+) -> Option<&'a str> {
+    graph
+        .variables
+        .iter()
+        .find_map(|(name, variable)| (variable.source == *source).then_some(name.as_str()))
+}
+
+fn scenario_variable_name_error(
+    graph: &WorkflowGraph,
+    current_name: Option<&str>,
+    candidate: &str,
+) -> Option<String> {
+    if !scenario_variable_name_is_valid(candidate) {
+        return Some("Используйте буквы, цифры и _. Первый символ — буква или _.".into());
+    }
+    if graph.variables.contains_key(candidate) && current_name != Some(candidate) {
+        return Some(format!("Переменная «{candidate}» уже существует."));
+    }
+    None
+}
+
+fn rename_scenario_variable_field_ref(
+    field: &mut FieldRef,
+    old_name: &str,
+    new_name: &str,
+) -> bool {
+    if !matches!(field.scope, ContextScope::Scenario) {
+        return false;
+    }
+    let Some(ContextPathSegment::Field { name }) = field.segments.first_mut() else {
+        return false;
+    };
+    if name != old_name {
+        return false;
+    }
+    *name = new_name.to_owned();
+    true
+}
+
+fn rename_scenario_variable_binding(
+    binding: &mut Binding,
+    old_name: &str,
+    new_name: &str,
+) -> usize {
+    match binding {
+        Binding::Field { field } => usize::from(rename_scenario_variable_field_ref(
+            field, old_name, new_name,
+        )),
+        Binding::Interpolated { parts } => parts
+            .iter_mut()
+            .map(|part| match part {
+                TemplatePart::Field { field } => usize::from(rename_scenario_variable_field_ref(
+                    field, old_name, new_name,
+                )),
+                TemplatePart::Literal { .. } => 0,
+            })
+            .sum(),
+        Binding::Literal { .. } | Binding::Template { .. } => 0,
+    }
+}
+
+fn rename_scenario_variable_expression(
+    expression: &mut ExpressionV1,
+    old_name: &str,
+    new_name: &str,
+) -> usize {
+    let mut rewritten = 0usize;
+    expression.visit_context_references_mut(|field| {
+        rewritten += usize::from(rename_scenario_variable_field_ref(
+            field, old_name, new_name,
+        ));
+    });
+    rewritten
+}
+
+fn rename_scenario_variable_condition(
+    condition: &mut StepCondition,
+    old_name: &str,
+    new_name: &str,
+) -> usize {
+    match condition {
+        StepCondition::Expression { rule, .. } => {
+            rename_scenario_variable_expression(rule, old_name, new_name)
+        }
+        StepCondition::All { conditions } | StepCondition::Any { conditions } => conditions
+            .iter_mut()
+            .map(|condition| rename_scenario_variable_condition(condition, old_name, new_name))
+            .sum(),
+        StepCondition::Not { condition } => {
+            rename_scenario_variable_condition(condition, old_name, new_name)
+        }
+        StepCondition::ExitCode { .. } | StepCondition::Path { .. } => 0,
+    }
+}
+
+fn rename_scenario_variable_step(step: &mut Step, old_name: &str, new_name: &str) -> usize {
+    let mut rewritten = step
+        .bindings
+        .values_mut()
+        .map(|binding| rename_scenario_variable_binding(binding, old_name, new_name))
+        .sum();
+    for condition in [step.when.as_mut(), step.require.as_mut()]
+        .into_iter()
+        .flatten()
+    {
+        rewritten += rename_scenario_variable_condition(condition, old_name, new_name);
+    }
+    if let Action::SelectArrayItems {
+        source: Some(source),
+        ..
+    } = &mut step.action
+    {
+        rewritten += usize::from(rename_scenario_variable_field_ref(
+            source, old_name, new_name,
+        ));
+    }
+    rewritten
+}
+
+fn graph_rename_scenario_variable_references(
+    graph: &mut WorkflowGraph,
+    old_name: &str,
+    new_name: &str,
+) -> usize {
+    fn visit(graph: &mut WorkflowGraph, old_name: &str, new_name: &str) -> usize {
+        let mut rewritten = 0usize;
+        for node in &mut graph.nodes {
+            match node {
+                GraphNode::Action(node) => {
+                    rewritten += node
+                        .bindings
+                        .values_mut()
+                        .map(|binding| {
+                            rename_scenario_variable_binding(binding, old_name, new_name)
+                        })
+                        .sum::<usize>();
+                    rewritten += rename_scenario_variable_step(&mut node.step, old_name, new_name);
+                }
+                GraphNode::ForEach(node) => {
+                    rewritten +=
+                        rename_scenario_variable_binding(&mut node.collection, old_name, new_name);
+                    rewritten += visit(&mut node.body, old_name, new_name);
+                }
+                GraphNode::If(node) => {
+                    rewritten += rename_scenario_variable_expression(
+                        &mut node.condition,
+                        old_name,
+                        new_name,
+                    );
+                    rewritten += visit(&mut node.then_graph, old_name, new_name);
+                    if let Some(graph) = &mut node.else_graph {
+                        rewritten += visit(graph, old_name, new_name);
+                    }
+                }
+                GraphNode::Switch(node) => {
+                    rewritten +=
+                        rename_scenario_variable_binding(&mut node.selector, old_name, new_name);
+                    for case in &mut node.cases {
+                        rewritten += visit(&mut case.graph, old_name, new_name);
+                    }
+                    if let Some(graph) = &mut node.default {
+                        rewritten += visit(graph, old_name, new_name);
+                    }
+                }
+                GraphNode::Join(_) => {}
+            }
+        }
+        rewritten
+    }
+
+    visit(graph, old_name, new_name)
+}
+
+fn graph_set_scenario_variable_name(
+    graph: &mut WorkflowGraph,
+    source: &FieldRef,
+    current_name: Option<&str>,
+    next_name: &str,
+) -> Result<bool, String> {
+    if let Some(error) = scenario_variable_name_error(graph, current_name, next_name) {
+        return Err(error);
+    }
+    if current_name == Some(next_name) {
+        return Ok(false);
+    }
+
+    let mut candidate = graph.clone();
+    if let Some(current_name) = current_name {
+        let Some(current) = candidate.variables.remove(current_name) else {
+            return Err(format!("Переменная «{current_name}» больше не существует."));
+        };
+        if current.source != *source {
+            return Err(format!(
+                "Переменная «{current_name}» больше не принадлежит этому блоку."
+            ));
+        }
+        graph_rename_scenario_variable_references(&mut candidate, current_name, next_name);
+    }
+    candidate
+        .variables
+        .insert(next_name.to_owned(), ScenarioVariable::new(source.clone()));
+    candidate.scenario_variable_schema().map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })?;
+    *graph = candidate;
+    Ok(true)
+}
+
 fn graph_insert_composer_block(
     graph: &mut WorkflowGraph,
     attach: &ComposerGraphAttach,
@@ -3166,21 +3916,46 @@ fn graph_insert_composer_block(
         }
     };
     let node = graph_make_node(graph, kind, id.clone(), parent_id, owner_loop);
-    let target = match attach {
-        ComposerGraphAttach::RootStart | ComposerGraphAttach::RootAfter { .. } => graph,
-        ComposerGraphAttach::NestedStart { scope }
-        | ComposerGraphAttach::NestedAfter { scope, .. } => graph_nested_scope_mut(graph, scope)
-            .ok_or_else(|| format!("вложенная область {} не найдена", scope.owner_id()))?,
-    };
-    target.nodes.push(node);
-    match attach {
-        ComposerGraphAttach::RootStart | ComposerGraphAttach::NestedStart { .. } => {
-            target.entries.push(id.clone());
+    {
+        let target = match attach {
+            ComposerGraphAttach::RootStart | ComposerGraphAttach::RootAfter { .. } => &mut *graph,
+            ComposerGraphAttach::NestedStart { scope }
+            | ComposerGraphAttach::NestedAfter { scope, .. } => {
+                graph_nested_scope_mut(graph, scope)
+                    .ok_or_else(|| format!("вложенная область {} не найдена", scope.owner_id()))?
+            }
+        };
+        target.nodes.push(node);
+        match attach {
+            ComposerGraphAttach::RootStart | ComposerGraphAttach::NestedStart { .. } => {
+                target.entries.push(id.clone());
+            }
+            ComposerGraphAttach::RootAfter { .. } | ComposerGraphAttach::NestedAfter { .. } => {
+                let (source_id, port) = incoming.expect("after attachment has an incoming edge");
+                target.edges.push(GraphEdge::new(source_id, port, &id));
+            }
         }
-        ComposerGraphAttach::RootAfter { .. } | ComposerGraphAttach::NestedAfter { .. } => {
-            let (source_id, port) = incoming.expect("after attachment has an incoming edge");
-            target.edges.push(GraphEdge::new(source_id, port, &id));
-        }
+    }
+    if matches!(
+        (attach, kind),
+        (
+            ComposerGraphAttach::RootStart | ComposerGraphAttach::RootAfter { .. },
+            ComposerGraphBlockKind::Action(ActionKind::GithubPreviewRepositories)
+        )
+    ) {
+        let base = "selected_repositories";
+        let name = if graph.variables.contains_key(base) {
+            (2usize..)
+                .map(|ordinal| format!("{base}_{ordinal}"))
+                .find(|candidate| !graph.variables.contains_key(candidate))
+                .expect("unbounded scenario variable sequence has a free value")
+        } else {
+            base.into()
+        };
+        graph.variables.insert(
+            name,
+            ScenarioVariable::new(FieldRef::step(&id).field("repositories")),
+        );
     }
     Ok(id)
 }
@@ -3741,6 +4516,36 @@ fn graph_remove_switch_case(
 
 fn graph_remove_composer_node(graph: &mut WorkflowGraph, id: &str) -> Result<bool, String> {
     if let Some(index) = graph.nodes.iter().position(|node| node.id() == id) {
+        let exported_variables = graph
+            .variables
+            .iter()
+            .filter_map(|(name, variable)| match &variable.source.scope {
+                ContextScope::Step { step_id } if step_id == id => Some(name.clone()),
+                ContextScope::Scenario
+                | ContextScope::Step { .. }
+                | ContextScope::LoopItem { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let mut reference_probe = graph.clone();
+        reference_probe.nodes.remove(index);
+        let referenced_variables = exported_variables
+            .iter()
+            .enumerate()
+            .filter_map(|(ordinal, name)| {
+                (graph_rename_scenario_variable_references(
+                    &mut reference_probe,
+                    name,
+                    &format!("__deleted_scenario_variable_{ordinal}"),
+                ) > 0)
+                    .then_some(name.as_str())
+            })
+            .collect::<Vec<_>>();
+        if !referenced_variables.is_empty() {
+            return Err(format!(
+                "Сначала удалите привязки к переменным сценария этого блока: {}",
+                referenced_variables.join(", ")
+            ));
+        }
         if graph_node_has_nested_content(&graph.nodes[index]) {
             return Err(
                 "Сначала удалите или перенесите блоки из вложенных ветвей; обычное удаление не удаляет ветку каскадно."
@@ -3760,6 +4565,9 @@ fn graph_remove_composer_node(graph: &mut WorkflowGraph, id: &str) -> Result<boo
                 "Сначала удалите или переподключите downstream-блоки: {}",
                 blockers.join(", ")
             ));
+        }
+        for variable in exported_variables {
+            graph.variables.remove(&variable);
         }
         graph.nodes.remove(index);
         graph
@@ -3866,6 +4674,62 @@ fn graph_binding_options(
     consumer_id: &str,
     expected: &FieldSchema,
 ) -> Vec<ComposerGraphBindingOption> {
+    fn push_scenario_sources(
+        root: &WorkflowGraph,
+        visible_action_ids: &BTreeSet<String>,
+        output: &mut Vec<ComposerGraphBindingOption>,
+    ) {
+        let Ok(schema) = root.scenario_variable_schema() else {
+            return;
+        };
+        for (name, variable) in &root.variables {
+            let ContextScope::Step { step_id } = &variable.source.scope else {
+                continue;
+            };
+            if !visible_action_ids.contains(step_id) {
+                continue;
+            }
+            let Some(field) = schema.field(name) else {
+                continue;
+            };
+            let root_type = field.value_type.clone();
+            let mut details = Vec::new();
+            collect_bindable_field_details(
+                &root_type,
+                "",
+                field.required,
+                field.nullable,
+                field.sensitivity,
+                &mut details,
+            );
+            for detail in details {
+                let reference = detail
+                    .path
+                    .split('.')
+                    .filter(|segment| !segment.is_empty())
+                    .fold(FieldRef::scenario().field(name), |reference, segment| {
+                        reference.field(segment)
+                    });
+                let path = if detail.path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name}.{}", detail.path)
+                };
+                output.push(ComposerGraphBindingOption {
+                    label: format!(
+                        "{path} · {}",
+                        context_type_label(&detail.value_type, detail.nullable, !detail.required)
+                    ),
+                    binding: Binding::field(reference),
+                    value_type: detail.value_type,
+                    required: detail.required,
+                    nullable: detail.nullable,
+                    sensitivity: detail.sensitivity,
+                });
+            }
+        }
+    }
+
     fn push_action_sources(
         graph: &WorkflowGraph,
         ids: &BTreeSet<String>,
@@ -3923,6 +4787,7 @@ fn graph_binding_options(
             let mut output = inherited.to_vec();
             let ancestors = graph_local_dominators(graph, consumer_id);
             push_action_sources(graph, &ancestors, &mut output);
+            push_scenario_sources(root, &ancestors, &mut output);
             return Some(output);
         }
         for node in &graph.nodes {
@@ -3931,6 +4796,7 @@ fn graph_binding_options(
                     let mut nested = inherited.to_vec();
                     let outer_ancestors = graph_local_dominators(graph, &node.id);
                     push_action_sources(graph, &outer_ancestors, &mut nested);
+                    push_scenario_sources(root, &outer_ancestors, &mut nested);
                     if let Some(item_type) = graph_loop_item_type(root, &node.id) {
                         let mut fields = Vec::new();
                         collect_bindable_field_details(
@@ -3951,7 +4817,7 @@ fn graph_binding_options(
                                 });
                             nested.push(ComposerGraphBindingOption {
                                 label: format!(
-                                    "{} (item).{} · {}",
+                                    "{}.{} · {}",
                                     node.item_alias,
                                     field.path,
                                     context_type_label(
@@ -3976,6 +4842,7 @@ fn graph_binding_options(
                     let mut nested = inherited.to_vec();
                     let outer = graph_local_dominators(graph, &node.id);
                     push_action_sources(graph, &outer, &mut nested);
+                    push_scenario_sources(root, &outer, &mut nested);
                     if let Some(found) = find_scope(root, &node.then_graph, consumer_id, &nested) {
                         return Some(found);
                     }
@@ -3991,6 +4858,7 @@ fn graph_binding_options(
                     let mut nested = inherited.to_vec();
                     let outer = graph_local_dominators(graph, &node.id);
                     push_action_sources(graph, &outer, &mut nested);
+                    push_scenario_sources(root, &outer, &mut nested);
                     for case in &node.cases {
                         if let Some(found) = find_scope(root, &case.graph, consumer_id, &nested) {
                             return Some(found);
@@ -4022,6 +4890,235 @@ fn graph_binding_options(
     options
 }
 
+fn graph_input_supports_interpolation(field: &FieldSchema) -> bool {
+    field.allowed_values.is_empty() && matches!(field.value_type, ContextType::String { .. })
+}
+
+fn graph_interpolation_options(
+    graph: &WorkflowGraph,
+    consumer_id: &str,
+) -> Vec<GraphInterpolationOption> {
+    let expected = FieldSchema::optional(ContextType::Any).nullable();
+    let mut options = graph_binding_options(graph, consumer_id, &expected)
+        .into_iter()
+        .filter_map(|option| {
+            if !option.required
+                || option.nullable
+                || option.sensitivity != Sensitivity::Public
+                || !matches!(
+                    option.value_type,
+                    ContextType::String { .. }
+                        | ContextType::Boolean
+                        | ContextType::Integer
+                        | ContextType::Number
+                )
+            {
+                return None;
+            }
+            let Binding::Field { field } = option.binding else {
+                return None;
+            };
+            Some(GraphInterpolationOption {
+                label: graph_field_display_label(graph, &field),
+                field,
+                value_type: option.value_type,
+            })
+        })
+        .collect::<Vec<_>>();
+    for loop_id in graph_enclosing_loop_ids(graph, consumer_id) {
+        let Some(GraphNode::ForEach(loop_node)) = graph_node(graph, &loop_id) else {
+            continue;
+        };
+        let Some(index_alias) = &loop_node.index_alias else {
+            continue;
+        };
+        options.push(GraphInterpolationOption {
+            label: index_alias.clone(),
+            field: FieldRef::loop_item(format!("{loop_id}::index")),
+            value_type: ContextType::Integer,
+        });
+    }
+    options.sort_by(|left, right| left.label.cmp(&right.label));
+    options.dedup_by(|left, right| left.label == right.label && left.field == right.field);
+    options
+}
+
+fn graph_interpolation_binding_text(
+    graph: &WorkflowGraph,
+    binding: &Binding,
+) -> Result<String, String> {
+    let Binding::Interpolated { parts } = binding else {
+        return Err("привязка не является структурным шаблоном".into());
+    };
+    let mut text = String::new();
+    for part in parts {
+        match part {
+            TemplatePart::Literal { value } => {
+                if value.contains("{{") || value.contains("}}") {
+                    return Err(
+                        "литеральная часть содержит {{ или }} и не может быть безопасно отредактирована визуально"
+                            .into(),
+                    );
+                }
+                text.push_str(value);
+            }
+            TemplatePart::Field { field } => {
+                text.push_str("{{");
+                text.push_str(&graph_field_display_label(graph, field));
+                text.push_str("}}");
+            }
+        }
+    }
+    Ok(text)
+}
+
+fn parse_graph_interpolation(
+    text: &str,
+    options: &[GraphInterpolationOption],
+) -> Result<Binding, String> {
+    let limits = BindingLimits::default();
+    if text.len() > limits.max_rendered_bytes {
+        return Err(format!(
+            "шаблон длиннее допустимых {} байт",
+            limits.max_rendered_bytes
+        ));
+    }
+    let mut fields_by_label = BTreeMap::<&str, Vec<&FieldRef>>::new();
+    for option in options {
+        fields_by_label
+            .entry(option.label.as_str())
+            .or_default()
+            .push(&option.field);
+    }
+
+    let mut parts = Vec::new();
+    let mut offset = 0usize;
+    while let Some(relative_start) = text[offset..].find("{{") {
+        let start = offset + relative_start;
+        if text[offset..start].contains('{') || text[offset..start].contains('}') {
+            return Err("фигурные скобки зарезервированы для переменных вида {{name}}".into());
+        }
+        if start > offset {
+            parts.push(TemplatePart::literal(&text[offset..start]));
+        }
+        let expression_start = start + 2;
+        let Some(relative_end) = text[expression_start..].find("}}") else {
+            return Err("закройте переменную двумя скобками: }}".into());
+        };
+        let end = expression_start + relative_end;
+        let expression = text[expression_start..end].trim();
+        if expression.is_empty() {
+            return Err("между {{ и }} выберите переменную".into());
+        }
+        let Some(matches) = fields_by_label.get(expression) else {
+            return Err(format!(
+                "переменная «{expression}» недоступна в этой позиции сценария"
+            ));
+        };
+        if matches.len() != 1 {
+            return Err(format!(
+                "имя «{expression}» неоднозначно; переименуйте источник или цикл"
+            ));
+        }
+        parts.push(TemplatePart::field((*matches[0]).clone()));
+        offset = end + 2;
+    }
+    if text[offset..].contains('{') || text[offset..].contains('}') {
+        return Err("фигурные скобки зарезервированы для переменных вида {{name}}".into());
+    }
+    if offset < text.len() {
+        parts.push(TemplatePart::literal(&text[offset..]));
+    }
+    if parts.is_empty() {
+        parts.push(TemplatePart::literal(""));
+    }
+    if parts.len() > limits.max_template_parts {
+        return Err(format!(
+            "в шаблоне {} частей, максимум {}",
+            parts.len(),
+            limits.max_template_parts
+        ));
+    }
+    Ok(Binding::interpolated(parts))
+}
+
+fn graph_interpolation_completion(
+    text: &str,
+    cursor_character_index: usize,
+) -> Option<GraphInterpolationCompletion> {
+    let cursor = text
+        .char_indices()
+        .nth(cursor_character_index)
+        .map_or(text.len(), |(index, _)| index);
+    let prefix = &text[..cursor];
+    let start = prefix.rfind("{{")?;
+    let fragment_start = start + 2;
+    let fragment = &text[fragment_start..cursor];
+    if fragment.contains("}}") || fragment.contains('{') || fragment.contains('}') {
+        return None;
+    }
+    if fragment.trim() != fragment {
+        return None;
+    }
+    Some(GraphInterpolationCompletion {
+        replace_start: fragment_start,
+        replace_end: cursor,
+        fragment: fragment.to_owned(),
+    })
+}
+
+fn graph_interpolation_suggestions<'a>(
+    completion: &GraphInterpolationCompletion,
+    options: &'a [GraphInterpolationOption],
+) -> Vec<&'a GraphInterpolationOption> {
+    let fragment = completion.fragment.to_lowercase();
+    let mut suggestions = options
+        .iter()
+        .filter(|option| option.label.to_lowercase().contains(&fragment))
+        .collect::<Vec<_>>();
+    suggestions.sort_by_key(|option| {
+        (
+            !option.label.to_lowercase().starts_with(&fragment),
+            option.label.as_str(),
+        )
+    });
+    suggestions.truncate(12);
+    suggestions
+}
+
+fn apply_graph_interpolation_suggestion(
+    text: &mut String,
+    completion: &GraphInterpolationCompletion,
+    label: &str,
+) -> usize {
+    text.replace_range(completion.replace_start..completion.replace_end, label);
+    let closing_at = completion.replace_start + label.len();
+    if !text[closing_at..].starts_with("}}") {
+        text.insert_str(closing_at, "}}");
+    }
+    text[..closing_at + 2].chars().count()
+}
+
+fn graph_interpolation_seed(
+    current: Option<&Binding>,
+    manual_initial: &serde_json::Value,
+) -> Binding {
+    match current {
+        Some(binding @ Binding::Interpolated { .. }) => binding.clone(),
+        Some(Binding::Field { field }) => {
+            Binding::interpolated([TemplatePart::field(field.clone())])
+        }
+        Some(Binding::Literal {
+            value: serde_json::Value::String(value),
+        }) => Binding::interpolated([TemplatePart::literal(value)]),
+        Some(Binding::Literal { .. } | Binding::Template { .. }) | None => {
+            Binding::interpolated([TemplatePart::literal(
+                manual_initial.as_str().unwrap_or_default(),
+            )])
+        }
+    }
+}
+
 fn graph_condition_fields(graph: &WorkflowGraph, consumer_id: &str) -> Vec<ComposerConditionField> {
     let expected = FieldSchema::optional(ContextType::Any).nullable();
     graph_binding_options(graph, consumer_id, &expected)
@@ -4041,9 +5138,10 @@ fn graph_condition_fields(graph: &WorkflowGraph, consumer_id: &str) -> Vec<Compo
         .collect()
 }
 
-fn graph_array_options(
+fn graph_array_options_with_authoring_previews(
     graph: &WorkflowGraph,
     consumer_id: &str,
+    include_authoring_previews: bool,
 ) -> Vec<(String, Binding, String, ContextType)> {
     type ArrayOption = (String, Binding, String, ContextType);
 
@@ -4051,6 +5149,7 @@ fn graph_array_options(
         graph: &WorkflowGraph,
         source_ids: &BTreeSet<String>,
         output: &mut Vec<ArrayOption>,
+        include_authoring_previews: bool,
     ) {
         for source_id in source_ids {
             let Some(GraphNode::Action(node)) =
@@ -4058,6 +5157,21 @@ fn graph_array_options(
             else {
                 continue;
             };
+            if include_authoring_previews
+                && matches!(node.step.action, Action::GithubListRepositories)
+            {
+                output.push((
+                    format!("{source_id}.github.repositories[] · снимок GitHub"),
+                    Binding::field(
+                        FieldRef::step(source_id)
+                            .field("github")
+                            .field("repositories"),
+                    ),
+                    "repository".into(),
+                    github_repository_snapshot_type(),
+                ));
+                continue;
+            }
             let definition = definition_for_action(&node.step.action);
             let mut arrays = Vec::new();
             collect_schema_arrays(&definition.output_schema, "", &mut arrays);
@@ -4100,9 +5214,9 @@ fn graph_array_options(
                     reference.field(segment)
                 });
             let label = if path.is_empty() {
-                format!("{} (item)[]", node.item_alias)
+                format!("{}[]", node.item_alias)
             } else {
-                format!("{} (item).{path}[]", node.item_alias)
+                format!("{}.{path}[]", node.item_alias)
             };
             output.push((
                 label,
@@ -4118,6 +5232,7 @@ fn graph_array_options(
         current: &WorkflowGraph,
         consumer_id: &str,
         inherited: &[ArrayOption],
+        include_authoring_previews: bool,
     ) -> Option<Vec<ArrayOption>> {
         if current.nodes.iter().any(|node| node.id() == consumer_id) {
             let mut output = inherited.to_vec();
@@ -4125,6 +5240,7 @@ fn graph_array_options(
                 current,
                 &graph_local_dominators(current, consumer_id),
                 &mut output,
+                include_authoring_previews,
             );
             return Some(output);
         }
@@ -4134,38 +5250,64 @@ fn graph_array_options(
                 current,
                 &graph_local_dominators(current, node.id()),
                 &mut nested,
+                include_authoring_previews,
             );
             match node {
                 GraphNode::ForEach(node) => {
                     push_loop_item_arrays(root, node, &mut nested);
-                    if let Some(found) = find_options(root, &node.body, consumer_id, &nested) {
+                    if let Some(found) = find_options(
+                        root,
+                        &node.body,
+                        consumer_id,
+                        &nested,
+                        include_authoring_previews,
+                    ) {
                         return Some(found);
                     }
                 }
                 GraphNode::If(node) => {
-                    if let Some(found) = find_options(root, &node.then_graph, consumer_id, &nested)
-                    {
+                    if let Some(found) = find_options(
+                        root,
+                        &node.then_graph,
+                        consumer_id,
+                        &nested,
+                        include_authoring_previews,
+                    ) {
                         return Some(found);
                     }
-                    if let Some(found) = node
-                        .else_graph
-                        .as_deref()
-                        .and_then(|graph| find_options(root, graph, consumer_id, &nested))
-                    {
+                    if let Some(found) = node.else_graph.as_deref().and_then(|graph| {
+                        find_options(
+                            root,
+                            graph,
+                            consumer_id,
+                            &nested,
+                            include_authoring_previews,
+                        )
+                    }) {
                         return Some(found);
                     }
                 }
                 GraphNode::Switch(node) => {
                     for case in &node.cases {
-                        if let Some(found) = find_options(root, &case.graph, consumer_id, &nested) {
+                        if let Some(found) = find_options(
+                            root,
+                            &case.graph,
+                            consumer_id,
+                            &nested,
+                            include_authoring_previews,
+                        ) {
                             return Some(found);
                         }
                     }
-                    if let Some(found) = node
-                        .default
-                        .as_deref()
-                        .and_then(|graph| find_options(root, graph, consumer_id, &nested))
-                    {
+                    if let Some(found) = node.default.as_deref().and_then(|graph| {
+                        find_options(
+                            root,
+                            graph,
+                            consumer_id,
+                            &nested,
+                            include_authoring_previews,
+                        )
+                    }) {
                         return Some(found);
                     }
                 }
@@ -4175,10 +5317,74 @@ fn graph_array_options(
         None
     }
 
-    let mut options = find_options(graph, graph, consumer_id, &[]).unwrap_or_default();
+    let mut options = find_options(graph, graph, consumer_id, &[], include_authoring_previews)
+        .unwrap_or_default();
     options.sort_by(|left, right| left.0.cmp(&right.0));
     options.dedup_by(|left, right| left.1 == right.1);
-    options
+
+    let mut named = graph
+        .variables
+        .iter()
+        .filter_map(|(name, variable)| {
+            let source_is_visible = options.iter().any(|(_, binding, _, _)| {
+                matches!(binding, Binding::Field { field } if field == &variable.source)
+            });
+            if !source_is_visible {
+                return None;
+            }
+            let ContextType::Array { items } =
+                graph_field_context_type(graph, &variable.source, 0)?
+            else {
+                return None;
+            };
+            let alias_path = variable
+                .source
+                .segments
+                .iter()
+                .rev()
+                .find_map(|segment| match segment {
+                    ContextPathSegment::Field { name } => Some(name.as_str()),
+                    ContextPathSegment::Index { .. } => None,
+                })
+                .unwrap_or(name);
+            Some((
+                format!("{name}[]"),
+                Binding::field(FieldRef::scenario().field(name)),
+                item_alias_for_array_path(alias_path),
+                *items,
+            ))
+        })
+        .collect::<Vec<_>>();
+    named.sort_by(|left, right| left.0.cmp(&right.0));
+    named.dedup_by(|left, right| left.1 == right.1);
+    named.extend(options);
+    named
+}
+
+fn graph_array_options(
+    graph: &WorkflowGraph,
+    consumer_id: &str,
+) -> Vec<(String, Binding, String, ContextType)> {
+    graph_array_options_with_authoring_previews(graph, consumer_id, false)
+}
+
+fn graph_snapshot_source_options(
+    graph: &WorkflowGraph,
+    consumer_id: &str,
+) -> Vec<ArraySnapshotSourceOption> {
+    graph_array_options_with_authoring_previews(graph, consumer_id, true)
+        .into_iter()
+        .filter_map(|(label, binding, _, item_type)| {
+            let Binding::Field { field } = binding else {
+                return None;
+            };
+            array_snapshot_item_type_is_supported(&item_type).then_some(ArraySnapshotSourceOption {
+                label,
+                source: field,
+                item_type,
+            })
+        })
+        .collect()
 }
 
 fn literal_prototype_for_field(field: &FieldSchema, path: &str) -> serde_json::Value {
@@ -4634,6 +5840,203 @@ fn directory_picker_start(value: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+fn graph_interpolation_state_id(
+    scope: &GraphInterpolationScope,
+    node_id: &str,
+    target: &str,
+) -> Id {
+    Id::new(("graph-interpolation-state", scope, node_id, target))
+}
+
+fn graph_interpolation_text_id(scope: &GraphInterpolationScope, node_id: &str, target: &str) -> Id {
+    Id::new(("graph-interpolation-text", scope, node_id, target))
+}
+
+fn paint_graph_interpolation_editor(
+    ui: &mut egui::Ui,
+    scope: &GraphInterpolationScope,
+    widget_id: (&str, &str),
+    binding: &mut Binding,
+    graph: &WorkflowGraph,
+    options: &[GraphInterpolationOption],
+    dark: bool,
+) -> bool {
+    let (node_id, target) = widget_id;
+    let state_id = graph_interpolation_state_id(scope, node_id, target);
+    let text_id = graph_interpolation_text_id(scope, node_id, target);
+    let formatted = graph_interpolation_binding_text(graph, binding);
+    let mut state = ui
+        .data_mut(|data| data.get_temp::<GraphInterpolationEditorState>(state_id))
+        .unwrap_or_else(|| GraphInterpolationEditorState {
+            text: formatted.clone().unwrap_or_default(),
+            baseline: binding.clone(),
+            rendered_baseline: formatted.clone().unwrap_or_default(),
+            selected_suggestion: 0,
+            completion_fragment: String::new(),
+        });
+    let formatted_text = formatted.clone().unwrap_or_default();
+    let clean_draft_needs_refresh =
+        state.text == state.rendered_baseline && state.rendered_baseline != formatted_text;
+    if state.baseline != *binding || clean_draft_needs_refresh {
+        state.text = formatted_text.clone();
+        state.baseline = binding.clone();
+        state.rendered_baseline = formatted_text;
+        state.selected_suggestion = 0;
+        state.completion_fragment.clear();
+    }
+
+    let Ok(_) = formatted else {
+        ui.label(
+            RichText::new(
+                "Этот структурный шаблон нельзя безопасно показать как {{переменная}}. Исправьте его в YAML.",
+            )
+            .size(8.0)
+            .color(ORANGE),
+        );
+        return false;
+    };
+
+    let editor_had_focus = ui.memory(|memory| memory.has_focus(text_id));
+    let output = egui::TextEdit::singleline(&mut state.text)
+        .id(text_id)
+        .char_limit(BindingLimits::default().max_rendered_bytes)
+        .hint_text("$HOME/Developer/{{repository.name}}")
+        .desired_width(ui.available_width())
+        .show(ui);
+    let cursor_character_index = output.cursor_range.map_or_else(
+        || state.text.chars().count(),
+        |cursor| cursor.primary.index.0,
+    );
+    let completion = graph_interpolation_completion(&state.text, cursor_character_index);
+    let suggestions = completion
+        .as_ref()
+        .map(|completion| graph_interpolation_suggestions(completion, options))
+        .unwrap_or_default();
+    let fragment = completion
+        .as_ref()
+        .map(|completion| completion.fragment.as_str())
+        .unwrap_or_default();
+    if state.completion_fragment != fragment {
+        state.completion_fragment = fragment.to_owned();
+        state.selected_suggestion = 0;
+    }
+    let editor_focused = editor_had_focus || output.response.has_focus();
+    if !suggestions.is_empty() && editor_focused {
+        let down =
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
+        let up = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+        if down {
+            state.selected_suggestion = (state.selected_suggestion + 1) % suggestions.len();
+        }
+        if up {
+            state.selected_suggestion = state
+                .selected_suggestion
+                .checked_sub(1)
+                .unwrap_or(suggestions.len() - 1);
+        }
+    }
+    state.selected_suggestion = state
+        .selected_suggestion
+        .min(suggestions.len().saturating_sub(1));
+    let accept_from_keyboard = !suggestions.is_empty()
+        && editor_focused
+        && ui.input_mut(|input| {
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                || input.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+        });
+    let mut accepted = accept_from_keyboard.then_some(state.selected_suggestion);
+    if !suggestions.is_empty() {
+        Frame::new()
+            .fill(panel(dark))
+            .stroke(Stroke::new(1.0, line(dark)))
+            .corner_radius(UI_RADIUS_CONTROL)
+            .inner_margin(Margin::same(5))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new("ПЕРЕМЕННЫЕ · ↑ ↓ И ENTER")
+                        .size(8.0)
+                        .color(MUTED),
+                );
+                ScrollArea::vertical()
+                    .id_salt(("graph-interpolation-suggestions", scope, node_id, target))
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        for (index, option) in suggestions.iter().enumerate() {
+                            let selected = index == state.selected_suggestion;
+                            let label = format!(
+                                "{} · {}",
+                                option.label,
+                                context_type_label(&option.value_type, false, false)
+                            );
+                            if ui
+                                .selectable_label(selected, context_widget_layout_job(&label, 9.0))
+                                .clicked()
+                            {
+                                accepted = Some(index);
+                            }
+                        }
+                    });
+            });
+    }
+
+    let mut moved_cursor = None;
+    if let (Some(index), Some(completion)) = (accepted, completion.as_ref()) {
+        moved_cursor = Some(apply_graph_interpolation_suggestion(
+            &mut state.text,
+            completion,
+            &suggestions[index].label,
+        ));
+        state.selected_suggestion = 0;
+        state.completion_fragment.clear();
+    }
+
+    let mut changed = false;
+    let parse_result = parse_graph_interpolation(&state.text, options);
+    match parse_result {
+        Ok(parsed) => {
+            if parsed != *binding {
+                *binding = parsed.clone();
+                changed = true;
+            }
+            state.rendered_baseline = graph_interpolation_binding_text(graph, &parsed)
+                .expect("parser only creates visually representable interpolation");
+            state.text.clone_from(&state.rendered_baseline);
+            state.baseline = parsed;
+            ui.label(
+                RichText::new("Сохранено как структурный шаблон")
+                    .size(8.0)
+                    .color(CYAN),
+            );
+        }
+        Err(error) => {
+            ui.label(RichText::new(error).size(8.0).color(ORANGE));
+            ui.label(
+                RichText::new("Черновик не меняет последнюю корректную привязку.")
+                    .size(8.0)
+                    .color(MUTED),
+            );
+        }
+    }
+    ui.label(
+        RichText::new("Введите {{ — список содержит только доступные обязательные scalar-поля.")
+            .size(8.0)
+            .color(MUTED),
+    );
+
+    if let Some(cursor) = moved_cursor {
+        output.response.request_focus();
+        let mut text_state = output.state;
+        text_state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(cursor),
+            )));
+        text_state.store(ui.ctx(), text_id);
+    }
+    ui.data_mut(|data| data.insert_temp(state_id, state));
+    changed
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SwitchCaseHeaderAction {
     MoveUp,
@@ -4830,6 +6233,8 @@ struct GraphExternalAuthContract {
 }
 
 fn graph_action_external_auth(action: &Action) -> Option<GraphExternalAuthContract> {
+    // Preview-only actions perform no runtime I/O. Authentication belongs to
+    // the explicit authoring preview button, never to plan/apply.
     matches!(action, Action::GithubListRepositories).then_some(GraphExternalAuthContract {
         provider: ExternalAuthProvider::GithubCli,
         intent: GithubAuthorizationIntent::AuthenticateOnly,
@@ -4866,6 +6271,160 @@ struct GithubAuthoringPreviewUiResponse {
     selected_repository_ids: Option<BTreeSet<String>>,
 }
 
+fn github_repository_snapshot_input(repository: &GithubRepository) -> GithubRepositoryInput {
+    GithubRepositoryInput {
+        id: repository.id.clone(),
+        owner: repository.owner.clone(),
+        name: repository.name.clone(),
+        full_name: repository.name_with_owner.clone(),
+        https_url: repository.url.clone(),
+        ssh_url: repository.ssh_url.clone(),
+        default_branch: repository.default_branch.clone(),
+        private: repository.is_private,
+        archived: repository.is_archived,
+    }
+}
+
+fn github_repository_snapshot_value(repository: &GithubRepository) -> serde_json::Value {
+    serde_json::to_value(github_repository_snapshot_input(repository))
+        .expect("GitHub repository snapshot serializes")
+}
+
+fn github_repository_snapshot_type() -> ContextType {
+    let definition = block_definition(ActionKind::GithubPreviewRepositories);
+    let repositories = definition
+        .output_schema
+        .resolve_owned(&[ContextPathSegment::field("repositories")])
+        .expect("GitHub snapshot schema publishes repositories");
+    match repositories.value_type {
+        ContextType::Array { items } => *items,
+        _ => unreachable!("repositories must be an array"),
+    }
+}
+
+fn github_snapshot_source_key(
+    scenario_path: Option<&[usize]>,
+    scenario_id: &str,
+    node: &ActionNode,
+) -> Option<GithubAuthoringPreviewKey> {
+    let Action::SelectArrayItems {
+        source: Some(field),
+        ..
+    } = &node.step.action
+    else {
+        return None;
+    };
+    let ContextScope::Step { step_id } = &field.scope else {
+        return None;
+    };
+    let scenario_path = scenario_path?;
+    (field.segments == [ContextPathSegment::field("repositories")]
+        || field.segments
+            == [
+                ContextPathSegment::field("github"),
+                ContextPathSegment::field("repositories"),
+            ])
+    .then(|| GithubAuthoringPreviewKey::new(scenario_path.to_vec(), scenario_id, step_id))
+}
+
+fn apply_array_snapshot_selection(
+    node: &mut ActionNode,
+    preview_repositories: &[GithubRepository],
+    selected_repository_ids: &BTreeSet<String>,
+    background_https_only: bool,
+) -> bool {
+    let Action::SelectArrayItems {
+        item_type,
+        selected_items,
+        ..
+    } = &mut node.step.action
+    else {
+        return false;
+    };
+    let next = preview_repositories
+        .iter()
+        .filter(|repository| selected_repository_ids.contains(&repository.id))
+        // A snapshot is serialized into the project. Never persist private
+        // repository metadata, regardless of what consumes the array later.
+        .filter(|repository| !repository.is_private)
+        .filter(|repository| {
+            !background_https_only
+                || (!repository.is_archived && repository.default_branch.is_some())
+        })
+        .map(github_repository_snapshot_value)
+        .collect::<Vec<_>>();
+    let next_type = github_repository_snapshot_type();
+    let changed = *item_type != next_type || *selected_items != next;
+    if changed {
+        *item_type = next_type;
+        *selected_items = next;
+    }
+    changed
+}
+
+fn apply_github_preview_selection(
+    node: &mut ActionNode,
+    preview_repositories: &[GithubRepository],
+    selected_repository_ids: &BTreeSet<String>,
+    background_https_only: bool,
+) -> Result<bool, String> {
+    let Action::GithubPreviewRepositories {
+        selected_repositories,
+    } = &node.step.action
+    else {
+        return Ok(false);
+    };
+    let previous = selected_repositories.clone();
+    let mut next = Vec::with_capacity(selected_repository_ids.len());
+    let mut included = BTreeSet::new();
+
+    // Selection changes are events, not a metadata refresh: keep every
+    // still-selected authored value byte-for-byte and remove only IDs that
+    // the user explicitly unchecked. This also preserves values absent from a
+    // later preview and keeps project YAML stable across candidate refreshes.
+    for saved in &previous {
+        if selected_repository_ids.contains(&saved.id) && included.insert(saved.id.clone()) {
+            next.push(saved.clone());
+        }
+    }
+
+    // New selections are appended in preview order rather than BTreeSet/ID
+    // order, so a refresh never shuffles the existing saved snapshot.
+    for repository in preview_repositories {
+        if !selected_repository_ids.contains(&repository.id)
+            || included.contains(&repository.id)
+            || repository.is_private
+            || (background_https_only
+                && (repository.is_archived || repository.default_branch.is_none()))
+        {
+            continue;
+        }
+        included.insert(repository.id.clone());
+        next.push(github_repository_snapshot_input(repository));
+    }
+
+    if previous == next {
+        return Ok(false);
+    }
+    let mut candidate = node.step.clone();
+    let Action::GithubPreviewRepositories {
+        selected_repositories,
+    } = &mut candidate.action
+    else {
+        unreachable!("candidate preserves GitHub snapshot action")
+    };
+    *selected_repositories = next.clone();
+    candidate.validate()?;
+    let Action::GithubPreviewRepositories {
+        selected_repositories,
+    } = &mut node.step.action
+    else {
+        unreachable!("validated action preserves GitHub snapshot action")
+    };
+    *selected_repositories = next;
+    Ok(true)
+}
+
 fn github_filter_source_key(
     scenario_path: Option<&[usize]>,
     scenario_id: &str,
@@ -4883,6 +6442,51 @@ fn github_filter_source_key(
     let scenario_path = scenario_path?;
     (field.segments == [ContextPathSegment::field("github")])
         .then(|| GithubAuthoringPreviewKey::new(scenario_path.to_vec(), scenario_id, step_id))
+}
+
+fn github_selector_uses_background_https_clone(graph: &WorkflowGraph, selector_id: &str) -> bool {
+    graph.nodes.iter().any(|node| {
+        let GraphNode::ForEach(loop_node) = node else {
+            return false;
+        };
+        let Binding::Field { field } = &loop_node.collection else {
+            return false;
+        };
+        let direct_collection = matches!(
+            &field.scope,
+            ContextScope::Step { step_id } if step_id == selector_id
+        ) && (field.segments
+            == [
+                ContextPathSegment::field("github"),
+                ContextPathSegment::field("repositories"),
+            ]
+            || field.segments == [ContextPathSegment::field("items")]
+            || field.segments == [ContextPathSegment::field("repositories")]);
+        let named_collection = match (&field.scope, field.segments.as_slice()) {
+            (ContextScope::Scenario, [ContextPathSegment::Field { name }]) => {
+                graph.variables.get(name).is_some_and(|variable| {
+                    matches!(
+                        &variable.source.scope,
+                        ContextScope::Step { step_id } if step_id == selector_id
+                    ) && variable.source.segments == [ContextPathSegment::field("repositories")]
+                })
+            }
+            _ => false,
+        };
+        let selected_collection = direct_collection || named_collection;
+        selected_collection
+            && loop_node.body.nodes.iter().any(|body_node| {
+                let GraphNode::Action(action) = body_node else {
+                    return false;
+                };
+                matches!(action.step.action, Action::GitCloneIfMissing { .. })
+                    && matches!(action.step.auth, AuthPolicy::None)
+                    && action.bindings.get("repo")
+                        == Some(&Binding::field(
+                            FieldRef::loop_item(&loop_node.id).field("https_url"),
+                        ))
+            })
+    })
 }
 
 fn github_preview_visible_repositories(
@@ -4912,7 +6516,8 @@ fn apply_github_filter_selection(
     node: &mut ActionNode,
     account_login: &str,
     preview_repositories: &[GithubRepository],
-    selected_repository_ids: BTreeSet<String>,
+    mut selected_repository_ids: BTreeSet<String>,
+    background_https_only: bool,
 ) -> bool {
     let Action::GithubSelectRepositories {
         github,
@@ -4926,6 +6531,18 @@ fn apply_github_filter_selection(
         .iter()
         .map(|repository| repository.id.as_str())
         .collect::<BTreeSet<_>>();
+    if background_https_only {
+        selected_repository_ids.retain(|id| {
+            preview_repositories
+                .iter()
+                .find(|repository| &repository.id == id)
+                .is_none_or(|repository| {
+                    !repository.is_private
+                        && !repository.is_archived
+                        && repository.default_branch.is_some()
+                })
+        });
+    }
     let mut ordered_repository_ids = preview_repositories
         .iter()
         .filter(|repository| selected_repository_ids.contains(&repository.id))
@@ -4946,15 +6563,97 @@ fn apply_github_filter_selection(
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GithubAuthoringPreviewSelectionKind {
+    BrowseOnly,
+    SavedSnapshot,
+    LegacyRuntimeIds,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GithubAuthoringPreviewMode<'a> {
+    selected_repository_ids: Option<&'a BTreeSet<String>>,
+    selection_kind: GithubAuthoringPreviewSelectionKind,
+    account_matches_selection: bool,
+    background_https_only: bool,
+}
+
+fn paint_saved_github_repository_snapshot(
+    ui: &mut egui::Ui,
+    repositories: &[GithubRepositoryInput],
+    dark: bool,
+) {
+    section_label(ui, "СОХРАНЕНО В СЦЕНАРИИ");
+    ui.add(
+        egui::Label::new(
+            RichText::new(format!(
+                "{} репозиториев. При запуске публикуются именно эти значения; обновление предпросмотра само их не меняет.",
+                repositories.len()
+            ))
+            .size(UI_TEXT_CAPTION)
+            .color(ui_tone(UiTone::Primary, dark)),
+        )
+        .wrap(),
+    );
+    if repositories.is_empty() {
+        ui.label(
+            RichText::new("Снимок пуст: цикл при запуске не выполнит ни одной итерации.")
+                .size(UI_TEXT_CAPTION)
+                .color(ui_tone(UiTone::Muted, dark)),
+        );
+        return;
+    }
+    ScrollArea::vertical()
+        .id_salt("saved-github-repository-snapshot")
+        .max_height(160.0)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for repository in repositories {
+                Frame::new()
+                    .fill(card(dark))
+                    .stroke(Stroke::new(1.0, line(dark)))
+                    .corner_radius(UI_RADIUS_CONTROL)
+                    .inner_margin(Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(&repository.full_name)
+                                .strong()
+                                .size(UI_TEXT_BODY)
+                                .color(text(dark)),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!(
+                                    "{} · ветка {}",
+                                    repository.https_url,
+                                    repository.default_branch.as_deref().unwrap_or("не задана")
+                                ))
+                                .monospace()
+                                .size(UI_TEXT_CAPTION)
+                                .color(ui_tone(UiTone::Muted, dark)),
+                            )
+                            .truncate(),
+                        );
+                    });
+                ui.add_space(UI_SPACE_XS);
+            }
+        });
+}
+
 fn paint_github_authoring_preview(
     ui: &mut egui::Ui,
     preview: Option<&GithubAuthoringPreview>,
     loading: bool,
     search: &mut String,
-    selected_repository_ids: Option<&BTreeSet<String>>,
-    account_matches_selection: bool,
+    mode: GithubAuthoringPreviewMode<'_>,
     dark: bool,
 ) -> GithubAuthoringPreviewUiResponse {
+    let GithubAuthoringPreviewMode {
+        selected_repository_ids,
+        selection_kind,
+        account_matches_selection,
+        background_https_only,
+    } = mode;
     let mut response = GithubAuthoringPreviewUiResponse::default();
     ui.add_space(UI_SPACE_SM);
     section_label(ui, "ПРЕДПРОСМОТР ДАННЫХ GITHUB");
@@ -4968,11 +6667,41 @@ fn paint_github_authoring_preview(
         )
         .wrap(),
     );
+    ui.add(
+        egui::Label::new(
+            RichText::new(match selection_kind {
+                GithubAuthoringPreviewSelectionKind::BrowseOnly => {
+                    "Это только свежий список кандидатов. Чтобы сохранить универсальный снимок, добавьте после источника блок «Выбрать элементы массива»."
+                }
+                GithubAuthoringPreviewSelectionKind::SavedSnapshot => {
+                    "Выше показан сохранённый снимок — только он используется при запуске. Обновление списка не меняет снимок; изменение флажка явно сохраняет полные публичные значения."
+                }
+                GithubAuthoringPreviewSelectionKind::LegacyRuntimeIds => {
+                    "Legacy-блок хранит только выбранные ID и при применении фильтрует свежий runtime-список. Обновление предпросмотра само ID не меняет."
+                }
+            })
+            .size(UI_TEXT_CAPTION)
+            .color(ui_tone(UiTone::Muted, dark)),
+        )
+        .wrap(),
+    );
+    let preview_loaded = preview.is_some_and(|preview| preview.loaded_once);
+    if let Some(repository_ids) = selected_repository_ids.filter(|_| !preview_loaded) {
+        ui.label(
+            RichText::new(format!(
+                "Сохранено в параметрах блока: {}",
+                repository_ids.len()
+            ))
+            .strong()
+            .size(UI_TEXT_CAPTION)
+            .color(ui_tone(UiTone::Primary, dark)),
+        );
+    }
     ui.add_space(UI_SPACE_XS);
     if ui
         .add_enabled(
             !loading,
-            egui::Button::new(if preview.is_some_and(|preview| preview.loaded_once) {
+            egui::Button::new(if preview_loaded {
                 "Обновить предпросмотр"
             } else {
                 "Загрузить предпросмотр"
@@ -5048,8 +6777,13 @@ fn paint_github_authoring_preview(
                         ui.horizontal(|ui| {
                             if selection_enabled {
                                 let mut selected = selection.contains(&repository.id);
-                                let can_select =
-                                    selected || selection.len() < MAX_SELECTED_GITHUB_REPOSITORIES;
+                                let supported = !repository.is_private
+                                    && (!background_https_only
+                                        || (!repository.is_archived
+                                            && repository.default_branch.is_some()));
+                                let can_select = selected
+                                    || (supported
+                                        && selection.len() < MAX_SELECTED_GITHUB_REPOSITORIES);
                                 if ui
                                     .add_enabled(
                                         can_select,
@@ -5063,6 +6797,22 @@ fn paint_github_authoring_preview(
                                         selection.remove(&repository.id);
                                     }
                                     selection_changed = true;
+                                }
+                                if !supported {
+                                    let unavailable = if repository.is_private {
+                                        "private: данные не сохраняются в проект"
+                                    } else {
+                                        "недоступно для фонового HTTPS-клонирования"
+                                    };
+                                    ui.label(
+                                        RichText::new(if selected {
+                                            "сохранённое значение не обновлено; снимите флажок, чтобы удалить"
+                                        } else {
+                                            unavailable
+                                        })
+                                        .size(UI_TEXT_CAPTION)
+                                        .color(ui_tone(UiTone::Warning, dark)),
+                                    );
                                 }
                             }
                             ui.vertical(|ui| {
@@ -5349,6 +7099,7 @@ fn reset_graph_step_policy(step: &mut Step, capabilities: &BlockPolicyCapabiliti
 
 fn paint_graph_action_editor(
     ui: &mut egui::Ui,
+    interpolation_scope: &GraphInterpolationScope,
     node: &mut ActionNode,
     options: &BTreeMap<String, Vec<ComposerGraphBindingOption>>,
     external_auth_state: &GraphExternalAuthUiState,
@@ -5381,6 +7132,35 @@ fn paint_graph_action_editor(
         .wrap(),
     );
     ui.add_space(8.0);
+    if let Action::GithubPreviewRepositories {
+        selected_repositories,
+    } = &node.step.action
+    {
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!(
+                    "Сохранено репозиториев: {}. Предпросмотр загружается только при настройке; запуск без повторного запроса публикует этот снимок в repositories[].",
+                    selected_repositories.len()
+                ))
+                .size(UI_TEXT_BODY)
+                .color(ui_tone(UiTone::Primary, dark)),
+            )
+            .wrap(),
+        );
+    } else if let Action::SelectArrayItems { selected_items, .. } = &node.step.action {
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!(
+                    "Сохранено элементов: {}. При запуске блок публикует именно эти данные без повторного обращения к источнику.",
+                    selected_items.len()
+                ))
+                .size(UI_TEXT_BODY)
+                .color(ui_tone(UiTone::Primary, dark)),
+            )
+            .wrap(),
+        );
+    }
+    ui.add_space(8.0);
     section_label(ui, "ВХОДЫ ПО СХЕМЕ");
     let definition = definition_for_action(&node.step.action);
     if definition.input_schema.fields.is_empty() {
@@ -5411,6 +7191,12 @@ fn paint_graph_action_editor(
         let compatible = options.get(&target).map(Vec::as_slice).unwrap_or_default();
         let current = node.bindings.get(&target).cloned();
         let manual_initial = manual_input_initial_value(&node.step, &target, &field);
+        let interpolation_options = graph
+            .map(|graph| graph_interpolation_options(graph, &node.step.id))
+            .unwrap_or_default();
+        let interpolation_available = graph_input_supports_interpolation(&field)
+            && (!interpolation_options.is_empty()
+                || matches!(current.as_ref(), Some(Binding::Interpolated { .. })));
         let selected_text: egui::WidgetText = match &current {
             None if field.required => "Значение блока по умолчанию".into(),
             None => "Не задавать · оставить default".into(),
@@ -5418,6 +7204,7 @@ fn paint_graph_action_editor(
                 value: serde_json::Value::Null,
             }) if field.nullable => "Явно null".into(),
             Some(Binding::Literal { .. }) => "Вручную".into(),
+            Some(Binding::Interpolated { .. }) => "Шаблон с переменными".into(),
             Some(binding) => compatible
                 .iter()
                 .find(|option| option.binding == *binding)
@@ -5456,6 +7243,21 @@ fn paint_graph_action_editor(
                     changed = true;
                     ui.close();
                 }
+                if interpolation_available
+                    && ui
+                        .selectable_label(
+                            matches!(current.as_ref(), Some(Binding::Interpolated { .. })),
+                            "Шаблон с переменными",
+                        )
+                        .clicked()
+                {
+                    node.bindings.insert(
+                        target.clone(),
+                        graph_interpolation_seed(current.as_ref(), &manual_initial),
+                    );
+                    changed = true;
+                    ui.close();
+                }
                 if field.nullable
                     && ui
                         .selectable_label(
@@ -5490,7 +7292,19 @@ fn paint_graph_action_editor(
             });
         let mut enum_literal_changed = false;
         let mut selected_literal = None;
-        if let Some(Binding::Literal { value }) = node.bindings.get_mut(&target) {
+        if let (Some(graph), Some(binding @ Binding::Interpolated { .. })) =
+            (graph, node.bindings.get_mut(&target))
+        {
+            changed |= paint_graph_interpolation_editor(
+                ui,
+                interpolation_scope,
+                (&node.step.id, &target),
+                binding,
+                graph,
+                &interpolation_options,
+                dark,
+            );
+        } else if let Some(Binding::Literal { value }) = node.bindings.get_mut(&target) {
             if field.allowed_values.is_empty() {
                 changed |= paint_graph_typed_literal_editor(
                     ui,
@@ -5889,6 +7703,8 @@ struct ScenarioApp {
     github_picker: GithubPickerState,
     github_authoring_previews: BTreeMap<GithubAuthoringPreviewKey, GithubAuthoringPreview>,
     github_filter_searches: BTreeMap<GithubAuthoringPreviewKey, String>,
+    array_snapshot_editors: BTreeMap<ArraySnapshotEditorKey, ArraySnapshotEditorState>,
+    scenario_variable_editors: BTreeMap<ArraySnapshotEditorKey, ScenarioVariableEditorState>,
     github_authoring_generation: u64,
     file_message: Option<(bool, String)>,
     custom_project: Option<ScenarioProject>,
@@ -5961,6 +7777,8 @@ impl ScenarioApp {
             github_picker: GithubPickerState::default(),
             github_authoring_previews: BTreeMap::new(),
             github_filter_searches: BTreeMap::new(),
+            array_snapshot_editors: BTreeMap::new(),
+            scenario_variable_editors: BTreeMap::new(),
             github_authoring_generation: 0,
             file_message: None,
             custom_project: None,
@@ -6152,12 +7970,22 @@ impl ScenarioApp {
             .and_then(|task| task.graph.as_ref())
             .and_then(|graph| graph_node(graph, &key.node_id))
             .is_some_and(|node| {
-                matches!(node, GraphNode::Action(node) if matches!(node.step.action, Action::GithubListRepositories))
+                matches!(
+                    node,
+                    GraphNode::Action(node)
+                        if matches!(
+                            node.step.action,
+                            Action::GithubListRepositories
+                                | Action::GithubPreviewRepositories { .. }
+                        )
+                )
             })
     }
 
     fn close_custom_project(&mut self) {
         self.request_github_authorization_cancellation();
+        self.array_snapshot_editors.clear();
+        self.scenario_variable_editors.clear();
         self.custom_project = None;
         self.workspace_project_drawer_open = false;
         self.workspace_inspector_open = false;
@@ -6222,6 +8050,8 @@ impl ScenarioApp {
             return;
         }
         self.request_github_authorization_cancellation();
+        self.array_snapshot_editors.clear();
+        self.scenario_variable_editors.clear();
         self.reset_run_permissions();
         let task = Task {
             id: "custom-scenario".into(),
@@ -6664,13 +8494,6 @@ impl ScenarioApp {
                 graph_node_ids(&nested)
             })
             .unwrap_or_default();
-        let removed_github_source = removed_ids.iter().any(|removed_id| {
-            matches!(
-                graph_node(graph, removed_id),
-                Some(GraphNode::Action(node))
-                    if matches!(node.step.action, Action::GithubListRepositories)
-            )
-        });
         match graph_remove_composer_node(graph, node_id) {
             Ok(true) => {}
             Ok(false) => return,
@@ -6680,6 +8503,17 @@ impl ScenarioApp {
             }
         }
         let task_id = task.id.clone();
+        let scenario_path = selected_path.unwrap_or_default();
+        self.array_snapshot_editors.retain(|key, _| {
+            key.scenario_path != scenario_path
+                || key.scenario_id != task_id
+                || !removed_ids.contains(&key.node_id)
+        });
+        self.scenario_variable_editors.retain(|key, _| {
+            key.scenario_path != scenario_path
+                || key.scenario_id != task_id
+                || !removed_ids.contains(&key.node_id)
+        });
         if let Some(canvas) = self
             .custom_project
             .as_mut()
@@ -6691,9 +8525,10 @@ impl ScenarioApp {
         }
         self.selected_node = None;
         self.workspace_inspector_open = false;
-        if removed_github_source {
-            self.invalidate_github_authoring_previews();
-        }
+        // Node IDs are intentionally reusable. Bump the authoring generation
+        // after every successful deletion so egui temp state from the removed
+        // node cannot attach to a later node with the same ID and input names.
+        self.invalidate_github_authoring_previews();
         self.mark_project_dirty();
     }
 
@@ -6766,7 +8601,7 @@ impl ScenarioApp {
         scenario_path.push(entries.len() - 1);
         self.selected_project_scenario = Some(scenario_path);
         self.selected_step = None;
-        self.selected_node = Some("list-repositories".into());
+        self.selected_node = Some("select-repositories".into());
         self.reset_run_permissions();
         self.invalidate_github_authoring_previews();
         self.mark_project_dirty();
@@ -7362,6 +9197,8 @@ impl ScenarioApp {
 
     fn open_custom_project(&mut self, mut project: ScenarioProject) {
         self.request_github_authorization_cancellation();
+        self.array_snapshot_editors.clear();
+        self.scenario_variable_editors.clear();
         self.reset_run_permissions();
         make_project_external(&mut project.entries);
         let selected = first_scenario_path(&project.entries, &mut Vec::new());
@@ -7496,12 +9333,14 @@ impl ScenarioApp {
                             .chain(
                                 ActionKind::ALL
                                     .into_iter()
-                                    .filter(|kind| kind.is_graph_action())
+                                    .filter(|kind| action_kind_visible_in_authoring_palette(*kind))
                                     .map(|kind| {
-                                        (
-                                            ComposerGraphBlockKind::Action(kind),
-                                            block_definition(kind),
-                                        )
+                                        let mut definition = block_definition(kind);
+                                        if matches!(kind, ActionKind::GithubListRepositories) {
+                                            definition.title =
+                                                "Получить репозитории при запуске".into();
+                                        }
+                                        (ComposerGraphBlockKind::Action(kind), definition)
                                     }),
                             )
                             .collect::<Vec<_>>();
@@ -8623,7 +10462,7 @@ impl ScenarioApp {
                     self.add_project_scenario();
                     ui.close();
                 }
-                if ui.button("GitHub · репозитории аккаунта").clicked() {
+                if ui.button("GitHub · выбрать и клонировать").clicked() {
                     self.add_github_project_scenario();
                     ui.close();
                 }
@@ -9441,6 +11280,7 @@ impl ScenarioApp {
         let mut external_auth_cancellation_requested = false;
         let mut authoring_preview_load_request = None;
         let mut github_filter_selection_change = None;
+        let mut scenario_variable_name_change = None;
         let external_auth_state = GraphExternalAuthUiState {
             enabled: !self.running && self.github_picker.is_idle(),
             authorizing: self.github_picker.authorizing,
@@ -9451,6 +11291,12 @@ impl ScenarioApp {
         };
         let selected_node = self.selected_node.clone();
         let selected_path = self.selected_project_scenario.clone();
+        let selected_project_id = self
+            .custom_project
+            .as_ref()
+            .map(|project| project.id.clone())
+            .unwrap_or_default();
+        let selected_project_generation = self.github_authoring_generation;
         {
             let Some(task) = self
                 .custom_project
@@ -9460,6 +11306,12 @@ impl ScenarioApp {
                 return;
             };
             let scenario_id = task.id.clone();
+            let interpolation_scope = GraphInterpolationScope::new(
+                selected_project_generation,
+                selected_project_id,
+                selected_path.clone().unwrap_or_default(),
+                &scenario_id,
+            );
             if let (Some(graph_snapshot), Some(node_id)) =
                 (task.graph.clone(), selected_node.as_deref())
             {
@@ -9498,6 +11350,8 @@ impl ScenarioApp {
                         &FieldSchema::optional(ContextType::Any).nullable(),
                     );
                     let array_options = graph_array_options(&graph_snapshot, node_id);
+                    let snapshot_source_options =
+                        graph_snapshot_source_options(&graph_snapshot, node_id);
                     let selected_scope = graph_visual_model(&graph_snapshot)
                         .0
                         .into_iter()
@@ -9511,9 +11365,9 @@ impl ScenarioApp {
                     };
                     match node {
                         GraphNode::Action(node) => {
-                            let action_before_editor = node.step.action.clone();
                             let response = paint_graph_action_editor(
                                 ui,
+                                &interpolation_scope,
                                 node,
                                 &action_options,
                                 &external_auth_state,
@@ -9524,7 +11378,7 @@ impl ScenarioApp {
                             external_auth_request = response.external_auth_request;
                             external_auth_cancellation_requested =
                                 response.external_auth_cancellation_requested;
-                            if matches!(action_before_editor, Action::GithubListRepositories) {
+                            if matches!(node.step.action, Action::GithubListRepositories) {
                                 let key = GithubAuthoringPreviewKey::new(
                                     selected_path.clone().unwrap_or_default(),
                                     &scenario_id,
@@ -9540,10 +11394,110 @@ impl ScenarioApp {
                                 let search =
                                     self.github_filter_searches.entry(key.clone()).or_default();
                                 let preview_response = paint_github_authoring_preview(
-                                    ui, preview, loading, search, None, true, self.dark,
+                                    ui,
+                                    preview,
+                                    loading,
+                                    search,
+                                    GithubAuthoringPreviewMode {
+                                        selected_repository_ids: None,
+                                        selection_kind:
+                                            GithubAuthoringPreviewSelectionKind::BrowseOnly,
+                                        account_matches_selection: true,
+                                        background_https_only: false,
+                                    },
+                                    self.dark,
                                 );
                                 if preview_response.load_requested {
                                     authoring_preview_load_request = Some(key);
+                                }
+                            } else if let Action::GithubPreviewRepositories {
+                                selected_repositories,
+                            } = &node.step.action
+                            {
+                                if graph_snapshot
+                                    .nodes
+                                    .iter()
+                                    .any(|candidate| candidate.id() == node.step.id)
+                                {
+                                    let source =
+                                        FieldRef::step(&node.step.id).field("repositories");
+                                    let current_name = graph_scenario_variable_name_for_source(
+                                        &graph_snapshot,
+                                        &source,
+                                    )
+                                    .map(str::to_owned);
+                                    let editor_key = ArraySnapshotEditorKey::new(
+                                        selected_path.clone().unwrap_or_default(),
+                                        &scenario_id,
+                                        &node.step.id,
+                                    );
+                                    let editor = self
+                                        .scenario_variable_editors
+                                        .entry(editor_key.clone())
+                                        .or_default();
+                                    if let Some(next_name) = paint_scenario_array_variable_editor(
+                                        ui,
+                                        &graph_snapshot,
+                                        current_name.as_deref(),
+                                        editor,
+                                        self.dark,
+                                    ) {
+                                        scenario_variable_name_change =
+                                            Some((source, current_name, next_name, editor_key));
+                                    }
+                                }
+                                paint_saved_github_repository_snapshot(
+                                    ui,
+                                    selected_repositories,
+                                    self.dark,
+                                );
+                                let selected = selected_repositories
+                                    .iter()
+                                    .map(|repository| repository.id.clone())
+                                    .collect::<BTreeSet<_>>();
+                                let key = GithubAuthoringPreviewKey::new(
+                                    selected_path.clone().unwrap_or_default(),
+                                    &scenario_id,
+                                    &node.step.id,
+                                );
+                                let loading = self.github_picker.loading
+                                    && self.github_picker.repository_load_target.as_ref()
+                                        == Some(&GithubRepositoryLoadTarget::Authoring {
+                                            key: key.clone(),
+                                            generation: self.github_authoring_generation,
+                                        });
+                                let preview = self.github_authoring_previews.get(&key);
+                                let search =
+                                    self.github_filter_searches.entry(key.clone()).or_default();
+                                let background_https_only =
+                                    github_selector_uses_background_https_clone(
+                                        &graph_snapshot,
+                                        &node.step.id,
+                                    );
+                                let preview_response = paint_github_authoring_preview(
+                                    ui,
+                                    preview,
+                                    loading,
+                                    search,
+                                    GithubAuthoringPreviewMode {
+                                        selected_repository_ids: Some(&selected),
+                                        selection_kind:
+                                            GithubAuthoringPreviewSelectionKind::SavedSnapshot,
+                                        account_matches_selection: true,
+                                        background_https_only,
+                                    },
+                                    self.dark,
+                                );
+                                if preview_response.load_requested {
+                                    authoring_preview_load_request = Some(key.clone());
+                                }
+                                if let Some(selection) = preview_response.selected_repository_ids {
+                                    github_filter_selection_change = Some((
+                                        node.step.id.clone(),
+                                        key,
+                                        selection,
+                                        background_https_only,
+                                    ));
                                 }
                             } else if let Action::GithubSelectRepositories {
                                 expected_account_login,
@@ -9592,13 +11546,23 @@ impl ScenarioApp {
                                         .or_default();
                                     let selected =
                                         repository_ids.iter().cloned().collect::<BTreeSet<_>>();
+                                    let background_https_only =
+                                        github_selector_uses_background_https_clone(
+                                            &graph_snapshot,
+                                            &node.step.id,
+                                        );
                                     let preview_response = paint_github_authoring_preview(
                                         ui,
                                         preview,
                                         loading,
                                         search,
-                                        Some(&selected),
-                                        account_matches,
+                                        GithubAuthoringPreviewMode {
+                                            selected_repository_ids: Some(&selected),
+                                            selection_kind:
+                                                GithubAuthoringPreviewSelectionKind::LegacyRuntimeIds,
+                                            account_matches_selection: account_matches,
+                                            background_https_only,
+                                        },
                                         self.dark,
                                     );
                                     if preview_response.load_requested {
@@ -9609,13 +11573,18 @@ impl ScenarioApp {
                                             node.step.id.clone(),
                                             key.clone(),
                                             BTreeSet::new(),
+                                            background_https_only,
                                         ));
                                     }
                                     if let Some(selection) =
                                         preview_response.selected_repository_ids
                                     {
-                                        github_filter_selection_change =
-                                            Some((node.step.id.clone(), key, selection));
+                                        github_filter_selection_change = Some((
+                                            node.step.id.clone(),
+                                            key,
+                                            selection,
+                                            background_https_only,
+                                        ));
                                     }
                                 } else {
                                     ui.label(
@@ -9625,6 +11594,86 @@ impl ScenarioApp {
                                         .size(UI_TEXT_CAPTION)
                                         .color(ui_tone(UiTone::Warning, self.dark)),
                                     );
+                                }
+                            } else if matches!(node.step.action, Action::SelectArrayItems { .. }) {
+                                let editor_key = ArraySnapshotEditorKey::new(
+                                    selected_path.clone().unwrap_or_default(),
+                                    &scenario_id,
+                                    &node.step.id,
+                                );
+                                let editor =
+                                    self.array_snapshot_editors.entry(editor_key).or_default();
+                                changed |= paint_array_snapshot_editor(
+                                    ui,
+                                    node,
+                                    &snapshot_source_options,
+                                    editor,
+                                    self.dark,
+                                );
+                                ui.add_space(UI_SPACE_SM);
+                                let key = github_snapshot_source_key(
+                                    selected_path.as_deref(),
+                                    &scenario_id,
+                                    node,
+                                );
+                                if let Some(key) = key {
+                                    let loading = self.github_picker.loading
+                                        && self.github_picker.repository_load_target.as_ref()
+                                            == Some(&GithubRepositoryLoadTarget::Authoring {
+                                                key: key.clone(),
+                                                generation: self.github_authoring_generation,
+                                            });
+                                    let preview = self.github_authoring_previews.get(&key);
+                                    let filter_search_key = GithubAuthoringPreviewKey::new(
+                                        selected_path.clone().unwrap_or_default(),
+                                        &scenario_id,
+                                        &node.step.id,
+                                    );
+                                    let search = self
+                                        .github_filter_searches
+                                        .entry(filter_search_key)
+                                        .or_default();
+                                    let selected = match &node.step.action {
+                                        Action::SelectArrayItems { selected_items, .. } => {
+                                            selected_items
+                                        }
+                                        _ => unreachable!("selector branch preserves action kind"),
+                                    }
+                                    .iter()
+                                    .filter_map(|item| item.get("id")?.as_str().map(str::to_owned))
+                                    .collect::<BTreeSet<_>>();
+                                    let background_https_only =
+                                        github_selector_uses_background_https_clone(
+                                            &graph_snapshot,
+                                            &node.step.id,
+                                        );
+                                    let preview_response = paint_github_authoring_preview(
+                                        ui,
+                                        preview,
+                                        loading,
+                                        search,
+                                        GithubAuthoringPreviewMode {
+                                            selected_repository_ids: Some(&selected),
+                                            selection_kind:
+                                                GithubAuthoringPreviewSelectionKind::SavedSnapshot,
+                                            account_matches_selection: true,
+                                            background_https_only,
+                                        },
+                                        self.dark,
+                                    );
+                                    if preview_response.load_requested {
+                                        authoring_preview_load_request = Some(key.clone());
+                                    }
+                                    if let Some(selection) =
+                                        preview_response.selected_repository_ids
+                                    {
+                                        github_filter_selection_change = Some((
+                                            node.step.id.clone(),
+                                            key,
+                                            selection,
+                                            background_https_only,
+                                        ));
+                                    }
                                 }
                             }
                             ui.add_space(12.0);
@@ -9653,9 +11702,22 @@ impl ScenarioApp {
                                 )
                                 .truncate(),
                             );
-                            ui.label(RichText::new("Коллекция").size(9.0).color(MUTED));
+                            ui.label(RichText::new("Переменная-массив").size(9.0).color(MUTED));
+                            let selected_collection_text: egui::WidgetText = array_options
+                                .iter()
+                                .find(|(_, binding, _, _)| node.collection == *binding)
+                                .map(|(label, _, _, _)| {
+                                    context_widget_layout_job(label, 10.0).into()
+                                })
+                                .unwrap_or_else(|| {
+                                    graph_context_binding_widget_text(
+                                        &graph_snapshot,
+                                        &node.collection,
+                                        10.0,
+                                    )
+                                });
                             egui::ComboBox::from_id_salt(("foreach-collection", &node.id))
-                                .selected_text(context_binding_widget_text(&node.collection, 10.0))
+                                .selected_text(selected_collection_text)
                                 .truncate()
                                 .width(ui.available_width())
                                 .show_ui(ui, |ui| {
@@ -9667,13 +11729,12 @@ impl ScenarioApp {
                                             )
                                             .clicked()
                                         {
-                                            node.collection = binding.clone();
-                                            node.item_alias = first_free_loop_alias(
+                                            changed |= apply_foreach_array_selection(
                                                 &graph_snapshot,
+                                                node,
+                                                binding,
                                                 alias,
-                                                Some(&node.id),
                                             );
-                                            changed = true;
                                             ui.close();
                                         }
                                     }
@@ -9687,11 +11748,7 @@ impl ScenarioApp {
                                     .color(ORANGE),
                                 );
                             }
-                            ui.label(
-                                RichText::new("Имя текущего элемента")
-                                    .size(9.0)
-                                    .color(MUTED),
-                            );
+                            ui.label(RichText::new("Имя элемента").size(9.0).color(MUTED));
                             changed |= ui
                                 .add(
                                     egui::TextEdit::singleline(&mut node.item_alias)
@@ -9744,7 +11801,10 @@ impl ScenarioApp {
                             ui.horizontal(|ui| {
                                 if ui
                                     .add(
-                                        egui::Button::new("＋ Для каждого item")
+                                        egui::Button::new(format!(
+                                            "＋ Для каждого {}",
+                                            node.item_alias
+                                        ))
                                             .fill(if node.body.nodes.is_empty() {
                                                 PURPLE
                                             } else {
@@ -9768,7 +11828,10 @@ impl ScenarioApp {
                                         egui::Button::new("＋ После цикла"),
                                     )
                                     .on_disabled_hover_text(
-                                        "Сначала добавьте хотя бы один блок для каждого item.",
+                                        format!(
+                                            "Сначала добавьте хотя бы один блок для каждого {}.",
+                                            node.item_alias
+                                        ),
                                     )
                                     .on_hover_text(
                                         "Этот блок выполнится один раз после завершения всех итераций.",
@@ -9788,8 +11851,10 @@ impl ScenarioApp {
                             });
                             ui.label(
                                 RichText::new(if node.body.nodes.is_empty() {
-                                    "Цикл пока пуст: добавьте действие через «Для каждого item»."
-                                        .to_owned()
+                                    format!(
+                                        "Цикл пока пуст: добавьте действие через «Для каждого {}».",
+                                        node.item_alias
+                                    )
                                 } else {
                                     format!(
                                         "В итерации: {} блоков. «После цикла» — отдельный однократный выход.",
@@ -9911,7 +11976,11 @@ impl ScenarioApp {
                             graph_control_summary(ui, "SWITCH", &node.id, self.dark);
                             ui.label(RichText::new("Selector").size(9.0).color(MUTED));
                             egui::ComboBox::from_id_salt(("switch-selector", &node.id))
-                                .selected_text(context_binding_widget_text(&node.selector, 10.0))
+                                .selected_text(graph_context_binding_widget_text(
+                                    &graph_snapshot,
+                                    &node.selector,
+                                    10.0,
+                                ))
                                 .truncate()
                                 .width(ui.available_width())
                                 .show_ui(ui, |ui| {
@@ -10214,6 +12283,38 @@ impl ScenarioApp {
                 );
             }
         }
+        if let Some((source, current_name, next_name, editor_key)) = scenario_variable_name_change {
+            let selected_path = self.selected_project_scenario.clone();
+            let result = self
+                .custom_project
+                .as_mut()
+                .and_then(|project| project.scenario_mut(selected_path.as_deref()?))
+                .and_then(|task| task.graph.as_mut())
+                .ok_or_else(|| "Сценарий больше не открыт.".to_owned())
+                .and_then(|graph| {
+                    graph_set_scenario_variable_name(
+                        graph,
+                        &source,
+                        current_name.as_deref(),
+                        &next_name,
+                    )
+                });
+            match result {
+                Ok(true) => {
+                    if let Some(editor) = self.scenario_variable_editors.get_mut(&editor_key) {
+                        editor.accept(&next_name);
+                    }
+                    self.mark_project_dirty();
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.file_message = Some((
+                        true,
+                        format!("Не удалось переименовать переменную массива: {error}"),
+                    ));
+                }
+            }
+        }
         if external_auth_cancellation_requested {
             self.cancel_github_authorization(ui.ctx());
         } else if let Some(request) = external_auth_request {
@@ -10222,7 +12323,9 @@ impl ScenarioApp {
         if let Some(key) = authoring_preview_load_request {
             self.start_github_authoring_preview_load(ui.ctx(), key);
         }
-        if let Some((node_id, key, selection)) = github_filter_selection_change {
+        if let Some((node_id, key, selection, background_https_only)) =
+            github_filter_selection_change
+        {
             let preview = self
                 .github_authoring_previews
                 .get(&key)
@@ -10241,8 +12344,37 @@ impl ScenarioApp {
                     .and_then(|task| task.graph.as_mut())
                     .and_then(|graph| graph_node_mut(graph, &node_id)),
             ) {
-                if apply_github_filter_selection(node, &login, &preview_repositories, selection) {
-                    self.mark_project_dirty();
+                let selection_changed =
+                    if matches!(node.step.action, Action::GithubPreviewRepositories { .. }) {
+                        apply_github_preview_selection(
+                            node,
+                            &preview_repositories,
+                            &selection,
+                            background_https_only,
+                        )
+                    } else if matches!(node.step.action, Action::SelectArrayItems { .. }) {
+                        Ok(apply_array_snapshot_selection(
+                            node,
+                            &preview_repositories,
+                            &selection,
+                            background_https_only,
+                        ))
+                    } else {
+                        Ok(apply_github_filter_selection(
+                            node,
+                            &login,
+                            &preview_repositories,
+                            selection,
+                            background_https_only,
+                        ))
+                    };
+                match selection_changed {
+                    Ok(true) => self.mark_project_dirty(),
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.file_message =
+                            Some((true, format!("Не удалось сохранить выбор GitHub: {error}")));
+                    }
                 }
             }
         }
@@ -11643,21 +13775,108 @@ fn default_github_destination_root() -> String {
         .unwrap_or_else(|| "$HOME/Developer".into())
 }
 
+fn github_background_clone_requirement(loop_id: &str) -> StepCondition {
+    let equals_false = |field: &str| ExpressionV1::Compare {
+        operator: ComparisonOperator::Equal,
+        left: Box::new(context_reference_expression(
+            &FieldRef::loop_item(loop_id).field(field),
+        )),
+        right: Box::new(ExpressionV1::Literal {
+            value: ExpressionValue::Bool(false),
+        }),
+    };
+    let branch = FieldRef::loop_item(loop_id).field("default_branch");
+    StepCondition::Expression {
+        rule: ExpressionV1::All {
+            expressions: vec![
+                equals_false("private"),
+                equals_false("archived"),
+                ExpressionV1::Exists {
+                    reference: ReferenceV1::Context {
+                        field: branch.clone(),
+                    },
+                },
+                ExpressionV1::Not {
+                    expression: Box::new(ExpressionV1::IsNull {
+                        expression: Box::new(context_reference_expression(&branch)),
+                    }),
+                },
+            ],
+        },
+        policy: RuleOutcomePolicy::default(),
+    }
+}
+
 fn github_repository_composer_task(ordinal: usize) -> Task {
-    let step = default_step(ActionKind::GithubListRepositories, "list-repositories")
-        .expect("GitHub repository discovery is a graph action");
+    let select_step = default_step(ActionKind::GithubPreviewRepositories, "select-repositories")
+        .expect("GitHub repository snapshot is a graph action");
+    let loop_id = "repositories";
+    let mut clone_step = default_step(ActionKind::GitCloneIfMissing, "clone-repository")
+        .expect("Git clone-if-missing is a graph action");
+    clone_step.require = Some(github_background_clone_requirement(loop_id));
+
     let graph = WorkflowGraph {
-        entries: vec![step.id.clone()],
-        nodes: vec![GraphNode::Action(Box::new(ActionNode {
-            step,
-            bindings: BTreeMap::new(),
-        }))],
+        entries: vec![select_step.id.clone()],
+        variables: BTreeMap::from([(
+            "selected_repositories".into(),
+            ScenarioVariable::new(FieldRef::step("select-repositories").field("repositories")),
+        )]),
+        nodes: vec![
+            GraphNode::Action(Box::new(ActionNode {
+                step: select_step,
+                bindings: BTreeMap::new(),
+            })),
+            GraphNode::ForEach(ForEachNode {
+                id: loop_id.into(),
+                collection: Binding::field(FieldRef::scenario().field("selected_repositories")),
+                item_alias: "repository".into(),
+                index_alias: Some("repository_index".into()),
+                concurrency: 1,
+                on_error: LoopFailurePolicy::Stop,
+                body: Box::new(WorkflowGraph {
+                    entries: vec!["clone-repository".into()],
+                    nodes: vec![GraphNode::Action(Box::new(ActionNode {
+                        step: clone_step,
+                        bindings: BTreeMap::from([
+                            (
+                                "repo".into(),
+                                Binding::field(FieldRef::loop_item(loop_id).field("https_url")),
+                            ),
+                            (
+                                "dest".into(),
+                                Binding::interpolated([
+                                    TemplatePart::literal("$HOME/Developer/"),
+                                    TemplatePart::field(
+                                        FieldRef::loop_item(loop_id).field("full_name"),
+                                    ),
+                                ]),
+                            ),
+                            (
+                                "branch".into(),
+                                Binding::field(
+                                    FieldRef::loop_item(loop_id).field("default_branch"),
+                                ),
+                            ),
+                        ]),
+                    }))],
+                    ..WorkflowGraph::default()
+                }),
+            }),
+        ],
+        edges: vec![GraphEdge::new(
+            "select-repositories",
+            EdgePort::Success,
+            "repositories",
+        )],
         ..WorkflowGraph::default()
     };
+    graph
+        .validate()
+        .expect("built-in GitHub selection and clone recipe must stay valid");
     Task {
         id: format!("github-repositories-{ordinal}"),
-        name: "Получить репозитории GitHub".into(),
-        description: "Получить логин текущей учётной записи GitHub CLI и массив полной метаинформации о доступных репозиториях.".into(),
+        name: "Выбрать и клонировать репозитории GitHub".into(),
+        description: "Загрузить репозитории только в инспекторе настройки, сохранить выбранные публичные значения в блоке GitHub и при запуске без повторного discovery-запроса клонировать отсутствующие репозитории в $HOME/Developer/<owner>/<repository>.".into(),
         platform: ppduster::rules::Platform::Macos,
         trust: TrustRequirement::ExternalAllowed,
         scenarios: Vec::new(),
@@ -12209,13 +14428,6 @@ fn context_layout_job(line: &str, size: f32, base_color: Color32) -> LayoutJob {
         job.append(&line[chunk_start..], 0.0, base);
     }
     job
-}
-
-fn context_binding_widget_text(binding: &Binding, size: f32) -> egui::WidgetText {
-    match binding {
-        Binding::Field { field } => context_widget_layout_job(&field_ref_label(field), size).into(),
-        _ => binding_label(binding).into(),
-    }
 }
 
 fn collect_schema_context_lines(schema: &ObjectSchema, prefix: &str, lines: &mut Vec<String>) {
@@ -15135,9 +17347,10 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, dark: bool) {
 
 fn action_color(action: &Action, dark: bool) -> Color32 {
     match action {
-        Action::GithubListRepositories | Action::GithubSelectRepositories { .. } => {
-            ui_tone(UiTone::Primary, dark)
-        }
+        Action::GithubListRepositories
+        | Action::GithubPreviewRepositories { .. }
+        | Action::GithubSelectRepositories { .. }
+        | Action::SelectArrayItems { .. } => ui_tone(UiTone::Primary, dark),
         Action::ForEach { .. } => ui_tone(UiTone::Success, dark),
         Action::ForEachGitCloneIfMissing { .. } => ui_tone(UiTone::Primary, dark),
         Action::CreateDirectory(_) | Action::InspectPath(_) | Action::WriteFile(_) => {
@@ -15167,7 +17380,9 @@ fn action_color(action: &Action, dark: bool) -> Color32 {
 fn action_icon(action: &Action) -> &'static str {
     match action {
         Action::GithubListRepositories => "GH",
+        Action::GithubPreviewRepositories { .. } => "GH✓",
         Action::GithubSelectRepositories { .. } => "GH✓",
+        Action::SelectArrayItems { .. } => "[]✓",
         Action::ForEach { .. } => "∀",
         Action::ForEachGitCloneIfMissing { .. } => "⌘",
         Action::CreateDirectory(_) => "+DIR",
@@ -15200,7 +17415,9 @@ fn action_icon(action: &Action) -> &'static str {
 fn action_eyebrow(action: &Action) -> &'static str {
     match action {
         Action::GithubListRepositories => "Репозитории GitHub",
+        Action::GithubPreviewRepositories { .. } => "Выбранные репозитории",
         Action::GithubSelectRepositories { .. } => "Выбор GitHub",
+        Action::SelectArrayItems { .. } => "Сохранённый массив",
         Action::ForEach { .. } => "Цикл",
         Action::ForEachGitCloneIfMissing { .. } => "Клонирование в цикле",
         Action::CreateDirectory(_) => "Папка",
@@ -15436,7 +17653,9 @@ fn action_supports_gui_run(action: &Action) -> bool {
         | Action::RunScript { .. }
         | Action::ConfigurePackageRegistryFiles { .. } => false,
         Action::GithubListRepositories
+        | Action::GithubPreviewRepositories { .. }
         | Action::GithubSelectRepositories { .. }
+        | Action::SelectArrayItems { .. }
         | Action::ForEach { .. }
         | Action::ForEachGitCloneIfMissing { .. }
         | Action::CreateDirectory(_)
@@ -16259,6 +18478,8 @@ mod tests {
             github_picker: GithubPickerState::default(),
             github_authoring_previews: BTreeMap::new(),
             github_filter_searches: BTreeMap::new(),
+            array_snapshot_editors: BTreeMap::new(),
+            scenario_variable_editors: BTreeMap::new(),
             github_authoring_generation: 0,
             file_message: None,
             custom_project: Some(project),
@@ -16373,7 +18594,7 @@ mod tests {
             Some(second_id.as_str())
         );
         assert_eq!(app.selected_step, None);
-        assert_eq!(app.selected_node.as_deref(), Some("list-repositories"));
+        assert_eq!(app.selected_node.as_deref(), Some("select-repositories"));
         assert_eq!(app.plan_error, None);
         assert!(!app.report_applied);
         assert!(!app.confirm_run);
@@ -16431,7 +18652,7 @@ mod tests {
             Some(second_id.as_str())
         );
         assert_eq!(app.selected_step, None);
-        assert_eq!(app.selected_node.as_deref(), Some("list-repositories"));
+        assert_eq!(app.selected_node.as_deref(), Some("select-repositories"));
         assert_eq!(app.plan_error, None);
         assert!(!app.report_applied);
         assert!(!app.confirm_run);
@@ -17492,7 +19713,8 @@ mod tests {
         assert!(planned.errors.is_empty(), "{:?}", planned.errors);
         let then_runtime_id = format!("{if_id}[then]/{then_id}");
         let else_runtime_id = format!("{if_id}[else]/{else_id}");
-        let loop_plan_id = format!("{loop_id}[*]/{loop_action_id}");
+        let first_loop_plan_id = format!("{loop_id}[1]/{loop_action_id}");
+        let second_loop_plan_id = format!("{loop_id}[2]/{loop_action_id}");
         let case_runtime_id = format!("{switch_id}[case:case-1]/{case_id}");
         let default_runtime_id = format!("{switch_id}[default]/{default_id}");
         for step_id in [
@@ -17500,7 +19722,8 @@ mod tests {
             then_runtime_id.as_str(),
             else_runtime_id.as_str(),
             if_id.as_str(),
-            loop_plan_id.as_str(),
+            first_loop_plan_id.as_str(),
+            second_loop_plan_id.as_str(),
             loop_id.as_str(),
             case_runtime_id.as_str(),
             default_runtime_id.as_str(),
@@ -17514,7 +19737,6 @@ mod tests {
         }
         for step_id in [
             if_id.as_str(),
-            loop_plan_id.as_str(),
             loop_id.as_str(),
             switch_id.as_str(),
             join_id.as_str(),
@@ -17525,15 +19747,18 @@ mod tests {
                 StepStatus::Pending
             ));
         }
+        for step_id in [first_loop_plan_id.as_str(), second_loop_plan_id.as_str()] {
+            assert!(matches!(
+                reported_step_for_test(planned, step_id).status,
+                StepStatus::Satisfied
+            ));
+        }
         let planned_action_ids = planned
             .plans
             .iter()
             .map(|plan| plan.step_id.as_str())
             .collect::<BTreeSet<_>>();
-        assert_eq!(
-            planned_action_ids,
-            BTreeSet::from([loop_plan_id.as_str(), create_id.as_str()])
-        );
+        assert_eq!(planned_action_ids, BTreeSet::from([create_id.as_str()]));
 
         let context = egui::Context::default();
         app.confirm_run = true;
@@ -18542,6 +20767,12 @@ positions:
                             bounded_inspector_scroll(ui, "inspector-containment-scroll", |ui| {
                                 paint_graph_action_editor(
                                     ui,
+                                    &GraphInterpolationScope::new(
+                                        0,
+                                        "inspector-containment-test",
+                                        Vec::new(),
+                                        "scenario",
+                                    ),
                                     &mut node,
                                     &options,
                                     &GraphExternalAuthUiState::default(),
@@ -20392,55 +22623,1179 @@ task:
     }
 
     #[test]
-    fn github_composer_scenario_publishes_repository_array_contract() {
+    fn github_composer_scenario_saves_selection_and_clones_only_that_collection() {
         let task = github_repository_composer_task(3);
 
         assert_eq!(task.id, "github-repositories-3");
-        assert_eq!(task.name, "Получить репозитории GitHub");
+        assert_eq!(task.name, "Выбрать и клонировать репозитории GitHub");
         assert!(task.steps.is_empty());
         let graph = task.graph.as_ref().expect("graph-native composer task");
-        assert_eq!(graph.entries, ["list-repositories"]);
-        let GraphNode::Action(action) = &graph.nodes[0] else {
-            panic!("expected GitHub repository action node")
+        assert_eq!(graph.entries, ["select-repositories"]);
+        let Some(GraphNode::Action(selector)) = graph_node(graph, "select-repositories") else {
+            panic!("expected saved GitHub repository selection node")
         };
-        assert!(matches!(action.step.action, Action::GithubListRepositories));
-        let lines = schema_context_lines(&definition_for_action(&action.step.action).output_schema);
+        let Action::GithubPreviewRepositories {
+            selected_repositories,
+        } = &selector.step.action
+        else {
+            panic!("expected merged GitHub snapshot selection")
+        };
+        assert!(selected_repositories.is_empty());
+        assert!(selector.bindings.is_empty());
+        assert_eq!(
+            graph.variables.get("selected_repositories"),
+            Some(&ScenarioVariable::new(
+                FieldRef::step("select-repositories").field("repositories")
+            ))
+        );
+        let Some(GraphNode::ForEach(repositories)) = graph_node(graph, "repositories") else {
+            panic!("expected selected repository loop")
+        };
+        assert_eq!(
+            repositories.collection,
+            Binding::field(FieldRef::scenario().field("selected_repositories"))
+        );
+        assert_eq!(repositories.item_alias, "repository");
+        let Some(GraphNode::Action(clone)) = graph_node(&repositories.body, "clone-repository")
+        else {
+            panic!("expected per-repository clone node")
+        };
+        assert!(matches!(
+            clone.step.action,
+            Action::GitCloneIfMissing { .. }
+        ));
+        assert_eq!(
+            clone.bindings.get("repo"),
+            Some(&Binding::field(
+                FieldRef::loop_item("repositories").field("https_url")
+            ))
+        );
+        assert_eq!(
+            clone.bindings.get("branch"),
+            Some(&Binding::field(
+                FieldRef::loop_item("repositories").field("default_branch")
+            ))
+        );
+        assert!(matches!(
+            clone.bindings.get("dest"),
+            Some(Binding::Interpolated { .. })
+        ));
+        assert!(matches!(clone.step.auth, AuthPolicy::None));
+        assert!(clone.step.require.is_some());
+        assert!(github_selector_uses_background_https_clone(
+            graph,
+            "select-repositories"
+        ));
+        assert!(task_supports_gui_run(&task));
+
+        let lines =
+            schema_context_lines(&definition_for_action(&selector.step.action).output_schema);
+        assert!(lines.iter().any(|line| line == "repositories[] : object"));
         assert!(lines
             .iter()
-            .any(|line| line == "github.account.login : string<identifier>"));
+            .any(|line| line == "repositories[].id : string<opaque-id>"));
         assert!(lines
             .iter()
-            .any(|line| line == "github.repositories[] : object"));
-        assert!(lines
-            .iter()
-            .any(|line| line == "github.repositories[].id : string<opaque-id>"));
-        assert!(lines
-            .iter()
-            .any(|line| { line == "github.repositories[].https_url : string<git-url>" }));
+            .any(|line| { line == "repositories[].https_url : string<git-url>" }));
         assert!(lines.iter().any(|line| {
-            line == "github.repositories[].default_branch : string<git-ref> | null (optional)"
+            line == "repositories[].default_branch : string<git-ref> | null (optional)"
         }));
         assert!(lines
             .iter()
             .all(|line| !line.contains(',') && line.len() < 96));
-        assert!(matches!(action.step.auth, AuthPolicy::None));
+        assert!(matches!(selector.step.auth, AuthPolicy::None));
         task.validate().unwrap();
         let yaml = serde_yaml::to_string(&TaskFile { task }).unwrap();
-        assert!(yaml.contains("type: github-list-repositories"));
+        assert!(yaml.contains("type: github-preview-repositories"));
+        assert!(!yaml.contains("type: select-array-items"));
+        assert!(yaml.contains("type: git-clone-if-missing"));
         assert!(yaml.contains("format_version: 3"));
         assert!(yaml.contains("workflow_graph:"));
         assert!(!yaml.contains("\n  steps:"));
         let round_trip: TaskFile = serde_yaml::from_str(&yaml).unwrap();
         assert!(round_trip.task.steps.is_empty());
-        let GraphNode::Action(round_trip_action) =
-            &round_trip.task.graph.as_ref().unwrap().nodes[0]
+        round_trip.task.validate().unwrap();
+    }
+
+    fn repository_directory_graph() -> (WorkflowGraph, String) {
+        let mut graph = github_repository_composer_task(1).graph.unwrap();
+        let directory_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::NestedAfter {
+                scope: ComposerGraphNestedScope::ForEachBody {
+                    owner_id: "repositories".into(),
+                },
+                node_id: "clone-repository".into(),
+            },
+            Some(EdgePort::Success),
+            ComposerGraphBlockKind::Action(ActionKind::CreateDirectory),
+        )
+        .unwrap();
+        (graph, directory_id)
+    }
+
+    #[test]
+    fn repository_path_interpolation_round_trips_as_structural_parts() {
+        let (graph, directory_id) = repository_directory_graph();
+        let options = graph_interpolation_options(&graph, &directory_id);
+        let name = options
+            .iter()
+            .find(|option| option.label == "repository.name")
+            .expect("repository name is visible in the loop");
+        let full_name = options
+            .iter()
+            .find(|option| option.label == "repository.full_name")
+            .expect("repository full_name is visible in the loop");
+
+        let text = "$HOME/Developer/{{repository.name}}/{{repository.full_name}}";
+        let binding = parse_graph_interpolation(text, &options).unwrap();
+        assert_eq!(
+            binding,
+            Binding::interpolated([
+                TemplatePart::literal("$HOME/Developer/"),
+                TemplatePart::field(name.field.clone()),
+                TemplatePart::literal("/"),
+                TemplatePart::field(full_name.field.clone()),
+            ])
+        );
+        assert_eq!(
+            graph_interpolation_binding_text(&graph, &binding).unwrap(),
+            text
+        );
+        let yaml = serde_yaml::to_string(&binding).unwrap();
+        assert!(yaml.contains("kind: interpolated"));
+        assert!(!yaml.contains("kind: template"));
+    }
+
+    #[test]
+    fn interpolation_suggestions_are_only_required_non_null_public_scalars() {
+        let (graph, directory_id) = repository_directory_graph();
+        let options = graph_interpolation_options(&graph, &directory_id);
+        let labels = options
+            .iter()
+            .map(|option| option.label.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(labels.contains("repository.name"));
+        assert!(labels.contains("repository.full_name"));
+        assert!(labels.contains("repository.private"));
+        assert!(labels.contains("repository_index"));
+        assert!(!labels.contains("repository.default_branch"));
+        assert!(!labels.contains("selected_repositories"));
+        assert!(options.iter().all(|option| {
+            matches!(
+                option.value_type,
+                ContextType::String { .. }
+                    | ContextType::Boolean
+                    | ContextType::Integer
+                    | ContextType::Number
+            )
+        }));
+        let index = options
+            .iter()
+            .find(|option| option.label == "repository_index")
+            .unwrap();
+        assert_eq!(index.field, FieldRef::loop_item("repositories::index"));
+        let index_binding =
+            parse_graph_interpolation("item-{{repository_index}}", &options).unwrap();
+        assert_eq!(
+            graph_interpolation_binding_text(&graph, &index_binding).unwrap(),
+            "item-{{repository_index}}"
+        );
+        assert!(graph_input_supports_interpolation(
+            definition_for_action(
+                &default_step(ActionKind::CreateDirectory, "create-directory")
+                    .unwrap()
+                    .action
+            )
+            .input_schema
+            .field("path")
+            .unwrap()
+        ));
+    }
+
+    #[test]
+    fn interpolation_completion_closes_unfinished_expressions_without_duplicate_braces() {
+        let (graph, directory_id) = repository_directory_graph();
+        let options = graph_interpolation_options(&graph, &directory_id);
+
+        let mut unfinished = "$HOME/Developer/{{repository.n".to_owned();
+        let completion =
+            graph_interpolation_completion(&unfinished, unfinished.chars().count()).unwrap();
+        let suggestions = graph_interpolation_suggestions(&completion, &options);
+        assert_eq!(suggestions[0].label, "repository.name");
+        let cursor = apply_graph_interpolation_suggestion(
+            &mut unfinished,
+            &completion,
+            &suggestions[0].label,
+        );
+        assert_eq!(unfinished, "$HOME/Developer/{{repository.name}}");
+        assert_eq!(cursor, unfinished.chars().count());
+
+        let mut already_closed = "$HOME/Developer/{{repository.n}}/cache".to_owned();
+        let before_closing = "$HOME/Developer/{{repository.n".chars().count();
+        let completion = graph_interpolation_completion(&already_closed, before_closing).unwrap();
+        apply_graph_interpolation_suggestion(&mut already_closed, &completion, "repository.name");
+        assert_eq!(already_closed, "$HOME/Developer/{{repository.name}}/cache");
+    }
+
+    #[test]
+    fn interpolation_editor_accepts_the_selected_suggestion_with_enter() {
+        let (graph, directory_id) = repository_directory_graph();
+        let options = graph_interpolation_options(&graph, &directory_id);
+        let mut binding = Binding::interpolated([TemplatePart::literal("$HOME/Developer/")]);
+        let scope = GraphInterpolationScope::new(0, "test-project", vec![0], "scenario");
+        let state_id = graph_interpolation_state_id(&scope, &directory_id, "path");
+        let text_id = graph_interpolation_text_id(&scope, &directory_id, "path");
+        let ctx = egui::Context::default();
+        configure_styles(&ctx, egui::ThemePreference::Dark);
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                state_id,
+                GraphInterpolationEditorState {
+                    text: "$HOME/Developer/{{repository.n".into(),
+                    baseline: binding.clone(),
+                    rendered_baseline: "$HOME/Developer/".into(),
+                    selected_suggestion: 0,
+                    completion_fragment: "repository.n".into(),
+                },
+            );
+        });
+        ctx.memory_mut(|memory| memory.request_focus(text_id));
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            assert!(paint_graph_interpolation_editor(
+                ui,
+                &scope,
+                (&directory_id, "path"),
+                &mut binding,
+                &graph,
+                &options,
+                true,
+            ));
+        });
+        assert_eq!(
+            graph_interpolation_binding_text(&graph, &binding).unwrap(),
+            "$HOME/Developer/{{repository.name}}"
+        );
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn interpolation_editor_keeps_invalid_draft_and_refreshes_clean_alias_display() {
+        fn shape_contains(shape: &egui::epaint::Shape, needle: &str) -> bool {
+            match shape {
+                egui::epaint::Shape::Text(text) => text.galley.job.text.contains(needle),
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().any(|shape| shape_contains(shape, needle))
+                }
+                _ => false,
+            }
+        }
+
+        let (mut graph, directory_id) = repository_directory_graph();
+        let options = graph_interpolation_options(&graph, &directory_id);
+        let mut binding =
+            parse_graph_interpolation("$HOME/Developer/{{repository.name}}", &options).unwrap();
+        let baseline = binding.clone();
+        let scope = GraphInterpolationScope::new(0, "test-project", vec![0], "scenario");
+        let state_id = graph_interpolation_state_id(&scope, &directory_id, "path");
+        let ctx = egui::Context::default();
+        configure_styles(&ctx, egui::ThemePreference::Dark);
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                state_id,
+                GraphInterpolationEditorState {
+                    text: "$HOME/Developer/{{repository.n".into(),
+                    baseline: baseline.clone(),
+                    rendered_baseline: "$HOME/Developer/{{repository.name}}".into(),
+                    selected_suggestion: 0,
+                    completion_fragment: String::new(),
+                },
+            );
+        });
+        let mut changed = true;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            changed = paint_graph_interpolation_editor(
+                ui,
+                &scope,
+                (&directory_id, "path"),
+                &mut binding,
+                &graph,
+                &options,
+                true,
+            );
+        });
+        assert!(!changed);
+        assert_eq!(binding, baseline);
+        assert!(output
+            .shapes
+            .iter()
+            .any(|clipped| shape_contains(&clipped.shape, "repository.name")));
+        let draft = ctx
+            .data_mut(|data| data.get_temp::<GraphInterpolationEditorState>(state_id))
+            .unwrap();
+        assert_eq!(draft.text, "$HOME/Developer/{{repository.n");
+        output.textures_delta.clear();
+
+        // Restore a clean editor, then rename only the display alias. FieldRef
+        // stays structural (`LoopItem { step_id }`) and must render with the new alias.
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                state_id,
+                GraphInterpolationEditorState {
+                    text: "$HOME/Developer/{{repository.name}}".into(),
+                    baseline: baseline.clone(),
+                    rendered_baseline: "$HOME/Developer/{{repository.name}}".into(),
+                    selected_suggestion: 0,
+                    completion_fragment: String::new(),
+                },
+            );
+        });
+        let Some(GraphNode::ForEach(loop_node)) = graph_node_mut(&mut graph, "repositories") else {
+            panic!("repository loop")
+        };
+        loop_node.item_alias = "repo".into();
+        let renamed_options = graph_interpolation_options(&graph, &directory_id);
+        let mut renamed_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_graph_interpolation_editor(
+                ui,
+                &scope,
+                (&directory_id, "path"),
+                &mut binding,
+                &graph,
+                &renamed_options,
+                true,
+            );
+        });
+        let renamed = ctx
+            .data_mut(|data| data.get_temp::<GraphInterpolationEditorState>(state_id))
+            .unwrap();
+        assert_eq!(renamed.text, "$HOME/Developer/{{repo.name}}");
+        assert_eq!(binding, baseline);
+        renamed_output.textures_delta.clear();
+    }
+
+    #[test]
+    fn opening_interpolation_braces_never_commit_a_partial_literal() {
+        let (graph, directory_id) = repository_directory_graph();
+        let options = graph_interpolation_options(&graph, &directory_id);
+        let baseline = Binding::interpolated([TemplatePart::literal("$HOME/Developer/")]);
+        let scope = GraphInterpolationScope::new(0, "test-project", vec![0], "scenario");
+
+        for draft in ["$HOME/Developer/{", "$HOME/Developer/{{"] {
+            let mut binding = baseline.clone();
+            let ctx = egui::Context::default();
+            let state_id = graph_interpolation_state_id(&scope, &directory_id, "path");
+            ctx.data_mut(|data| {
+                data.insert_temp(
+                    state_id,
+                    GraphInterpolationEditorState {
+                        text: draft.into(),
+                        baseline: baseline.clone(),
+                        rendered_baseline: "$HOME/Developer/".into(),
+                        selected_suggestion: 0,
+                        completion_fragment: String::new(),
+                    },
+                );
+            });
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                assert!(!paint_graph_interpolation_editor(
+                    ui,
+                    &scope,
+                    (&directory_id, "path"),
+                    &mut binding,
+                    &graph,
+                    &options,
+                    true,
+                ));
+            });
+            assert_eq!(binding, baseline, "partial draft {draft:?} was committed");
+            let state = ctx
+                .data_mut(|data| data.get_temp::<GraphInterpolationEditorState>(state_id))
+                .unwrap();
+            assert_eq!(state.text, draft);
+            output.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn interpolation_draft_is_isolated_between_project_sessions_with_identical_ids() {
+        let (graph_a, directory_id) = repository_directory_graph();
+        let options_a = graph_interpolation_options(&graph_a, &directory_id);
+        let mut graph_b = graph_a.clone();
+        let Some(GraphNode::ForEach(loop_node)) = graph_node_mut(&mut graph_b, "repositories")
         else {
-            panic!("expected round-tripped GitHub action node")
+            panic!("repository loop")
+        };
+        loop_node.item_alias = "repo".into();
+        let options_b = graph_interpolation_options(&graph_b, &directory_id);
+        let baseline = Binding::interpolated([TemplatePart::literal("$HOME/Developer/")]);
+        let scope_a =
+            GraphInterpolationScope::new(41, "same-project-id", vec![0, 0], "same-scenario-id");
+        let scope_b =
+            GraphInterpolationScope::new(42, "same-project-id", vec![0, 0], "same-scenario-id");
+        let ctx = egui::Context::default();
+        let state_a_id = graph_interpolation_state_id(&scope_a, &directory_id, "path");
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                state_a_id,
+                GraphInterpolationEditorState {
+                    // Invalid in A (`repository` alias), valid in B (`repo`
+                    // alias). Leaking this draft would silently mutate B.
+                    text: "$HOME/Developer/{{repo.name}}".into(),
+                    baseline: baseline.clone(),
+                    rendered_baseline: "$HOME/Developer/".into(),
+                    selected_suggestion: 0,
+                    completion_fragment: String::new(),
+                },
+            );
+        });
+
+        let mut binding_a = baseline.clone();
+        let mut output_a = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(!paint_graph_interpolation_editor(
+                ui,
+                &scope_a,
+                (&directory_id, "path"),
+                &mut binding_a,
+                &graph_a,
+                &options_a,
+                true,
+            ));
+        });
+        assert_eq!(binding_a, baseline);
+        output_a.textures_delta.clear();
+
+        let mut binding_b = baseline.clone();
+        let mut output_b = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(!paint_graph_interpolation_editor(
+                ui,
+                &scope_b,
+                (&directory_id, "path"),
+                &mut binding_b,
+                &graph_b,
+                &options_b,
+                true,
+            ));
+        });
+        assert_eq!(binding_b, baseline);
+        let state_b = ctx
+            .data_mut(|data| {
+                data.get_temp::<GraphInterpolationEditorState>(graph_interpolation_state_id(
+                    &scope_b,
+                    &directory_id,
+                    "path",
+                ))
+            })
+            .unwrap();
+        assert_eq!(state_b.text, "$HOME/Developer/");
+        assert_eq!(
+            ctx.data_mut(|data| {
+                data.get_temp::<GraphInterpolationEditorState>(state_a_id)
+                    .unwrap()
+                    .text
+            }),
+            "$HOME/Developer/{{repo.name}}"
+        );
+        output_b.textures_delta.clear();
+    }
+
+    #[test]
+    fn deleting_and_recreating_ordinary_node_rotates_interpolation_lifetime() {
+        let mut graph = WorkflowGraph::default();
+        let node_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::CreateDirectory),
+        )
+        .unwrap();
+        let task_id = "ordinary-node-lifetime";
+        let task = graph_authoring_test_task(task_id, graph);
+        let mut app = composer_app_for_test(composer_project_with_canvas(
+            task,
+            ComposerCanvas::default(),
+        ));
+        app.selected_node = Some(node_id.clone());
+        let old_generation = app.github_authoring_generation;
+        let old_scope =
+            GraphInterpolationScope::new(old_generation, "test-project", vec![0], task_id);
+        let ctx = egui::Context::default();
+        let old_state_id = graph_interpolation_state_id(&old_scope, &node_id, "path");
+        let baseline = Binding::interpolated([TemplatePart::literal("$HOME/Developer/")]);
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                old_state_id,
+                GraphInterpolationEditorState {
+                    text: "$HOME/Developer/{".into(),
+                    baseline: baseline.clone(),
+                    rendered_baseline: "$HOME/Developer/".into(),
+                    selected_suggestion: 0,
+                    completion_fragment: String::new(),
+                },
+            );
+        });
+
+        app.remove_composer_node(&node_id);
+        assert_ne!(app.github_authoring_generation, old_generation);
+        let recreated_id = {
+            let graph = app
+                .custom_project
+                .as_mut()
+                .unwrap()
+                .scenario_mut(&[0])
+                .unwrap()
+                .graph
+                .as_mut()
+                .unwrap();
+            graph_insert_composer_block(
+                graph,
+                &ComposerGraphAttach::RootStart,
+                None,
+                ComposerGraphBlockKind::Action(ActionKind::CreateDirectory),
+            )
+            .unwrap()
+        };
+        assert_eq!(recreated_id, node_id);
+
+        let new_scope = GraphInterpolationScope::new(
+            app.github_authoring_generation,
+            "test-project",
+            vec![0],
+            task_id,
+        );
+        let new_state_id = graph_interpolation_state_id(&new_scope, &recreated_id, "path");
+        assert_ne!(new_state_id, old_state_id);
+        let graph = app
+            .custom_project
+            .as_ref()
+            .unwrap()
+            .scenario(&[0])
+            .unwrap()
+            .graph
+            .as_ref()
+            .unwrap();
+        let options = graph_interpolation_options(graph, &recreated_id);
+        let mut binding = baseline.clone();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(!paint_graph_interpolation_editor(
+                ui,
+                &new_scope,
+                (&recreated_id, "path"),
+                &mut binding,
+                graph,
+                &options,
+                true,
+            ));
+        });
+        assert_eq!(binding, baseline);
+        assert_eq!(
+            ctx.data_mut(|data| {
+                data.get_temp::<GraphInterpolationEditorState>(new_state_id)
+                    .unwrap()
+                    .text
+            }),
+            "$HOME/Developer/"
+        );
+        assert_eq!(
+            ctx.data_mut(|data| {
+                data.get_temp::<GraphInterpolationEditorState>(old_state_id)
+                    .unwrap()
+                    .text
+            }),
+            "$HOME/Developer/{"
+        );
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn unknown_or_unclosed_interpolation_never_constructs_a_field_reference() {
+        let (graph, directory_id) = repository_directory_graph();
+        let options = graph_interpolation_options(&graph, &directory_id);
+        assert!(
+            parse_graph_interpolation("$HOME/Developer/{{repository.missing}}", &options)
+                .unwrap_err()
+                .contains("недоступна")
+        );
+        assert!(
+            parse_graph_interpolation("$HOME/Developer/{{repository.name", &options)
+                .unwrap_err()
+                .contains("закройте")
+        );
+    }
+
+    #[test]
+    fn scenario_array_variable_rename_rewrites_all_structural_references_and_round_trips() {
+        let mut task = github_repository_composer_task(1);
+        let graph = task.graph.as_mut().unwrap();
+        let Some(GraphNode::ForEach(loop_node)) = graph_node_mut(graph, "repositories") else {
+            panic!("repository loop")
+        };
+        let Some(GraphNode::Action(clone)) =
+            graph_node_mut(&mut loop_node.body, "clone-repository")
+        else {
+            panic!("clone action")
+        };
+        let Some(Binding::Interpolated { parts }) = clone.bindings.get_mut("dest") else {
+            panic!("interpolated destination")
+        };
+        parts.push(TemplatePart::literal("/"));
+        parts.push(TemplatePart::field(
+            FieldRef::scenario()
+                .field("selected_repositories")
+                .index(0)
+                .field("full_name"),
+        ));
+        let source = FieldRef::step("select-repositories").field("repositories");
+
+        assert!(graph_set_scenario_variable_name(
+            graph,
+            &source,
+            Some("selected_repositories"),
+            "my_repositories",
+        )
+        .unwrap());
+        assert!(!graph.variables.contains_key("selected_repositories"));
+        assert_eq!(
+            graph.variables.get("my_repositories"),
+            Some(&ScenarioVariable::new(source))
+        );
+        let Some(GraphNode::ForEach(loop_node)) = graph_node(graph, "repositories") else {
+            unreachable!()
+        };
+        assert_eq!(
+            loop_node.collection,
+            Binding::field(FieldRef::scenario().field("my_repositories"))
+        );
+        let Some(GraphNode::Action(clone)) = graph_node(&loop_node.body, "clone-repository") else {
+            unreachable!()
         };
         assert!(matches!(
-            round_trip_action.step.action,
-            Action::GithubListRepositories
+            clone.bindings.get("dest"),
+            Some(Binding::Interpolated { parts })
+                if matches!(
+                    parts.last().unwrap(),
+                    TemplatePart::Field { field }
+                        if field == &FieldRef::scenario()
+                            .field("my_repositories")
+                            .index(0)
+                            .field("full_name")
+                )
         ));
+        graph.validate().unwrap();
+
+        let yaml = serde_yaml::to_string(&TaskFile { task }).unwrap();
+        assert!(yaml.contains("my_repositories"));
+        assert!(!yaml.contains("selected_repositories"));
+        let reopened: TaskFile = serde_yaml::from_str(&yaml).unwrap();
+        reopened.task.validate().unwrap();
+    }
+
+    #[test]
+    fn invalid_or_colliding_scenario_variable_name_keeps_graph_unchanged() {
+        let mut graph = github_repository_composer_task(1).graph.unwrap();
+        graph.variables.insert(
+            "occupied".into(),
+            ScenarioVariable::new(FieldRef::step("select-repositories").field("repositories")),
+        );
+        let before = serde_yaml::to_string(&graph).unwrap();
+        let source = FieldRef::step("select-repositories").field("repositories");
+
+        assert!(graph_set_scenario_variable_name(
+            &mut graph,
+            &source,
+            Some("selected_repositories"),
+            "not valid",
+        )
+        .is_err());
+        assert_eq!(serde_yaml::to_string(&graph).unwrap(), before);
+        assert!(graph_set_scenario_variable_name(
+            &mut graph,
+            &source,
+            Some("selected_repositories"),
+            "occupied",
+        )
+        .is_err());
+        assert_eq!(serde_yaml::to_string(&graph).unwrap(), before);
+    }
+
+    #[test]
+    fn scenario_variable_rewrite_covers_rules_snapshot_sources_and_ignores_raw_templates() {
+        let mut step = default_step(ActionKind::SelectArrayItems, "selector").unwrap();
+        step.action = Action::SelectArrayItems {
+            source: Some(FieldRef::scenario().field("old").field("items")),
+            item_type: ContextType::STRING,
+            selected_items: Vec::new(),
+        };
+        step.when = Some(StepCondition::All {
+            conditions: vec![StepCondition::Not {
+                condition: Box::new(StepCondition::Expression {
+                    rule: ExpressionV1::Exists {
+                        reference: ReferenceV1::Context {
+                            field: FieldRef::scenario().field("old").index(0),
+                        },
+                    },
+                    policy: RuleOutcomePolicy::default(),
+                }),
+            }],
+        });
+        step.bindings.insert(
+            "legacy".into(),
+            Binding::template("{{scenario.old}} must remain raw text"),
+        );
+
+        assert_eq!(rename_scenario_variable_step(&mut step, "old", "new"), 2);
+        let Action::SelectArrayItems {
+            source: Some(source),
+            ..
+        } = &step.action
+        else {
+            unreachable!()
+        };
+        assert_eq!(source, &FieldRef::scenario().field("new").field("items"));
+        let Some(StepCondition::All { conditions }) = &step.when else {
+            unreachable!()
+        };
+        let StepCondition::Not { condition } = &conditions[0] else {
+            unreachable!()
+        };
+        let StepCondition::Expression { rule, .. } = condition.as_ref() else {
+            unreachable!()
+        };
+        let ExpressionV1::Exists {
+            reference: ReferenceV1::Context { field },
+        } = rule
+        else {
+            unreachable!()
+        };
+        assert_eq!(field, &FieldRef::scenario().field("new").index(0));
+        assert_eq!(
+            step.bindings.get("legacy"),
+            Some(&Binding::template("{{scenario.old}} must remain raw text"))
+        );
+    }
+
+    #[test]
+    fn foreach_options_prioritize_named_array_and_preserve_custom_item_alias() {
+        let mut graph = github_repository_composer_task(1).graph.unwrap();
+        let options = graph_array_options(&graph, "repositories");
+        assert_eq!(
+            options.first().map(|option| option.0.as_str()),
+            Some("selected_repositories[]")
+        );
+        assert_eq!(
+            options.first().map(|option| &option.1),
+            Some(&Binding::field(
+                FieldRef::scenario().field("selected_repositories")
+            ))
+        );
+        assert_eq!(
+            options.first().map(|option| option.2.as_str()),
+            Some("repository")
+        );
+
+        let Some(GraphNode::ForEach(mut loop_node)) = graph_node(&graph, "repositories").cloned()
+        else {
+            unreachable!()
+        };
+        loop_node.item_alias = "repo".into();
+        assert!(apply_foreach_array_selection(
+            &graph,
+            &mut loop_node,
+            &Binding::field(FieldRef::step("select-repositories").field("repositories")),
+            "repository",
+        ));
+        assert_eq!(loop_node.item_alias, "repo");
+        assert_eq!(
+            graph_field_display_label(
+                &graph,
+                &FieldRef::loop_item("repositories").field("https_url")
+            ),
+            "repository.https_url"
+        );
+
+        let Some(GraphNode::ForEach(loop_node)) = graph_node_mut(&mut graph, "repositories") else {
+            unreachable!()
+        };
+        loop_node.item_alias = "repo".into();
+        assert_eq!(
+            graph_field_display_label(
+                &graph,
+                &FieldRef::loop_item("repositories").field("https_url")
+            ),
+            "repo.https_url"
+        );
+    }
+
+    #[test]
+    fn nested_binding_picker_uses_item_alias_but_keeps_structural_loop_reference() {
+        let graph = github_repository_composer_task(1).graph.unwrap();
+        let Some(GraphNode::Action(clone)) = graph_node(&graph, "clone-repository") else {
+            unreachable!()
+        };
+        let expected = definition_for_action(&clone.step.action)
+            .input_schema
+            .field("repo")
+            .unwrap()
+            .clone();
+        let options = graph_binding_options(&graph, "clone-repository", &expected);
+        let option = options
+            .iter()
+            .find(|option| option.label.starts_with("repository.https_url ·"))
+            .expect("friendly loop item option");
+        assert!(!option.label.contains("(item)"));
+        assert_eq!(
+            option.binding,
+            Binding::field(FieldRef::loop_item("repositories").field("https_url"))
+        );
+    }
+
+    #[test]
+    fn removing_unreferenced_exported_root_action_cleans_up_its_variable() {
+        let mut graph = github_repository_composer_task(1).graph.unwrap();
+        graph
+            .nodes
+            .retain(|node| node.id() == "select-repositories");
+        graph.edges.clear();
+
+        assert!(graph_remove_composer_node(&mut graph, "select-repositories").unwrap());
+        assert!(graph.nodes.is_empty());
+        assert!(graph.variables.is_empty());
+    }
+
+    #[test]
+    fn removing_exported_root_action_with_variable_consumers_is_blocked_atomically() {
+        let mut graph = github_repository_composer_task(1).graph.unwrap();
+        graph.edges.clear();
+        let before = serde_yaml::to_string(&graph).unwrap();
+
+        let error = graph_remove_composer_node(&mut graph, "select-repositories").unwrap_err();
+        assert!(error.contains("selected_repositories"));
+        assert_eq!(serde_yaml::to_string(&graph).unwrap(), before);
+    }
+
+    #[test]
+    fn generic_array_snapshot_draft_preserves_scalars_objects_and_duplicates() {
+        let item_type = ContextType::object(
+            ObjectSchema::new("test.snapshot-item@1")
+                .with_field("name", FieldSchema::required(ContextType::STRING)),
+        );
+        let mut selector = ActionNode {
+            step: Step {
+                action: Action::SelectArrayItems {
+                    source: Some(FieldRef::step("source").field("items")),
+                    item_type,
+                    selected_items: Vec::new(),
+                },
+                ..default_step(ActionKind::SelectArrayItems, "selector").unwrap()
+            },
+            bindings: BTreeMap::new(),
+        };
+        let draft = r#"[
+            {"name":"same"},
+            {"name":"same"},
+            {"name":"different"}
+        ]"#;
+
+        assert!(apply_array_snapshot_draft(&mut selector, draft).unwrap());
+        let Action::SelectArrayItems { selected_items, .. } = &selector.step.action else {
+            unreachable!()
+        };
+        assert_eq!(selected_items.len(), 3);
+        assert_eq!(selected_items[0], selected_items[1]);
+
+        let scalar = parse_array_snapshot_draft("[1, 1, 2]", &ContextType::Integer).unwrap();
+        assert_eq!(
+            scalar,
+            [
+                serde_json::json!(1),
+                serde_json::json!(1),
+                serde_json::json!(2)
+            ]
+        );
+        assert!(parse_array_snapshot_draft("[1, \"two\"]", &ContextType::Integer).is_err());
+    }
+
+    #[test]
+    fn saved_array_snapshot_state_is_visible_after_reopen_without_preview() {
+        let saved = vec![
+            serde_json::json!({ "name": "same" }),
+            serde_json::json!({ "name": "same" }),
+        ];
+        let mut reopened_state = ArraySnapshotEditorState::default();
+
+        reopened_state.sync(&saved);
+
+        assert_eq!(reopened_state.baseline, saved);
+        assert_eq!(
+            serde_json::from_str::<Vec<serde_json::Value>>(&reopened_state.draft).unwrap(),
+            saved
+        );
+        assert!(reopened_state.draft.contains("same"));
+    }
+
+    #[test]
+    fn changing_array_snapshot_source_discards_old_type_draft() {
+        let mut step = default_step(ActionKind::SelectArrayItems, "selector").unwrap();
+        step.action = Action::SelectArrayItems {
+            source: Some(FieldRef::step("strings").field("items")),
+            item_type: ContextType::STRING,
+            selected_items: Vec::new(),
+        };
+        let mut state = ArraySnapshotEditorState {
+            baseline: Vec::new(),
+            draft: r#"["unsaved-old-type"]"#.into(),
+        };
+
+        assert!(set_array_snapshot_source(
+            &mut step,
+            &FieldRef::step("numbers").field("items"),
+            &ContextType::Integer,
+        ));
+        state.baseline.clear();
+        state.draft = "[]".into();
+
+        assert_eq!(state.draft, "[]");
+        let Action::SelectArrayItems {
+            source,
+            item_type,
+            selected_items,
+        } = step.action
+        else {
+            unreachable!()
+        };
+        assert_eq!(source, Some(FieldRef::step("numbers").field("items")));
+        assert_eq!(item_type, ContextType::Integer);
+        assert!(selected_items.is_empty());
+    }
+
+    #[test]
+    fn new_authoring_palette_hides_legacy_github_selector() {
+        assert!(!action_kind_visible_in_authoring_palette(
+            ActionKind::GithubSelectRepositories
+        ));
+        assert!(action_kind_visible_in_authoring_palette(
+            ActionKind::SelectArrayItems
+        ));
+        assert!(action_kind_visible_in_authoring_palette(
+            ActionKind::GithubPreviewRepositories
+        ));
+    }
+
+    #[test]
+    fn palette_array_snapshot_inherits_parent_array_source_and_item_type() {
+        let mut graph = WorkflowGraph::default();
+        let source_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GithubListRepositories),
+        )
+        .unwrap();
+        let selector_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootAfter {
+                node_id: source_id.clone(),
+            },
+            Some(EdgePort::Success),
+            ComposerGraphBlockKind::Action(ActionKind::SelectArrayItems),
+        )
+        .unwrap();
+        let Some(GraphNode::Action(selector)) = graph_node(&graph, &selector_id) else {
+            panic!("array selector action")
+        };
+        let Action::SelectArrayItems {
+            source,
+            item_type,
+            selected_items,
+        } = &selector.step.action
+        else {
+            panic!("array selector action")
+        };
+        assert_eq!(
+            source.as_ref(),
+            Some(
+                &FieldRef::step(&source_id)
+                    .field("github")
+                    .field("repositories")
+            )
+        );
+        assert_eq!(*item_type, github_repository_snapshot_type());
+        assert!(selected_items.is_empty());
+        assert!(selector.bindings.is_empty());
+        graph.validate().unwrap();
+    }
+
+    #[test]
+    fn palette_array_snapshot_inherits_non_github_scalar_array() {
+        let mut graph = WorkflowGraph::default();
+        let process_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::RunScript),
+        )
+        .unwrap();
+        let selector_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootAfter {
+                node_id: process_id.clone(),
+            },
+            Some(EdgePort::Success),
+            ComposerGraphBlockKind::Action(ActionKind::SelectArrayItems),
+        )
+        .unwrap();
+        let Some(GraphNode::Action(selector)) = graph_node(&graph, &selector_id) else {
+            panic!("array selector action")
+        };
+        let Action::SelectArrayItems {
+            source, item_type, ..
+        } = &selector.step.action
+        else {
+            panic!("array selector action")
+        };
+        assert_eq!(
+            source.as_ref(),
+            Some(&FieldRef::step(&process_id).field("success_exit_codes"))
+        );
+        assert_eq!(*item_type, ContextType::Integer);
+        let options = graph_snapshot_source_options(&graph, &selector_id);
+        assert!(options.iter().any(|option| {
+            option.source == FieldRef::step(&process_id).field("success_exit_codes")
+                && option.item_type == ContextType::Integer
+        }));
+        graph.validate().unwrap();
+    }
+
+    #[test]
+    fn github_snapshot_parent_configures_generic_array_selection_from_runtime_output() {
+        let mut graph = WorkflowGraph::default();
+        let preview_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootStart,
+            None,
+            ComposerGraphBlockKind::Action(ActionKind::GithubPreviewRepositories),
+        )
+        .unwrap();
+        let selector_id = graph_insert_composer_block(
+            &mut graph,
+            &ComposerGraphAttach::RootAfter {
+                node_id: preview_id.clone(),
+            },
+            Some(EdgePort::Success),
+            ComposerGraphBlockKind::Action(ActionKind::SelectArrayItems),
+        )
+        .unwrap();
+        let Some(GraphNode::Action(selector)) = graph_node(&graph, &selector_id) else {
+            panic!("array selector action")
+        };
+        let Action::SelectArrayItems {
+            source, item_type, ..
+        } = &selector.step.action
+        else {
+            panic!("array selector action")
+        };
+        assert_eq!(
+            source.as_ref(),
+            Some(&FieldRef::step(&preview_id).field("repositories"))
+        );
+        assert_eq!(*item_type, github_repository_snapshot_type());
+        assert!(selector.bindings.is_empty());
+        graph.validate().unwrap();
+    }
+
+    #[test]
+    fn github_starter_empty_snapshot_applies_offline_without_clone() {
+        let task = github_repository_composer_task(1);
+        let report = run_task(
+            &task,
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(report.errors.is_empty());
+        let selector = report
+            .steps
+            .iter()
+            .find(|step| step.step_id == "select-repositories")
+            .expect("snapshot publication report");
+        assert!(selector.summary.contains("no discovery request"));
+        let Some(StepOutput::Structured(output)) = selector.output.as_ref() else {
+            panic!("snapshot output")
+        };
+        assert_eq!(output.value, serde_json::json!({ "repositories": [] }));
+        let loop_report = report
+            .steps
+            .iter()
+            .find(|step| step.step_id == "repositories")
+            .expect("empty loop report");
+        assert!(loop_report.summary.contains("empty"));
+        assert!(!report
+            .steps
+            .iter()
+            .any(|step| step.step_id.contains("clone-repository")));
+    }
+
+    #[test]
+    fn github_starter_plans_exactly_the_two_saved_repositories_offline() {
+        let mut task = github_repository_composer_task(1);
+        let graph = task.graph.as_mut().expect("GitHub starter graph");
+        let Some(GraphNode::Action(selector)) = graph_node_mut(graph, "select-repositories") else {
+            panic!("GitHub starter selector")
+        };
+        let repositories = [
+            github_repository("R_two", "owner/two", "trunk"),
+            github_repository("R_one", "owner/one", "main"),
+        ];
+        assert!(apply_github_preview_selection(
+            selector,
+            &repositories,
+            &BTreeSet::from(["R_two".into(), "R_one".into()]),
+            true,
+        )
+        .unwrap());
+        task.validate().unwrap();
+
+        let report = run_task(&task, &RunOptions::default()).unwrap();
+
+        assert!(report.errors.is_empty());
+        assert!(report
+            .steps
+            .iter()
+            .find(|step| step.step_id == "select-repositories")
+            .is_some_and(|step| step.summary.contains("no discovery request")));
+        let clone_plans = report
+            .plans
+            .iter()
+            .filter(|plan| plan.step_id.ends_with("/clone-repository"))
+            .collect::<Vec<_>>();
+        assert_eq!(clone_plans.len(), 2);
+        assert_eq!(clone_plans[0].step_id, "repositories[1]/clone-repository");
+        assert!(clone_plans[0]
+            .summary
+            .contains("https://github.com/owner/two"));
+        assert!(clone_plans[0].summary.contains("$HOME/Developer/owner/two"));
+        assert!(clone_plans[0].summary.contains("branch trunk"));
+        assert_eq!(clone_plans[1].step_id, "repositories[2]/clone-repository");
+        assert!(clone_plans[1]
+            .summary
+            .contains("https://github.com/owner/one"));
+        assert!(clone_plans[1].summary.contains("$HOME/Developer/owner/one"));
+        assert!(clone_plans[1].summary.contains("branch main"));
+        assert!(!report.steps.iter().any(|step| step.step_id.contains("[*]")));
     }
 
     #[test]
@@ -20623,7 +23978,7 @@ task:
             .collect::<Vec<_>>();
         assert_eq!(
             all_action_kinds.len(),
-            24,
+            26,
             "update the authoring matrix for new actions"
         );
         // The GitHub selector is intentionally context-dependent and has its
@@ -20635,7 +23990,7 @@ task:
             .collect::<Vec<_>>();
         assert_eq!(
             action_kinds.len(),
-            23,
+            25,
             "update the context-free authoring matrix for new actions"
         );
 
@@ -22443,23 +25798,23 @@ task:
             let mut response = GraphActionEditorResponse::default();
             let output = ctx.run_ui(input(events), |ui| {
                 ui.set_width(360.0);
-                response =
-                    paint_graph_action_editor(ui, node, &BTreeMap::new(), auth_state, None, true);
+                response = paint_graph_action_editor(
+                    ui,
+                    &GraphInterpolationScope::new(0, "github-auth-test", Vec::new(), "scenario"),
+                    node,
+                    &BTreeMap::new(),
+                    auth_state,
+                    None,
+                    true,
+                );
             });
             (output, response)
         }
 
-        let task = github_repository_composer_task(1);
-        assert_eq!(task.id, "github-repositories-1");
-        assert!(github_picker_source_steps(&task).is_none());
-        let GraphNode::Action(action) = graph_node(
-            task.graph.as_ref().expect("custom GitHub graph"),
-            "list-repositories",
-        )
-        .expect("GitHub repository discovery block") else {
-            panic!("repository discovery must be an action node")
+        let mut action = ActionNode {
+            step: default_step(ActionKind::GithubListRepositories, "list-repositories").unwrap(),
+            bindings: BTreeMap::new(),
         };
-        let mut action = action.as_ref().clone();
         let contract = GraphExternalAuthContract {
             provider: ExternalAuthProvider::GithubCli,
             intent: GithubAuthorizationIntent::AuthenticateOnly,
@@ -22853,7 +26208,20 @@ task:
 
     #[test]
     fn successful_github_plan_result_clears_failed_status_but_unrelated_success_does_not() {
-        let github_task = github_repository_composer_task(1);
+        let snapshot_task = github_repository_composer_task(1);
+        let live_github_step =
+            default_step(ActionKind::GithubListRepositories, "live-github").unwrap();
+        let live_github_task = graph_authoring_test_task(
+            "live-github",
+            WorkflowGraph {
+                entries: vec![live_github_step.id.clone()],
+                nodes: vec![GraphNode::Action(Box::new(ActionNode {
+                    step: live_github_step,
+                    bindings: BTreeMap::new(),
+                }))],
+                ..WorkflowGraph::default()
+            },
+        );
         let create_step = default_step(ActionKind::CreateDirectory, "create-directory-1").unwrap();
         let non_github_task = graph_authoring_test_task(
             "non-github",
@@ -22866,19 +26234,26 @@ task:
                 ..WorkflowGraph::default()
             },
         );
-        let github_checks_repository_access = task_checks_github_repository_access(&github_task);
+        let snapshot_checks_repository_access =
+            task_checks_github_repository_access(&snapshot_task);
+        let github_checks_repository_access =
+            task_checks_github_repository_access(&live_github_task);
         let non_github_checks_repository_access =
             task_checks_github_repository_access(&non_github_task);
+        assert!(!snapshot_checks_repository_access);
         assert!(github_checks_repository_access);
         assert!(!non_github_checks_repository_access);
 
         let stale_error = GithubSessionStatus::Failed("stale auth failure".into());
         let mut app = composer_app_for_test(composer_project_with_canvas(
-            github_task,
+            snapshot_task,
             ComposerCanvas::default(),
         ));
         app.github_picker.auth_status = stale_error.clone();
         app.update_github_auth_status(&[], non_github_checks_repository_access);
+        assert_eq!(app.github_picker.auth_status, stale_error);
+
+        app.update_github_auth_status(&[], snapshot_checks_repository_access);
         assert_eq!(app.github_picker.auth_status, stale_error);
 
         app.update_github_auth_status(&[], github_checks_repository_access);
@@ -23015,11 +26390,12 @@ task:
             task,
             ComposerCanvas::default(),
         ));
-        let key = GithubAuthoringPreviewKey::new(vec![0], task_id, "list-repositories");
+        let key = GithubAuthoringPreviewKey::new(vec![0], task_id, "select-repositories");
         let picker_repository = github_repository("R_picker", "picker/unchanged", "main");
         app.github_picker.repositories = vec![picker_repository.clone()];
         app.github_picker.loaded_once = true;
         app.github_picker.error = Some("picker error remains isolated".into());
+        let project_before = serde_yaml::to_string(app.custom_project.as_ref().unwrap()).unwrap();
 
         let (sender, receiver) = mpsc::channel();
         sender
@@ -23050,6 +26426,12 @@ task:
             app.github_picker.error.as_deref(),
             Some("picker error remains isolated")
         );
+        assert!(!app.running);
+        assert!(app.run_receiver.is_none());
+        assert_eq!(
+            serde_yaml::to_string(app.custom_project.as_ref().unwrap()).unwrap(),
+            project_before
+        );
     }
 
     #[test]
@@ -23060,7 +26442,7 @@ task:
             task,
             ComposerCanvas::default(),
         ));
-        let key = GithubAuthoringPreviewKey::new(vec![0], task_id, "list-repositories");
+        let key = GithubAuthoringPreviewKey::new(vec![0], task_id, "select-repositories");
         let stale_generation = app.github_authoring_generation;
         app.invalidate_github_authoring_previews();
 
@@ -23120,11 +26502,23 @@ task:
                 ..GithubAuthoringPreview::default()
             },
         );
+        let snapshot_editor_key =
+            ArraySnapshotEditorKey::new(vec![0], "nested-preview", &source_id);
+        app.array_snapshot_editors.insert(
+            snapshot_editor_key.clone(),
+            ArraySnapshotEditorState {
+                baseline: Vec::new(),
+                draft: r#"[{"stale":true}]"#.into(),
+            },
+        );
         let stale_generation = app.github_authoring_generation;
 
         app.remove_composer_node(&source_id);
 
         assert!(app.github_authoring_previews.is_empty());
+        assert!(!app
+            .array_snapshot_editors
+            .contains_key(&snapshot_editor_key));
         assert_ne!(app.github_authoring_generation, stale_generation);
         let recreated_id = {
             let graph = app
@@ -23176,7 +26570,7 @@ task:
         ));
         let before = serde_yaml::to_string(app.custom_project.as_ref().unwrap()).unwrap();
         app.github_authoring_previews.insert(
-            GithubAuthoringPreviewKey::new(vec![0], task_id, "list-repositories"),
+            GithubAuthoringPreviewKey::new(vec![0], task_id, "select-repositories"),
             GithubAuthoringPreview {
                 account_login: Some("preview-only-user".into()),
                 repositories: vec![github_repository(
@@ -23193,6 +26587,211 @@ task:
         assert_eq!(after, before);
         assert!(!after.contains("R_preview_only"));
         assert!(!after.contains("metadata-must-not-persist"));
+    }
+
+    #[test]
+    fn github_starter_selection_parameters_survive_project_save_and_reopen() {
+        let task = github_repository_composer_task(1);
+        let mut project = composer_project_with_canvas(task, ComposerCanvas::default());
+        let graph = project
+            .scenario_mut(&[0])
+            .and_then(|task| task.graph.as_mut())
+            .expect("GitHub starter graph");
+        let Some(GraphNode::Action(selector)) = graph_node_mut(graph, "select-repositories") else {
+            panic!("GitHub starter selector")
+        };
+        let preview_repositories = [
+            github_repository("R_2", "owner/two", "main"),
+            github_repository("R_1", "owner/one", "trunk"),
+        ];
+        assert!(apply_github_preview_selection(
+            selector,
+            &preview_repositories,
+            &BTreeSet::from(["R_2".into(), "R_1".into()]),
+            true,
+        )
+        .unwrap());
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("github-starter.ppduster.yaml");
+        write_project_file(&path, &project).unwrap();
+        let yaml = fs::read_to_string(&path).unwrap();
+        assert!(yaml.contains("type: github-preview-repositories"));
+        assert!(yaml.contains("selected_repositories"));
+        assert!(!yaml.contains("type: select-array-items"));
+        assert!(yaml.contains("R_2"));
+        assert!(yaml.contains("R_1"));
+        assert!(yaml.contains("owner/two"));
+        assert!(yaml.contains("owner/one"));
+        assert!(yaml.contains("https_url"));
+
+        let reopened = read_project_file(&path).unwrap();
+        let graph = reopened
+            .scenario(&[0])
+            .and_then(|task| task.graph.as_ref())
+            .expect("reopened GitHub starter graph");
+        let Some(GraphNode::Action(selector)) = graph_node(graph, "select-repositories") else {
+            panic!("reopened GitHub starter selector")
+        };
+        let Action::GithubPreviewRepositories {
+            selected_repositories,
+        } = &selector.step.action
+        else {
+            panic!("reopened merged GitHub snapshot action")
+        };
+        assert_eq!(
+            selected_repositories
+                .iter()
+                .map(|repository| repository.id.as_str())
+                .collect::<Vec<_>>(),
+            ["R_2", "R_1"]
+        );
+        assert!(selector.bindings.is_empty());
+        validate_project_structure(&reopened).unwrap();
+    }
+
+    #[test]
+    fn github_snapshot_never_persists_private_repository_metadata() {
+        let task = github_repository_composer_task(1);
+        let mut graph = task.graph.expect("GitHub starter graph");
+        let Some(GraphNode::Action(selector)) = graph_node_mut(&mut graph, "select-repositories")
+        else {
+            panic!("GitHub starter selector")
+        };
+        let public = github_repository("R_public", "owner/public", "main");
+        let mut private = github_repository("R_private", "owner/private", "main");
+        private.is_private = true;
+
+        assert!(apply_github_preview_selection(
+            selector,
+            &[private, public],
+            &BTreeSet::from(["R_private".into(), "R_public".into()]),
+            false,
+        )
+        .unwrap());
+        let Action::GithubPreviewRepositories {
+            selected_repositories,
+        } = &selector.step.action
+        else {
+            panic!("merged GitHub snapshot")
+        };
+        assert_eq!(
+            selected_repositories
+                .iter()
+                .map(|repository| repository.id.as_str())
+                .collect::<Vec<_>>(),
+            ["R_public"]
+        );
+        let yaml = serde_yaml::to_string(&graph).unwrap();
+        assert!(!yaml.contains("R_private"));
+        assert!(!yaml.contains("owner/private"));
+    }
+
+    #[test]
+    fn github_snapshot_checkbox_events_preserve_saved_values_and_order() {
+        let mut selector = ActionNode {
+            step: default_step(ActionKind::GithubPreviewRepositories, "select-repositories")
+                .unwrap(),
+            bindings: BTreeMap::new(),
+        };
+        let original = github_repository("R_saved", "owner/saved", "main");
+        assert!(apply_github_preview_selection(
+            &mut selector,
+            std::slice::from_ref(&original),
+            &BTreeSet::from(["R_saved".into()]),
+            true,
+        )
+        .unwrap());
+        let Action::GithubPreviewRepositories {
+            selected_repositories,
+        } = &selector.step.action
+        else {
+            unreachable!()
+        };
+        let saved_before_refresh = selected_repositories[0].clone();
+
+        let mut drifted = original;
+        drifted.url = "https://github.com/changed/value".into();
+        drifted.default_branch = None;
+        drifted.is_archived = true;
+        assert!(!apply_github_preview_selection(
+            &mut selector,
+            std::slice::from_ref(&drifted),
+            &BTreeSet::from(["R_saved".into()]),
+            true,
+        )
+        .unwrap());
+        let Action::GithubPreviewRepositories {
+            selected_repositories,
+        } = &selector.step.action
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            selected_repositories,
+            std::slice::from_ref(&saved_before_refresh)
+        );
+
+        let added = github_repository("R_added", "owner/added", "trunk");
+        assert!(apply_github_preview_selection(
+            &mut selector,
+            &[added.clone(), drifted],
+            &BTreeSet::from(["R_saved".into(), "R_added".into()]),
+            true,
+        )
+        .unwrap());
+        let Action::GithubPreviewRepositories {
+            selected_repositories,
+        } = &selector.step.action
+        else {
+            unreachable!()
+        };
+        assert_eq!(selected_repositories[0], saved_before_refresh);
+        assert_eq!(
+            selected_repositories[1],
+            github_repository_snapshot_input(&added)
+        );
+
+        assert!(apply_github_preview_selection(
+            &mut selector,
+            &[],
+            &BTreeSet::from(["R_added".into()]),
+            true,
+        )
+        .unwrap());
+        let Action::GithubPreviewRepositories {
+            selected_repositories,
+        } = &selector.step.action
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            selected_repositories,
+            &[github_repository_snapshot_input(&added)]
+        );
+    }
+
+    #[test]
+    fn github_snapshot_schema_rejects_tampered_private_values() {
+        let item_type = github_repository_snapshot_type();
+        let ContextType::Object { schema } = &item_type else {
+            panic!("GitHub snapshot items must be objects")
+        };
+        assert_eq!(
+            schema.field("private").unwrap().allowed_values,
+            [serde_json::json!(false)]
+        );
+        let mut private = github_repository("R_private", "owner/private", "main");
+        private.is_private = true;
+        let mut step = default_step(ActionKind::GithubPreviewRepositories, "selector").unwrap();
+        step.action = Action::GithubPreviewRepositories {
+            selected_repositories: vec![github_repository_snapshot_input(&private)],
+        };
+        let error = step.validate().unwrap_err();
+        assert!(
+            error.contains("private") || error.contains("public"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -23227,6 +26826,7 @@ task:
                 github_repository("R_1", "owner/one", "main"),
             ],
             BTreeSet::from(["R_2".into(), "R_1".into()]),
+            false,
         ));
         let Action::GithubSelectRepositories {
             github,
@@ -23244,6 +26844,41 @@ task:
             Some("new-account"),
             expected_account_login
         ));
+    }
+
+    #[test]
+    fn github_background_selection_keeps_only_cloneable_public_repositories() {
+        let mut selector = ActionNode {
+            step: default_step(ActionKind::GithubSelectRepositories, "selector").unwrap(),
+            bindings: BTreeMap::from([(
+                "github".into(),
+                Binding::field(FieldRef::step("source").field("github")),
+            )]),
+        };
+        let public = github_repository("R_public", "owner/public", "main");
+        let mut private = github_repository("R_private", "owner/private", "main");
+        private.is_private = true;
+        let mut archived = github_repository("R_archived", "owner/archived", "main");
+        archived.is_archived = true;
+        let mut empty = github_repository("R_empty", "owner/empty", "main");
+        empty.default_branch = None;
+
+        assert!(apply_github_filter_selection(
+            &mut selector,
+            "configured-user",
+            &[public, private, archived, empty],
+            BTreeSet::from([
+                "R_public".into(),
+                "R_private".into(),
+                "R_archived".into(),
+                "R_empty".into(),
+            ]),
+            true,
+        ));
+        let Action::GithubSelectRepositories { repository_ids, .. } = &selector.step.action else {
+            unreachable!()
+        };
+        assert_eq!(repository_ids, &["R_public"]);
     }
 
     #[test]

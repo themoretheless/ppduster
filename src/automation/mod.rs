@@ -36,8 +36,9 @@ pub use expression::{
 pub use graph::{
     ActionNode, EdgeEndpoint, EdgePort, ForEachNode, GraphEdge, GraphExit, GraphNode,
     GraphValidationError, GraphValidationErrorKind, IfNode, JoinMode, JoinNode,
-    LinearMigrationError, LoopFailurePolicy, SwitchCase, SwitchNode, WorkflowGraph,
-    WorkflowGraphMigrationError, MIN_MIGRATABLE_WORKFLOW_GRAPH_VERSION, WORKFLOW_GRAPH_VERSION,
+    LinearMigrationError, LoopFailurePolicy, ScenarioVariable, SwitchCase, SwitchNode,
+    WorkflowGraph, WorkflowGraphMigrationError, MIN_MIGRATABLE_WORKFLOW_GRAPH_VERSION,
+    WORKFLOW_GRAPH_VERSION,
 };
 pub use loader::{PackTrust, TaskPack, TaskSource};
 pub use project::{

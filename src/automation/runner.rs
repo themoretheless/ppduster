@@ -1,8 +1,9 @@
 use crate::automation::binding::{materialize_step, resolve_binding, BindingLimits};
 use crate::automation::block::definition_for_action;
 use crate::automation::context::{
-    Binding, ContextOrigin, ContextPathSegment, ContextProvenance, ContextScope, ContextStore,
-    ContextType, ContextValue, FieldRef, ResolvedSchemaOwned, Sensitivity, TemplatePart,
+    Binding, ContextLookupError, ContextOrigin, ContextPathSegment, ContextProvenance,
+    ContextScope, ContextStore, ContextType, ContextValue, FieldRef, ObjectSchema,
+    ResolvedSchemaOwned, Sensitivity, TemplatePart,
 };
 use crate::automation::expression::{
     check_rule, ExpressionLimits, ExpressionV1, ReferenceV1, RuleEvaluation, RuleExprV1,
@@ -419,9 +420,11 @@ pub struct RunReport {
     pub plans: Vec<ActionPlan>,
     pub outcomes: Vec<ActionOutcome>,
     pub steps: Vec<StepReport>,
-    /// Validated action outputs keyed by stable step IDs. Transport metadata
-    /// from [`StepOutput`] is deliberately absent: bindings start directly at
-    /// the output contract (`github.repositories`, `repository.path`, ...).
+    /// Validated action outputs keyed by stable step IDs, plus the materialized
+    /// [`ContextScope::Scenario`] object when the graph declares named
+    /// variables. Transport metadata from [`StepOutput`] is deliberately
+    /// absent: bindings start directly at the output contract
+    /// (`github.repositories`, `repository.path`, ...).
     pub context: ContextStore,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
@@ -599,7 +602,9 @@ fn context_path(raw: &str) -> String {
 fn legacy_action_output(step: &Step, changed: bool) -> Option<StepOutput> {
     let output = match &step.action {
         Action::GithubListRepositories
+        | Action::GithubPreviewRepositories { .. }
         | Action::GithubSelectRepositories { .. }
+        | Action::SelectArrayItems { .. }
         | Action::InspectPath(_)
         | Action::RunCommand { .. }
         | Action::RunScript { .. } => return None,
@@ -1309,6 +1314,49 @@ fn run_step_sequence_with_interactivity(
                 continue;
             }
         }
+        // Authored snapshots are already complete, immutable values. Publishing
+        // them during dry-run performs no observation, discovery, or mutation.
+        // Keeping the step pending preserves normal plan reporting while its
+        // typed output lets downstream controls plan against the exact saved
+        // items instead of a symbolic null placeholder.
+        if !opts.apply {
+            let snapshot_output = match &step.action {
+                Action::SelectArrayItems { selected_items, .. } => {
+                    Some(apply_selected_array_snapshot(selected_items))
+                }
+                Action::GithubPreviewRepositories {
+                    selected_repositories,
+                } => Some(apply_github_repository_snapshot(selected_repositories)),
+                _ => None,
+            };
+            if let Some(snapshot_output) = snapshot_output {
+                let plan = plan_step(step, opts)?;
+                let ApplyStepResult::AlreadySatisfiedWithOutput { summary, output } =
+                    snapshot_output?
+                else {
+                    unreachable!("authored snapshot publication is a pure typed output")
+                };
+                plans.push(plan.clone());
+                outcomes.push(ActionOutcome::Planned {
+                    action: plan.clone(),
+                });
+                steps.push(StepReport {
+                    step_id: step.id.clone(),
+                    step_name: step_name(step),
+                    summary,
+                    status: StepStatus::Pending,
+                    prerequisites: plan.prerequisites,
+                    logs: vec![StepLogEntry {
+                        step_id: step.id.clone(),
+                        message:
+                            "published the immutable authored snapshot for downstream planning"
+                                .into(),
+                    }],
+                    output: Some(output),
+                });
+                continue;
+            }
+        }
         // Unconditional typed inspections are deliberately read-only, so they
         // run during both a normal dry-run and an applied run. Conditional
         // inspections remain planned during dry-run because their prerequisite
@@ -1617,6 +1665,104 @@ struct GraphScopeState {
     values: ContextStore,
     schemas: ContextStore,
     aliases: BTreeMap<String, FieldRef>,
+    scenario_sources: BTreeMap<String, FieldRef>,
+    scenario_schema: Option<ObjectSchema>,
+}
+
+fn scenario_context(
+    value: serde_json::Value,
+    schema: ObjectSchema,
+    inputs: Vec<FieldRef>,
+) -> ContextValue {
+    ContextValue::new(
+        value,
+        ContextProvenance {
+            origin: ContextOrigin::Derived,
+            inputs,
+            operation: Some("scenario-variable-materialization".into()),
+        },
+    )
+    .with_schema(schema)
+}
+
+fn initialize_scenario_scope(graph: &WorkflowGraph, scope: &mut GraphScopeState) -> Result<()> {
+    if graph.variables.is_empty() {
+        return Ok(());
+    }
+    let schema = graph.scenario_variable_schema().map_err(|errors| {
+        anyhow!(
+            "workflow graph has invalid scenario variables: {}",
+            errors
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    scope.scenario_sources = graph
+        .variables
+        .iter()
+        .map(|(name, variable)| (name.clone(), variable.source.clone()))
+        .collect();
+    scope.scenario_schema = Some(schema.clone());
+    scope.schemas.insert(
+        ContextScope::Scenario,
+        scenario_context(serde_json::Value::Null, schema, Vec::new()),
+    );
+    Ok(())
+}
+
+/// Rebuild the scenario object from source outputs currently available in the
+/// graph scope. Missing sources remain absent, so a dependent binding fails
+/// closed before its action can mutate the machine. Rebuilding instead of
+/// incrementally patching also prevents a stale value from surviving a future
+/// source that did not publish output.
+fn refresh_scenario_scope(scope: &mut GraphScopeState) -> Result<()> {
+    let Some(mut schema) = scope.scenario_schema.clone() else {
+        return Ok(());
+    };
+    if !scope
+        .scenario_sources
+        .values()
+        .any(|source| scope.values.get(&source.scope).is_some())
+    {
+        return Ok(());
+    }
+    let mut values = serde_json::Map::new();
+    let mut inputs = Vec::new();
+    for (name, source) in &scope.scenario_sources {
+        let resolved = match scope.values.resolve(source) {
+            Ok(resolved) => resolved,
+            Err(
+                ContextLookupError::MissingScope(_) | ContextLookupError::MissingSegment { .. },
+            ) => continue,
+            Err(error) => {
+                return Err(anyhow!(
+                    "resolve scenario variable {name:?} from {source:?}: {error}"
+                ));
+            }
+        };
+        values.insert(name.clone(), resolved.value.clone());
+        inputs.push(source.clone());
+        if let Some(field) = schema.fields.get_mut(name) {
+            field.sensitivity = field.sensitivity.combine(resolved.sensitivity);
+        }
+    }
+    inputs.sort();
+    inputs.dedup();
+    scope.values.insert(
+        ContextScope::Scenario,
+        scenario_context(
+            serde_json::Value::Object(values),
+            schema.clone(),
+            inputs.clone(),
+        ),
+    );
+    scope.schemas.insert(
+        ContextScope::Scenario,
+        scenario_context(serde_json::Value::Null, schema, inputs),
+    );
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -1817,6 +1963,7 @@ fn run_graph_task_with_interactivity(
         budget: GraphExecutionBudget::default(),
     };
     let mut scope = GraphScopeState::default();
+    initialize_scenario_scope(graph, &mut scope)?;
     let invocation = runtime.execute_graph(graph, &mut scope, "", 1)?;
     if invocation.failed && runtime.accumulator.errors.is_empty() {
         runtime
@@ -2033,7 +2180,9 @@ fn binding_affects_preflight_policy(action: &Action, target: &str) -> bool {
         | Action::InstallDmg { .. }
         | Action::InstallPkg { .. } => true,
         Action::GithubListRepositories
+        | Action::GithubPreviewRepositories { .. }
         | Action::GithubSelectRepositories { .. }
+        | Action::SelectArrayItems { .. }
         | Action::ForEach { .. }
         | Action::ForEachGitCloneIfMissing { .. }
         | Action::BrewInstall { .. }
@@ -2354,6 +2503,7 @@ impl GraphRuntime<'_> {
                 .insert(entry.scope.clone(), entry.context.clone());
         }
         insert_action_schema(&mut scope.schemas, &materialized);
+        refresh_scenario_scope(scope)?;
 
         let status = report.steps.first().map(|report| &report.status);
         let result = match status {
@@ -2753,6 +2903,87 @@ impl GraphRuntime<'_> {
         let item_type =
             collection_item_type(&node.collection, &scope.schemas).unwrap_or(ContextType::Any);
         if !self.opts.apply {
+            let expected = ResolvedSchemaOwned {
+                value_type: ContextType::array(ContextType::Any),
+                required: true,
+                nullable: false,
+                sensitivity: Sensitivity::Secret,
+                allowed_values: Vec::new(),
+            };
+            if let Ok(collection) = resolve_binding(
+                &node.collection,
+                &expected,
+                &scope.values,
+                BindingLimits::default(),
+            ) {
+                if let Some(items) = collection.value.as_array() {
+                    self.budget.loop_iterations =
+                        self.budget.loop_iterations.saturating_add(items.len());
+                    if self.budget.loop_iterations > GRAPH_MAX_LOOP_ITERATIONS {
+                        bail!(
+                            "workflow graph exceeds {GRAPH_MAX_LOOP_ITERATIONS} total loop iterations"
+                        );
+                    }
+
+                    let mut failed = false;
+                    for (index, item) in items.iter().enumerate() {
+                        let mut child_scope = scope.clone();
+                        insert_loop_value(
+                            &mut child_scope,
+                            &node.id,
+                            index,
+                            item.clone(),
+                            item_type.clone(),
+                            collection.sensitivity,
+                        );
+                        child_scope
+                            .aliases
+                            .insert(node.item_alias.clone(), FieldRef::loop_item(&node.id));
+                        if let Some(alias) = &node.index_alias {
+                            let index_scope = loop_index_scope(&node.id);
+                            insert_loop_value(
+                                &mut child_scope,
+                                &index_scope,
+                                index,
+                                serde_json::json!(index),
+                                ContextType::Integer,
+                                Sensitivity::Public,
+                            );
+                            child_scope
+                                .aliases
+                                .insert(alias.clone(), FieldRef::loop_item(index_scope));
+                        }
+                        let prefix = nested_instance_prefix(
+                            instance_prefix,
+                            &format!("{}[{}]", node.id, index + 1),
+                        );
+                        failed |= self
+                            .execute_graph(&node.body, &mut child_scope, &prefix, depth)?
+                            .failed;
+                    }
+
+                    self.push_control_report(
+                        &node.id,
+                        "For each",
+                        if failed {
+                            StepStatus::Failed
+                        } else {
+                            StepStatus::Pending
+                        },
+                        format!(
+                            "planned {} concrete loop iteration(s); collection values are available during planning",
+                            items.len()
+                        ),
+                        instance_prefix,
+                    );
+                    return Ok(if failed {
+                        GraphNodeResult::control_failure()
+                    } else {
+                        GraphNodeResult::control_planned(items.is_empty())
+                    });
+                }
+            }
+
             let mut symbolic = scope.clone();
             insert_loop_value(
                 &mut symbolic,
@@ -4418,6 +4649,12 @@ pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
         Action::GithubListRepositories => {
             "list repositories visible to the GitHub CLI account and return the account login plus typed GitHub repository metadata".into()
         }
+        Action::GithubPreviewRepositories {
+            selected_repositories,
+        } => format!(
+            "publish {} repository/repositories saved during GitHub authoring; runtime performs no discovery request",
+            selected_repositories.len()
+        ),
         Action::GithubSelectRepositories {
             expected_account_login,
             repository_ids,
@@ -4426,6 +4663,10 @@ pub fn describe_step(step: &Step, opts: &RunOptions) -> Result<String> {
             "select {} repository/repositories by exact GitHub node ID from the freshly listed account {:?}; fail if the account or any selected ID changed",
             repository_ids.len(),
             expected_account_login
+        ),
+        Action::SelectArrayItems { selected_items, .. } => format!(
+            "publish an immutable authored snapshot containing {} selected array item(s)",
+            selected_items.len()
         ),
         Action::ForEach {
             source_step,
@@ -5032,11 +5273,17 @@ fn prompt_once(message: &str) -> Result<()> {
 fn apply_step(task_id: &str, step: &Step, opts: &RunOptions) -> Result<ApplyStepResult> {
     match &step.action {
         Action::GithubListRepositories => apply_github_list_repositories(),
+        Action::GithubPreviewRepositories {
+            selected_repositories,
+        } => apply_github_repository_snapshot(selected_repositories),
         Action::GithubSelectRepositories {
             github,
             expected_account_login,
             repository_ids,
         } => apply_github_select_repositories(github, expected_account_login, repository_ids),
+        Action::SelectArrayItems { selected_items, .. } => {
+            apply_selected_array_snapshot(selected_items)
+        }
         Action::ForEach { .. } | Action::ForEachGitCloneIfMissing { .. } => {
             bail!("foreach actions must be executed by the scenario runner")
         }
@@ -5269,6 +5516,38 @@ fn apply_github_select_repositories(
                 repositories: selected,
             },
         }),
+    })
+}
+
+fn apply_selected_array_snapshot(selected_items: &[serde_json::Value]) -> Result<ApplyStepResult> {
+    Ok(ApplyStepResult::AlreadySatisfiedWithOutput {
+        summary: format!(
+            "published {} selected array item(s) from the authored snapshot",
+            selected_items.len()
+        ),
+        output: structured_step_output(
+            "ppduster.array.selection@1",
+            serde_json::json!({ "items": selected_items }),
+        ),
+    })
+}
+
+fn apply_github_repository_snapshot(
+    selected_repositories: &[GithubRepositoryInput],
+) -> Result<ApplyStepResult> {
+    let repositories = selected_repositories
+        .iter()
+        .map(github_repository_input_output)
+        .collect::<Vec<_>>();
+    Ok(ApplyStepResult::AlreadySatisfiedWithOutput {
+        summary: format!(
+            "published {} GitHub repository/repositories saved during authoring; runtime performed no discovery request",
+            repositories.len()
+        ),
+        output: structured_step_output(
+            "ppduster.github.selected-repositories@1",
+            serde_json::json!({ "repositories": repositories }),
+        ),
     })
 }
 
@@ -9139,7 +9418,7 @@ pub fn extracted_path_is_safe(root: &Path, rel: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automation::context::TemplatePart;
+    use crate::automation::context::{FieldSchema, ObjectSchema, SemanticFormat, TemplatePart};
     use crate::automation::expression::ExpressionValue;
     use crate::automation::graph::{GraphEdge, LegacyTaskImporter, SwitchCase};
     use crate::automation::loader::{PackTrust, TaskPack, TaskSource};
@@ -13862,6 +14141,500 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
                 .collect::<Vec<_>>(),
             ["R_beta", "R_alpha"]
         );
+    }
+
+    #[test]
+    fn array_snapshot_apply_publishes_typed_authored_values() {
+        let selected_items = vec![serde_json::json!("alpha"), serde_json::json!("beta")];
+        let result = apply_selected_array_snapshot(&selected_items).unwrap();
+        let ApplyStepResult::AlreadySatisfiedWithOutput { summary, output } = result else {
+            panic!("expected immutable snapshot output")
+        };
+        assert!(summary.contains("2 selected array item"));
+        let StepOutput::Structured(output) = output else {
+            panic!("expected structured array selection output")
+        };
+        assert_eq!(output.schema_id, "ppduster.array.selection@1");
+        assert_eq!(output.value, serde_json::json!({ "items": selected_items }));
+    }
+
+    #[test]
+    fn array_snapshot_plan_uses_the_same_authored_count() {
+        let step = plain_step(
+            "select-items",
+            Action::SelectArrayItems {
+                source: Some(FieldRef::step("preview").field("items")),
+                item_type: ContextType::Integer,
+                selected_items: vec![serde_json::json!(1), serde_json::json!(2)],
+            },
+        );
+        step.validate().unwrap();
+        let description = describe_step(&step, &RunOptions::default()).unwrap();
+        assert!(description.contains("2 selected array item"));
+        assert!(plan_step(&step, &RunOptions::default())
+            .unwrap()
+            .summary
+            .contains("2 selected array item"));
+    }
+
+    #[test]
+    fn array_snapshot_dry_run_plans_each_saved_item_with_concrete_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        let item_type = ContextType::object(
+            ObjectSchema::new("test.directory-selection-item@1").with_field(
+                "path",
+                FieldSchema::required(ContextType::string(SemanticFormat::DirectoryPath)),
+            ),
+        );
+        let selector = plain_step(
+            "selector",
+            Action::SelectArrayItems {
+                source: Some(FieldRef::step("authoring-preview").field("directories")),
+                item_type,
+                selected_items: vec![
+                    serde_json::json!({ "path": first.to_string_lossy() }),
+                    serde_json::json!({ "path": second.to_string_lossy() }),
+                ],
+            },
+        );
+        let create = plain_step(
+            "create",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: "/tmp/placeholder".into(),
+            }),
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["selector".into()],
+            nodes: vec![
+                action_node(selector, BTreeMap::new()),
+                GraphNode::ForEach(ForEachNode {
+                    id: "directories".into(),
+                    collection: Binding::field(FieldRef::step("selector").field("items")),
+                    item_alias: "directory".into(),
+                    index_alias: Some("directory_index".into()),
+                    concurrency: 1,
+                    on_error: LoopFailurePolicy::Stop,
+                    body: Box::new(one_action_graph(
+                        create,
+                        BTreeMap::from([(
+                            "path".into(),
+                            Binding::field(FieldRef::loop_item("directories").field("path")),
+                        )]),
+                    )),
+                }),
+            ],
+            edges: vec![GraphEdge::new("selector", EdgePort::Success, "directories")],
+            ..WorkflowGraph::default()
+        };
+
+        let report = run_task(&graph_task(graph), &RunOptions::default()).unwrap();
+
+        assert!(!first.exists());
+        assert!(!second.exists());
+        assert!(report
+            .steps
+            .iter()
+            .any(|step| step.step_id == "directories[1]/create"
+                && step.summary.contains(&first.to_string_lossy().to_string())));
+        assert!(report
+            .steps
+            .iter()
+            .any(|step| step.step_id == "directories[2]/create"
+                && step.summary.contains(&second.to_string_lossy().to_string())));
+        assert!(!report.steps.iter().any(|step| step.step_id.contains("[*]")));
+        assert!(report.steps.iter().any(|step| {
+            step.step_id == "directories"
+                && step.summary.contains("planned 2 concrete loop iteration")
+        }));
+        let snapshot = report
+            .context
+            .get(&ContextScope::Step {
+                step_id: "selector".into(),
+            })
+            .expect("dry-run must publish the typed authored snapshot");
+        assert_eq!(snapshot.value["items"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn github_preview_runtime_publishes_an_empty_typed_snapshot_without_discovery() {
+        let step = plain_step(
+            "preview",
+            Action::GithubPreviewRepositories {
+                selected_repositories: Vec::new(),
+            },
+        );
+        let result = apply_step("task", &step, &RunOptions::default()).unwrap();
+        let ApplyStepResult::AlreadySatisfiedWithOutput { summary, output } = result else {
+            panic!("GitHub snapshot must publish typed runtime output")
+        };
+        assert!(summary.contains("no discovery request"));
+        let StepOutput::Structured(output) = output else {
+            panic!("GitHub snapshot must use its structured output contract")
+        };
+        assert_eq!(output.schema_id, "ppduster.github.selected-repositories@1");
+        assert_eq!(output.value, serde_json::json!({ "repositories": [] }));
+        assert!(legacy_action_output(&step, false).is_none());
+        let mut schemas = ContextStore::default();
+        insert_action_schema(&mut schemas, &step);
+        let schema = schemas
+            .get(&ContextScope::Step {
+                step_id: "preview".into(),
+            })
+            .expect("GitHub snapshot schema must be available to downstream bindings");
+        assert!(schema
+            .schema
+            .as_ref()
+            .is_some_and(|schema| schema.field("repositories").is_some()));
+    }
+
+    fn github_preview_graph_task(
+        selected_repositories: Vec<GithubRepositoryInput>,
+        body: Option<Step>,
+    ) -> Task {
+        let preview = plain_step(
+            "preview",
+            Action::GithubPreviewRepositories {
+                selected_repositories,
+            },
+        );
+        let mut graph = WorkflowGraph {
+            entries: vec!["preview".into()],
+            variables: BTreeMap::from([(
+                "selected_repositories".into(),
+                crate::automation::graph::ScenarioVariable::new(
+                    FieldRef::step("preview").field("repositories"),
+                ),
+            )]),
+            nodes: vec![action_node(preview, BTreeMap::new())],
+            ..WorkflowGraph::default()
+        };
+        if let Some(body) = body {
+            graph.nodes.push(GraphNode::ForEach(ForEachNode {
+                id: "repositories".into(),
+                collection: Binding::field(FieldRef::scenario().field("selected_repositories")),
+                item_alias: "repository".into(),
+                index_alias: Some("repository_index".into()),
+                concurrency: 1,
+                on_error: LoopFailurePolicy::Stop,
+                body: Box::new(one_action_graph(
+                    body,
+                    BTreeMap::from([(
+                        "path".into(),
+                        Binding::interpolated([
+                            TemplatePart::literal("/tmp/ppduster-github-snapshot-test-"),
+                            TemplatePart::field(FieldRef::loop_item("repositories").field("name")),
+                        ]),
+                    )]),
+                )),
+            }));
+            graph
+                .edges
+                .push(GraphEdge::new("preview", EdgePort::Success, "repositories"));
+        }
+        graph_task(graph)
+    }
+
+    fn github_preview_context(report: &RunReport) -> &ContextValue {
+        report
+            .context
+            .get(&ContextScope::Step {
+                step_id: "preview".into(),
+            })
+            .expect("GitHub snapshot must be present in runtime context")
+    }
+
+    fn github_scenario_context(report: &RunReport) -> &ContextValue {
+        report
+            .context
+            .get(&ContextScope::Scenario)
+            .expect("named GitHub snapshot must be present in scenario context")
+    }
+
+    #[test]
+    fn github_preview_empty_snapshot_has_identical_plan_and_apply_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("must-remain-absent");
+        let task = github_preview_graph_task(
+            Vec::new(),
+            Some(plain_step(
+                "create",
+                Action::CreateDirectory(CreateDirectoryAction {
+                    path: target.to_string_lossy().into_owned(),
+                }),
+            )),
+        );
+
+        let planned = run_task(&task, &RunOptions::default()).unwrap();
+        let applied = run_task(
+            &task,
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(planned.errors.is_empty(), "{:?}", planned.errors);
+        assert!(applied.errors.is_empty(), "{:?}", applied.errors);
+        assert_eq!(
+            github_preview_context(&planned).value,
+            serde_json::json!({ "repositories": [] })
+        );
+        assert_eq!(
+            github_preview_context(&planned).value,
+            github_preview_context(&applied).value
+        );
+        assert_eq!(
+            github_scenario_context(&planned).value,
+            serde_json::json!({ "selected_repositories": [] })
+        );
+        assert_eq!(
+            github_scenario_context(&planned).value,
+            github_scenario_context(&applied).value
+        );
+        assert_eq!(
+            github_scenario_context(&planned).provenance.origin,
+            ContextOrigin::Derived
+        );
+        assert_eq!(
+            github_scenario_context(&planned).provenance.inputs,
+            [FieldRef::step("preview").field("repositories")]
+        );
+        assert!(!target.exists());
+        assert!(planned.steps.iter().any(|step| {
+            step.step_id == "repositories"
+                && step.summary.contains("planned 0 concrete loop iteration")
+        }));
+        assert!(applied.steps.iter().any(|step| {
+            step.step_id == "repositories" && step.summary.contains("collection was empty")
+        }));
+        assert!(planned.steps[0].summary.contains("no discovery request"));
+        assert!(applied.steps[0].summary.contains("no discovery request"));
+    }
+
+    #[test]
+    fn github_preview_nonempty_snapshot_plans_exact_iterations_and_matches_apply_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("alpha");
+        let second = temp.path().join("beta");
+        let create = plain_step(
+            "create",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: "/tmp/placeholder".into(),
+            }),
+        );
+        let mut task = github_preview_graph_task(
+            vec![
+                github_selection_repository("R_alpha", "alpha"),
+                github_selection_repository("R_beta", "beta"),
+            ],
+            Some(create),
+        );
+        let graph = task.graph.as_mut().unwrap();
+        let GraphNode::ForEach(loop_node) = &mut graph.nodes[1] else {
+            panic!("expected repository loop")
+        };
+        let GraphNode::Action(create) = &mut loop_node.body.nodes[0] else {
+            panic!("expected create action")
+        };
+        create.bindings.insert(
+            "path".into(),
+            Binding::interpolated([
+                TemplatePart::literal(format!("{}/", temp.path().display())),
+                TemplatePart::field(FieldRef::loop_item("repositories").field("name")),
+            ]),
+        );
+        task.validate().unwrap();
+
+        let planned = run_task(&task, &RunOptions::default()).unwrap();
+        assert!(!first.exists());
+        assert!(!second.exists());
+        assert!(planned.errors.is_empty(), "{:?}", planned.errors);
+        assert!(planned
+            .steps
+            .iter()
+            .any(|step| step.step_id == "repositories[1]/create"
+                && step.summary.contains(&first.to_string_lossy().to_string())));
+        assert!(planned
+            .steps
+            .iter()
+            .any(|step| step.step_id == "repositories[2]/create"
+                && step.summary.contains(&second.to_string_lossy().to_string())));
+        assert!(!planned
+            .steps
+            .iter()
+            .any(|step| step.step_id.contains("[*]")));
+
+        let applied = run_task(
+            &task,
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(applied.errors.is_empty(), "{:?}", applied.errors);
+        assert!(first.is_dir());
+        assert!(second.is_dir());
+        assert_eq!(
+            github_preview_context(&planned).value,
+            github_preview_context(&applied).value
+        );
+        assert_eq!(
+            github_scenario_context(&planned).value,
+            github_scenario_context(&applied).value
+        );
+        assert_eq!(
+            github_scenario_context(&applied).value["selected_repositories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|repository| repository["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["R_alpha", "R_beta"]
+        );
+        assert!(planned.steps[0].summary.contains("no discovery request"));
+        assert!(applied.steps[0].summary.contains("no discovery request"));
+    }
+
+    #[test]
+    fn repository_name_path_is_structural_then_expanded_before_safety_validation() {
+        let repository_name = format!("ppduster-folder-binding-{}", std::process::id());
+        let repository = github_selection_repository("R_folder", &repository_name);
+        let repository_type = crate::automation::block::block_definition(
+            crate::automation::block::ActionKind::GithubPreviewRepositories,
+        )
+        .output_schema
+        .resolve_owned(&[
+            ContextPathSegment::field("repositories"),
+            ContextPathSegment::index(0),
+        ])
+        .expect("GitHub snapshot schema must expose a typed repository item")
+        .value_type;
+        let mut scope = GraphScopeState::default();
+        insert_loop_value(
+            &mut scope,
+            "repositories",
+            0,
+            serde_json::to_value(repository).unwrap(),
+            repository_type,
+            Sensitivity::Public,
+        );
+        let create = plain_step(
+            "create",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: "/tmp/placeholder".into(),
+            }),
+        );
+        let materialized = materialize_step(
+            &create,
+            &BTreeMap::from([(
+                "path".into(),
+                Binding::interpolated([
+                    TemplatePart::literal("$HOME/Developer/"),
+                    TemplatePart::field(FieldRef::loop_item("repositories").field("name")),
+                ]),
+            )]),
+            &scope.values,
+            BindingLimits::default(),
+        )
+        .expect("repository.name must materialize into a directory path");
+        let Action::CreateDirectory(action) = materialized.action else {
+            panic!("expected create-directory action")
+        };
+
+        assert_eq!(
+            action.path,
+            format!("$HOME/Developer/{repository_name}"),
+            "the authored $HOME token remains a literal while the field is structural"
+        );
+        let validated = validate_create_directory_path(&action.path)
+            .expect("the final materialized path must pass normal destination safety");
+        assert_eq!(
+            validated,
+            dirs::home_dir()
+                .unwrap()
+                .join("Developer")
+                .join(repository_name)
+        );
+    }
+
+    #[test]
+    fn unresolved_scenario_variable_fails_before_the_dependent_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("must-not-be-created");
+        let mut source = plain_step(
+            "inspect",
+            Action::InspectPath(InspectPathAction {
+                path: target.to_string_lossy().into_owned(),
+                recursive_size: false,
+                sha256: false,
+                expect: None,
+            }),
+        );
+        source.when = Some(StepCondition::Expression {
+            rule: ExpressionV1::Literal {
+                value: crate::automation::expression::ExpressionValue::Bool(false),
+            },
+            policy: Default::default(),
+        });
+        let mutation = plain_step(
+            "mutate",
+            Action::CreateDirectory(CreateDirectoryAction {
+                path: "/tmp/placeholder".into(),
+            }),
+        );
+        let graph = WorkflowGraph {
+            entries: vec!["inspect".into()],
+            variables: BTreeMap::from([(
+                "target_path".into(),
+                crate::automation::graph::ScenarioVariable::new(
+                    FieldRef::step("inspect").field("path"),
+                ),
+            )]),
+            nodes: vec![
+                action_node(source, BTreeMap::new()),
+                action_node(
+                    mutation,
+                    BTreeMap::from([(
+                        "path".into(),
+                        Binding::field(FieldRef::scenario().field("target_path")),
+                    )]),
+                ),
+            ],
+            edges: vec![GraphEdge::new("inspect", EdgePort::Success, "mutate")],
+            ..WorkflowGraph::default()
+        };
+
+        let report = run_task(
+            &graph_task(graph),
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!target.exists());
+        assert!(report
+            .steps
+            .iter()
+            .any(|step| step.step_id == "inspect" && matches!(step.status, StepStatus::Skipped)));
+        assert!(report.steps.iter().any(|step| {
+            step.step_id == "mutate"
+                && matches!(step.status, StepStatus::Failed)
+                && step
+                    .logs
+                    .iter()
+                    .any(|log| log.message.contains("binding failed"))
+        }));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("binding failed")));
+        assert!(report.context.get(&ContextScope::Scenario).is_none());
     }
 
     #[test]
