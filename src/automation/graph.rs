@@ -86,6 +86,14 @@ pub struct WorkflowGraph {
     pub entries: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exits: Vec<GraphExit>,
+    /// Named scenario-wide values materialized from root action outputs.
+    ///
+    /// The declaration stores provenance, not a second copy of the value. At
+    /// runtime the runner publishes the resolved source value under
+    /// [`ContextScope::Scenario`], while static validation preserves the
+    /// source field's exact type and dominance requirements.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, ScenarioVariable>,
     #[serde(default)]
     pub nodes: Vec<GraphNode>,
     #[serde(default)]
@@ -99,9 +107,23 @@ impl Default for WorkflowGraph {
             id: None,
             entries: Vec::new(),
             exits: Vec::new(),
+            variables: BTreeMap::new(),
             nodes: Vec::new(),
             edges: Vec::new(),
         }
+    }
+}
+
+/// A named scenario value sourced from an exact root action output field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioVariable {
+    pub source: FieldRef,
+}
+
+impl ScenarioVariable {
+    pub fn new(source: FieldRef) -> Self {
+        Self { source }
     }
 }
 
@@ -130,9 +152,11 @@ impl WorkflowGraph {
         let mut validator = GraphValidator::default();
         if validator.preflight(self) {
             validator.collect_ids(self, "graph");
+            validator.collect_scenario_variables(self, "graph");
             validator.validate_graph(
                 self,
                 "graph",
+                true,
                 &BTreeSet::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
@@ -140,6 +164,25 @@ impl WorkflowGraph {
         }
         if validator.errors.is_empty() {
             Ok(())
+        } else {
+            Err(validator.errors)
+        }
+    }
+
+    /// Resolve the declared scenario variables to the schema exposed through
+    /// [`ContextScope::Scenario`].
+    ///
+    /// This validates declaration sources (root action, non-empty typed path)
+    /// but does not require the full graph to be structurally valid. Callers
+    /// that execute a graph must still call [`Self::validate`].
+    pub fn scenario_variable_schema(&self) -> Result<ObjectSchema, Vec<GraphValidationError>> {
+        let mut validator = GraphValidator::default();
+        if validator.preflight(self) {
+            validator.collect_ids(self, "graph");
+            validator.collect_scenario_variables(self, "graph");
+        }
+        if validator.errors.is_empty() {
+            Ok(validator.scenario_variable_schema())
         } else {
             Err(validator.errors)
         }
@@ -1428,8 +1471,15 @@ struct GraphValidator {
     global_output_schemas: BTreeMap<String, ObjectSchema>,
     global_action_kinds: BTreeMap<String, ActionKind>,
     global_script_exit_codes: BTreeMap<String, Option<BTreeSet<u32>>>,
+    scenario_variables: BTreeMap<String, ResolvedScenarioVariable>,
     errors: Vec<GraphValidationError>,
     error_limit_reached: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedScenarioVariable {
+    source: FieldRef,
+    value_type: StaticBindingType,
 }
 
 impl GraphValidator {
@@ -1515,6 +1565,37 @@ impl GraphValidator {
 
             if let Some(id) = &graph.id {
                 valid &= self.preflight_string(id, &format!("{path}.id"), &mut budget);
+            }
+            let binding_limits = BindingLimits::default();
+            if graph.variables.len() > binding_limits.max_bindings {
+                self.resource_limit(
+                    &format!("{path}.variables"),
+                    "scenario variables",
+                    graph.variables.len(),
+                    binding_limits.max_bindings,
+                );
+                valid = false;
+            } else {
+                budget.bindings = budget.bindings.saturating_add(graph.variables.len());
+                if budget.bindings > GRAPH_MAX_TOTAL_BINDINGS {
+                    self.resource_limit(
+                        &format!("{path}.variables"),
+                        "total bindings and scenario variables",
+                        budget.bindings,
+                        GRAPH_MAX_TOTAL_BINDINGS,
+                    );
+                    valid = false;
+                }
+                for (name, variable) in &graph.variables {
+                    let variable_path = format!("{path}.variables[{name:?}]");
+                    valid &=
+                        self.preflight_string(name, &format!("{variable_path}.name"), &mut budget);
+                    valid &= self.preflight_field_ref(
+                        &variable.source,
+                        &format!("{variable_path}.source"),
+                        &mut budget,
+                    );
+                }
             }
             for (entry_index, entry) in graph.entries.iter().enumerate() {
                 valid &= self.preflight_string(
@@ -1954,25 +2035,7 @@ impl GraphValidator {
         let limits = BindingLimits::default();
         match binding {
             Binding::Literal { value } => self.preflight_json_value(value, path, budget),
-            Binding::Field { field } => {
-                if field.segments.len() > limits.max_path_segments {
-                    self.resource_limit(
-                        path,
-                        "binding path segments",
-                        field.segments.len(),
-                        limits.max_path_segments,
-                    );
-                    false
-                } else {
-                    match field_ref_payload_bytes(field) {
-                        Ok(bytes) => self.preflight_payload_bytes(bytes, path, budget),
-                        Err(limit) => {
-                            self.resource_limit(path, limit.resource, limit.found, limit.limit);
-                            false
-                        }
-                    }
-                }
-            }
+            Binding::Field { field } => self.preflight_field_ref(field, path, budget),
             Binding::Template { template } => {
                 if template.len() > limits.max_rendered_bytes {
                     self.resource_limit(
@@ -2053,6 +2116,32 @@ impl GraphValidator {
                     }
                 }
                 valid
+            }
+        }
+    }
+
+    fn preflight_field_ref(
+        &mut self,
+        field: &FieldRef,
+        path: &str,
+        budget: &mut GraphPreflightBudget,
+    ) -> bool {
+        let limits = BindingLimits::default();
+        if field.segments.len() > limits.max_path_segments {
+            self.resource_limit(
+                path,
+                "binding path segments",
+                field.segments.len(),
+                limits.max_path_segments,
+            );
+            false
+        } else {
+            match field_ref_payload_bytes(field) {
+                Ok(bytes) => self.preflight_payload_bytes(bytes, path, budget),
+                Err(limit) => {
+                    self.resource_limit(path, limit.resource, limit.found, limit.limit);
+                    false
+                }
             }
         }
     }
@@ -2151,14 +2240,141 @@ impl GraphValidator {
         }
     }
 
+    fn collect_scenario_variables(&mut self, graph: &WorkflowGraph, path: &str) {
+        let root_actions = graph
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                GraphNode::Action(action) if !action.step.id.trim().is_empty() => Some((
+                    action.step.id.as_str(),
+                    definition_for_action(&action.step.action).output_schema,
+                )),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        for (name, variable) in &graph.variables {
+            let variable_path = format!("{path}.variables[{name:?}]");
+            if !is_identifier(name) {
+                self.error(
+                    &variable_path,
+                    GraphValidationErrorKind::InvalidAlias {
+                        node: "scenario".into(),
+                        alias: name.clone(),
+                    },
+                );
+                continue;
+            }
+            let ContextScope::Step { step_id } = &variable.source.scope else {
+                self.error(
+                    &variable_path,
+                    GraphValidationErrorKind::InvalidAction {
+                        node: format!("scenario.{name}"),
+                        message: "scenario variable source must be a root action output field"
+                            .into(),
+                    },
+                );
+                continue;
+            };
+            if variable.source.segments.is_empty()
+                || variable
+                    .source
+                    .segments
+                    .iter()
+                    .any(|segment| matches!(segment, ContextPathSegment::Index { .. }))
+            {
+                self.error(
+                    &variable_path,
+                    GraphValidationErrorKind::InvalidAction {
+                        node: format!("scenario.{name}"),
+                        message: "scenario variable source must be a field-only path below the action output root; array indices are not allowed".into(),
+                    },
+                );
+                continue;
+            }
+            let Some(schema) = root_actions.get(step_id.as_str()) else {
+                self.error(
+                    &variable_path,
+                    GraphValidationErrorKind::InvalidAction {
+                        node: format!("scenario.{name}"),
+                        message: format!(
+                            "scenario variable source {step_id:?} is not an action in the root graph"
+                        ),
+                    },
+                );
+                continue;
+            };
+            let Some(resolved) = schema.resolve_owned(&variable.source.segments) else {
+                self.error(
+                    &variable_path,
+                    GraphValidationErrorKind::UnknownContextField {
+                        consumer: format!("scenario.{name}"),
+                        producer: step_id.clone(),
+                        field: display_segments(&variable.source.segments),
+                    },
+                );
+                continue;
+            };
+            self.scenario_variables.insert(
+                name.clone(),
+                ResolvedScenarioVariable {
+                    source: variable.source.clone(),
+                    value_type: StaticBindingType {
+                        value_type: resolved.value_type,
+                        required: resolved.required,
+                        nullable: resolved.nullable,
+                        sensitivity: resolved.sensitivity,
+                        allowed_values: resolved.allowed_values,
+                        positionally_optional: source_is_optional_only_by_index(
+                            schema,
+                            &variable.source.segments,
+                        ),
+                    },
+                },
+            );
+        }
+    }
+
+    fn scenario_variable_schema(&self) -> ObjectSchema {
+        let fields = self
+            .scenario_variables
+            .iter()
+            .map(|(name, variable)| {
+                let value_type = &variable.value_type;
+                (
+                    name.clone(),
+                    FieldSchema {
+                        value_type: value_type.value_type.clone(),
+                        required: value_type.required,
+                        nullable: value_type.nullable,
+                        description: None,
+                        sensitivity: value_type.sensitivity,
+                        allowed_values: value_type.allowed_values.clone(),
+                    },
+                )
+            })
+            .collect();
+        ObjectSchema::anonymous(fields)
+    }
+
     fn validate_graph(
         &mut self,
         graph: &WorkflowGraph,
         path: &str,
+        is_root: bool,
         inherited_visible: &BTreeSet<String>,
         active_loops: &BTreeMap<String, StaticBindingType>,
         active_aliases: &BTreeMap<String, FieldRef>,
     ) {
+        if !is_root && !graph.variables.is_empty() {
+            self.error(
+                format!("{path}.variables"),
+                GraphValidationErrorKind::InvalidAction {
+                    node: graph.id.clone().unwrap_or_else(|| path.into()),
+                    message: "nested workflow graphs cannot declare scenario variables".into(),
+                },
+            );
+        }
         if graph.version != WORKFLOW_GRAPH_VERSION {
             self.error(
                 path,
@@ -2571,6 +2787,7 @@ impl GraphValidator {
                     self.validate_graph(
                         &control.body,
                         &format!("{node_path}.body"),
+                        false,
                         &visible,
                         &loops,
                         &aliases,
@@ -2592,6 +2809,7 @@ impl GraphValidator {
                     self.validate_graph(
                         &control.then_graph,
                         &format!("{node_path}.then"),
+                        false,
                         &visible,
                         active_loops,
                         active_aliases,
@@ -2600,6 +2818,7 @@ impl GraphValidator {
                         self.validate_graph(
                             graph,
                             &format!("{node_path}.else"),
+                            false,
                             &visible,
                             active_loops,
                             active_aliases,
@@ -2718,6 +2937,7 @@ impl GraphValidator {
                         self.validate_graph(
                             &case.graph,
                             &format!("{case_path}.graph"),
+                            false,
                             &visible,
                             active_loops,
                             active_aliases,
@@ -2727,6 +2947,7 @@ impl GraphValidator {
                         self.validate_graph(
                             graph,
                             &format!("{node_path}.default"),
+                            false,
                             &visible,
                             active_loops,
                             active_aliases,
@@ -3058,6 +3279,27 @@ impl GraphValidator {
         active_loops: &BTreeMap<String, StaticBindingType>,
         dominators: &BTreeMap<String, BTreeSet<String>>,
     ) -> Option<StaticBindingType> {
+        if matches!(field.scope, ContextScope::Scenario) {
+            let (name, segments) = scenario_reference_parts(field)?;
+            let variable = self.scenario_variables.get(name)?.clone();
+            let ContextScope::Step { step_id } = &variable.source.scope else {
+                return None;
+            };
+            if !step_is_visible(step_id, consumer, local_ids, inherited_visible, dominators) {
+                return None;
+            }
+            return resolve_static_type(&variable.value_type, segments).or_else(|| {
+                self.error(
+                    path,
+                    GraphValidationErrorKind::UnknownContextField {
+                        consumer: consumer.into(),
+                        producer: format!("scenario.{name}"),
+                        field: display_segments(segments),
+                    },
+                );
+                None
+            });
+        }
         if !field_ref_is_visible(
             field,
             consumer,
@@ -3069,10 +3311,7 @@ impl GraphValidator {
             return None;
         }
         match &field.scope {
-            // The v2 task envelope does not yet declare a scenario input
-            // schema, so scenario references are checked during task
-            // integration when that envelope is available.
-            ContextScope::Scenario => None,
+            ContextScope::Scenario => unreachable!("scenario fields are handled above"),
             ContextScope::LoopItem { step_id } => {
                 let root = active_loops.get(step_id)?;
                 resolve_static_type(root, &field.segments).or_else(|| {
@@ -3315,9 +3554,25 @@ impl GraphValidator {
             limits.max_depth,
         );
         let mut requested_scopes = BTreeSet::new();
+        let mut context_references = Vec::new();
         rewritten.visit_context_references(|field| {
             requested_scopes.insert(field.scope.clone());
+            context_references.push(field.clone());
         });
+        for field in context_references
+            .iter()
+            .filter(|field| matches!(field.scope, ContextScope::Scenario))
+        {
+            self.validate_field_ref(
+                field,
+                consumer,
+                path,
+                local_ids,
+                inherited_visible,
+                active_loops,
+                dominators,
+            );
+        }
         let resolver = self.expression_context_store(
             consumer,
             local_ids,
@@ -3433,6 +3688,52 @@ impl GraphValidator {
         }
 
         let mut store = ContextStore::default();
+        if requested_scopes.contains(&ContextScope::Scenario) {
+            let visible_variables = self
+                .scenario_variables
+                .iter()
+                .filter(|(_, variable)| {
+                    matches!(
+                        &variable.source.scope,
+                        ContextScope::Step { step_id } if visible.contains(step_id)
+                    )
+                })
+                .collect::<Vec<_>>();
+            let schema = ObjectSchema::anonymous(
+                visible_variables
+                    .iter()
+                    .map(|(name, variable)| {
+                        let value_type = &variable.value_type;
+                        (
+                            (*name).clone(),
+                            FieldSchema {
+                                value_type: value_type.value_type.clone(),
+                                required: value_type.required,
+                                nullable: value_type.nullable,
+                                description: None,
+                                sensitivity: value_type.sensitivity,
+                                allowed_values: value_type.allowed_values.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+            store.insert(
+                ContextScope::Scenario,
+                ContextValue::new(
+                    Value::Null,
+                    ContextProvenance {
+                        origin: ContextOrigin::ScenarioInput,
+                        inputs: visible_variables
+                            .into_iter()
+                            .map(|(_, variable)| variable.source.clone())
+                            .collect(),
+                        operation: Some("graph-static-scenario-variables".into()),
+                    },
+                )
+                .with_schema(schema),
+            );
+        }
         for step_id in visible {
             let scope = ContextScope::Step {
                 step_id: step_id.clone(),
@@ -3488,14 +3789,53 @@ impl GraphValidator {
         dominators: &BTreeMap<String, BTreeSet<String>>,
     ) {
         match &field.scope {
-            ContextScope::Scenario => self.error(
-                path,
-                GraphValidationErrorKind::UnknownContextField {
-                    consumer: consumer.into(),
-                    producer: "scenario input".into(),
-                    field: display_segments(&field.segments),
-                },
-            ),
+            ContextScope::Scenario => {
+                let Some((name, segments)) = scenario_reference_parts(field) else {
+                    self.error(
+                        path,
+                        GraphValidationErrorKind::UnknownContextField {
+                            consumer: consumer.into(),
+                            producer: "scenario variables".into(),
+                            field: display_segments(&field.segments),
+                        },
+                    );
+                    return;
+                };
+                let Some(variable) = self.scenario_variables.get(name).cloned() else {
+                    self.error(
+                        path,
+                        GraphValidationErrorKind::UnknownContextField {
+                            consumer: consumer.into(),
+                            producer: "scenario variables".into(),
+                            field: name.into(),
+                        },
+                    );
+                    return;
+                };
+                let ContextScope::Step { step_id } = &variable.source.scope else {
+                    return;
+                };
+                if !step_is_visible(step_id, consumer, local_ids, inherited_visible, dominators) {
+                    self.error(
+                        path,
+                        GraphValidationErrorKind::ContextNotVisible {
+                            consumer: consumer.into(),
+                            producer: step_id.clone(),
+                        },
+                    );
+                    return;
+                }
+                if resolve_static_type(&variable.value_type, segments).is_none() {
+                    self.error(
+                        path,
+                        GraphValidationErrorKind::UnknownContextField {
+                            consumer: consumer.into(),
+                            producer: format!("scenario.{name}"),
+                            field: display_segments(segments),
+                        },
+                    );
+                }
+            }
             ContextScope::LoopItem { step_id } => {
                 if !active_loops.contains_key(step_id) {
                     self.error(
@@ -4125,6 +4465,29 @@ fn loop_index_scope(loop_id: &str) -> String {
     format!("{loop_id}::index")
 }
 
+fn scenario_reference_parts(field: &FieldRef) -> Option<(&str, &[ContextPathSegment])> {
+    let (first, rest) = field.segments.split_first()?;
+    let ContextPathSegment::Field { name } = first else {
+        return None;
+    };
+    Some((name, rest))
+}
+
+fn step_is_visible(
+    step_id: &str,
+    consumer: &str,
+    local_ids: &BTreeSet<String>,
+    inherited_visible: &BTreeSet<String>,
+    dominators: &BTreeMap<String, BTreeSet<String>>,
+) -> bool {
+    inherited_visible.contains(step_id)
+        || (local_ids.contains(step_id)
+            && step_id != consumer
+            && dominators
+                .get(consumer)
+                .is_some_and(|set| set.contains(step_id)))
+}
+
 fn field_ref_is_visible(
     field: &FieldRef,
     consumer: &str,
@@ -4134,18 +4497,12 @@ fn field_ref_is_visible(
     dominators: &BTreeMap<String, BTreeSet<String>>,
 ) -> bool {
     match &field.scope {
-        // WorkflowGraph v3 does not yet declare a scenario-input schema.
-        // Reject these references during validation instead of deferring an
-        // untyped lookup to runtime.
+        // Scenario variables need a declaration lookup in addition to lexical
+        // visibility and are handled by `GraphValidator::field_static_type`.
         ContextScope::Scenario => false,
         ContextScope::LoopItem { step_id } => active_loops.contains_key(step_id),
         ContextScope::Step { step_id } => {
-            inherited_visible.contains(step_id)
-                || (local_ids.contains(step_id)
-                    && step_id != consumer
-                    && dominators
-                        .get(consumer)
-                        .is_some_and(|set| set.contains(step_id)))
+            step_is_visible(step_id, consumer, local_ids, inherited_visible, dominators)
         }
     }
 }
@@ -4544,6 +4901,299 @@ mod tests {
             .is_some_and(|errors| errors.iter().any(|error| predicate(&error.kind)))
     }
 
+    #[test]
+    fn github_preview_repositories_are_a_typed_runtime_collection() {
+        let preview = GraphNode::Action(Box::new(ActionNode {
+            step: default_step(ActionKind::GithubPreviewRepositories, "preview").unwrap(),
+            bindings: BTreeMap::new(),
+        }));
+        let loop_node = GraphNode::ForEach(ForEachNode {
+            id: "loop".into(),
+            collection: Binding::field(FieldRef::step("preview").field("repositories")),
+            item_alias: "repository".into(),
+            index_alias: None,
+            concurrency: 1,
+            on_error: LoopFailurePolicy::Stop,
+            body: Box::new(graph(&["inside"], vec![action("inside")], vec![])),
+        });
+        let root = graph(
+            &["preview"],
+            vec![preview, loop_node],
+            vec![GraphEdge::new("preview", EdgePort::Success, "loop")],
+        );
+        root.validate().unwrap();
+    }
+
+    #[test]
+    fn github_preview_repositories_must_dominate_the_consumer() {
+        let preview = GraphNode::Action(Box::new(ActionNode {
+            step: default_step(ActionKind::GithubPreviewRepositories, "preview").unwrap(),
+            bindings: BTreeMap::new(),
+        }));
+        let loop_node = GraphNode::ForEach(ForEachNode {
+            id: "loop".into(),
+            collection: Binding::field(FieldRef::step("preview").field("repositories")),
+            item_alias: "repository".into(),
+            index_alias: None,
+            concurrency: 1,
+            on_error: LoopFailurePolicy::Stop,
+            body: Box::new(graph(&["inside"], vec![action("inside")], vec![])),
+        });
+        let root = graph(&["preview", "loop"], vec![preview, loop_node], vec![]);
+
+        assert!(has_error(&root.validate(), |kind| matches!(
+            kind,
+            GraphValidationErrorKind::ContextNotVisible { consumer, producer }
+                if consumer == "loop" && producer == "preview"
+        )));
+    }
+
+    #[test]
+    fn scenario_variable_exposes_a_typed_collection_to_for_each() {
+        let preview = GraphNode::Action(Box::new(ActionNode {
+            step: default_step(ActionKind::GithubPreviewRepositories, "preview").unwrap(),
+            bindings: BTreeMap::new(),
+        }));
+        let loop_node = GraphNode::ForEach(ForEachNode {
+            id: "loop".into(),
+            collection: Binding::field(FieldRef::scenario().field("selected_repositories")),
+            item_alias: "repository".into(),
+            index_alias: None,
+            concurrency: 1,
+            on_error: LoopFailurePolicy::Stop,
+            body: Box::new(graph(&["inside"], vec![action("inside")], vec![])),
+        });
+        let mut root = graph(
+            &["preview"],
+            vec![preview, loop_node],
+            vec![GraphEdge::new("preview", EdgePort::Success, "loop")],
+        );
+        root.variables.insert(
+            "selected_repositories".into(),
+            ScenarioVariable::new(FieldRef::step("preview").field("repositories")),
+        );
+
+        root.validate().unwrap();
+        let resolved = root
+            .scenario_variable_schema()
+            .unwrap()
+            .resolve_owned(&[ContextPathSegment::field("selected_repositories")])
+            .unwrap();
+        assert!(matches!(resolved.value_type, ContextType::Array { .. }));
+        assert!(resolved.required);
+        assert!(!resolved.nullable);
+    }
+
+    #[test]
+    fn scenario_variable_reference_rejects_unknown_name_and_invalid_root_paths() {
+        for field in [
+            FieldRef::scenario(),
+            FieldRef {
+                scope: ContextScope::Scenario,
+                segments: vec![ContextPathSegment::index(0)],
+            },
+            FieldRef::scenario().field("missing"),
+        ] {
+            let loop_node = GraphNode::ForEach(ForEachNode {
+                id: "loop".into(),
+                collection: Binding::field(field),
+                item_alias: "item".into(),
+                index_alias: None,
+                concurrency: 1,
+                on_error: LoopFailurePolicy::Stop,
+                body: Box::new(graph(&["inside"], vec![action("inside")], vec![])),
+            });
+            assert!(has_error(
+                &graph(&["loop"], vec![loop_node], vec![]).validate(),
+                |kind| matches!(kind, GraphValidationErrorKind::UnknownContextField { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn scenario_variable_declaration_requires_identifier_and_typed_root_action_field() {
+        let preview = || {
+            GraphNode::Action(Box::new(ActionNode {
+                step: default_step(ActionKind::GithubPreviewRepositories, "preview").unwrap(),
+                bindings: BTreeMap::new(),
+            }))
+        };
+        for (name, source) in [
+            ("not valid", FieldRef::step("preview").field("repositories")),
+            ("root", FieldRef::step("preview")),
+            (
+                "index_first",
+                FieldRef {
+                    scope: ContextScope::Step {
+                        step_id: "preview".into(),
+                    },
+                    segments: vec![ContextPathSegment::index(0)],
+                },
+            ),
+            ("wrong_scope", FieldRef::scenario().field("repositories")),
+            ("unknown_field", FieldRef::step("preview").field("missing")),
+        ] {
+            let mut root = graph(&["preview"], vec![preview()], vec![]);
+            root.variables
+                .insert(name.into(), ScenarioVariable::new(source));
+            assert!(root.validate().is_err(), "declaration {name:?} must fail");
+        }
+    }
+
+    #[test]
+    fn scenario_variable_source_rejects_indices_at_any_depth_but_accepts_direct_fields() {
+        let preview_node = || {
+            GraphNode::Action(Box::new(ActionNode {
+                step: default_step(ActionKind::GithubPreviewRepositories, "preview").unwrap(),
+                bindings: BTreeMap::new(),
+            }))
+        };
+
+        let mut direct = graph(&["preview"], vec![preview_node()], vec![]);
+        direct.variables.insert(
+            "repositories".into(),
+            ScenarioVariable::new(FieldRef::step("preview").field("repositories")),
+        );
+        direct.validate().unwrap();
+
+        let cases = [
+            (
+                graph(&["preview"], vec![preview_node()], vec![]),
+                FieldRef::step("preview").field("repositories").index(0),
+            ),
+            (
+                graph(&["list"], vec![action("list")], vec![]),
+                FieldRef::step("list")
+                    .field("github")
+                    .field("repositories")
+                    .index(0)
+                    .field("https_url"),
+            ),
+        ];
+        for (mut root, source) in cases {
+            root.variables
+                .insert("repository".into(), ScenarioVariable::new(source));
+            assert!(has_error(&root.validate(), |kind| matches!(
+                kind,
+                GraphValidationErrorKind::InvalidAction { message, .. }
+                    if message.contains("array indices are not allowed")
+            )));
+        }
+    }
+
+    #[test]
+    fn nested_graph_cannot_declare_scenario_variables() {
+        let mut body = graph(&["inside"], vec![action("inside")], vec![]);
+        body.variables.insert(
+            "repositories".into(),
+            ScenarioVariable::new(FieldRef::step("preview").field("repositories")),
+        );
+        let loop_node = GraphNode::ForEach(ForEachNode {
+            id: "loop".into(),
+            collection: Binding::literal(serde_json::json!(["item"])),
+            item_alias: "item".into(),
+            index_alias: None,
+            concurrency: 1,
+            on_error: LoopFailurePolicy::Stop,
+            body: Box::new(body),
+        });
+
+        assert!(has_error(
+            &graph(&["loop"], vec![loop_node], vec![]).validate(),
+            |kind| matches!(
+                kind,
+                GraphValidationErrorKind::InvalidAction { message, .. }
+                    if message.contains("nested workflow graphs")
+            )
+        ));
+    }
+
+    #[test]
+    fn scenario_variable_source_must_dominate_each_consumer() {
+        let preview = GraphNode::Action(Box::new(ActionNode {
+            step: default_step(ActionKind::GithubPreviewRepositories, "preview").unwrap(),
+            bindings: BTreeMap::new(),
+        }));
+        let loop_node = GraphNode::ForEach(ForEachNode {
+            id: "loop".into(),
+            collection: Binding::field(FieldRef::scenario().field("repositories")),
+            item_alias: "repository".into(),
+            index_alias: None,
+            concurrency: 1,
+            on_error: LoopFailurePolicy::Stop,
+            body: Box::new(graph(&["inside"], vec![action("inside")], vec![])),
+        });
+        let mut root = graph(&["preview", "loop"], vec![preview, loop_node], vec![]);
+        root.variables.insert(
+            "repositories".into(),
+            ScenarioVariable::new(FieldRef::step("preview").field("repositories")),
+        );
+
+        assert!(has_error(&root.validate(), |kind| matches!(
+            kind,
+            GraphValidationErrorKind::ContextNotVisible { consumer, producer }
+                if consumer == "loop" && producer == "preview"
+        )));
+    }
+
+    #[test]
+    fn scenario_variable_is_available_to_the_static_expression_checker() {
+        let preview = GraphNode::Action(Box::new(ActionNode {
+            step: default_step(ActionKind::GithubPreviewRepositories, "preview").unwrap(),
+            bindings: BTreeMap::new(),
+        }));
+        let choice = GraphNode::If(IfNode {
+            id: "choice".into(),
+            condition: ExpressionV1::Exists {
+                reference: ReferenceV1::Context {
+                    field: FieldRef::scenario().field("repositories"),
+                },
+            },
+            then_graph: Box::new(graph(&["inside"], vec![action("inside")], vec![])),
+            else_graph: None,
+        });
+        let mut root = graph(
+            &["preview"],
+            vec![preview, choice],
+            vec![GraphEdge::new("preview", EdgePort::Success, "choice")],
+        );
+        root.variables.insert(
+            "repositories".into(),
+            ScenarioVariable::new(FieldRef::step("preview").field("repositories")),
+        );
+
+        root.validate().unwrap();
+    }
+
+    #[test]
+    fn empty_variables_are_backward_compatible_and_omitted_from_wire() {
+        let root = graph(&["only"], vec![action("only")], vec![]);
+        let mut wire = serde_json::to_value(&root).unwrap();
+        assert!(wire.get("variables").is_none());
+        wire.as_object_mut().unwrap().remove("variables");
+        let decoded: WorkflowGraph = serde_json::from_value(wire).unwrap();
+        assert!(decoded.variables.is_empty());
+        decoded.validate().unwrap();
+    }
+
+    #[test]
+    fn array_snapshot_source_is_non_runtime_authoring_metadata() {
+        let selector = GraphNode::Action(Box::new(ActionNode {
+            step: Step {
+                action: Action::SelectArrayItems {
+                    source: Some(FieldRef::step("missing-preview").field("items")),
+                    item_type: ContextType::STRING,
+                    selected_items: Vec::new(),
+                },
+                ..default_step(ActionKind::SelectArrayItems, "selector").unwrap()
+            },
+            bindings: BTreeMap::new(),
+        }));
+        graph(&["selector"], vec![selector], vec![])
+            .validate()
+            .unwrap();
+    }
+
     fn validate_interpreter_source(field: FieldSchema) -> Result<(), Vec<GraphValidationError>> {
         let source = action("source");
         let script = default_step(ActionKind::RunScript, "script").unwrap();
@@ -4572,6 +5222,7 @@ mod tests {
             validator.validate_graph(
                 &root,
                 "graph",
+                true,
                 &BTreeSet::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
@@ -5756,7 +6407,7 @@ mod tests {
         assert!(has_error(&root.validate(), |kind| matches!(
             kind,
             GraphValidationErrorKind::UnknownContextField { producer, field, .. }
-                if producer == "scenario input" && field == "branch"
+                if producer == "scenario variables" && field == "branch"
         )));
     }
 

@@ -118,7 +118,7 @@ fn assert_round_trip(step: Step, kind: ActionKind, case: &str) {
 
 fn manual_literal(kind: ActionKind, target: &str) -> Option<Value> {
     Some(match (kind, target) {
-        (ActionKind::GithubListRepositories, _) => return None,
+        (ActionKind::GithubListRepositories | ActionKind::SelectArrayItems, _) => return None,
         (ActionKind::CreateDirectory, "path") => json!("/tmp/ppduster-matrix-created"),
         (ActionKind::InspectPath, "path") => json!("/tmp/ppduster-matrix-inspect"),
         (ActionKind::InspectPath, "recursive_size" | "sha256") => json!(true),
@@ -248,7 +248,7 @@ fn manual_literal(kind: ActionKind, target: &str) -> Option<Value> {
 #[test]
 fn every_executable_default_step_materializes_and_round_trips() {
     let kinds = executable_action_kinds().collect::<Vec<_>>();
-    assert_eq!(kinds.len(), 24, "update the default-input matrix");
+    assert_eq!(kinds.len(), 26, "update the default-input matrix");
 
     for kind in kinds {
         let materialized = materialize_literals(kind, "default", []).unwrap_or_else(|error| {
@@ -334,7 +334,7 @@ fn every_action_materializes_all_compatible_manual_fields_together() {
         );
     }
 
-    assert_eq!(action_count, 24, "update the grouped action matrix");
+    assert_eq!(action_count, 26, "update the grouped action matrix");
     assert_eq!(binding_count, 75, "update grouped manual fixtures");
 }
 

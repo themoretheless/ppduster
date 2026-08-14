@@ -77,42 +77,68 @@ but iterations still run sequentially. Legacy templates can compose legacy step-
 including a graph task from a legacy template is rejected until graph-aware composition has an
 explicit ID, edge, scope, and export contract.
 
-For the bundled GitHub repository scenario, the inspector can load repositories visible
-to the current GitHub CLI account and select one or many public repositories. Each
-selection materializes separate inspect, clone-if-missing, fetch, and fast-forward
-blocks under `<destination root>/<owner>/<repository>`, so plans, statuses, and errors
-stay separate. Private, archived,
-empty, and no-`main` repositories cannot be selected; SSH is not offered in the GUI.
+The **GitHub · select and clone** starter uses snapshot semantics:
+**Select GitHub repositories** -> **For each** -> **Clone if missing**. The first block
+loads preview candidates only while authoring and shows the selection checkboxes itself.
+It stores the complete selected public values in the project YAML and publishes them as
+the named typed scenario variable `selected_repositories[]` at runtime without listing GitHub
+again. Fields include `id`, `owner`, `name`, `full_name`, `https_url`, `ssh_url`,
+`default_branch`, `private`, and `archived`. Private repository metadata is never persisted;
+the background HTTPS recipe additionally excludes archived repositories and repositories
+without a default branch.
 
-The visual constructor also provides a read-only **Get account repositories** GitHub
-block. Its typed output contains `github.account.login` and `github.repositories[]`.
-Each repository exposes `id`, `owner`, `name`, `full_name`, `https_url`, `ssh_url`,
-`default_branch`, `private`, and `archived`.
+The starter configures **For each** explicitly: its collection is the scenario variable
+`selected_repositories[]`, its item alias is `repository`, and its index alias is
+`repository_index`. Blocks inside the loop can bind typed item fields such as
+`repository.https_url`, `repository.full_name`, and `repository.default_branch`; the numeric
+`repository_index` is available from the same lexical loop context. The collection is not
+chosen again when the scenario runs: **For each** reads the already saved named variable.
 
-The source block's inspector can sign in through GitHub CLI and **Load preview** without
-checking a plan, applying a plan, or executing the graph. The authoring preview can also
-be refreshed from the inspector of a downstream read-only **Select GitHub repositories**
-block. Add that block directly after **Get account repositories** to bind its complete
-`github` input automatically, then search the preview and select the required repositories.
-The selector publishes the same typed `github.account` and `github.repositories[]` shape,
-so a following **For each** block can use the filtered `github.repositories` array.
+A scenario variable is part of ppduster's typed workflow context, not an operating-system
+environment variable. It is never injected into a child process environment and does not
+create `SELECTED_REPOSITORIES` or any similar shell variable. A later block can read it only
+through an explicit typed binding, and only when the snapshot-producing block dominates that
+consumer in the workflow graph. Inside **For each**, item fields are likewise available only
+through explicit bindings from the `repository` loop item. If a command or script needs one
+of those scalar values in its process `env`, that specific environment entry must be bound
+explicitly.
 
-Preview account and repository metadata exist only in application memory. The project YAML
-stores only the expected account login and the selected opaque GitHub repository node IDs;
-it stores neither the preview, credentials, nor a GitHub token. At runtime the upstream
-source obtains a fresh repository list through GitHub CLI. The selector requires the fresh
-account login to match and resolves every saved ID from that fresh list. A changed account,
-missing repository, or revoked access fails before any downstream mutation instead of using
-stale preview metadata or silently substituting another repository.
+Both plan and apply are offline with respect to repository discovery and never list
+repositories again. Dry-run validates and describes the saved selector configuration;
+apply publishes the saved `selected_repositories[]` snapshot for downstream execution. The
+subsequent clone action can still contact the saved HTTPS repository URL. Refreshing the
+authoring preview does not replace the saved snapshot until the user changes the selection,
+so refresh and reselect when a repository URL or default branch changes. Unselected preview
+values, credentials, and a GitHub token are never written to the project.
 
-To pass one concrete repository to a later **Check Git repository** block, select that
-block and use **Input context** for `Repository URL`: choose **From context**, select
-the earlier `github.repositories[]` output, enter the one-based element number, and
-choose `https_url` or `ssh_url`. For example, element `3` is stored structurally as
-`github.repositories[2].https_url`; the UI shows `3`, while the runtime uses the
-zero-based index `2`. If the array contains fewer elements, the binding fails before
-the consumer action runs. Use **For each** instead when every repository should be
-processed.
+To pass every saved repository to **Clone if missing**, open **For each** and select
+`selected_repositories[]` as its collection. Then open the clone block inside the loop and bind
+its repository URL from `repository.https_url`; `repository.default_branch` can supply the
+branch, and `repository.full_name` can be used wherever a typed name or display value is
+accepted. To address one fixed element without a loop, select the named scenario array and a
+one-based element in the binding editor. Runtime stores that position as a zero-based index and
+fails before the consumer action runs if the saved array is shorter.
+
+Path fields inside the loop can mix literal text with typed item fields. For example, enter
+`$HOME/Developer/{{repository.name}}` in **Create directory** to create one folder named after
+each repository; typing `{{` opens autocomplete for the fields visible at that graph position.
+The braces are editor syntax only. Project YAML stores the value as a structural
+`Binding::Interpolated`: a literal `$HOME/Developer/` part followed by a `FieldRef` to the loop
+item's `name`. It is never saved as a legacy raw `Binding::Template`, so renames, type checking,
+and final path safety validation continue to operate on the real reference.
+
+The older live GitHub blocks remain available for compatibility and for workflows that
+intentionally need fresh discovery. **Get account repositories** runs through GitHub CLI
+at runtime and publishes `github.account.login` plus `github.repositories[]`.
+**Select GitHub repositories** stores account/ID keys, then filters that freshly fetched
+array on each applied run. These live outputs and their `github.repositories[...]` paths
+belong to the legacy/live flow; the snapshot starter does not depend on them.
+
+The older bundled repository-picker flow also remains separate: it materializes selected
+public repositories into individual inspect, clone-if-missing, fetch, and fast-forward
+blocks under `<destination root>/<owner>/<repository>`. Its statuses and errors stay per
+repository; private, archived, empty, and no-`main` repositories are unavailable, and SSH
+is not offered in the GUI.
 
 Every automation block publishes a versioned structural output schema and declares a typed
 input schema. One schema-driven inspector walks those definitions recursively, renders the
@@ -168,8 +194,9 @@ open target/macos/ppduster.app
 
 Scenarios that need a terminal prompt, App Store authentication, or vendor license UI
 remain terminal-only. The desktop app produces the exact CLI command for them instead
-of attempting to capture credentials. A repository selection is an in-memory scenario
-configuration and is applied from the desktop UI after its generated plan is reviewed.
+of attempting to capture credentials. Authoring previews remain in memory, while a
+snapshot selector persists only its chosen public typed values in project YAML. The saved
+snapshot is then planned and applied without repeating discovery.
 
 ## Usage
 
@@ -260,8 +287,9 @@ ppduster setup show dev-brew-bootstrap
 # Plan a task (default; no side effects)
 ppduster setup run dev-brew-bootstrap
 
-# Typed graph: list the current GitHub account, filter repositories, and plan
-# one clone-if-missing action per repository. Review before applying.
+# Legacy/live typed graph: fetch the current GitHub account and repositories at
+# apply time, filter by saved IDs, and run clone-if-missing per repository.
+# This is separate from the UI snapshot starter described above.
 ppduster setup run github-account-clone-v2
 ppduster setup run github-account-clone-v2 --yes
 

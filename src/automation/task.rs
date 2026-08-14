@@ -1,6 +1,8 @@
+use crate::automation::binding::validate_literal_binding;
 use crate::automation::block::definition_for_action;
 use crate::automation::context::{
-    Binding, ContextProvenance, ContextScope, ContextStore, ContextValue, TemplatePart,
+    Binding, ContextProvenance, ContextScope, ContextStore, ContextType, ContextValue, FieldRef,
+    FieldSchema, Sensitivity, TemplatePart, CONTEXT_SCHEMA_VERSION,
 };
 use crate::automation::expression::{check_rule, ExpressionLimits, RuleExprV1};
 use crate::automation::graph::{
@@ -824,6 +826,19 @@ fn default_script_success_exit_codes() -> Vec<u32> {
 const MAX_GITHUB_ACCOUNT_LOGIN_BYTES: usize = 256;
 const MAX_SELECTED_GITHUB_REPOSITORIES: usize = 200;
 const MAX_GITHUB_REPOSITORY_ID_BYTES: usize = 1_024;
+const MAX_GITHUB_REPOSITORY_OWNER_BYTES: usize = 39;
+const MAX_GITHUB_REPOSITORY_NAME_BYTES: usize = 100;
+const MAX_GITHUB_REPOSITORY_FULL_NAME_BYTES: usize =
+    MAX_GITHUB_REPOSITORY_OWNER_BYTES + 1 + MAX_GITHUB_REPOSITORY_NAME_BYTES;
+const MAX_GITHUB_REPOSITORY_URL_BYTES: usize = 512;
+const MAX_GITHUB_REPOSITORY_BRANCH_BYTES: usize = 1_024;
+const MAX_GITHUB_REPOSITORY_SNAPSHOT_BYTES: usize = 512 * 1_024;
+const MAX_SELECTED_ARRAY_ITEMS: usize = 200;
+const MAX_SELECTED_ARRAY_SNAPSHOT_BYTES: usize = 1024 * 1024;
+const MAX_SELECTED_ARRAY_ITEM_TYPE_BYTES: usize = 1024 * 1024;
+const MAX_SELECTED_ARRAY_VALUE_DEPTH: usize = 32;
+const MAX_SELECTED_ARRAY_VALUE_NODES: usize = 16_384;
+const MAX_SELECTED_ARRAY_SCHEMA_NODES: usize = 256;
 
 /// Public, non-secret GitHub context accepted by repository-selection blocks.
 ///
@@ -865,6 +880,14 @@ pub struct GithubRepositoryInput {
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Action {
     GithubListRepositories,
+    /// GitHub repository choices authored from a configuration-time preview.
+    ///
+    /// The editor may refresh candidates through GitHub CLI, but runtime never
+    /// performs discovery: it publishes only this persisted public snapshot.
+    GithubPreviewRepositories {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        selected_repositories: Vec<GithubRepositoryInput>,
+    },
     GithubSelectRepositories {
         /// Must be structurally bound from the whole `github` output of an
         /// upstream `github-list-repositories` action.
@@ -875,6 +898,18 @@ pub enum Action {
         /// Exact opaque GraphQL node IDs selected while authoring.
         #[serde(default)]
         repository_ids: Vec<String>,
+    },
+    /// Immutable authoring snapshot of selected values from any typed array.
+    ///
+    /// `source` records where the editor obtained the preview; it is not a
+    /// runtime dependency. Runtime publishes only `selected_items`, validated
+    /// against the public `item_type` captured while authoring.
+    SelectArrayItems {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<FieldRef>,
+        item_type: ContextType,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        selected_items: Vec<serde_json::Value>,
     },
     ForEach {
         source_step: String,
@@ -1310,6 +1345,13 @@ impl Step {
         for binding in self.bindings.values_mut() {
             prefix_binding_source_steps(binding, prefix);
         }
+        if let Action::SelectArrayItems {
+            source: Some(source),
+            ..
+        } = &mut self.action
+        {
+            prefix_field_source_step(source, prefix);
+        }
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -1333,6 +1375,32 @@ impl Step {
                         self.id
                     ));
                 }
+            }
+            Action::GithubPreviewRepositories {
+                selected_repositories,
+            } => {
+                if !self.bindings.is_empty() {
+                    return Err(format!(
+                        "step {} github-preview-repositories stores its authored snapshot and cannot declare input bindings",
+                        self.id
+                    ));
+                }
+                if !matches!(self.auth, AuthPolicy::None)
+                    || !matches!(self.allow_elevation, ElevationPolicy::Forbidden)
+                    || self.dangerous
+                {
+                    return Err(format!(
+                        "step {} github-preview-repositories must be read-only and must not request authentication or elevation",
+                        self.id
+                    ));
+                }
+                if self.when.is_some() || self.require.is_some() || self.check.is_some() {
+                    return Err(format!(
+                        "step {} github-preview-repositories must always publish its authored snapshot and cannot declare when, require, or check guards",
+                        self.id
+                    ));
+                }
+                validate_github_repository_snapshot(&self.id, selected_repositories)?;
             }
             Action::GithubSelectRepositories {
                 expected_account_login,
@@ -1394,6 +1462,101 @@ impl Step {
                         self.id, duplicate
                     ));
                 }
+            }
+            Action::SelectArrayItems {
+                item_type,
+                selected_items,
+                ..
+            } => {
+                if !self.bindings.is_empty() {
+                    return Err(format!(
+                        "step {} select-array-items stores its snapshot in the action and cannot declare input bindings",
+                        self.id
+                    ));
+                }
+                if !matches!(self.auth, AuthPolicy::None)
+                    || !matches!(self.allow_elevation, ElevationPolicy::Forbidden)
+                    || self.dangerous
+                {
+                    return Err(format!(
+                        "step {} select-array-items must be read-only and must not request authentication or elevation",
+                        self.id
+                    ));
+                }
+                if self.when.is_some() || self.require.is_some() || self.check.is_some() {
+                    return Err(format!(
+                        "step {} select-array-items cannot declare when, require, or check guards because it must always publish its authored snapshot",
+                        self.id
+                    ));
+                }
+                if selected_items.len() > MAX_SELECTED_ARRAY_ITEMS {
+                    return Err(format!(
+                        "step {} select-array-items contains {} values; limit is {}",
+                        self.id,
+                        selected_items.len(),
+                        MAX_SELECTED_ARRAY_ITEMS
+                    ));
+                }
+                let mut schema_nodes = 0;
+                validate_public_snapshot_item_type(item_type, "item_type", 0, &mut schema_nodes)
+                    .map_err(|error| format!("step {} select-array-items {error}", self.id))?;
+                let mut value_nodes = 0;
+                for (index, item) in selected_items.iter().enumerate() {
+                    validate_snapshot_value_limits(
+                        item,
+                        &format!("selected_items[{index}]"),
+                        0,
+                        &mut value_nodes,
+                    )
+                    .map_err(|error| format!("step {} select-array-items {error}", self.id))?;
+                }
+                let item_type_bytes = serde_json::to_vec(item_type)
+                    .map_err(|error| {
+                        format!(
+                            "step {} select-array-items item_type cannot be serialized: {error}",
+                            self.id
+                        )
+                    })?
+                    .len();
+                if item_type_bytes > MAX_SELECTED_ARRAY_ITEM_TYPE_BYTES {
+                    return Err(format!(
+                        "step {} select-array-items item_type is {} bytes; limit is {}",
+                        self.id, item_type_bytes, MAX_SELECTED_ARRAY_ITEM_TYPE_BYTES
+                    ));
+                }
+                let encoded_bytes = serde_json::to_vec(selected_items)
+                    .map_err(|error| {
+                        format!(
+                            "step {} select-array-items snapshot cannot be serialized: {error}",
+                            self.id
+                        )
+                    })?
+                    .len();
+                if encoded_bytes > MAX_SELECTED_ARRAY_SNAPSHOT_BYTES {
+                    return Err(format!(
+                        "step {} select-array-items snapshot is {} bytes; limit is {}",
+                        self.id, encoded_bytes, MAX_SELECTED_ARRAY_SNAPSHOT_BYTES
+                    ));
+                }
+                validate_literal_binding(
+                    &serde_json::Value::Array(selected_items.clone()),
+                    &FieldSchema::required(ContextType::array(item_type.clone())),
+                )
+                .map_err(|error| {
+                    format!(
+                        "step {} select-array-items contains a value outside its declared item_type: {error}",
+                        self.id
+                    )
+                })?;
+                definition_for_action(&self.action)
+                    .output_schema
+                    .validate_value(&serde_json::json!({ "items": selected_items }))
+                    .map_err(|error| {
+                        format!(
+                            "step {} select-array-items contains a value outside its declared item_type: {error}",
+                            self.id
+                        )
+                    })?;
             }
             Action::ForEach {
                 source_step,
@@ -1808,23 +1971,311 @@ impl Step {
     }
 }
 
-fn prefix_binding_source_steps(binding: &mut Binding, prefix: &str) {
-    let prefix_field = |field: &mut crate::automation::context::FieldRef| match &mut field.scope {
-        ContextScope::Step { step_id } | ContextScope::LoopItem { step_id } => {
-            *step_id = format!("{prefix}/{step_id}");
+fn validate_github_repository_snapshot(
+    step_id: &str,
+    repositories: &[GithubRepositoryInput],
+) -> Result<(), String> {
+    if repositories.len() > MAX_SELECTED_GITHUB_REPOSITORIES {
+        return Err(format!(
+            "step {step_id} github-preview-repositories stores {} repositories; limit is {}",
+            repositories.len(),
+            MAX_SELECTED_GITHUB_REPOSITORIES
+        ));
+    }
+    let encoded = serde_json::to_vec(repositories).map_err(|error| {
+        format!("step {step_id} github-preview-repositories snapshot cannot be serialized: {error}")
+    })?;
+    if encoded.len() > MAX_GITHUB_REPOSITORY_SNAPSHOT_BYTES {
+        return Err(format!(
+            "step {step_id} github-preview-repositories snapshot is {} bytes; limit is {}",
+            encoded.len(),
+            MAX_GITHUB_REPOSITORY_SNAPSHOT_BYTES
+        ));
+    }
+
+    let mut ids = BTreeSet::new();
+    let mut full_names = BTreeSet::new();
+    for (index, repository) in repositories.iter().enumerate() {
+        let path = format!("selected_repositories[{index}]");
+        if repository.private {
+            return Err(format!(
+                "step {step_id} github-preview-repositories {path} cannot persist private repository metadata"
+            ));
         }
-        ContextScope::Scenario => {}
-    };
+        validate_github_snapshot_string(
+            step_id,
+            &path,
+            "id",
+            &repository.id,
+            MAX_GITHUB_REPOSITORY_ID_BYTES,
+        )?;
+        validate_github_snapshot_string(
+            step_id,
+            &path,
+            "owner",
+            &repository.owner,
+            MAX_GITHUB_REPOSITORY_OWNER_BYTES,
+        )?;
+        validate_github_snapshot_string(
+            step_id,
+            &path,
+            "name",
+            &repository.name,
+            MAX_GITHUB_REPOSITORY_NAME_BYTES,
+        )?;
+        validate_github_snapshot_string(
+            step_id,
+            &path,
+            "full_name",
+            &repository.full_name,
+            MAX_GITHUB_REPOSITORY_FULL_NAME_BYTES,
+        )?;
+        validate_github_snapshot_string(
+            step_id,
+            &path,
+            "https_url",
+            &repository.https_url,
+            MAX_GITHUB_REPOSITORY_URL_BYTES,
+        )?;
+        validate_github_snapshot_string(
+            step_id,
+            &path,
+            "ssh_url",
+            &repository.ssh_url,
+            MAX_GITHUB_REPOSITORY_URL_BYTES,
+        )?;
+        if let Some(branch) = &repository.default_branch {
+            validate_github_snapshot_string(
+                step_id,
+                &path,
+                "default_branch",
+                branch,
+                MAX_GITHUB_REPOSITORY_BRANCH_BYTES,
+            )?;
+        }
+
+        if !valid_github_owner(&repository.owner) {
+            return Err(format!(
+                "step {step_id} github-preview-repositories {path}.owner is not a canonical GitHub login"
+            ));
+        }
+        if !valid_github_repository_name(&repository.name) {
+            return Err(format!(
+                "step {step_id} github-preview-repositories {path}.name is not a canonical GitHub repository name"
+            ));
+        }
+        let canonical_full_name = format!("{}/{}", repository.owner, repository.name);
+        if repository.full_name != canonical_full_name {
+            return Err(format!(
+                "step {step_id} github-preview-repositories {path}.full_name must exactly match owner/name"
+            ));
+        }
+        let canonical_https_url = format!("https://github.com/{canonical_full_name}");
+        if repository.https_url != canonical_https_url {
+            return Err(format!(
+                "step {step_id} github-preview-repositories {path}.https_url is not the canonical public github.com URL for owner/name"
+            ));
+        }
+        let canonical_ssh_url = format!("git@github.com:{canonical_full_name}.git");
+        if repository.ssh_url != canonical_ssh_url {
+            return Err(format!(
+                "step {step_id} github-preview-repositories {path}.ssh_url is not the canonical github.com SSH URL for owner/name"
+            ));
+        }
+
+        if !ids.insert(repository.id.as_str()) {
+            return Err(format!(
+                "step {step_id} github-preview-repositories contains duplicate repository ID {:?}",
+                repository.id
+            ));
+        }
+        if !full_names.insert(repository.full_name.to_ascii_lowercase()) {
+            return Err(format!(
+                "step {step_id} github-preview-repositories contains duplicate repository full_name"
+            ));
+        }
+    }
+
+    let value = serde_json::from_slice(&encoded).map_err(|error| {
+        format!("step {step_id} github-preview-repositories snapshot cannot be decoded: {error}")
+    })?;
+    validate_literal_binding(
+        &value,
+        &FieldSchema::required(
+            definition_for_action(&Action::GithubPreviewRepositories {
+                selected_repositories: Vec::new(),
+            })
+            .output_schema
+            .field("repositories")
+            .expect("GitHub snapshot schema has repositories")
+            .value_type
+            .clone(),
+        ),
+    )
+    .map_err(|_| {
+        format!(
+            "step {step_id} github-preview-repositories snapshot does not match the public typed repository schema"
+        )
+    })
+}
+
+fn validate_github_snapshot_string(
+    step_id: &str,
+    path: &str,
+    field: &str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), String> {
+    if value.is_empty() || value.len() > max_bytes || value.contains('\0') {
+        return Err(format!(
+            "step {step_id} github-preview-repositories {path}.{field} must contain 1..={max_bytes} bytes and no NUL"
+        ));
+    }
+    Ok(())
+}
+
+fn valid_github_owner(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+}
+
+fn valid_github_repository_name(value: &str) -> bool {
+    value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn validate_public_snapshot_item_type(
+    value_type: &ContextType,
+    path: &str,
+    depth: usize,
+    nodes: &mut usize,
+) -> Result<(), String> {
+    if depth > MAX_SELECTED_ARRAY_VALUE_DEPTH {
+        return Err(format!(
+            "item schema at {path} exceeds depth limit {}",
+            MAX_SELECTED_ARRAY_VALUE_DEPTH
+        ));
+    }
+    *nodes = nodes.saturating_add(1);
+    if *nodes > MAX_SELECTED_ARRAY_SCHEMA_NODES {
+        return Err(format!(
+            "item schema exceeds node limit {}",
+            MAX_SELECTED_ARRAY_SCHEMA_NODES
+        ));
+    }
+    match value_type {
+        ContextType::Array { items } => {
+            validate_public_snapshot_item_type(items, &format!("{path}[]"), depth + 1, nodes)
+        }
+        ContextType::Object { schema } => {
+            if schema.version == 0 || schema.version > CONTEXT_SCHEMA_VERSION {
+                return Err(format!(
+                    "declares unsupported schema version {} at {path}",
+                    schema.version
+                ));
+            }
+            for (name, field) in &schema.fields {
+                let field_path = format!("{path}.{name}");
+                if !matches!(field.sensitivity, Sensitivity::Public) {
+                    return Err(format!(
+                        "requires a public item schema, but {field_path} is {:?}",
+                        field.sensitivity
+                    ));
+                }
+                validate_public_snapshot_item_type(
+                    &field.value_type,
+                    &field_path,
+                    depth + 1,
+                    nodes,
+                )?;
+            }
+            if schema.additional_fields.value_type().is_some() {
+                return Err(format!(
+                    "requires a closed item schema, but {path} allows additional properties"
+                ));
+            }
+            Ok(())
+        }
+        ContextType::Any => Err(format!(
+            "requires an explicit public item_type; untyped any is not allowed at {path}"
+        )),
+        ContextType::Null
+        | ContextType::Boolean
+        | ContextType::Integer
+        | ContextType::Number
+        | ContextType::String { .. } => Ok(()),
+    }
+}
+
+fn validate_snapshot_value_limits(
+    value: &serde_json::Value,
+    path: &str,
+    depth: usize,
+    nodes: &mut usize,
+) -> Result<(), String> {
+    if depth > MAX_SELECTED_ARRAY_VALUE_DEPTH {
+        return Err(format!(
+            "value at {path} exceeds depth limit {}",
+            MAX_SELECTED_ARRAY_VALUE_DEPTH
+        ));
+    }
+    *nodes = nodes.saturating_add(1);
+    if *nodes > MAX_SELECTED_ARRAY_VALUE_NODES {
+        return Err(format!(
+            "snapshot exceeds value node limit {}",
+            MAX_SELECTED_ARRAY_VALUE_NODES
+        ));
+    }
+    match value {
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                validate_snapshot_value_limits(
+                    item,
+                    &format!("{path}[{index}]"),
+                    depth + 1,
+                    nodes,
+                )?;
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for (name, item) in fields {
+                validate_snapshot_value_limits(item, &format!("{path}.{name}"), depth + 1, nodes)?;
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+    Ok(())
+}
+
+fn prefix_binding_source_steps(binding: &mut Binding, prefix: &str) {
     match binding {
-        Binding::Field { field } => prefix_field(field),
+        Binding::Field { field } => prefix_field_source_step(field, prefix),
         Binding::Interpolated { parts } => {
             for part in parts {
                 if let TemplatePart::Field { field } = part {
-                    prefix_field(field);
+                    prefix_field_source_step(field, prefix);
                 }
             }
         }
         Binding::Literal { .. } | Binding::Template { .. } => {}
+    }
+}
+
+fn prefix_field_source_step(field: &mut FieldRef, prefix: &str) {
+    match &mut field.scope {
+        ContextScope::Step { step_id } | ContextScope::LoopItem { step_id } => {
+            *step_id = format!("{prefix}/{step_id}");
+        }
+        ContextScope::Scenario => {}
     }
 }
 
@@ -2038,6 +2489,7 @@ fn valid_bundle_identifier(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::automation::context::ObjectSchema;
 
     fn package_registry_step() -> Step {
         Step {
@@ -2074,6 +2526,323 @@ mod tests {
     #[test]
     fn package_registry_action_validates() {
         package_registry_step().validate().unwrap();
+    }
+
+    fn array_snapshot_step(item_type: ContextType, selected_items: Vec<serde_json::Value>) -> Step {
+        Step {
+            id: "select-items".into(),
+            name: String::new(),
+            bindings: BTreeMap::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
+            action: Action::SelectArrayItems {
+                source: Some(FieldRef::step("preview").field("items")),
+                item_type,
+                selected_items,
+            },
+        }
+    }
+
+    #[test]
+    fn array_snapshot_requires_a_bounded_public_explicit_schema() {
+        array_snapshot_step(
+            ContextType::STRING,
+            vec![serde_json::json!("one"), serde_json::json!("two")],
+        )
+        .validate()
+        .unwrap();
+
+        let untyped = array_snapshot_step(ContextType::Any, Vec::new())
+            .validate()
+            .unwrap_err();
+        assert!(untyped.contains("untyped any"));
+
+        let secret_type = ContextType::object(ObjectSchema::new("private-item@1").with_field(
+            "token",
+            FieldSchema::required(ContextType::STRING).sensitive(Sensitivity::Secret),
+        ));
+        let secret = array_snapshot_step(secret_type, Vec::new())
+            .validate()
+            .unwrap_err();
+        assert!(secret.contains("public item schema"));
+
+        let open_type =
+            ContextType::object(ObjectSchema::new("open-item@1").allowing_additional_fields());
+        let open = array_snapshot_step(open_type, Vec::new())
+            .validate()
+            .unwrap_err();
+        assert!(open.contains("closed item schema"));
+
+        let mut deep_type = ContextType::STRING;
+        for _ in 0..=MAX_SELECTED_ARRAY_VALUE_DEPTH {
+            deep_type = ContextType::array(deep_type);
+        }
+        let deep_schema = array_snapshot_step(deep_type, Vec::new())
+            .validate()
+            .unwrap_err();
+        assert!(deep_schema.contains("item schema") && deep_schema.contains("depth limit"));
+    }
+
+    #[test]
+    fn array_snapshot_validates_values_and_resource_limits() {
+        let mismatch = array_snapshot_step(ContextType::Integer, vec![serde_json::json!("one")])
+            .validate()
+            .unwrap_err();
+        assert!(mismatch.contains("outside its declared item_type"));
+
+        let invalid_git_url = array_snapshot_step(
+            ContextType::string(crate::automation::context::SemanticFormat::GitUrl),
+            vec![serde_json::json!("definitely not a git URL")],
+        )
+        .validate()
+        .unwrap_err();
+        assert!(invalid_git_url.contains("outside its declared item_type"));
+
+        let mut deep_value = serde_json::json!("leaf");
+        for _ in 0..=MAX_SELECTED_ARRAY_VALUE_DEPTH {
+            deep_value = serde_json::json!([deep_value]);
+        }
+        let deep_snapshot = array_snapshot_step(ContextType::STRING, vec![deep_value])
+            .validate()
+            .unwrap_err();
+        assert!(deep_snapshot.contains("value at") && deep_snapshot.contains("depth limit"));
+
+        let too_many = array_snapshot_step(
+            ContextType::Integer,
+            (0..=MAX_SELECTED_ARRAY_ITEMS)
+                .map(|value| serde_json::json!(value))
+                .collect(),
+        )
+        .validate()
+        .unwrap_err();
+        assert!(too_many.contains("limit is"));
+
+        let too_large = array_snapshot_step(
+            ContextType::STRING,
+            vec![serde_json::json!(
+                "x".repeat(MAX_SELECTED_ARRAY_SNAPSHOT_BYTES)
+            )],
+        )
+        .validate()
+        .unwrap_err();
+        assert!(too_large.contains("snapshot is"));
+
+        let oversized_schema = array_snapshot_step(
+            ContextType::object(ObjectSchema::new(
+                "x".repeat(MAX_SELECTED_ARRAY_ITEM_TYPE_BYTES),
+            )),
+            Vec::new(),
+        )
+        .validate()
+        .unwrap_err();
+        assert!(oversized_schema.contains("item_type is"));
+
+        let mut bound = array_snapshot_step(ContextType::STRING, Vec::new());
+        bound
+            .bindings
+            .insert("items".into(), Binding::literal(serde_json::json!([])));
+        assert!(bound
+            .validate()
+            .unwrap_err()
+            .contains("cannot declare input bindings"));
+    }
+
+    fn github_snapshot_repository(
+        id: impl Into<String>,
+        owner: impl Into<String>,
+        name: impl Into<String>,
+    ) -> GithubRepositoryInput {
+        let owner = owner.into();
+        let name = name.into();
+        let full_name = format!("{owner}/{name}");
+        GithubRepositoryInput {
+            id: id.into(),
+            owner,
+            name,
+            https_url: format!("https://github.com/{full_name}"),
+            ssh_url: format!("git@github.com:{full_name}.git"),
+            full_name,
+            default_branch: Some("main".into()),
+            private: false,
+            archived: false,
+        }
+    }
+
+    fn github_preview_step(selected_repositories: Vec<GithubRepositoryInput>) -> Step {
+        Step {
+            id: "preview".into(),
+            name: String::new(),
+            bindings: BTreeMap::new(),
+            auth: AuthPolicy::None,
+            check: None,
+            dangerous: false,
+            allow_elevation: ElevationPolicy::Forbidden,
+            when: None,
+            require: None,
+            action: Action::GithubPreviewRepositories {
+                selected_repositories,
+            },
+        }
+    }
+
+    #[test]
+    fn github_preview_old_unit_yaml_defaults_to_an_empty_snapshot() {
+        let step: Step = serde_yaml::from_str(
+            r#"
+id: preview
+type: github-preview-repositories
+"#,
+        )
+        .unwrap();
+        let Action::GithubPreviewRepositories {
+            selected_repositories,
+        } = &step.action
+        else {
+            panic!("expected GitHub preview action")
+        };
+        assert!(selected_repositories.is_empty());
+        step.validate().unwrap();
+
+        let yaml = serde_yaml::to_string(&step).unwrap();
+        assert!(yaml.contains("type: github-preview-repositories"));
+        assert!(!yaml.contains("selected_repositories"));
+    }
+
+    #[test]
+    fn github_preview_snapshot_requires_public_unique_consistent_repositories() {
+        let valid = github_preview_step(vec![github_snapshot_repository(
+            "R_one",
+            "octocat",
+            "hello-world",
+        )]);
+        valid.validate().unwrap();
+        let yaml = serde_yaml::to_string(&valid).unwrap();
+        let round_tripped: Step = serde_yaml::from_str(&yaml).unwrap();
+        let Action::GithubPreviewRepositories {
+            selected_repositories,
+        } = round_tripped.action
+        else {
+            panic!("expected GitHub preview action")
+        };
+        assert_eq!(
+            selected_repositories,
+            vec![github_snapshot_repository(
+                "R_one",
+                "octocat",
+                "hello-world"
+            )]
+        );
+
+        let invalid = |mutate: fn(&mut GithubRepositoryInput)| {
+            let mut repository = github_snapshot_repository("R_one", "octocat", "hello-world");
+            mutate(&mut repository);
+            github_preview_step(vec![repository])
+                .validate()
+                .unwrap_err()
+        };
+        assert!(invalid(|repository| repository.private = true).contains("private repository"));
+        assert!(invalid(|repository| repository.owner = "other".into())
+            .contains("full_name must exactly match owner/name"));
+        assert!(
+            invalid(|repository| repository.full_name = "octocat/other".into())
+                .contains("full_name must exactly match owner/name")
+        );
+        assert!(invalid(|repository| repository.https_url.push_str(".git"))
+            .contains("https_url is not the canonical"));
+        assert!(invalid(
+            |repository| repository.ssh_url = "ssh://github.com/octocat/hello-world".into()
+        )
+        .contains("ssh_url is not the canonical"));
+        assert!(invalid(|repository| repository.name = "../escape".into())
+            .contains("canonical GitHub repository name"));
+
+        let duplicate_id = github_preview_step(vec![
+            github_snapshot_repository("R_same", "octocat", "one"),
+            github_snapshot_repository("R_same", "octocat", "two"),
+        ])
+        .validate()
+        .unwrap_err();
+        assert!(duplicate_id.contains("duplicate repository ID"));
+
+        let duplicate_name = github_preview_step(vec![
+            github_snapshot_repository("R_one", "Octocat", "Hello-World"),
+            github_snapshot_repository("R_two", "octocat", "hello-world"),
+        ])
+        .validate()
+        .unwrap_err();
+        assert!(duplicate_name.contains("duplicate repository full_name"));
+    }
+
+    #[test]
+    fn github_preview_snapshot_enforces_schema_and_resource_bounds() {
+        let oversized_id = github_preview_step(vec![github_snapshot_repository(
+            "R".repeat(MAX_GITHUB_REPOSITORY_ID_BYTES + 1),
+            "octocat",
+            "hello-world",
+        )])
+        .validate()
+        .unwrap_err();
+        assert!(oversized_id.contains(".id must contain"));
+
+        let mut invalid_branch = github_snapshot_repository("R_one", "octocat", "hello-world");
+        invalid_branch.default_branch = Some("not a valid branch".into());
+        assert!(github_preview_step(vec![invalid_branch])
+            .validate()
+            .unwrap_err()
+            .contains("public typed repository schema"));
+
+        let too_many = (0..=MAX_SELECTED_GITHUB_REPOSITORIES)
+            .map(|index| {
+                github_snapshot_repository(format!("R_{index}"), "octocat", format!("repo-{index}"))
+            })
+            .collect();
+        assert!(github_preview_step(too_many)
+            .validate()
+            .unwrap_err()
+            .contains("limit is"));
+
+        let owner = "o".repeat(MAX_GITHUB_REPOSITORY_OWNER_BYTES);
+        let large = (0..MAX_SELECTED_GITHUB_REPOSITORIES)
+            .map(|index| {
+                let name = format!(
+                    "{}{:03}",
+                    "r".repeat(MAX_GITHUB_REPOSITORY_NAME_BYTES - 3),
+                    index
+                );
+                let mut repository = github_snapshot_repository(
+                    format!(
+                        "{:03}{}",
+                        index,
+                        "I".repeat(MAX_GITHUB_REPOSITORY_ID_BYTES - 3)
+                    ),
+                    &owner,
+                    name,
+                );
+                repository.default_branch = Some("b".repeat(MAX_GITHUB_REPOSITORY_BRANCH_BYTES));
+                repository
+            })
+            .collect();
+        assert!(github_preview_step(large)
+            .validate()
+            .unwrap_err()
+            .contains("snapshot is"));
+    }
+
+    #[test]
+    fn github_preview_snapshot_is_guard_free() {
+        let preview = github_preview_step(Vec::new());
+        preview.validate().unwrap();
+
+        let mut guarded = preview;
+        guarded.check = Some(Check::default());
+        assert!(guarded
+            .validate()
+            .unwrap_err()
+            .contains("always publish its authored snapshot"));
     }
 
     #[test]
