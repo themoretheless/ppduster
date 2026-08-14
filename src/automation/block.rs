@@ -118,6 +118,12 @@ pub struct BlockDefinition {
     pub schema_version: u32,
     pub title: String,
     pub category: String,
+    /// Stable action ID followed by curated English and Russian search aliases.
+    ///
+    /// This metadata is descriptive only: it helps catalog clients find a
+    /// block and never changes the persisted task or its execution semantics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub search_terms: Vec<String>,
     pub input_schema: ObjectSchema,
     pub output_schema: ObjectSchema,
     #[serde(default)]
@@ -726,12 +732,241 @@ pub fn block_definition(kind: ActionKind) -> BlockDefinition {
         schema_version: 1,
         title: title.into(),
         category: category.into(),
+        search_terms: block_search_terms(kind),
         input_schema: inputs,
         output_schema: outputs,
         read_only,
         may_use_secrets,
         policy: block_policy_capabilities(kind),
     }
+}
+
+fn block_search_terms(kind: ActionKind) -> Vec<String> {
+    let aliases: &[&str] = match kind {
+        ActionKind::GithubListRepositories => &[
+            "github",
+            "гитхаб",
+            "гит",
+            "list repositories",
+            "account repositories",
+            "репозитории github",
+            "получить репозитории",
+            "репозитории аккаунта",
+        ],
+        ActionKind::GithubSelectRepositories => &[
+            "github",
+            "гитхаб",
+            "гит",
+            "select repositories",
+            "repository picker",
+            "выбрать репозитории",
+            "выбор репозиториев",
+            "репозитории github",
+        ],
+        ActionKind::ForEach => &[
+            "for each",
+            "foreach",
+            "loop",
+            "для каждого",
+            "цикл",
+            "перебор",
+        ],
+        ActionKind::ForEachGitCloneIfMissing => &[
+            "гит",
+            "clone every repository",
+            "git repository loop",
+            "clone if missing loop",
+            "клонировать каждый репозиторий",
+            "цикл репозиториев git",
+            "клонировать отсутствующие репозитории",
+        ],
+        ActionKind::CreateDirectory => &[
+            "create directory",
+            "create folder",
+            "filesystem directory",
+            "создать папку",
+            "создать каталог",
+            "файловая система",
+        ],
+        ActionKind::InspectPath => &[
+            "inspect path",
+            "path metadata",
+            "filesystem check",
+            "проверить путь",
+            "метаданные пути",
+            "проверка файла или папки",
+        ],
+        ActionKind::CopyPath => &[
+            "copy path",
+            "copy file",
+            "copy directory",
+            "копировать путь",
+            "копировать файл",
+            "копировать папку",
+        ],
+        ActionKind::WriteFile => &[
+            "write file",
+            "file content",
+            "create text file",
+            "записать файл",
+            "содержимое файла",
+            "создать текстовый файл",
+        ],
+        ActionKind::RemovePath => &[
+            "remove path",
+            "move to trash",
+            "delete file",
+            "удалить путь",
+            "переместить в корзину",
+            "удалить файл или папку",
+        ],
+        ActionKind::GitClone => &[
+            "гит",
+            "git clone",
+            "clone repository",
+            "sync repository",
+            "клонировать git",
+            "клонировать репозиторий",
+            "синхронизировать репозиторий",
+        ],
+        ActionKind::GitInspect => &[
+            "гит",
+            "git inspect",
+            "repository status",
+            "inspect repository",
+            "проверить git",
+            "состояние репозитория",
+            "проверить репозиторий",
+        ],
+        ActionKind::GitCloneIfMissing => &[
+            "гит",
+            "git clone if missing",
+            "conditional clone",
+            "clone absent repository",
+            "клонировать если отсутствует",
+            "условное клонирование",
+            "клонировать отсутствующий репозиторий",
+        ],
+        ActionKind::GitFetch => &[
+            "гит",
+            "git fetch",
+            "fetch remote branch",
+            "download git refs",
+            "получить remote ветку",
+            "загрузить ветку git",
+            "получить изменения репозитория",
+        ],
+        ActionKind::GitFastForward => &[
+            "гит",
+            "git fast forward",
+            "update branch",
+            "fast forward branch",
+            "актуализировать ветку",
+            "обновить ветку git",
+            "перемотать ветку вперед",
+        ],
+        ActionKind::BrewInstall => &[
+            "homebrew",
+            "brew install",
+            "install package",
+            "установить homebrew пакет",
+            "установить пакет brew",
+            "пакетный менеджер",
+        ],
+        ActionKind::RunCommand => &[
+            "run command",
+            "execute command",
+            "shell process",
+            "выполнить команду",
+            "запустить процесс",
+            "командная оболочка",
+        ],
+        ActionKind::RunScript => &[
+            "run script",
+            "execute script",
+            "shell script",
+            "выполнить скрипт",
+            "запустить скрипт",
+            "сценарий командной оболочки",
+        ],
+        ActionKind::ConfigurePackageRegistryFiles => &[
+            "package registry",
+            "npm registry",
+            "nuget registry",
+            "реестр пакетов",
+            "настроить npm",
+            "настроить nuget",
+        ],
+        ActionKind::DownloadFile => &[
+            "download file",
+            "http download",
+            "download artifact",
+            "скачать файл",
+            "загрузка по url",
+            "скачать артефакт",
+        ],
+        ActionKind::ExtractArchive => &[
+            "extract archive",
+            "unpack zip",
+            "unpack tar",
+            "распаковать архив",
+            "извлечь архив",
+            "распаковать zip или tar",
+        ],
+        ActionKind::InstallDmg => &[
+            "install dmg",
+            "macos disk image",
+            "dmg installer",
+            "установить dmg",
+            "образ диска macos",
+            "установщик dmg",
+        ],
+        ActionKind::InstallPkg => &[
+            "install pkg",
+            "macos installer package",
+            "pkg installer",
+            "установить pkg",
+            "пакет установщика macos",
+            "установщик pkg",
+        ],
+        ActionKind::MacosRequirements => &[
+            "macos requirements",
+            "system check",
+            "rosetta requirement",
+            "требования macos",
+            "проверка системы",
+            "требование rosetta",
+        ],
+        ActionKind::AppStoreInstall => &[
+            "app store install",
+            "mac app store",
+            "install store app",
+            "установить из app store",
+            "магазин приложений mac",
+            "установить приложение из магазина",
+        ],
+        ActionKind::BambuStudioRelease => &[
+            "bambu studio",
+            "install bambu studio",
+            "update bambu studio",
+            "установить bambu studio",
+            "обновить bambu studio",
+            "релиз bambu studio",
+        ],
+        ActionKind::ActivateLicense => &[
+            "activate license",
+            "license activation",
+            "vendor license ui",
+            "активировать лицензию",
+            "активация лицензии",
+            "интерфейс лицензии поставщика",
+        ],
+    };
+
+    std::iter::once(kind.id())
+        .chain(aliases.iter().copied())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn schema<const N: usize>(id: impl Into<String>, fields: [(&str, FieldSchema); N]) -> ObjectSchema {
@@ -1323,7 +1558,65 @@ mod tests {
             assert_eq!(definition.schema_version, 1);
             assert!(definition.input_schema.id.is_some());
             assert!(definition.output_schema.id.is_some());
+            assert_eq!(
+                definition.search_terms.first().map(String::as_str),
+                Some(kind.id()),
+                "{} must publish its stable action ID as the first search term",
+                kind.id()
+            );
+            assert!(
+                definition.search_terms[1..].iter().any(|term| term
+                    .chars()
+                    .any(|character| character.is_ascii_alphabetic())),
+                "{} must publish an English search alias",
+                kind.id()
+            );
+            assert!(
+                definition.search_terms[1..].iter().any(|term| term
+                    .chars()
+                    .any(|character| matches!(character, '\u{0400}'..='\u{04ff}'))),
+                "{} must publish a Russian search alias",
+                kind.id()
+            );
+            assert!(
+                definition.search_terms.iter().all(|term| !term.is_empty()
+                    && term.trim() == term
+                    && term.to_lowercase() == *term),
+                "{} search terms must be non-empty, trimmed, and lowercase",
+                kind.id()
+            );
+            let unique = definition
+                .search_terms
+                .iter()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                unique.len(),
+                definition.search_terms.len(),
+                "{} search terms must not contain duplicates",
+                kind.id()
+            );
         }
+    }
+
+    #[test]
+    fn block_search_terms_are_serde_compatible_and_optional_on_legacy_input() {
+        let definition = block_definition(ActionKind::GitInspect);
+        let encoded = serde_json::to_value(&definition).unwrap();
+
+        assert_eq!(
+            encoded["search_terms"][0],
+            serde_json::Value::String(ActionKind::GitInspect.id().into())
+        );
+        assert_eq!(
+            serde_json::from_value::<BlockDefinition>(encoded.clone()).unwrap(),
+            definition
+        );
+
+        let mut legacy = encoded;
+        legacy.as_object_mut().unwrap().remove("search_terms");
+        let decoded = serde_json::from_value::<BlockDefinition>(legacy).unwrap();
+        assert!(decoded.search_terms.is_empty());
     }
 
     #[test]

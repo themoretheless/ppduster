@@ -268,6 +268,12 @@ fn legacy_initialize_clients_can_list_and_call_tools() {
             .len(),
         1
     );
+    let search_terms = catalog["result"]["structuredContent"]["blocks"][0]["search_terms"]
+        .as_array()
+        .unwrap();
+    assert_eq!(search_terms[0], "create-directory");
+    assert!(search_terms.iter().any(|term| term == "create directory"));
+    assert!(search_terms.iter().any(|term| term == "создать папку"));
 
     server.shutdown();
 }

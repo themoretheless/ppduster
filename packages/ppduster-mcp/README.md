@@ -37,8 +37,8 @@ directories must also exist.
 ## Tools
 
 - `list_blocks` returns every supported action kind with its versioned input
-  and output schemas. Optional `kind` and `category` filters keep the response
-  small.
+  and output schemas plus stable bilingual `search_terms` used by catalog UIs.
+  Optional `kind` and `category` filters keep the response small.
 - `validate_scheme` builds the shared Rust project types, validates every
   `Step` and `Task`, and returns normalized project JSON plus a YAML preview.
 - `create_scheme` performs the same validation and creates a `.yaml` or `.yml`
