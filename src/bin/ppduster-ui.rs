@@ -7507,9 +7507,12 @@ impl ScenarioApp {
                             .collect::<Vec<_>>();
                         for (graph_kind, definition) in graph_definitions {
                             let context_lines = schema_context_lines(&definition.output_schema);
+                            let include_schema_attributes =
+                                matches!(graph_kind, ComposerGraphBlockKind::Action(_));
                             if !block_picker_definition_matches(
                                 &definition,
                                 &self.block_picker_search,
+                                include_schema_attributes,
                             ) {
                                 continue;
                             }
@@ -12052,12 +12055,15 @@ fn differs_by_one_character(left: &str, right: &str) -> bool {
 
 fn searchable_text_matches<'a>(query: &str, fields: impl IntoIterator<Item = &'a str>) -> bool {
     let normalized_query = query.trim().to_lowercase();
+    if normalized_query.is_empty() {
+        return true;
+    }
     let query_terms = normalized_query
         .split(|character: char| !character.is_alphanumeric())
         .filter(|term| !term.is_empty())
         .collect::<Vec<_>>();
     if query_terms.is_empty() {
-        return true;
+        return false;
     }
 
     let haystack = fields
@@ -12086,17 +12092,18 @@ fn searchable_text_matches<'a>(query: &str, fields: impl IntoIterator<Item = &'a
     })
 }
 
-fn block_picker_definition_matches(definition: &BlockDefinition, query: &str) -> bool {
-    let input_context = schema_context_lines(&definition.input_schema);
-    let output_context = schema_context_lines(&definition.output_schema);
-    searchable_text_matches(
-        query,
-        [definition.title.as_str(), definition.category.as_str()]
-            .into_iter()
-            .chain(definition.search_terms.iter().map(String::as_str))
-            .chain(input_context.iter().map(String::as_str))
-            .chain(output_context.iter().map(String::as_str)),
-    )
+fn block_picker_definition_matches(
+    definition: &BlockDefinition,
+    query: &str,
+    include_schema_attributes: bool,
+) -> bool {
+    let mut fields = vec![definition.title.clone(), definition.category.clone()];
+    fields.extend(definition.search_terms.iter().cloned());
+    if include_schema_attributes {
+        fields.extend(schema_context_lines(&definition.input_schema));
+        fields.extend(schema_context_lines(&definition.output_schema));
+    }
+    searchable_text_matches(query, fields.iter().map(String::as_str))
 }
 
 fn graph_control_search_terms(kind: ComposerGraphBlockKind) -> &'static [&'static str] {
@@ -19168,21 +19175,27 @@ task:
         for query in ["git", "GIT-INSPECT", "гит", "пше", "пшк", "git репозиторий"]
         {
             assert!(
-                block_picker_definition_matches(&git, query),
+                block_picker_definition_matches(&git, query, true),
                 "Git card must match {query:?}"
             );
         }
-        assert!(!block_picker_definition_matches(&git, "homebrew package"));
+        assert!(!block_picker_definition_matches(
+            &git,
+            "homebrew package",
+            true
+        ));
 
         let download = block_definition(ActionKind::DownloadFile);
         assert!(block_picker_definition_matches(
             &download,
-            "checksum sha256"
+            "checksum sha256",
+            true
         ));
 
         assert!(searchable_text_matches("git", ["пше"]));
         assert!(searchable_text_matches("пше", ["git"]));
         assert!(searchable_text_matches("", ["anything"]));
+        assert!(!searchable_text_matches("---", ["anything"]));
     }
 
     #[test]
@@ -19192,14 +19205,36 @@ task:
             graph_control_definition(ComposerGraphBlockKind::Switch, "Выбор по значению");
         let join_card = graph_control_definition(ComposerGraphBlockKind::Join, "Объединить ветви");
 
-        assert!(block_picker_definition_matches(&if_card, "condition"));
-        assert!(block_picker_definition_matches(&switch_card, "switch case"));
+        assert!(block_picker_definition_matches(
+            &if_card,
+            "condition",
+            false
+        ));
+        assert!(block_picker_definition_matches(
+            &switch_card,
+            "switch case",
+            false
+        ));
         assert!(block_picker_definition_matches(
             &join_card,
-            "merge branches"
+            "merge branches",
+            false
         ));
-        assert!(!block_picker_definition_matches(&if_card, "foreach loop"));
-        assert!(!block_picker_definition_matches(&switch_card, "join merge"));
+        assert!(!block_picker_definition_matches(
+            &if_card,
+            "foreach loop",
+            false
+        ));
+        assert!(!block_picker_definition_matches(
+            &switch_card,
+            "join merge",
+            false
+        ));
+        assert!(!block_picker_definition_matches(
+            &if_card,
+            "array_path",
+            false
+        ));
     }
 
     #[test]
