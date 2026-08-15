@@ -427,7 +427,9 @@ fn run() -> Result<()> {
             let tasks = load_tasks(&action, trust_external_packs)?;
             match action {
                 SetupCmd::List => {
-                    for task in &tasks.tasks {
+                    let mut listed: Vec<_> = tasks.tasks.iter().collect();
+                    listed.sort_by_key(|task| (!task.is_template(), task.id.as_str()));
+                    for task in listed {
                         let kind = if task.is_template() {
                             "template"
                         } else {

@@ -1,0 +1,16 @@
+task:
+  id: macos-home-office
+  name: Home office defaults
+  description: |
+    Review everyday home-office defaults without touching developer toolchains.
+    The template covers default apps, fonts, notifications, and Focus.
+    It does not assign a hardcoded Office-Printer queue and does not run a user backup script.
+    Several children only inspect current state or plan a brew cask. Dry-run is still the default.
+    The template does not migrate mail, calendars, or iCloud documents.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-top-37-default-apps
+    - macos-top-40-fonts
+    - macos-top-17-notifications
+    - macos-top-18-focus

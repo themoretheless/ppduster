@@ -1,0 +1,13 @@
+task:
+  id: macos-node-developer
+  name: Node.js, VS Code, and CLI tools
+  description: |
+    Install Node.js from Homebrew, Visual Studio Code, and fzf/ripgrep.
+    Does not pin a Node version, does not install npm globals, and does not write VS Code settings.
+    Homebrew must already be on PATH. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-stack-node
+    - macos-stack-vscode
+    - macos-top-29-cli-ux

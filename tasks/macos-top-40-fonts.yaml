@@ -5,11 +5,6 @@ task:
   platform: macos
   trust: bundled-only
   steps:
-    - id: install-font-tap
-      name: Install homebrew fonts tap
-      type: run-command
-      program: brew
-      args: ["tap", "homebrew/cask-fonts"]
     - id: install-jetbrains-font
       name: Install JetBrains Mono Nerd Font
       type: brew-install

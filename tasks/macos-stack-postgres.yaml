@@ -1,0 +1,18 @@
+task:
+  id: macos-stack-postgres
+  name: Install PostgreSQL
+  description: |
+    Install the Homebrew postgresql@17 formula when it is missing.
+    Does not start the service and does not set a password.
+    The formula is keg-only: unversioned psql is not on PATH; use the postgresql@17 binaries.
+    Homebrew may create a default cluster under its prefix on first install.
+    Homebrew must already be on PATH.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-postgres
+      name: Install PostgreSQL 17
+      type: brew-install
+      package: postgresql@17
+      check:
+        command_succeeds: ["brew", "list", "postgresql@17"]

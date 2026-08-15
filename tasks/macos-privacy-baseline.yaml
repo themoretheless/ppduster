@@ -1,0 +1,17 @@
+task:
+  id: macos-privacy-baseline
+  name: Privacy and security baseline
+  description: |
+    Review the macOS privacy and security surface in a deliberate order.
+    The template inspects the security baseline, firewall, Gatekeeper, TCC privacy database, and lock-screen settings.
+    FileVault enable/disable is left out on purpose: that child mutates disk encryption.
+    Several children are status checks. Applying with elevation can turn the firewall and Gatekeeper on.
+    Dry-run is still the default. The template does not disable SIP and does not wipe TCC.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-top-08-security-baseline
+    - macos-top-23-firewall
+    - macos-top-24-gatekeeper
+    - macos-top-21-privacy-tcc
+    - macos-top-20-screensaver-lock

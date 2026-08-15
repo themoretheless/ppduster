@@ -15,8 +15,9 @@ pub use binding::{
     BindingError, BindingLimits, ResolvedBinding,
 };
 pub use block::{
-    block_definition, block_definitions, block_policy_capabilities, default_action, default_step,
-    definition_for_action, ActionKind, BlockDefinition, BlockPolicyCapabilities, PolicyRequirement,
+    block_catalog, block_definition, block_definitions, block_policy_capabilities, default_action,
+    default_step, definition_for_action, ActionKind, BlockCatalog, BlockDefinition,
+    BlockPolicyCapabilities, PolicyRequirement,
 };
 pub use context::{
     AdditionalProperties, Binding, ContextLookupError, ContextOrigin, ContextPathSegment,

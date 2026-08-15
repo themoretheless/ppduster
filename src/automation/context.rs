@@ -34,6 +34,8 @@ pub enum SemanticFormat {
     GitRef,
     RepositoryName,
     Identifier,
+    /// Homebrew formula or cask token, including versioned names like postgresql@17.
+    PackageName,
     /// Non-empty, NUL-free identity issued by an external system.
     OpaqueId,
 }

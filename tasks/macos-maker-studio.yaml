@@ -1,0 +1,15 @@
+task:
+  id: macos-maker-studio
+  name: Bambu Studio and a nerd font
+  description: |
+    Install a small maker/design layer without pulling developer toolchains.
+    The template plans Bambu Studio, a Nerd Font cask, and default-app helpers.
+    LightBurn stays a separate terminal scenario because activation needs the vendor UI.
+    Child checks and safety gates remain active. Dry-run is still the default.
+    The template does not migrate printer profiles, does not overwrite ~/Applications apps that are already newer, and does not change mail or iCloud files.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - bambu-studio-install
+    - macos-top-40-fonts
+    - macos-top-37-default-apps

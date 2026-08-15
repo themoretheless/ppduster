@@ -1,0 +1,15 @@
+task:
+  id: macos-full-stack
+  name: Node, PostgreSQL, VS Code, and CLI tools
+  description: |
+    Install Node.js, PostgreSQL 17, Visual Studio Code, and fzf/ripgrep.
+    Does not run migrations and does not write editor settings.
+    First install of postgresql@17 may create Homebrew's default cluster. rustc is not in this pack.
+    Homebrew must already be on PATH. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-stack-node
+    - macos-stack-postgres
+    - macos-stack-vscode
+    - macos-top-29-cli-ux

@@ -1,0 +1,39 @@
+task:
+  id: macos-apps-terminals
+  name: Popular terminals
+  description: |
+    Install iTerm2, Ghostty, Warp, and Kitty from Homebrew casks.
+    Source: Homebrew cask install counts for the last 365 days.
+    Does not write shell profiles, does not import term settings, and does not change the default terminal.
+    Homebrew must already be on PATH. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-iterm2
+      name: Install iTerm2
+      type: brew-install
+      package: iterm2
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "iterm2"]
+    - id: install-ghostty
+      name: Install Ghostty
+      type: brew-install
+      package: ghostty
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "ghostty"]
+    - id: install-warp
+      name: Install Warp
+      type: brew-install
+      package: warp
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "warp"]
+    - id: install-kitty
+      name: Install Kitty
+      type: brew-install
+      package: kitty
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "kitty"]

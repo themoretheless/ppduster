@@ -293,10 +293,10 @@ ppduster setup run dev-brew-bootstrap
 ppduster setup run github-account-clone-v2
 ppduster setup run github-account-clone-v2 --yes
 
-# Built-in macOS automation starters
+# Built-in macOS automation starters (plan first; many leaves inspect or need extra files)
 ppduster setup show macos-top-01-brew-bootstrap
-ppduster setup run macos-top-03-system-defaults --allow-shell
 ppduster setup run macos-top-08-security-baseline --allow-elevation
+ppduster setup run macos-top-29-cli-ux
 
 # In a repository that contains package.json and a .NET solution/project:
 # create project-level npm and NuGet registry files for DodoPizza packages
@@ -325,9 +325,33 @@ ppduster setup run bambu-studio-install --channel beta --yes
 ppduster setup run app-store-bootstrap
 ppduster setup run app-store-bootstrap --yes
 
-# A reusable template composed from six existing scenarios
+# Templates first (review the plan; these compose existing leaves, they are not one-click new-Mac installers)
+ppduster setup list
+ppduster setup show macos-new-machine
+ppduster setup run macos-new-machine
+ppduster setup show macos-web-developer
+ppduster setup run macos-web-developer
+ppduster setup show macos-privacy-baseline
+ppduster setup run macos-privacy-baseline --allow-elevation
+ppduster setup show macos-node-developer
+ppduster setup run macos-node-developer
+# node + VS Code + fzf/rg; no nvm, no global npm packages
+ppduster setup show macos-python-data
+ppduster setup run macos-python-data
+# uv + fzf/rg only; no Python runtime, no venv, no torch
+ppduster setup show macos-rust-developer
+ppduster setup run macos-rust-developer
+# rustup is keg-only; rustc still comes from rustup itself
+ppduster setup show macos-containers
+ppduster setup run macos-containers
+# Docker Desktop cask; does not start the daemon
+ppduster setup show macos-apps-browsers
+ppduster setup run macos-apps-browsers
+# Homebrew cask packs from 365-day install counts: browsers, comms, media,
+# notes/passwords, terminals, editors, design, AI apps. Not App Store top 100.
 ppduster setup show macos-developer-workstation
-ppduster setup run macos-developer-workstation --allow-shell
+ppduster setup run macos-developer-workstation
+# workstation still expects a user Brewfile, example/dotfiles, ~/.ssh, and ~/.tmux.conf
 
 # Typed folder/file operations, SHA-256, and filesystem conditions
 ppduster setup run filesystem-basics
@@ -370,6 +394,25 @@ task:
 runtime validates and executes this graph directly; there is no second flat executor and no
 lowering based on canvas position. Action nodes embed the same typed action fields documented
 in the shorter block fragments below.
+
+Bundled templates (`macos-new-machine`, `macos-web-developer`,
+`macos-node-developer`, `macos-python-data`, `macos-rust-developer`,
+`macos-full-stack`, `macos-containers`, `macos-privacy-baseline`,
+`macos-power-user`, `macos-home-office`, `macos-recovery-kit`,
+`macos-maker-studio`, `macos-developer-workstation`)
+compose existing child scenarios without copying their steps. They are review
+packs, not one-click blank-machine installers: some children still inspect
+state, require Homebrew already on PATH, or need elevation. The Scenario Flow
+library lists templates first and collapses long macOS leaf bands. The block
+picker groups everyday actions by category and hides vendor-specific or
+composite blocks until you search for them.
+
+Popular GUI apps are grouped by role, not as one 100-app scenario:
+`macos-apps-browsers`, `macos-apps-comms`, `macos-apps-media`,
+`macos-apps-notes-passwords`, `macos-apps-terminals`, `macos-apps-editors`,
+`macos-apps-design`, `macos-apps-agents`. Tokens come from Homebrew cask
+install counts for the last 365 days. They do not cover the Mac App Store
+chart and they skip CLI/SDK noise such as chromedriver or android-platform-tools.
 
 A legacy reusable template can group existing scenarios without copying their steps:
 
@@ -820,7 +863,7 @@ asset SHA-256, verifies the exact `com.bambulab.bambu-studio` bundle and signing
 and compares the signed installed version before updating `~/Applications`. Equal or
 newer installed versions are left untouched.
 
-Bundled macOS setup starters currently cover the top 50 bootstrap areas, starting with:
+Bundled macOS setup leaves currently include 50 `macos-top-*` sketches. Many are inspect-or-plan wrappers, not finished installers. The first ten are:
 
 1. Brew bootstrap
 2. Dotfiles sync

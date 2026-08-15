@@ -1,0 +1,14 @@
+task:
+  id: macos-rust-developer
+  name: rustup, VS Code, and CLI tools
+  description: |
+    Install rustup, Visual Studio Code, and fzf/ripgrep.
+    rustup still owns the first toolchain and is keg-only: add "$(brew --prefix rustup)/bin" to PATH after apply.
+    This template does not write rust-toolchain.toml and does not run rustup default.
+    Homebrew must already be on PATH. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-stack-rustup
+    - macos-stack-vscode
+    - macos-top-29-cli-ux

@@ -1,0 +1,25 @@
+task:
+  id: macos-apps-design
+  name: Popular design apps
+  description: |
+    Install Figma and Blender from Homebrew casks.
+    Source: Homebrew cask install counts for the last 365 days.
+    Does not install Adobe Creative Cloud, Affinity, or Inkscape.
+    Homebrew must already be on PATH. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-figma
+      name: Install Figma
+      type: brew-install
+      package: figma
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "figma"]
+    - id: install-blender
+      name: Install Blender
+      type: brew-install
+      package: blender
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "blender"]

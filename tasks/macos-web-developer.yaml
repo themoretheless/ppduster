@@ -1,0 +1,16 @@
+task:
+  id: macos-web-developer
+  name: mise, Chrome, and CLI tools
+  description: |
+    Prepare a macOS machine for everyday web development.
+    The template installs mise-based language toolchains, installs Chrome as a cask, then adds modern CLI tools.
+    It does not apply a user Brewfile, does not require ~/.ssh or ~/.tmux.conf, and does not invent a Node/Docker stack.
+    Homebrew must already be on PATH for the brew-install children.
+    Child checks and safety gates remain active. Dry-run is still the default; review the plan before applying.
+    Browser policy inspection may require shell permission.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-top-05-toolchains
+    - macos-top-38-browsers
+    - macos-top-29-cli-ux

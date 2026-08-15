@@ -1,0 +1,16 @@
+task:
+  id: macos-stack-uv
+  name: Install uv
+  description: |
+    Install Astral uv from Homebrew for Python environments and package installs.
+    Does not create a virtualenv and does not write pyproject.toml.
+    Homebrew must already be on PATH.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-uv
+      name: Install uv
+      type: brew-install
+      package: uv
+      check:
+        command_succeeds: ["brew", "list", "uv"]

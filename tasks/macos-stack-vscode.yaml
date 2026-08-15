@@ -1,0 +1,17 @@
+task:
+  id: macos-stack-vscode
+  name: Install Visual Studio Code
+  description: |
+    Install the Visual Studio Code cask when it is missing.
+    Does not install extensions and does not write settings.json.
+    Homebrew must already be on PATH.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-vscode
+      name: Install Visual Studio Code
+      type: brew-install
+      package: visual-studio-code
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "visual-studio-code"]

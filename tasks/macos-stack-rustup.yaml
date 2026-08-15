@@ -1,0 +1,17 @@
+task:
+  id: macos-stack-rustup
+  name: Install rustup
+  description: |
+    Install rustup from Homebrew (formerly rustup-init). The first rustc toolchain is still configured by rustup itself.
+    The formula is keg-only: add "$(brew --prefix rustup)/bin" to PATH after apply.
+    Does not run rustup-init prompts and does not write rust-toolchain.toml.
+    Homebrew must already be on PATH.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-rustup
+      name: Install rustup
+      type: brew-install
+      package: rustup
+      check:
+        command_succeeds: ["brew", "list", "rustup"]

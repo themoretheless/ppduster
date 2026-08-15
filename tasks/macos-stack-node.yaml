@@ -1,0 +1,16 @@
+task:
+  id: macos-stack-node
+  name: Install Node.js
+  description: |
+    Install the current Homebrew node formula when it is missing.
+    Does not pin a version, does not write .nvmrc, and does not install global npm packages.
+    Homebrew must already be on PATH.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-node
+      name: Install Node.js
+      type: brew-install
+      package: node
+      check:
+        command_succeeds: ["brew", "list", "node"]

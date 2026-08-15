@@ -15,16 +15,17 @@ use ppduster::automation::{
     block_definition, definition_for_action, describe_step, first_scenario_path, load_project_yaml,
     make_project_external, project_group_entries, project_group_entries_mut, run_task,
     validate_project as validate_project_structure, Action, ActionKind, ActionNode, AuthPolicy,
-    Binding, BlockDefinition, BlockPolicyCapabilities, CanvasPoint, CanvasView, ComparisonOperator,
-    ComposerCanvas, ContextPathSegment, ContextScope, EdgePort, ElevationPolicy, ExpressionLimits,
-    ExpressionV1, ExpressionValue, FieldRef, ForEachNode, GithubRepositoryInput, GraphEdge,
-    GraphNode, GraphValidationError, GraphValidationErrorKind, IfNode, IndeterminatePolicy,
-    JoinMode, JoinNode, LoopFailurePolicy, ObjectSchema, PolicyRequirement, ProjectEntry,
-    ProtectedPathApproval, ProtectedPathApprovalRequest, ProtectedPathApprovalRequired,
-    ProtectedPathOperation, ProtectedPathRisk, ReferenceV1, ReleaseChannel, RuleOutcomePolicy,
-    RunOptions, RunReport, ScenarioProject, ScriptInterpreter, SemanticFormat, Sensitivity, Step,
-    StepCondition, StepStatus, SwitchCase, SwitchNode, Task, TaskFile, TaskPack, TaskSource,
-    TemplatePart, TrustRequirement, WorkflowGraph, WriteConflictPolicy,
+    Binding, BlockCatalog, BlockDefinition, BlockPolicyCapabilities, CanvasPoint, CanvasView,
+    ComparisonOperator, ComposerCanvas, ContextPathSegment, ContextScope, EdgePort,
+    ElevationPolicy, ExpressionLimits, ExpressionV1, ExpressionValue, FieldRef, ForEachNode,
+    GithubRepositoryInput, GraphEdge, GraphNode, GraphValidationError, GraphValidationErrorKind,
+    IfNode, IndeterminatePolicy, JoinMode, JoinNode, LoopFailurePolicy, ObjectSchema,
+    PolicyRequirement, ProjectEntry, ProtectedPathApproval, ProtectedPathApprovalRequest,
+    ProtectedPathApprovalRequired, ProtectedPathOperation, ProtectedPathRisk, ReferenceV1,
+    ReleaseChannel, RuleOutcomePolicy, RunOptions, RunReport, ScenarioProject, ScriptInterpreter,
+    SemanticFormat, Sensitivity, Step, StepCondition, StepStatus, SwitchCase, SwitchNode, Task,
+    TaskFile, TaskPack, TaskSource, TemplatePart, TrustRequirement, WorkflowGraph,
+    WriteConflictPolicy,
 };
 #[cfg(test)]
 use ppduster::automation::{
@@ -5418,6 +5419,7 @@ fn literal_prototype_for_type(value_type: &ContextType, path: &str) -> serde_jso
             Some(SemanticFormat::GitRef) => "main".into(),
             Some(SemanticFormat::RepositoryName) => "owner/repository".into(),
             Some(SemanticFormat::Identifier) => "value".into(),
+            Some(SemanticFormat::PackageName) => "postgresql@17".into(),
             Some(SemanticFormat::OpaqueId) => "opaque-id".into(),
             None if path.ends_with("version") => "1.0".into(),
             None if path.ends_with("app_name") => "Application.app".into(),
@@ -7109,28 +7111,11 @@ fn paint_graph_action_editor(
     let mut changed = false;
     let mut external_auth_request = None;
     let mut external_auth_cancellation_requested = false;
-    ui.label(RichText::new("Название блока").size(9.0).color(MUTED));
+    ui.label(RichText::new("Название блока").size(UI_TEXT_CAPTION).color(MUTED));
     changed |= ui
         .add(egui::TextEdit::singleline(&mut node.step.name).desired_width(ui.available_width()))
+        .on_hover_text(format!("ID: {}", node.step.id))
         .changed();
-    ui.label(RichText::new("ID блока").size(9.0).color(MUTED));
-    ui.add(
-        egui::Label::new(
-            RichText::new(&node.step.id)
-                .monospace()
-                .size(9.0)
-                .color(PURPLE),
-        )
-        .truncate(),
-    );
-    ui.add(
-        egui::Label::new(
-            RichText::new("ID стабилен: связи и контекст адресуют узел по нему.")
-                .size(8.0)
-                .color(MUTED),
-        )
-        .wrap(),
-    );
     ui.add_space(8.0);
     if let Action::GithubPreviewRepositories {
         selected_repositories,
@@ -7147,6 +7132,7 @@ fn paint_graph_action_editor(
             )
             .wrap(),
         );
+        ui.add_space(8.0);
     } else if let Action::SelectArrayItems { selected_items, .. } = &node.step.action {
         ui.add(
             egui::Label::new(
@@ -7159,18 +7145,14 @@ fn paint_graph_action_editor(
             )
             .wrap(),
         );
+        ui.add_space(8.0);
     }
-    ui.add_space(8.0);
-    section_label(ui, "ВХОДЫ ПО СХЕМЕ");
     let definition = definition_for_action(&node.step.action);
-    if definition.input_schema.fields.is_empty() {
-        ui.label(
-            RichText::new("У блока нет входных параметров.")
-                .size(9.0)
-                .color(MUTED),
-        );
+    let input_fields = graph_input_fields(&definition.input_schema);
+    if !input_fields.is_empty() {
+        section_label(ui, "ВХОДЫ ПО СХЕМЕ");
     }
-    for (target, field) in graph_input_fields(&definition.input_schema) {
+    for (target, field) in input_fields {
         ui.add_space(5.0);
         ui.vertical(|ui| {
             ui.add(egui::Label::new(context_line_layout_job(&target, 9.0)).truncate());
@@ -7363,8 +7345,21 @@ fn paint_graph_action_editor(
         );
     }
     ui.add_space(8.0);
-    section_label(ui, "ПОЛИТИКИ ШАГА");
     let policy_issues = graph_step_policy_issues(&node.step, &definition.policy);
+    let show_auth_combo = graph_action_external_auth(&node.step.action).is_some()
+        || definition.policy.allow_git_credentials
+        || definition.policy.allow_sudo
+        || !matches!(node.step.auth, AuthPolicy::None);
+    let show_elevation = definition.policy.allow_elevation;
+    let show_dangerous = !matches!(definition.policy.dangerous, PolicyRequirement::Forbidden)
+        || node.step.dangerous;
+    let show_policies = !policy_issues.is_empty()
+        || show_auth_combo
+        || show_elevation
+        || show_dangerous;
+    if show_policies {
+        section_label(ui, "ПОЛИТИКИ ШАГА");
+    }
     if !policy_issues.is_empty() {
         ui.add(
             egui::Label::new(
@@ -7387,7 +7382,8 @@ fn paint_graph_action_editor(
         }
         ui.add_space(5.0);
     }
-    ui.label(RichText::new("Аутентификация").size(9.0).color(MUTED));
+    if show_auth_combo {
+    ui.label(RichText::new("Аутентификация").size(UI_TEXT_CAPTION).color(MUTED));
     if let Some(contract) = graph_action_external_auth(&node.step.action) {
         let response = paint_graph_external_auth(ui, contract, external_auth_state, dark);
         if response.authorization_requested {
@@ -7419,8 +7415,9 @@ fn paint_graph_action_editor(
                 }
             });
     }
-    ui.label(RichText::new("Повышение прав").size(9.0).color(MUTED));
-    if definition.policy.allow_elevation {
+    }
+    if show_elevation {
+        ui.label(RichText::new("Повышение прав").size(UI_TEXT_CAPTION).color(MUTED));
         egui::ComboBox::from_id_salt(("graph-step-elevation", &node.step.id))
             .selected_text(match node.step.allow_elevation {
                 ElevationPolicy::Forbidden => "Запрещено",
@@ -7444,12 +7441,6 @@ fn paint_graph_action_editor(
                     )
                     .changed();
             });
-    } else {
-        ui.label(
-            RichText::new("Запрещено для этого блока")
-                .size(8.0)
-                .color(MUTED),
-        );
     }
     match definition.policy.dangerous {
         PolicyRequirement::Optional => {
@@ -7457,20 +7448,14 @@ fn paint_graph_action_editor(
                 .checkbox(&mut node.step.dangerous, "Опасная операция")
                 .changed();
         }
-        PolicyRequirement::Forbidden => {
-            ui.label(
-                RichText::new("Опасная операция: запрещено для этого блока")
-                    .size(8.0)
-                    .color(MUTED),
-            );
-        }
         PolicyRequirement::Required => {
             ui.label(
                 RichText::new("Опасная операция: обязательная защита включена")
-                    .size(8.0)
+                    .size(UI_TEXT_CAPTION)
                     .color(MUTED),
             );
         }
+        PolicyRequirement::Forbidden => {}
     }
     if let Err(error) = node.step.validate() {
         ui.add(
@@ -7749,7 +7734,7 @@ impl ScenarioApp {
             .and_then(|pack| {
                 pack.tasks
                     .iter()
-                    .position(|task| task.id == "macos-developer-workstation")
+                    .position(|task| task.id == "macos-new-machine")
                     .or_else(|| pack.tasks.iter().position(Task::is_template))
             })
             .unwrap_or(0);
@@ -9316,93 +9301,104 @@ impl ScenarioApp {
                         .hint_text("Название, ID, атрибут или другая раскладка…")
                         .desired_width(f32::INFINITY),
                 );
+                let query = self.block_picker_search.trim().to_lowercase();
+                if query.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "Показаны основные блоки. Узкие (лицензия, вендоры) появляются по поиску.",
+                        )
+                        .size(UI_TEXT_CAPTION)
+                        .color(MUTED),
+                    );
+                }
                 ui.add_space(10.0);
                 ScrollArea::vertical()
                     .id_salt("composer-block-picker-list")
                     .max_height(list_height)
                     .show(ui, |ui| {
-                        let graph_controls = [
-                            (ComposerGraphBlockKind::ForEach, "Для каждого элемента"),
-                            (ComposerGraphBlockKind::If, "Если / иначе"),
-                            (ComposerGraphBlockKind::Switch, "Выбор по значению"),
-                            (ComposerGraphBlockKind::Join, "Объединить ветви"),
-                        ]
-                        .into_iter()
-                        .map(|(kind, title)| (kind, graph_control_definition(kind, title)));
-                        let graph_definitions = graph_controls
-                            .chain(
-                                ActionKind::ALL
-                                    .into_iter()
-                                    .filter(|kind| action_kind_visible_in_authoring_palette(*kind))
-                                    .map(|kind| {
-                                        let mut definition = block_definition(kind);
-                                        if matches!(kind, ActionKind::GithubListRepositories) {
-                                            definition.title =
-                                                "Получить репозитории при запуске".into();
-                                        }
-                                        (ComposerGraphBlockKind::Action(kind), definition)
-                                    }),
-                            )
+                        let graph_definitions = picker_block_entries();
+                        let mut visible = graph_definitions
+                            .into_iter()
+                            .filter(|(kind, definition)| {
+                                if !picker_definition_visible(kind, definition, &query) {
+                                    return false;
+                                }
+                                if query.is_empty() {
+                                    return true;
+                                }
+                                let include_schema_attributes =
+                                    matches!(kind, ComposerGraphBlockKind::Action(_));
+                                block_picker_definition_matches(
+                                    definition,
+                                    &self.block_picker_search,
+                                    include_schema_attributes,
+                                ) || picker_definition_visible(kind, definition, &query)
+                            })
                             .collect::<Vec<_>>();
-                        for (graph_kind, definition) in graph_definitions {
-                            let context_lines = schema_context_lines(&definition.output_schema);
-                            let include_schema_attributes =
-                                matches!(graph_kind, ComposerGraphBlockKind::Action(_));
-                            if !block_picker_definition_matches(
-                                &definition,
-                                &self.block_picker_search,
-                                include_schema_attributes,
-                            ) {
-                                continue;
+                        visible.sort_by(|(left_kind, left), (right_kind, right)| {
+                            picker_category_rank(&left.category)
+                                .cmp(&picker_category_rank(&right.category))
+                                .then_with(|| {
+                                    picker_control_rank(left_kind)
+                                        .cmp(&picker_control_rank(right_kind))
+                                })
+                                .then_with(|| left.title.cmp(&right.title))
+                        });
+                        if visible.is_empty() {
+                            ui.label(
+                                RichText::new(if query.is_empty() {
+                                    "Нет доступных блоков."
+                                } else {
+                                    "По этому запросу блоки не найдены."
+                                })
+                                .size(UI_TEXT_BODY)
+                                .color(ui_tone(UiTone::Muted, self.dark)),
+                            );
+                        }
+                        let mut last_category = None;
+                        for (graph_kind, definition) in visible {
+                            if last_category.as_deref() != Some(definition.category.as_str()) {
+                                if last_category.is_some() {
+                                    ui.add_space(8.0);
+                                }
+                                ui.label(
+                                    RichText::new(definition.category.to_uppercase())
+                                        .strong()
+                                        .size(UI_TEXT_CAPTION)
+                                        .color(MUTED),
+                                );
+                                ui.add_space(4.0);
+                                last_category = Some(definition.category.clone());
                             }
+                            let purpose = picker_purpose(&graph_kind, &definition);
                             let response = Frame::new()
                                 .fill(panel(self.dark))
                                 .stroke(Stroke::new(1.0, line(self.dark)))
-                                .corner_radius(10)
-                                .inner_margin(Margin::same(11))
+                                .corner_radius(8)
+                                .inner_margin(Margin::symmetric(10, 8))
                                 .show(ui, |ui| {
                                     ui.set_width(ui.available_width());
                                     ui.horizontal(|ui| {
                                         ui.label(
                                             RichText::new(&definition.title)
                                                 .strong()
-                                                .size(11.0)
+                                                .size(UI_TEXT_BODY)
                                                 .color(text(self.dark)),
                                         );
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
-                                                ui.label(
-                                                    RichText::new(&definition.category)
-                                                        .size(8.0)
-                                                        .color(CYAN),
-                                                );
-                                            },
-                                        );
+                                        if definition.catalog == BlockCatalog::Specialized {
+                                            ui.label(
+                                                RichText::new("узкий")
+                                                    .size(8.0)
+                                                    .color(ui_tone(UiTone::Warning, self.dark)),
+                                            );
+                                        }
                                     });
-                                    for (index, line) in context_lines.iter().take(4).enumerate() {
-                                        let prefix = if index == 0 {
-                                            "Выход: "
-                                        } else {
-                                            "       "
-                                        };
-                                        ui.add(
-                                            egui::Label::new(context_line_layout_job(
-                                                &format!("{prefix}{line}"),
-                                                8.0,
-                                            ))
-                                            .truncate(),
-                                        );
-                                    }
-                                    if context_lines.len() > 4 {
+                                    if !purpose.is_empty() {
                                         ui.label(
-                                            RichText::new(format!(
-                                                "       … ещё {}",
-                                                context_lines.len() - 4
-                                            ))
-                                            .monospace()
-                                            .size(8.0)
-                                            .color(MUTED),
+                                            RichText::new(purpose)
+                                                .size(UI_TEXT_CAPTION)
+                                                .color(MUTED),
                                         );
                                     }
                                 })
@@ -9411,7 +9407,7 @@ impl ScenarioApp {
                             if response.clicked() {
                                 selected_graph = Some(graph_kind);
                             }
-                            ui.add_space(6.0);
+                            ui.add_space(4.0);
                         }
                     });
             });
@@ -9533,6 +9529,266 @@ enum ProjectTreeAction {
 
 fn library_task_row_id(task_id: &str) -> Id {
     Id::new(("library-task-row", task_id))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LibrarySection {
+    Templates,
+    PopularApps,
+    Stacks,
+    AppsAndRepos,
+    MacosStart,
+    MacosSystem,
+    MacosApps,
+    MacosContinuity,
+    Other,
+}
+
+impl LibrarySection {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Templates => "ГОТОВЫЕ ШАБЛОНЫ",
+            Self::PopularApps => "ПОПУЛЯРНЫЕ ПРИЛОЖЕНИЯ",
+            Self::Stacks => "СТЕКИ",
+            Self::AppsAndRepos => "ПРИЛОЖЕНИЯ И РЕПОЗИТОРИИ",
+            Self::MacosStart => "MACOS · ЗАПУСК",
+            Self::MacosSystem => "MACOS · СИСТЕМА",
+            Self::MacosApps => "MACOS · ПРИЛОЖЕНИЯ",
+            Self::MacosContinuity => "MACOS · РЕЗЕРВ И СИНХРОН",
+            Self::Other => "ДРУГИЕ СЦЕНАРИИ",
+        }
+    }
+}
+
+fn macos_top_number(task_id: &str) -> Option<u32> {
+    task_id
+        .strip_prefix("macos-top-")?
+        .get(..2)?
+        .parse()
+        .ok()
+}
+
+fn library_section(task: &Task) -> LibrarySection {
+    if task.is_template() {
+        return LibrarySection::Templates;
+    }
+    if task.id.starts_with("macos-apps-") {
+        return LibrarySection::PopularApps;
+    }
+    if task.id.starts_with("macos-stack-") {
+        return LibrarySection::Stacks;
+    }
+    if let Some(number) = macos_top_number(&task.id) {
+        return match number {
+            1..=10 => LibrarySection::MacosStart,
+            11..=25 => LibrarySection::MacosSystem,
+            26..=46 => LibrarySection::MacosApps,
+            _ => LibrarySection::MacosContinuity,
+        };
+    }
+    if task.id == "github-account-clone-v2"
+        || task.id == "github-repositories"
+        || task.id.starts_with("github-repositories-")
+    {
+        return LibrarySection::AppsAndRepos;
+    }
+    match task.id.as_str() {
+        "lightburn-install-activate"
+        | "bambu-studio-install"
+        | "app-store-bootstrap"
+        | "dev-brew-bootstrap"
+        | "dev-dodopizza-package-registries"
+        | "filesystem-basics" => LibrarySection::AppsAndRepos,
+        _ => LibrarySection::Other,
+    }
+}
+
+fn library_section_default_open(
+    section: LibrarySection,
+    query: &str,
+    contains_selected: bool,
+) -> bool {
+    if !query.is_empty() || contains_selected {
+        return true;
+    }
+    matches!(
+        section,
+        LibrarySection::Templates | LibrarySection::AppsAndRepos | LibrarySection::Other
+    )
+}
+
+fn picker_block_entries() -> Vec<(ComposerGraphBlockKind, ppduster::automation::BlockDefinition)> {
+    let graph_controls = [
+        (ComposerGraphBlockKind::ForEach, "Для каждого элемента"),
+        (ComposerGraphBlockKind::If, "Если / иначе"),
+        (ComposerGraphBlockKind::Switch, "Выбор по значению"),
+        (ComposerGraphBlockKind::Join, "Объединить ветви"),
+    ]
+    .into_iter()
+    .map(|(kind, title)| {
+        let mut definition = graph_control_definition(kind, title);
+        definition.catalog = BlockCatalog::Core;
+        definition.input_schema = schema_free_picker_control();
+        definition.output_schema = schema_free_picker_control();
+        (kind, definition)
+    });
+    graph_controls
+        .chain(
+            ActionKind::ALL
+                .into_iter()
+                .filter(|kind| action_kind_visible_in_authoring_palette(*kind))
+                .filter(|kind| *kind != ActionKind::GitClone)
+                .map(|kind| {
+                    let mut definition = block_definition(kind);
+                    if matches!(kind, ActionKind::GithubListRepositories) {
+                        definition.title = "Получить репозитории при запуске".into();
+                    }
+                    (ComposerGraphBlockKind::Action(kind), definition)
+                }),
+        )
+        .collect()
+}
+
+fn schema_free_picker_control() -> ObjectSchema {
+    ObjectSchema::anonymous(BTreeMap::new())
+}
+
+fn picker_purpose(
+    kind: &ComposerGraphBlockKind,
+    _definition: &ppduster::automation::BlockDefinition,
+) -> &'static str {
+    match kind {
+        ComposerGraphBlockKind::ForEach => "Повтор для каждого элемента списка",
+        ComposerGraphBlockKind::If => "Ветвление по условию",
+        ComposerGraphBlockKind::Switch => "Несколько веток по значению",
+        ComposerGraphBlockKind::Join => "Свести параллельные ветви",
+        ComposerGraphBlockKind::Action(ActionKind::ActivateLicense) => {
+            "Открыть vendor UI лицензии (LightBurn)"
+        }
+        ComposerGraphBlockKind::Action(ActionKind::BambuStudioRelease) => {
+            "Найти релиз Bambu Studio"
+        }
+        ComposerGraphBlockKind::Action(ActionKind::GitClone) => {
+            "Составной clone + fetch + fast-forward"
+        }
+        ComposerGraphBlockKind::Action(ActionKind::ConfigurePackageRegistryFiles) => {
+            "npm/NuGet registry files"
+        }
+        ComposerGraphBlockKind::Action(_) => "",
+    }
+}
+
+fn picker_search_haystack(
+    kind: &ComposerGraphBlockKind,
+    definition: &ppduster::automation::BlockDefinition,
+) -> String {
+    let mut haystack = format!(
+        "{} {} {}",
+        definition.title,
+        definition.category,
+        picker_purpose(kind, definition)
+    );
+    if let ComposerGraphBlockKind::Action(action_kind) = kind {
+        haystack.push(' ');
+        haystack.push_str(action_kind.id());
+    }
+    haystack.push(' ');
+    haystack.push_str(&picker_kind_aliases(kind));
+    haystack.push(' ');
+    haystack.push_str(&schema_search_tokens(&definition.input_schema));
+    haystack
+}
+
+fn picker_kind_aliases(kind: &ComposerGraphBlockKind) -> &'static str {
+    match kind {
+        ComposerGraphBlockKind::ForEach => "for-each foreach loop каждый",
+        ComposerGraphBlockKind::If => "if else иначе условие branch",
+        ComposerGraphBlockKind::Switch => "switch case выбор",
+        ComposerGraphBlockKind::Join => "join merge объединить ветви",
+        ComposerGraphBlockKind::Action(ActionKind::ActivateLicense) => {
+            "lightburn light-burn vendor-ui лицензия"
+        }
+        ComposerGraphBlockKind::Action(ActionKind::BambuStudioRelease) => {
+            "bambu bambulab studio"
+        }
+        ComposerGraphBlockKind::Action(ActionKind::GitClone) => "git-clone sync составной",
+        ComposerGraphBlockKind::Action(ActionKind::ConfigurePackageRegistryFiles) => {
+            "npm nuget dodopizza registry"
+        }
+        _ => "",
+    }
+}
+
+fn schema_search_tokens(schema: &ObjectSchema) -> String {
+    let mut tokens = Vec::new();
+    collect_schema_search_tokens(schema, &mut tokens);
+    tokens.join(" ")
+}
+
+fn collect_schema_search_tokens(schema: &ObjectSchema, tokens: &mut Vec<String>) {
+    for (name, field) in &schema.fields {
+        tokens.push(name.clone());
+        for value in &field.allowed_values {
+            if let Some(text) = value.as_str() {
+                tokens.push(text.to_owned());
+            }
+        }
+        match &field.value_type {
+            ContextType::Object { schema: nested } => {
+                collect_schema_search_tokens(nested, tokens);
+            }
+            ContextType::Array { items } => {
+                if let ContextType::Object { schema: nested } = items.as_ref() {
+                    collect_schema_search_tokens(nested, tokens);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn picker_definition_visible(
+    kind: &ComposerGraphBlockKind,
+    definition: &ppduster::automation::BlockDefinition,
+    query: &str,
+) -> bool {
+    let haystack = picker_search_haystack(kind, definition).to_lowercase();
+    let matches_query = query.is_empty() || haystack.contains(query);
+    if !matches_query {
+        return false;
+    }
+    if query.is_empty() && definition.catalog == BlockCatalog::Specialized {
+        return false;
+    }
+    true
+}
+
+fn picker_category_rank(category: &str) -> u8 {
+    match category {
+        "Логика" => 0,
+        "GitHub" => 1,
+        "Данные" => 2,
+        "Git" => 3,
+        "Файлы" => 3,
+        "Пакеты" => 4,
+        "Процессы" => 5,
+        "Артефакты" => 6,
+        "Установка" => 7,
+        "Система" => 8,
+        "Конфигурация" => 9,
+        "Лицензия" => 10,
+        _ => 20,
+    }
+}
+
+fn picker_control_rank(kind: &ComposerGraphBlockKind) -> u8 {
+    match kind {
+        ComposerGraphBlockKind::ForEach => 0,
+        ComposerGraphBlockKind::If => 1,
+        ComposerGraphBlockKind::Switch => 2,
+        ComposerGraphBlockKind::Join => 3,
+        ComposerGraphBlockKind::Action(_) => 10,
+    }
 }
 
 fn project_scenario_row_id(path: &[usize]) -> Id {
@@ -10187,7 +10443,7 @@ impl ScenarioApp {
                 ui.label(
                     RichText::new("Сценарии")
                         .strong()
-                        .size(22.0)
+                        .size(UI_TEXT_NODE_TITLE)
                         .color(text(self.dark)),
                 );
                 ui.add(
@@ -10198,14 +10454,23 @@ impl ScenarioApp {
                 ui.add_space(UI_SPACE_XS);
                 let query = self.library_search.trim().to_lowercase();
                 let mut task_action = None;
-                let task_list_height = (ui.available_height() - 190.0).clamp(120.0, 480.0);
+                let task_list_height = (ui.available_height() - 148.0).max(160.0);
                 ScrollArea::vertical()
                     .id_salt("library-task-list")
                     .max_height(task_list_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        if let Some(error) = &self.load_error {
+                            ui.label(
+                                RichText::new(error)
+                                    .size(UI_TEXT_BODY)
+                                    .color(ui_tone(UiTone::Danger, self.dark)),
+                            );
+                            ui.add_space(8.0);
+                        }
                         if let Some(pack) = &self.task_pack {
-                            let mut visible_count = 0usize;
+                            let mut grouped: BTreeMap<LibrarySection, Vec<(usize, &Task)>> =
+                                BTreeMap::new();
                             for (index, task) in pack.tasks.iter().enumerate() {
                                 if !query.is_empty()
                                     && !task.name.to_lowercase().contains(&query)
@@ -10214,28 +10479,59 @@ impl ScenarioApp {
                                 {
                                     continue;
                                 }
-                                visible_count += 1;
-                                let response = paint_navigation_row(
-                                    ui,
-                                    library_task_row_id(&task.id),
-                                    &task.name,
-                                    Some(&task.id),
-                                    self.selected_task == index,
-                                    !self.running,
-                                    self.dark,
-                                );
-                                if response.clicked() {
-                                    task_action = Some(index);
-                                }
-                                ui.add_space(2.0);
+                                grouped
+                                    .entry(library_section(task))
+                                    .or_default()
+                                    .push((index, task));
+                            }
+                            let selected_task = self.selected_task;
+                            let running = self.running;
+                            let dark = self.dark;
+                            for (section, rows) in &grouped {
+                                let contains_selected =
+                                    rows.iter().any(|(index, _)| *index == selected_task);
+                                let force_open = !query.is_empty() || contains_selected;
+                                egui::CollapsingHeader::new(section.title())
+                                    .id_salt(("library-section", section.title()))
+                                    .default_open(library_section_default_open(
+                                        *section,
+                                        &query,
+                                        contains_selected,
+                                    ))
+                                    .open(force_open.then_some(true))
+                                    .show(ui, |ui| {
+                                        for (index, task) in rows {
+                                            let template_subtitle = task.is_template().then(|| {
+                                                format!("шаблон · {}", task.id)
+                                            });
+                                            let selected_subtitle = (*index == selected_task)
+                                                .then(|| task.id.as_str());
+                                            let subtitle = template_subtitle
+                                                .as_deref()
+                                                .or(selected_subtitle);
+                                            let response = paint_navigation_row(
+                                                ui,
+                                                library_task_row_id(&task.id),
+                                                &task.name,
+                                                subtitle,
+                                                selected_task == *index,
+                                                !running,
+                                                dark,
+                                            );
+                                            if response.clicked() {
+                                                task_action = Some(*index);
+                                            }
+                                            ui.add_space(2.0);
+                                        }
+                                    });
                             }
                             if pack.tasks.is_empty() {
                                 ui.label(
                                     RichText::new("В библиотеке пока нет сценариев.")
-                                        .size(9.0)
+                                        .size(UI_TEXT_BODY)
                                         .color(MUTED),
                                 );
-                            } else if visible_count == 0 {
+                            } else if grouped.is_empty() && self.load_error.is_none() {
                                 ui.label(
                                     RichText::new("По этому запросу сценарии не найдены.")
                                         .size(UI_TEXT_BODY)
@@ -10251,7 +10547,7 @@ impl ScenarioApp {
                 ui.label(
                     RichText::new("Проект")
                         .strong()
-                        .size(22.0)
+                        .size(UI_TEXT_NODE_TITLE)
                         .color(text(self.dark)),
                 );
                 ui.add(
@@ -11684,14 +11980,23 @@ impl ScenarioApp {
                                 self.dark,
                             );
                             ui.add_space(12.0);
-                            section_label(ui, "ВЫХОДНОЙ КОНТЕКСТ");
-                            for line in schema_context_lines(
+                            let output_lines = schema_context_lines(
                                 &definition_for_action(&node.step.action).output_schema,
-                            ) {
-                                ui.add(
-                                    egui::Label::new(context_line_layout_job(&line, 8.0))
-                                        .truncate(),
-                                );
+                            );
+                            if !output_lines.is_empty() {
+                                egui::CollapsingHeader::new("ВЫХОДНОЙ КОНТЕКСТ")
+                                    .id_salt(("graph-output-context", &node.step.id))
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        for line in output_lines {
+                                            ui.add(
+                                                egui::Label::new(context_line_layout_job(
+                                                    &line, 8.0,
+                                                ))
+                                                .truncate(),
+                                            );
+                                        }
+                                    });
                             }
                         }
                         GraphNode::ForEach(node) => {
@@ -14501,6 +14806,7 @@ fn semantic_format_label(format: SemanticFormat) -> &'static str {
         SemanticFormat::GitRef => "git-ref",
         SemanticFormat::RepositoryName => "repository-name",
         SemanticFormat::Identifier => "identifier",
+        SemanticFormat::PackageName => "package-name",
         SemanticFormat::OpaqueId => "opaque-id",
     }
 }
@@ -14795,32 +15101,34 @@ fn paint_composer_conditions(
 ) -> bool {
     let mut changed = false;
     let step_id = step.id.clone();
-    section_label(ui, "УСЛОВИЯ");
-    ui.label(
-        RichText::new("Доступны только типизированные поля предыдущих блоков.")
-            .size(8.0)
-            .color(MUTED),
-    );
-    ui.add_space(5.0);
-    changed |= paint_condition_slot(
-        ui,
-        &step_id,
-        "when",
-        "Выполнять, когда",
-        &mut step.when,
-        fields,
-        dark,
-    );
-    ui.add_space(8.0);
-    changed |= paint_condition_slot(
-        ui,
-        &step_id,
-        "require",
-        "Требовать перед запуском",
-        &mut step.require,
-        fields,
-        dark,
-    );
+    let conditions_open = step.when.is_some() || step.require.is_some();
+    let body = egui::CollapsingHeader::new("УСЛОВИЯ")
+        .id_salt(("composer-conditions", &step.id))
+        .default_open(conditions_open)
+        .show(ui, |ui| {
+            let mut inner = false;
+            inner |= paint_condition_slot(
+                ui,
+                &step_id,
+                "when",
+                "Выполнять, когда",
+                &mut step.when,
+                fields,
+                dark,
+            );
+            ui.add_space(8.0);
+            inner |= paint_condition_slot(
+                ui,
+                &step_id,
+                "require",
+                "Требовать перед запуском",
+                &mut step.require,
+                fields,
+                dark,
+            );
+            inner
+        });
+    changed |= body.body_returned.unwrap_or(false);
     changed
 }
 
@@ -20903,6 +21211,136 @@ positions:
         assert!(pack.get("bambu-studio-install").is_some());
         assert!(pack.get("lightburn-install-activate").is_some());
         assert!(pack.get("macos-developer-workstation").is_some());
+        assert!(pack.get("macos-new-machine").is_some());
+        assert!(pack.get("macos-web-developer").is_some());
+        assert!(pack.get("macos-privacy-baseline").is_some());
+        assert!(pack.get("macos-maker-studio").is_some());
+        assert!(pack.get("macos-node-developer").is_some());
+        assert!(pack.get("macos-stack-node").is_some());
+    }
+
+    #[test]
+    fn library_groups_templates_ahead_of_atomic_macos_tasks() {
+        assert_eq!(
+            library_section(&Task {
+                id: "macos-new-machine".into(),
+                name: "New Mac baseline".into(),
+                description: String::new(),
+                platform: Default::default(),
+                trust: TrustRequirement::BundledOnly,
+                scenarios: vec!["macos-top-08-security-baseline".into()],
+                resolved_scenarios: Vec::new(),
+                steps: Vec::new(),
+                graph: None,
+            }),
+            LibrarySection::Templates
+        );
+        assert_eq!(
+            library_section(&Task {
+                id: "macos-top-08-security-baseline".into(),
+                name: "Security".into(),
+                description: String::new(),
+                platform: Default::default(),
+                trust: TrustRequirement::BundledOnly,
+                scenarios: Vec::new(),
+                resolved_scenarios: Vec::new(),
+                steps: Vec::new(),
+                graph: None,
+            }),
+            LibrarySection::MacosStart
+        );
+        assert!(LibrarySection::Templates < LibrarySection::MacosStart);
+        assert_eq!(
+            library_section(&Task {
+                id: "github-repositories-2".into(),
+                name: "GitHub 2".into(),
+                description: String::new(),
+                platform: Default::default(),
+                trust: TrustRequirement::BundledOnly,
+                scenarios: Vec::new(),
+                resolved_scenarios: Vec::new(),
+                steps: Vec::new(),
+                graph: None,
+            }),
+            LibrarySection::AppsAndRepos
+        );
+        assert_eq!(
+            library_section(&Task {
+                id: "macos-stack-node".into(),
+                name: "Install Node.js".into(),
+                description: String::new(),
+                platform: Default::default(),
+                trust: TrustRequirement::BundledOnly,
+                scenarios: Vec::new(),
+                resolved_scenarios: Vec::new(),
+                steps: Vec::new(),
+                graph: None,
+            }),
+            LibrarySection::Stacks
+        );
+        assert_eq!(
+            library_section(&Task {
+                id: "macos-apps-browsers".into(),
+                name: "Popular browsers".into(),
+                description: String::new(),
+                platform: Default::default(),
+                trust: TrustRequirement::BundledOnly,
+                scenarios: Vec::new(),
+                resolved_scenarios: Vec::new(),
+                steps: Vec::new(),
+                graph: None,
+            }),
+            LibrarySection::PopularApps
+        );
+    }
+
+    #[test]
+    fn picker_hides_specialized_blocks_until_they_are_searched() {
+        let license = block_definition(ActionKind::ActivateLicense);
+        let files = block_definition(ActionKind::CreateDirectory);
+        let license_kind = ComposerGraphBlockKind::Action(ActionKind::ActivateLicense);
+        let files_kind = ComposerGraphBlockKind::Action(ActionKind::CreateDirectory);
+        assert!(!picker_definition_visible(&license_kind, &license, ""));
+        assert!(picker_definition_visible(&license_kind, &license, "лиценз"));
+        assert!(picker_definition_visible(&license_kind, &license, "activate"));
+        assert!(picker_definition_visible(&license_kind, &license, "lightburn"));
+        assert!(picker_definition_visible(&files_kind, &files, ""));
+        assert!(!picker_definition_visible(&files_kind, &files, "github"));
+        let entries = picker_block_entries();
+        let if_entry = entries
+            .iter()
+            .find(|(kind, _)| matches!(kind, ComposerGraphBlockKind::If))
+            .expect("If is a picker control");
+        assert!(picker_definition_visible(&if_entry.0, &if_entry.1, "if"));
+        assert!(!picker_definition_visible(
+            &if_entry.0,
+            &if_entry.1,
+            "array_path"
+        ));
+        assert!(!picker_definition_visible(
+            &if_entry.0,
+            &if_entry.1,
+            "for-each"
+        ));
+        assert!(entries.iter().all(|(kind, _)| {
+            !matches!(
+                kind,
+                ComposerGraphBlockKind::Action(ActionKind::ForEachGitCloneIfMissing)
+            )
+        }));
+        assert!(entries.iter().all(|(kind, definition)| {
+            picker_definition_visible(kind, definition, "")
+                || definition.catalog == BlockCatalog::Specialized
+        }));
+        assert!(entries.iter().all(|(kind, _)| {
+            !matches!(kind, ComposerGraphBlockKind::Action(ActionKind::GitClone))
+        }));
+        assert!(entries.iter().any(|(kind, definition)| {
+            matches!(
+                kind,
+                ComposerGraphBlockKind::Action(ActionKind::GitCloneIfMissing)
+            ) && picker_definition_visible(kind, definition, "clone")
+        }));
     }
 
     #[test]

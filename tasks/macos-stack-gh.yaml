@@ -1,0 +1,16 @@
+task:
+  id: macos-stack-gh
+  name: Install GitHub CLI
+  description: |
+    Install the GitHub CLI formula when it is missing.
+    Does not run gh auth login and does not store a token.
+    Homebrew must already be on PATH. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-gh
+      name: Install GitHub CLI
+      type: brew-install
+      package: gh
+      check:
+        command_succeeds: ["brew", "list", "gh"]

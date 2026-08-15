@@ -144,6 +144,8 @@ pub struct BlockDefinition {
     /// invalid (for example GitHub repository discovery with sudo).
     #[serde(default)]
     pub policy: BlockPolicyCapabilities,
+    #[serde(default)]
+    pub catalog: BlockCatalog,
 }
 
 impl BlockDefinition {
@@ -159,6 +161,19 @@ pub enum PolicyRequirement {
     Forbidden,
     Optional,
     Required,
+}
+
+/// How a block is presented in pickers and catalogs.
+///
+/// Specialized blocks stay executable and searchable. They are hidden from
+/// the default picker so vendor-specific and composite actions do not bury
+/// the everyday filesystem / git / brew set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockCatalog {
+    #[default]
+    Core,
+    Specialized,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,6 +450,17 @@ pub fn default_step(kind: ActionKind, id: impl Into<String>) -> Result<Step, &'s
     })
 }
 
+pub const fn block_catalog(kind: ActionKind) -> BlockCatalog {
+    match kind {
+        ActionKind::BambuStudioRelease
+        | ActionKind::ActivateLicense
+        | ActionKind::ConfigurePackageRegistryFiles
+        | ActionKind::GitClone
+        | ActionKind::ForEachGitCloneIfMissing => BlockCatalog::Specialized,
+        _ => BlockCatalog::Core,
+    }
+}
+
 pub const fn block_policy_capabilities(kind: ActionKind) -> BlockPolicyCapabilities {
     match kind {
         ActionKind::GithubListRepositories
@@ -631,7 +657,7 @@ pub fn block_definition(kind: ActionKind) -> BlockDefinition {
             schema(
                 "ppduster.package.brew-install.inputs@1",
                 [
-                    ("package", req(identifier())),
+                    ("package", req(package_name())),
                     ("cask", opt(ContextType::Boolean)),
                 ],
             ),
@@ -767,6 +793,7 @@ pub fn block_definition(kind: ActionKind) -> BlockDefinition {
         read_only,
         may_use_secrets,
         policy: block_policy_capabilities(kind),
+        catalog: block_catalog(kind),
     }
 }
 
@@ -1042,6 +1069,7 @@ fn github_snapshot_definition() -> BlockDefinition {
         read_only: true,
         may_use_secrets: false,
         policy: block_policy_capabilities(ActionKind::GithubPreviewRepositories),
+        catalog: block_catalog(ActionKind::GithubPreviewRepositories),
     }
 }
 
@@ -1060,6 +1088,7 @@ fn array_selection_definition(item_type: ContextType) -> BlockDefinition {
         read_only: true,
         may_use_secrets: false,
         policy: block_policy_capabilities(ActionKind::SelectArrayItems),
+        catalog: block_catalog(ActionKind::SelectArrayItems),
     }
 }
 
@@ -1117,6 +1146,10 @@ fn sha256() -> ContextType {
 
 fn identifier() -> ContextType {
     string(SemanticFormat::Identifier)
+}
+
+fn package_name() -> ContextType {
+    string(SemanticFormat::PackageName)
 }
 
 fn secret_ref() -> ContextType {
@@ -1479,7 +1512,7 @@ fn package_schema() -> ObjectSchema {
     let package = ContextType::object(schema(
         "ppduster.package.result@1",
         [
-            ("name", req(identifier())),
+            ("name", req(package_name())),
             ("cask", req(ContextType::Boolean)),
             ("installed", req(ContextType::Boolean)),
             ("changed", req(ContextType::Boolean)),
@@ -1641,6 +1674,53 @@ mod tests {
         ActionKind::ALL
             .into_iter()
             .filter(|kind| kind.is_graph_action())
+    }
+
+    #[test]
+    fn specialized_catalog_covers_vendor_and_composite_blocks_only() {
+        assert_eq!(
+            block_catalog(ActionKind::BambuStudioRelease),
+            BlockCatalog::Specialized
+        );
+        assert_eq!(
+            block_catalog(ActionKind::ActivateLicense),
+            BlockCatalog::Specialized
+        );
+        assert_eq!(
+            block_catalog(ActionKind::ConfigurePackageRegistryFiles),
+            BlockCatalog::Specialized
+        );
+        assert_eq!(block_catalog(ActionKind::GitClone), BlockCatalog::Specialized);
+        assert_eq!(
+            block_catalog(ActionKind::ForEachGitCloneIfMissing),
+            BlockCatalog::Specialized
+        );
+        assert_eq!(block_catalog(ActionKind::CreateDirectory), BlockCatalog::Core);
+        assert_eq!(block_catalog(ActionKind::BrewInstall), BlockCatalog::Core);
+        assert_eq!(
+            block_definition(ActionKind::BambuStudioRelease).catalog,
+            BlockCatalog::Specialized
+        );
+        assert_eq!(
+            block_definition(ActionKind::InspectPath).catalog,
+            BlockCatalog::Core
+        );
+        let specialized = [
+            ActionKind::BambuStudioRelease,
+            ActionKind::ActivateLicense,
+            ActionKind::ConfigurePackageRegistryFiles,
+            ActionKind::GitClone,
+            ActionKind::ForEachGitCloneIfMissing,
+        ];
+        for kind in ActionKind::ALL {
+            let expected = if specialized.contains(&kind) {
+                BlockCatalog::Specialized
+            } else {
+                BlockCatalog::Core
+            };
+            assert_eq!(block_catalog(kind), expected, "{}", kind.id());
+            assert_eq!(block_definition(kind).catalog, expected, "{}", kind.id());
+        }
     }
 
     #[test]

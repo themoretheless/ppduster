@@ -1,0 +1,15 @@
+task:
+  id: macos-new-machine
+  name: New Mac baseline
+  description: |
+    Start a new Mac from a conservative inspect-first baseline.
+    The template checks the security baseline, lock-screen defaults, and software-update scheduling.
+    It does not apply a user Brewfile, does not require ~/.ssh, and does not enable FileVault.
+    Child checks and safety gates remain active. Dry-run is still the default; review the plan before applying and grant only the permissions it reports.
+    Apply of the update-schedule child needs elevation. This is a review pack, not a one-click blank-machine installer.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-top-08-security-baseline
+    - macos-top-20-screensaver-lock
+    - macos-top-25-softwareupdate

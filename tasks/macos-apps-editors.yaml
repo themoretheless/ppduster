@@ -1,0 +1,39 @@
+task:
+  id: macos-apps-editors
+  name: Popular editors
+  description: |
+    Install Visual Studio Code, Cursor, Zed, and Sublime Text from Homebrew casks.
+    Source: Homebrew cask install counts for the last 365 days.
+    Does not install extensions and does not write editor settings.
+    Homebrew must already be on PATH. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-visual-studio-code
+      name: Install Visual Studio Code
+      type: brew-install
+      package: visual-studio-code
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "visual-studio-code"]
+    - id: install-cursor
+      name: Install Cursor
+      type: brew-install
+      package: cursor
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "cursor"]
+    - id: install-zed
+      name: Install Zed
+      type: brew-install
+      package: zed
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "zed"]
+    - id: install-sublime-text
+      name: Install Sublime Text
+      type: brew-install
+      package: sublime-text
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "sublime-text"]

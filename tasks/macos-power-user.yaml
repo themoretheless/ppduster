@@ -1,0 +1,16 @@
+task:
+  id: macos-power-user
+  name: Hammerspoon, Rectangle, and CLI tools
+  description: |
+    Install a reviewable power-user desktop layer on top of Homebrew.
+    The template plans Hammerspoon, rectangle-style window management, and modern CLI tools.
+    Raycast and Shortcuts stay as separate library leaves because they expect a scripts directory or a named shortcut that this repo does not ship.
+    Homebrew must already be on PATH for the brew-install children.
+    Child brew installs stay idempotent. Dry-run is still the default; review cask names before applying.
+    The template does not download third-party configs. Pair it with the developer workstation template when you also want toolchains and Git.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-top-43-hammerspoon
+    - macos-top-46-window-management
+    - macos-top-29-cli-ux

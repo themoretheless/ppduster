@@ -1,0 +1,12 @@
+task:
+  id: macos-python-data
+  name: uv and CLI tools
+  description: |
+    Install Astral uv plus fzf/ripgrep for Python and data work.
+    Does not install Anaconda, does not create a virtualenv, and does not pip-install torch.
+    Homebrew must already be on PATH. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-stack-uv
+    - macos-top-29-cli-ux

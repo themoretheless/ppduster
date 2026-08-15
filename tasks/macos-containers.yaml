@@ -1,0 +1,11 @@
+task:
+  id: macos-containers
+  name: Docker Desktop
+  description: |
+    Install the Docker Desktop cask.
+    Does not start the VM, does not pull images, and does not sign in to a registry.
+    Homebrew must already be on PATH. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-stack-docker

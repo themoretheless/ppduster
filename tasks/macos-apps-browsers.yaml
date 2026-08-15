@@ -1,0 +1,46 @@
+task:
+  id: macos-apps-browsers
+  name: Popular browsers
+  description: |
+    Install Chrome, Firefox, Brave, Edge, and Arc from Homebrew casks.
+    Source: Homebrew cask install counts for the last 365 days, GUI browsers only.
+    Does not change the default browser, does not import profiles, and does not install Chromium or chromedriver.
+    Homebrew must already be on PATH. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-google-chrome
+      name: Install Google Chrome
+      type: brew-install
+      package: google-chrome
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "google-chrome"]
+    - id: install-firefox
+      name: Install Firefox
+      type: brew-install
+      package: firefox
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "firefox"]
+    - id: install-brave
+      name: Install Brave
+      type: brew-install
+      package: brave-browser
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "brave-browser"]
+    - id: install-microsoft-edge
+      name: Install Microsoft Edge
+      type: brew-install
+      package: microsoft-edge
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "microsoft-edge"]
+    - id: install-arc
+      name: Install Arc
+      type: brew-install
+      package: arc
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "arc"]

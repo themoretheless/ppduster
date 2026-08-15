@@ -578,6 +578,7 @@ fn validate_string_format(value: &str, format: SemanticFormat) -> Result<(), Str
         SemanticFormat::GitRef => valid_git_ref(value),
         SemanticFormat::RepositoryName => valid_repository_name(value),
         SemanticFormat::Identifier => valid_identifier(value),
+        SemanticFormat::PackageName => valid_package_name(value),
         SemanticFormat::OpaqueId => !value.is_empty() && !value.contains('\0'),
     };
     if valid {
@@ -656,6 +657,13 @@ fn valid_identifier(value: &str) -> bool {
         && value
             .chars()
             .all(|character| character.is_alphanumeric() || matches!(character, '-' | '_' | '.'))
+}
+
+fn valid_package_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '@' | '+')
+        })
 }
 
 #[cfg(test)]
@@ -945,6 +953,15 @@ mod tests {
         );
         assert!(validate_string_format("", SemanticFormat::OpaqueId).is_err());
         assert!(validate_string_format("node\0id", SemanticFormat::OpaqueId).is_err());
+    }
+
+    #[test]
+    fn package_name_accepts_homebrew_versioned_tokens() {
+        assert!(validate_string_format("postgresql@17", SemanticFormat::PackageName).is_ok());
+        assert!(validate_string_format("docker-desktop", SemanticFormat::PackageName).is_ok());
+        assert!(validate_string_format("node", SemanticFormat::PackageName).is_ok());
+        assert!(validate_string_format("postgresql@17", SemanticFormat::Identifier).is_err());
+        assert!(validate_string_format("", SemanticFormat::PackageName).is_err());
     }
 
     #[test]

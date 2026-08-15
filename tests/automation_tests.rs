@@ -872,12 +872,233 @@ fn bundled_dev_setup_includes_macos_top_fifty_tasks() {
         "expected bundled task pack to include the App Store bootstrap scenario"
     );
     assert!(
-        pack.get("macos-developer-workstation").is_some(),
+        pack.get("macos-developer-workstation")
+            .is_some_and(Task::is_template),
         "expected bundled task pack to include the developer workstation template"
     );
+    let expected_templates = [
+        "macos-containers",
+        "macos-developer-workstation",
+        "macos-full-stack",
+        "macos-home-office",
+        "macos-maker-studio",
+        "macos-new-machine",
+        "macos-node-developer",
+        "macos-power-user",
+        "macos-privacy-baseline",
+        "macos-python-data",
+        "macos-recovery-kit",
+        "macos-rust-developer",
+        "macos-web-developer",
+    ];
+    let mut bundled_templates: Vec<_> = pack
+        .tasks
+        .iter()
+        .filter(|task| task.is_template())
+        .map(|task| task.id.as_str())
+        .collect();
+    bundled_templates.sort_unstable();
+    assert_eq!(
+        bundled_templates, expected_templates,
+        "bundled template set drifted"
+    );
+    for template_id in [
+        "macos-new-machine",
+        "macos-web-developer",
+        "macos-privacy-baseline",
+        "macos-power-user",
+        "macos-home-office",
+        "macos-recovery-kit",
+        "macos-maker-studio",
+        "macos-node-developer",
+        "macos-python-data",
+        "macos-rust-developer",
+        "macos-containers",
+        "macos-full-stack",
+    ] {
+        let template = pack.get(template_id).unwrap_or_else(|| {
+            panic!("expected bundled task pack to include the {template_id} template")
+        });
+        assert!(
+            template.is_template(),
+            "{template_id} must remain a reusable template"
+        );
+        pack.resolve(template_id).unwrap_or_else(|error| {
+            panic!("{template_id} must resolve against bundled children: {error}")
+        });
+    }
     assert!(
         pack.get("filesystem-basics").is_some(),
         "expected bundled task pack to include the typed filesystem scenario"
+    );
+}
+
+#[test]
+fn bundled_stack_leaves_are_typed_brew_installs() {
+    let pack = TaskPack::load_many(
+        &[TaskSource {
+            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap();
+
+    let expected = [
+        ("macos-stack-gh", "gh", false),
+        ("macos-stack-node", "node", false),
+        ("macos-stack-uv", "uv", false),
+        ("macos-stack-rustup", "rustup", false),
+        ("macos-stack-docker", "docker-desktop", true),
+        ("macos-stack-vscode", "visual-studio-code", true),
+        ("macos-stack-postgres", "postgresql@17", false),
+    ];
+    for (id, package, cask) in expected {
+        let task = pack.get(id).unwrap_or_else(|| panic!("missing stack leaf {id}"));
+        assert!(!task.is_template(), "{id} must stay a leaf");
+        let steps = graph_action_steps(task);
+        assert_eq!(steps.len(), 1, "{id} must be one brew-install step");
+        match &steps[0].action {
+            Action::BrewInstall {
+                package: installed,
+                cask: is_cask,
+            } => {
+                assert_eq!(installed, package, "{id} package drifted");
+                assert_eq!(*is_cask, cask, "{id} cask flag drifted");
+            }
+            other => panic!("{id} must be brew-install, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn bundled_popular_app_packs_are_homebrew_casks() {
+    let pack = TaskPack::load_many(
+        &[TaskSource {
+            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap();
+
+    let expected: &[(&str, &[&str])] = &[
+        (
+            "macos-apps-browsers",
+            &[
+                "google-chrome",
+                "firefox",
+                "brave-browser",
+                "microsoft-edge",
+                "arc",
+            ],
+        ),
+        (
+            "macos-apps-comms",
+            &[
+                "slack",
+                "discord",
+                "zoom",
+                "telegram",
+                "whatsapp",
+                "microsoft-teams",
+            ],
+        ),
+        (
+            "macos-apps-media",
+            &["spotify", "vlc", "iina", "obs"],
+        ),
+        (
+            "macos-apps-notes-passwords",
+            &["obsidian", "notion", "1password", "bitwarden"],
+        ),
+        (
+            "macos-apps-terminals",
+            &["iterm2", "ghostty", "warp", "kitty"],
+        ),
+        (
+            "macos-apps-editors",
+            &[
+                "visual-studio-code",
+                "cursor",
+                "zed",
+                "sublime-text",
+            ],
+        ),
+        ("macos-apps-design", &["figma", "blender"]),
+        (
+            "macos-apps-agents",
+            &["claude", "chatgpt", "claude-code", "codex"],
+        ),
+    ];
+
+    for (id, packages) in expected {
+        let task = pack.get(id).unwrap_or_else(|| panic!("missing app pack {id}"));
+        assert!(!task.is_template(), "{id} must stay a multi-step leaf");
+        let steps = graph_action_steps(task);
+        let installed: Vec<&str> = steps
+            .iter()
+            .map(|step| match &step.action {
+                Action::BrewInstall { package, cask } => {
+                    assert!(*cask, "{id} step {} must be a cask", step.id);
+                    package.as_str()
+                }
+                other => panic!("{id} step {} must be brew-install, got {other:?}", step.id),
+            })
+            .collect();
+        assert_eq!(installed, *packages, "{id} cask list drifted");
+    }
+}
+
+#[test]
+fn setup_list_prints_templates_before_scenarios() {
+    let output = Command::new(env!("CARGO_BIN_EXE_ppduster"))
+        .args(["setup", "list"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "setup list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let mut saw_scenario = false;
+    let mut listed_templates = Vec::new();
+    for line in stdout.lines() {
+        let mut columns = line.split('\t');
+        let id = columns.next().unwrap_or("");
+        let kind = columns.next().unwrap_or("");
+        match kind {
+            "template" => {
+                assert!(
+                    !saw_scenario,
+                    "template {id} printed after a scenario"
+                );
+                listed_templates.push(id.to_owned());
+            }
+            "scenario" => saw_scenario = true,
+            other => panic!("unexpected setup list kind {other:?} for {id}"),
+        }
+    }
+    assert!(saw_scenario, "setup list must include atomic scenarios");
+    listed_templates.sort();
+    assert_eq!(
+        listed_templates,
+        [
+            "macos-containers",
+            "macos-developer-workstation",
+            "macos-full-stack",
+            "macos-home-office",
+            "macos-maker-studio",
+            "macos-new-machine",
+            "macos-node-developer",
+            "macos-power-user",
+            "macos-privacy-baseline",
+            "macos-python-data",
+            "macos-recovery-kit",
+            "macos-rust-developer",
+            "macos-web-developer",
+        ]
     );
 }
 

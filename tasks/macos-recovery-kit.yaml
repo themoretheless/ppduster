@@ -1,0 +1,13 @@
+task:
+  id: macos-recovery-kit
+  name: Preference snapshot and drift notes
+  description: |
+    Export a defaults snapshot, write a restore-manifest note, and dump the current Brewfile for drift comparison.
+    This is not a machine recovery kit: it does not restore files, does not roll back a volume, and does not run Time Machine.
+    Use it before a risky change so you have a reviewable snapshot. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  scenarios:
+    - macos-top-10-rollback-snapshot
+    - macos-top-50-recovery
+    - macos-top-09-drift-detection

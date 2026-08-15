@@ -1,0 +1,39 @@
+task:
+  id: macos-apps-agents
+  name: Popular AI apps
+  description: |
+    Install Claude, ChatGPT, Claude Code, and Codex from Homebrew casks.
+    Source: Homebrew cask install counts for the last 365 days. These four sit at the top of that list.
+    Does not sign in, does not install claude-code@latest, and does not store API keys.
+    Homebrew must already be on PATH. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-claude
+      name: Install Claude
+      type: brew-install
+      package: claude
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "claude"]
+    - id: install-chatgpt
+      name: Install ChatGPT
+      type: brew-install
+      package: chatgpt
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "chatgpt"]
+    - id: install-claude-code
+      name: Install Claude Code
+      type: brew-install
+      package: claude-code
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "claude-code"]
+    - id: install-codex
+      name: Install Codex
+      type: brew-install
+      package: codex
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "codex"]

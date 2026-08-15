@@ -1,0 +1,39 @@
+task:
+  id: macos-apps-media
+  name: Popular media apps
+  description: |
+    Install Spotify, VLC, IINA, and OBS from Homebrew casks.
+    Source: Homebrew cask install counts for the last 365 days.
+    Does not sign in to Spotify, does not install codecs beyond the cask, and does not configure OBS scenes.
+    Homebrew must already be on PATH. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-spotify
+      name: Install Spotify
+      type: brew-install
+      package: spotify
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "spotify"]
+    - id: install-vlc
+      name: Install VLC
+      type: brew-install
+      package: vlc
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "vlc"]
+    - id: install-iina
+      name: Install IINA
+      type: brew-install
+      package: iina
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "iina"]
+    - id: install-obs
+      name: Install OBS
+      type: brew-install
+      package: obs
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "obs"]

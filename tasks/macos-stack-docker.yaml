@@ -1,0 +1,17 @@
+task:
+  id: macos-stack-docker
+  name: Install Docker Desktop
+  description: |
+    Install the Docker Desktop cask when it is missing.
+    Does not start the Docker daemon and does not sign in to Docker Hub.
+    Homebrew must already be on PATH.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-docker
+      name: Install Docker Desktop
+      type: brew-install
+      package: docker-desktop
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "docker-desktop"]

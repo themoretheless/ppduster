@@ -1,0 +1,53 @@
+task:
+  id: macos-apps-comms
+  name: Popular chat and meetings
+  description: |
+    Install Slack, Discord, Zoom, Telegram, WhatsApp, and Microsoft Teams from Homebrew casks.
+    Source: Homebrew cask install counts for the last 365 days.
+    Does not sign in, does not migrate chats, and does not install enterprise VPN or Jabber.
+    Homebrew must already be on PATH. Dry-run is still the default.
+  platform: macos
+  trust: bundled-only
+  steps:
+    - id: install-slack
+      name: Install Slack
+      type: brew-install
+      package: slack
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "slack"]
+    - id: install-discord
+      name: Install Discord
+      type: brew-install
+      package: discord
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "discord"]
+    - id: install-zoom
+      name: Install Zoom
+      type: brew-install
+      package: zoom
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "zoom"]
+    - id: install-telegram
+      name: Install Telegram
+      type: brew-install
+      package: telegram
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "telegram"]
+    - id: install-whatsapp
+      name: Install WhatsApp
+      type: brew-install
+      package: whatsapp
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "whatsapp"]
+    - id: install-microsoft-teams
+      name: Install Microsoft Teams
+      type: brew-install
+      package: microsoft-teams
+      cask: true
+      check:
+        command_succeeds: ["brew", "list", "--cask", "microsoft-teams"]
