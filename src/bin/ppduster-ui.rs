@@ -10,21 +10,23 @@ use ppduster::automation::binding::{
 };
 use ppduster::automation::block::default_step;
 use ppduster::automation::graph::ScenarioVariable;
+#[cfg(test)]
+use ppduster::automation::validate_project as validate_project_structure;
 use ppduster::automation::PackTrust;
 use ppduster::automation::{
     block_definition, definition_for_action, describe_step, first_scenario_path, load_project_yaml,
-    make_project_external, project_group_entries, project_group_entries_mut, run_task,
-    validate_project as validate_project_structure, Action, ActionKind, ActionNode, AuthPolicy,
-    Binding, BlockDefinition, BlockPolicyCapabilities, CanvasPoint, CanvasView, ComparisonOperator,
-    ComposerCanvas, ContextPathSegment, ContextScope, EdgePort, ElevationPolicy, ExpressionLimits,
-    ExpressionV1, ExpressionValue, FieldRef, ForEachNode, GithubRepositoryInput, GraphEdge,
-    GraphNode, GraphValidationError, GraphValidationErrorKind, IfNode, IndeterminatePolicy,
-    JoinMode, JoinNode, LoopFailurePolicy, ObjectSchema, PolicyRequirement, ProjectEntry,
-    ProtectedPathApproval, ProtectedPathApprovalRequest, ProtectedPathApprovalRequired,
-    ProtectedPathOperation, ProtectedPathRisk, ReferenceV1, ReleaseChannel, RuleOutcomePolicy,
-    RunOptions, RunReport, ScenarioProject, ScriptInterpreter, SemanticFormat, Sensitivity, Step,
-    StepCondition, StepStatus, SwitchCase, SwitchNode, Task, TaskFile, TaskPack, TaskSource,
-    TemplatePart, TrustRequirement, WorkflowGraph, WriteConflictPolicy,
+    make_project_external, project_group_entries, project_group_entries_mut, run_task, Action,
+    ActionKind, ActionNode, AuthPolicy, Binding, BlockDefinition, BlockPolicyCapabilities,
+    CanvasPoint, CanvasView, ComparisonOperator, ComposerCanvas, ContextPathSegment, ContextScope,
+    EdgePort, ElevationPolicy, ExpressionLimits, ExpressionV1, ExpressionValue, FieldRef,
+    ForEachNode, GithubRepositoryInput, GraphEdge, GraphNode, GraphValidationError,
+    GraphValidationErrorKind, IfNode, IndeterminatePolicy, JoinMode, JoinNode, LoopFailurePolicy,
+    ObjectSchema, PolicyRequirement, ProjectEntry, ProtectedPathApproval,
+    ProtectedPathApprovalRequest, ProtectedPathApprovalRequired, ProtectedPathOperation,
+    ProtectedPathRisk, ReferenceV1, ReleaseChannel, RuleOutcomePolicy, RunOptions, RunReport,
+    ScenarioProject, ScriptInterpreter, SemanticFormat, Sensitivity, Step, StepCondition,
+    StepStatus, SwitchCase, SwitchNode, Task, TaskFile, TaskPack, TaskSource, TemplatePart,
+    TrustRequirement, WorkflowGraph, WriteConflictPolicy,
 };
 #[cfg(test)]
 use ppduster::automation::{
@@ -121,6 +123,9 @@ const WIDE_INSPECTOR_WIDTH: f32 = 360.0;
 const WORKSPACE_PROJECT_RAIL_WIDTH: f32 = 52.0;
 const WORKSPACE_PROJECT_DRAWER_WIDTH: f32 = 272.0;
 const WORKSPACE_OVERLAY_BREAKPOINT: f32 = 1360.0;
+const TOP_BAR_CUSTOM_ACTIONS_WIDTH: f32 = 600.0;
+const TOP_BAR_LIBRARY_ACTIONS_WIDTH: f32 = 210.0;
+const TOP_BAR_IDENTITY_MIN_WIDTH: f32 = 220.0;
 const CANVAS_MIN_ZOOM: f32 = 0.35;
 const CANVAS_MAX_ZOOM: f32 = 2.5;
 const CANVAS_ZOOM_STEP: f32 = 1.2;
@@ -135,6 +140,69 @@ const GITHUB_LOGIN_COMMAND: &str =
 const GITHUB_DEVICE_LOGIN_URL: &str = "https://github.com/login/device";
 const GITHUB_EXTERNAL_LOGIN_HINT: &str = "Вход через Terminal будет обнаружен автоматически.";
 const RUNNING_CLOSE_MESSAGE: &str = "Сценарий выполняется. Дождитесь завершения перед закрытием.";
+const NEW_SCENARIO_DESCRIPTION: &str = "Сценарий, собранный из атомарных операций в ppduster.";
+const GITHUB_REPOSITORY_COMPOSER_NAME: &str = "Выбрать и клонировать репозитории GitHub";
+
+fn new_composer_scenario_task(id: impl Into<String>, name: impl Into<String>) -> Task {
+    Task {
+        id: id.into(),
+        name: name.into(),
+        description: NEW_SCENARIO_DESCRIPTION.into(),
+        platform: ppduster::rules::Platform::Macos,
+        trust: TrustRequirement::ExternalAllowed,
+        scenarios: Vec::new(),
+        resolved_scenarios: Vec::new(),
+        graph: Some(WorkflowGraph::default()),
+        steps: Vec::new(),
+    }
+}
+
+fn is_pristine_new_project_scenario(task: &Task) -> bool {
+    task.id == "custom-scenario"
+        && task.name == "Новый сценарий"
+        && task.description == NEW_SCENARIO_DESCRIPTION
+        && task.platform == ppduster::rules::Platform::Macos
+        && task.trust == TrustRequirement::ExternalAllowed
+        && task.scenarios.is_empty()
+        && task.resolved_scenarios.is_empty()
+        && task.steps.is_empty()
+        && task.graph.as_ref().is_some_and(|graph| {
+            graph.id.is_none()
+                && graph.entries.is_empty()
+                && graph.exits.is_empty()
+                && graph.variables.is_empty()
+                && graph.nodes.is_empty()
+                && graph.edges.is_empty()
+        })
+}
+
+fn first_authored_scenario_path(
+    entries: &[ProjectEntry],
+    parent_path: &mut Vec<usize>,
+) -> Option<Vec<usize>> {
+    for (index, entry) in entries.iter().enumerate() {
+        parent_path.push(index);
+        let found = match entry {
+            ProjectEntry::Scenario { task } if !is_pristine_new_project_scenario(task) => {
+                Some(parent_path.clone())
+            }
+            ProjectEntry::Group { entries, .. } => {
+                first_authored_scenario_path(entries, parent_path)
+            }
+            ProjectEntry::Scenario { .. } => None,
+        };
+        parent_path.pop();
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+fn preferred_project_scenario_path(project: &ScenarioProject) -> Option<Vec<usize>> {
+    first_authored_scenario_path(&project.entries, &mut Vec::new())
+        .or_else(|| first_scenario_path(&project.entries, &mut Vec::new()))
+}
 
 fn safety_badge(allow_shell: bool, allow_elevation: bool, dark: bool) -> (&'static str, Color32) {
     match (allow_shell, allow_elevation) {
@@ -172,6 +240,27 @@ fn open_workspace_project_drawer(
     *drawer_open = true;
     if workspace_project_drawer_overlays(viewport_width) {
         *inspector_open = false;
+    }
+}
+
+fn open_workspace_inspector(
+    drawer_open: &mut bool,
+    inspector_open: &mut bool,
+    viewport_width: f32,
+) {
+    *inspector_open = true;
+    if workspace_project_drawer_overlays(viewport_width) {
+        *drawer_open = false;
+    }
+}
+
+fn reconcile_workspace_side_panels(
+    drawer_open: &mut bool,
+    inspector_open: bool,
+    viewport_width: f32,
+) {
+    if inspector_open && workspace_project_drawer_overlays(viewport_width) {
+        *drawer_open = false;
     }
 }
 
@@ -4228,21 +4317,136 @@ fn graph_validation_message(graph: &WorkflowGraph, error: &GraphValidationError)
     }
 }
 
+fn binding_shell_wrapping_quote(binding: &Binding) -> Option<char> {
+    match binding {
+        Binding::Literal { value } => value.as_str().and_then(shell_wrapping_quote),
+        Binding::Template { template } => shell_wrapping_quote(template),
+        Binding::Interpolated { parts } => {
+            let TemplatePart::Literal { value: first } = parts.first()? else {
+                return None;
+            };
+            let TemplatePart::Literal { value: last } = parts.last()? else {
+                return None;
+            };
+            let first = first.trim_start().chars().next()?;
+            let last = last.trim_end().chars().last()?;
+            (matches!(first, '\'' | '"') && first == last).then_some(first)
+        }
+        Binding::Field { .. } => None,
+    }
+}
+
+fn collect_shell_quoted_path_messages(graph: &WorkflowGraph, messages: &mut Vec<String>) {
+    for node in &graph.nodes {
+        match node {
+            GraphNode::Action(action) => {
+                let definition = definition_for_action(&action.step.action);
+                for (field_name, field) in &definition.input_schema.fields {
+                    if !is_path_type(&field.value_type)
+                        || !graph_top_level_binding(action, field_name)
+                            .is_some_and(|binding| binding_shell_wrapping_quote(binding).is_some())
+                    {
+                        continue;
+                    }
+                    messages.push(format!(
+                        "Во входе «{field_name}» блока «{}» внешние кавычки сохранены как часть пути. Уберите их.",
+                        action.step.name
+                    ));
+                }
+            }
+            GraphNode::ForEach(node) => {
+                collect_shell_quoted_path_messages(&node.body, messages);
+            }
+            GraphNode::If(node) => {
+                collect_shell_quoted_path_messages(&node.then_graph, messages);
+                if let Some(graph) = node.else_graph.as_deref() {
+                    collect_shell_quoted_path_messages(graph, messages);
+                }
+            }
+            GraphNode::Switch(node) => {
+                for case in &node.cases {
+                    collect_shell_quoted_path_messages(&case.graph, messages);
+                }
+                if let Some(graph) = node.default.as_deref() {
+                    collect_shell_quoted_path_messages(graph, messages);
+                }
+            }
+            GraphNode::Join(_) => {}
+        }
+    }
+}
+
+fn github_repository_composer_messages(task: &Task, graph: &WorkflowGraph) -> Vec<String> {
+    let is_generated_recipe = task
+        .id
+        .strip_prefix("github-repositories-")
+        .is_some_and(|ordinal| {
+            !ordinal.is_empty() && ordinal.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    if !is_generated_recipe {
+        return Vec::new();
+    }
+
+    let Some((selector_id, selected_repositories)) = graph.nodes.iter().find_map(|node| {
+        let GraphNode::Action(action) = node else {
+            return None;
+        };
+        let Action::GithubPreviewRepositories {
+            selected_repositories,
+        } = &action.step.action
+        else {
+            return None;
+        };
+        Some((action.step.id.as_str(), selected_repositories))
+    }) else {
+        // Older imported recipes keep the github-repositories-N ID but use
+        // the live-list graph rather than the offline snapshot starter.
+        return Vec::new();
+    };
+
+    let mut messages = Vec::new();
+    if selected_repositories.is_empty() {
+        messages.push(
+            "Не выбран ни один репозиторий GitHub. Откройте блок выбора, загрузите список и сохраните нужные репозитории."
+                .into(),
+        );
+    }
+    if !github_selector_has_clone_action(graph, selector_id) {
+        messages.push(
+            "В цикле нет блока «Клонировать, если отсутствует». Блок «Создать папку» создаёт только пустой каталог."
+                .into(),
+        );
+    }
+    messages
+}
+
 fn validate_graph_for_ui(task: &Task, graph: &WorkflowGraph) -> Result<(), String> {
-    graph.validate().map_err(|errors| {
-        let mut messages = Vec::new();
+    let mut messages = Vec::new();
+    if let Err(errors) = graph.validate() {
         for error in errors {
             let message = graph_validation_message(graph, &error);
             if !messages.contains(&message) {
                 messages.push(message);
             }
         }
-        format!(
+    }
+    for message in github_repository_composer_messages(task, graph) {
+        if !messages.contains(&message) {
+            messages.push(message);
+        }
+    }
+    collect_shell_quoted_path_messages(graph, &mut messages);
+    messages.sort();
+    messages.dedup();
+    if messages.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
             "Сценарий «{}» пока не готов:\n• {}",
             task.name,
             messages.join("\n• ")
-        )
-    })
+        ))
+    }
 }
 
 fn graph_edge_port_label(port: &EdgePort) -> &'static str {
@@ -5763,6 +5967,33 @@ fn is_directory_path_type(value_type: &ContextType) -> bool {
     )
 }
 
+fn is_path_type(value_type: &ContextType) -> bool {
+    matches!(
+        value_type,
+        ContextType::String {
+            format: Some(
+                SemanticFormat::Path | SemanticFormat::FilePath | SemanticFormat::DirectoryPath
+            )
+        }
+    )
+}
+
+fn shell_wrapping_quote(value: &str) -> Option<char> {
+    let value = value.trim();
+    let quote = value.chars().next()?;
+    (value.chars().count() > 1 && matches!(quote, '\'' | '"') && value.ends_with(quote))
+        .then_some(quote)
+}
+
+fn graph_interpolation_path_error(
+    value: &str,
+    value_type: Option<&ContextType>,
+) -> Option<&'static str> {
+    (value_type.is_some_and(is_path_type) && shell_wrapping_quote(value).is_some()).then_some(
+        "Не заключайте путь в кавычки: это не shell-команда, кавычки станут частью имени.",
+    )
+}
+
 fn paint_directory_path_literal(ui: &mut egui::Ui, value: &mut String) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -5855,13 +6086,13 @@ fn graph_interpolation_text_id(scope: &GraphInterpolationScope, node_id: &str, t
 fn paint_graph_interpolation_editor(
     ui: &mut egui::Ui,
     scope: &GraphInterpolationScope,
-    widget_id: (&str, &str),
+    widget_id: (&str, &str, Option<&ContextType>),
     binding: &mut Binding,
     graph: &WorkflowGraph,
     options: &[GraphInterpolationOption],
     dark: bool,
 ) -> bool {
-    let (node_id, target) = widget_id;
+    let (node_id, target, value_type) = widget_id;
     let state_id = graph_interpolation_state_id(scope, node_id, target);
     let text_id = graph_interpolation_text_id(scope, node_id, target);
     let formatted = graph_interpolation_binding_text(graph, binding);
@@ -5991,7 +6222,10 @@ fn paint_graph_interpolation_editor(
     }
 
     let mut changed = false;
-    let parse_result = parse_graph_interpolation(&state.text, options);
+    let parse_result = graph_interpolation_path_error(&state.text, value_type).map_or_else(
+        || parse_graph_interpolation(&state.text, options),
+        |error| Err(error.into()),
+    );
     match parse_result {
         Ok(parsed) => {
             if parsed != *binding {
@@ -6002,25 +6236,36 @@ fn paint_graph_interpolation_editor(
                 .expect("parser only creates visually representable interpolation");
             state.text.clone_from(&state.rendered_baseline);
             state.baseline = parsed;
-            ui.label(
-                RichText::new("Сохранено как структурный шаблон")
-                    .size(8.0)
-                    .color(CYAN),
+            ui.add(
+                egui::Label::new(
+                    RichText::new("Сохранено как структурный шаблон")
+                        .size(8.0)
+                        .color(CYAN),
+                )
+                .wrap(),
             );
         }
         Err(error) => {
-            ui.label(RichText::new(error).size(8.0).color(ORANGE));
-            ui.label(
-                RichText::new("Черновик не меняет последнюю корректную привязку.")
-                    .size(8.0)
-                    .color(MUTED),
+            ui.add(egui::Label::new(RichText::new(error).size(8.0).color(ORANGE)).wrap());
+            ui.add(
+                egui::Label::new(
+                    RichText::new("Черновик не меняет последнюю корректную привязку.")
+                        .size(8.0)
+                        .color(MUTED),
+                )
+                .wrap(),
             );
         }
     }
-    ui.label(
-        RichText::new("Введите {{ — список содержит только доступные обязательные scalar-поля.")
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "Введите {{ — список содержит только доступные обязательные scalar-поля.",
+            )
             .size(8.0)
             .color(MUTED),
+        )
+        .wrap(),
     );
 
     if let Some(cursor) = moved_cursor {
@@ -6449,32 +6694,7 @@ fn github_selector_uses_background_https_clone(graph: &WorkflowGraph, selector_i
         let GraphNode::ForEach(loop_node) = node else {
             return false;
         };
-        let Binding::Field { field } = &loop_node.collection else {
-            return false;
-        };
-        let direct_collection = matches!(
-            &field.scope,
-            ContextScope::Step { step_id } if step_id == selector_id
-        ) && (field.segments
-            == [
-                ContextPathSegment::field("github"),
-                ContextPathSegment::field("repositories"),
-            ]
-            || field.segments == [ContextPathSegment::field("items")]
-            || field.segments == [ContextPathSegment::field("repositories")]);
-        let named_collection = match (&field.scope, field.segments.as_slice()) {
-            (ContextScope::Scenario, [ContextPathSegment::Field { name }]) => {
-                graph.variables.get(name).is_some_and(|variable| {
-                    matches!(
-                        &variable.source.scope,
-                        ContextScope::Step { step_id } if step_id == selector_id
-                    ) && variable.source.segments == [ContextPathSegment::field("repositories")]
-                })
-            }
-            _ => false,
-        };
-        let selected_collection = direct_collection || named_collection;
-        selected_collection
+        github_loop_uses_selector_collection(graph, loop_node, selector_id)
             && loop_node.body.nodes.iter().any(|body_node| {
                 let GraphNode::Action(action) = body_node else {
                     return false;
@@ -6486,6 +6706,75 @@ fn github_selector_uses_background_https_clone(graph: &WorkflowGraph, selector_i
                             FieldRef::loop_item(&loop_node.id).field("https_url"),
                         ))
             })
+    })
+}
+
+fn github_loop_uses_selector_collection(
+    graph: &WorkflowGraph,
+    loop_node: &ForEachNode,
+    selector_id: &str,
+) -> bool {
+    let Binding::Field { field } = &loop_node.collection else {
+        return false;
+    };
+    let direct_collection = matches!(
+        &field.scope,
+        ContextScope::Step { step_id } if step_id == selector_id
+    ) && (field.segments
+        == [
+            ContextPathSegment::field("github"),
+            ContextPathSegment::field("repositories"),
+        ]
+        || field.segments == [ContextPathSegment::field("items")]
+        || field.segments == [ContextPathSegment::field("repositories")]);
+    let named_collection = match (&field.scope, field.segments.as_slice()) {
+        (ContextScope::Scenario, [ContextPathSegment::Field { name }]) => {
+            graph.variables.get(name).is_some_and(|variable| {
+                matches!(
+                    &variable.source.scope,
+                    ContextScope::Step { step_id } if step_id == selector_id
+                ) && variable.source.segments == [ContextPathSegment::field("repositories")]
+            })
+        }
+        _ => false,
+    };
+    direct_collection || named_collection
+}
+
+fn graph_contains_git_clone_action(graph: &WorkflowGraph) -> bool {
+    graph.nodes.iter().any(|node| match node {
+        GraphNode::Action(action) => matches!(
+            action.step.action,
+            Action::GitClone { .. } | Action::GitCloneIfMissing { .. }
+        ),
+        GraphNode::ForEach(node) => graph_contains_git_clone_action(&node.body),
+        GraphNode::If(node) => {
+            graph_contains_git_clone_action(&node.then_graph)
+                || node
+                    .else_graph
+                    .as_deref()
+                    .is_some_and(graph_contains_git_clone_action)
+        }
+        GraphNode::Switch(node) => {
+            node.cases
+                .iter()
+                .any(|case| graph_contains_git_clone_action(&case.graph))
+                || node
+                    .default
+                    .as_deref()
+                    .is_some_and(graph_contains_git_clone_action)
+        }
+        GraphNode::Join(_) => false,
+    })
+}
+
+fn github_selector_has_clone_action(graph: &WorkflowGraph, selector_id: &str) -> bool {
+    graph.nodes.iter().any(|node| {
+        let GraphNode::ForEach(loop_node) = node else {
+            return false;
+        };
+        github_loop_uses_selector_collection(graph, loop_node, selector_id)
+            && graph_contains_git_clone_action(&loop_node.body)
     })
 }
 
@@ -7159,6 +7448,15 @@ fn paint_graph_action_editor(
             )
             .wrap(),
         );
+    } else if let Some(note) = graph_action_behavior_note(&node.step.action) {
+        ui.add(
+            egui::Label::new(
+                RichText::new(note)
+                    .size(UI_TEXT_BODY)
+                    .color(ui_tone(UiTone::Warning, dark)),
+            )
+            .wrap(),
+        );
     }
     ui.add_space(8.0);
     section_label(ui, "ВХОДЫ ПО СХЕМЕ");
@@ -7298,7 +7596,7 @@ fn paint_graph_action_editor(
             changed |= paint_graph_interpolation_editor(
                 ui,
                 interpolation_scope,
-                (&node.step.id, &target),
+                (&node.step.id, &target, Some(&field.value_type)),
                 binding,
                 graph,
                 &interpolation_options,
@@ -7507,6 +7805,18 @@ fn paint_graph_action_editor(
     }
 }
 
+fn graph_action_behavior_note(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::GithubListRepositories => Some(
+            "Этот блок только получает список репозиториев. Он ничего не выбирает и не клонирует.",
+        ),
+        Action::CreateDirectory(_) => Some(
+            "Этот блок только создаёт пустую папку. Чтобы получить файлы репозитория, добавьте «Клонировать, если отсутствует».",
+        ),
+        _ => None,
+    }
+}
+
 struct GithubPickerState {
     open: bool,
     search: String,
@@ -7659,7 +7969,7 @@ impl Default for GithubPickerState {
 fn main() -> eframe::Result {
     let viewport = egui::ViewportBuilder::default()
         .with_title("ppduster · Scenario Flow")
-        .with_inner_size([1440.0, 900.0])
+        .with_inner_size([1280.0, 780.0])
         .with_min_inner_size([980.0, 680.0]);
     #[cfg(target_os = "macos")]
     let viewport = viewport
@@ -8053,17 +8363,7 @@ impl ScenarioApp {
         self.array_snapshot_editors.clear();
         self.scenario_variable_editors.clear();
         self.reset_run_permissions();
-        let task = Task {
-            id: "custom-scenario".into(),
-            name: "Новый сценарий".into(),
-            description: "Сценарий, собранный из атомарных операций в ppduster.".into(),
-            platform: ppduster::rules::Platform::Macos,
-            trust: TrustRequirement::ExternalAllowed,
-            scenarios: Vec::new(),
-            resolved_scenarios: Vec::new(),
-            graph: Some(WorkflowGraph::default()),
-            steps: Vec::new(),
-        };
+        let task = new_composer_scenario_task("custom-scenario", "Новый сценарий");
         self.custom_project = Some(ScenarioProject {
             id: "scenario-project".into(),
             name: "Новый проект".into(),
@@ -8267,7 +8567,7 @@ impl ScenarioApp {
         self.mark_project_dirty();
     }
 
-    fn add_graph_composer_block(&mut self, kind: ComposerGraphBlockKind) {
+    fn add_graph_composer_block(&mut self, kind: ComposerGraphBlockKind, viewport_width: f32) {
         let attach = self
             .graph_picker_attach
             .clone()
@@ -8298,7 +8598,11 @@ impl ScenarioApp {
                     });
                 }
                 self.selected_node = Some(id.clone());
-                self.workspace_inspector_open = true;
+                open_workspace_inspector(
+                    &mut self.workspace_project_drawer_open,
+                    &mut self.workspace_inspector_open,
+                    viewport_width,
+                );
                 self.selected_step = None;
                 if let Some(project) = self.custom_project.as_mut() {
                     let canvas = project.canvases.entry(task_id).or_default();
@@ -8563,17 +8867,10 @@ impl ScenarioApp {
         };
         let ordinal = entries.len() + 1;
         entries.push(ProjectEntry::Scenario {
-            task: Box::new(Task {
-                id: format!("scenario-{ordinal}"),
-                name: format!("Новый сценарий {ordinal}"),
-                description: "Сценарий, собранный из атомарных операций в ppduster.".into(),
-                platform: ppduster::rules::Platform::Macos,
-                trust: TrustRequirement::ExternalAllowed,
-                scenarios: Vec::new(),
-                resolved_scenarios: Vec::new(),
-                graph: Some(WorkflowGraph::default()),
-                steps: Vec::new(),
-            }),
+            task: Box::new(new_composer_scenario_task(
+                format!("scenario-{ordinal}"),
+                format!("Новый сценарий {ordinal}"),
+            )),
         });
         let mut scenario_path = path;
         scenario_path.push(entries.len() - 1);
@@ -8590,15 +8887,44 @@ impl ScenarioApp {
         let Some(project) = self.custom_project.as_mut() else {
             return;
         };
-        let Some(entries) = project_group_entries_mut(project, &path) else {
-            return;
+        let (scenario_index, replaced_scenario_id) = {
+            let Some(entries) = project_group_entries_mut(project, &path) else {
+                return;
+            };
+            let placeholder_index = (entries.len() == 1)
+                .then(|| match &entries[0] {
+                    ProjectEntry::Scenario { task } if is_pristine_new_project_scenario(task) => {
+                        Some(0)
+                    }
+                    ProjectEntry::Group { .. } | ProjectEntry::Scenario { .. } => None,
+                })
+                .flatten();
+            let ordinal = placeholder_index.map_or(entries.len() + 1, |_| 1);
+            let replacement = ProjectEntry::Scenario {
+                task: Box::new(github_repository_composer_task(ordinal)),
+            };
+            if let Some(index) = placeholder_index {
+                let replaced_id = match std::mem::replace(&mut entries[index], replacement) {
+                    ProjectEntry::Scenario { task } => Some(task.id),
+                    ProjectEntry::Group { .. } => None,
+                };
+                (index, replaced_id)
+            } else {
+                entries.push(replacement);
+                (entries.len() - 1, None)
+            }
         };
-        let ordinal = entries.len() + 1;
-        entries.push(ProjectEntry::Scenario {
-            task: Box::new(github_repository_composer_task(ordinal)),
-        });
         let mut scenario_path = path;
-        scenario_path.push(entries.len() - 1);
+        scenario_path.push(scenario_index);
+        if let Some(replaced_id) = replaced_scenario_id {
+            project.canvases.remove(&replaced_id);
+            self.array_snapshot_editors.retain(|key, _| {
+                key.scenario_path != scenario_path || key.scenario_id != replaced_id
+            });
+            self.scenario_variable_editors.retain(|key, _| {
+                key.scenario_path != scenario_path || key.scenario_id != replaced_id
+            });
+        }
         self.selected_project_scenario = Some(scenario_path);
         self.selected_step = None;
         self.selected_node = Some("select-repositories".into());
@@ -8901,14 +9227,12 @@ impl ScenarioApp {
         self.report_applied = false;
         self.prepared_plan = None;
         self.pending_protected_path_approval = None;
-        if let Some(project) = &self.custom_project {
-            if let Err(error) = validate_project(project) {
-                self.report = None;
-                self.protected_path_approvals.clear();
-                self.plan_error = Some(error);
-                self.reveal_workspace_bottom(WorkspaceBottomTab::Problems);
-                return;
-            }
+        if let Some(error) = self.selected_project_validation_error() {
+            self.report = None;
+            self.protected_path_approvals.clear();
+            self.plan_error = Some(error);
+            self.reveal_workspace_bottom(WorkspaceBottomTab::Problems);
+            return;
         }
         let task = match self.resolved_selected_task() {
             Ok(task) => task,
@@ -9201,7 +9525,7 @@ impl ScenarioApp {
         self.scenario_variable_editors.clear();
         self.reset_run_permissions();
         make_project_external(&mut project.entries);
-        let selected = first_scenario_path(&project.entries, &mut Vec::new());
+        let selected = preferred_project_scenario_path(&project);
         self.custom_project = Some(project);
         self.project_path = None;
         self.project_dirty = false;
@@ -9420,7 +9744,7 @@ impl ScenarioApp {
             self.graph_picker_attach = None;
             self.graph_picker_port = None;
         } else if let Some(kind) = selected_graph {
-            self.add_graph_composer_block(kind);
+            self.add_graph_composer_block(kind, ctx.content_rect().width());
         }
     }
 }
@@ -9670,11 +9994,13 @@ fn paint_project_tree(
     }
 }
 
+#[cfg(test)]
 fn validate_project(project: &ScenarioProject) -> Result<(), String> {
     validate_project_structure(project)?;
     validate_project_canvases(&project.entries, &project.canvases)
 }
 
+#[cfg(test)]
 fn validate_project_canvases(
     entries: &[ProjectEntry],
     canvases: &BTreeMap<String, ComposerCanvas>,
@@ -9696,7 +10022,37 @@ fn validate_project_canvases(
     Ok(())
 }
 
+fn validate_selected_project_scenario(
+    project: &ScenarioProject,
+    scenario_path: &[usize],
+) -> Result<(), String> {
+    // Project files deliberately allow unfinished graphs to coexist while the
+    // user works on another scenario. Metadata and stable-ID collisions are
+    // still project-wide, but plan/apply validation belongs to the selected
+    // scenario only.
+    validate_project_for_editing(project)?;
+    let task = project
+        .scenario(scenario_path)
+        .ok_or_else(|| "Выбранный сценарий больше не существует.".to_owned())?;
+    if let Some(canvas) = project.canvases.get(&task.id) {
+        validate_composer_canvas(task, canvas)
+    } else if let Some(graph) = &task.graph {
+        validate_graph_for_ui(task, graph)
+    } else {
+        Err(format!(
+            "Сценарий «{}» не импортирован в WorkflowGraph v3.",
+            task.name
+        ))
+    }
+}
+
 impl ScenarioApp {
+    fn selected_project_validation_error(&self) -> Option<String> {
+        let project = self.custom_project.as_ref()?;
+        let scenario_path = self.selected_project_scenario.as_deref()?;
+        validate_selected_project_scenario(project, scenario_path).err()
+    }
+
     fn top_bar(&mut self, root: &mut egui::Ui) {
         #[cfg(target_os = "macos")]
         let horizontal_margin = Margin {
@@ -9738,99 +10094,122 @@ impl ScenarioApp {
                     }
                 }
 
+                let available = ui.available_size();
+                let target_actions_width = if self.custom_project.is_some() {
+                    TOP_BAR_CUSTOM_ACTIONS_WIDTH
+                } else {
+                    TOP_BAR_LIBRARY_ACTIONS_WIDTH
+                };
+                let actions_width = target_actions_width
+                    .min((available.x - TOP_BAR_IDENTITY_MIN_WIDTH - UI_SPACE_SM).max(0.0));
+                let identity_width = (available.x - actions_width - UI_SPACE_SM).max(0.0);
                 ui.horizontal(|ui| {
-                    Frame::new()
-                        .fill(if self.dark { Color32::WHITE } else { INK })
-                        .corner_radius(UI_RADIUS_CONTROL)
-                        .inner_margin(Margin::symmetric(8, 6))
-                        .show(ui, |ui| {
-                            ui.label(RichText::new("PP").strong().size(11.0).color(if self.dark {
-                                INK
-                            } else {
-                                Color32::WHITE
-                            }));
-                        });
-                    ui.label(
-                        RichText::new("PPDUSTER")
-                            .strong()
-                            .size(UI_TEXT_BODY)
-                            .color(text(self.dark)),
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(identity_width, available.y),
+                        Layout::left_to_right(Align::Center),
+                        |ui| self.top_bar_identity(ui, breadcrumb.as_ref()),
                     );
-
-                    if let Some((project, task, task_id)) = breadcrumb {
-                        ui.add_space(UI_SPACE_MD);
-                        ui.label(
-                            RichText::new(project)
-                                .size(UI_TEXT_BODY)
-                                .color(ui_tone(UiTone::Muted, self.dark)),
-                        );
-                        ui.label(
-                            RichText::new("/")
-                                .size(UI_TEXT_BODY)
-                                .color(ui_tone(UiTone::Muted, self.dark)),
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(task)
-                                    .strong()
-                                    .size(UI_TEXT_BODY)
-                                    .color(text(self.dark)),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(task_id);
-                        if self.custom_project.is_some() && self.project_dirty {
-                            ui.label(
-                                RichText::new("●")
-                                    .size(8.0)
-                                    .color(ui_tone(UiTone::Warning, self.dark)),
-                            )
-                            .on_hover_text("Есть несохранённые изменения");
-                        }
-                    }
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .button(if self.dark { "☀" } else { "☾" })
-                            .on_hover_text(if self.dark {
-                                "Включить светлую тему"
-                            } else {
-                                "Включить тёмную тему"
-                            })
-                            .clicked()
-                        {
-                            self.dark = !self.dark;
-                            configure_styles(
-                                ui.ctx(),
-                                if self.dark {
-                                    egui::ThemePreference::Dark
-                                } else {
-                                    egui::ThemePreference::Light
-                                },
-                            );
-                        }
-                        if self.custom_project.is_some() {
-                            self.project_file_menu(ui);
-                            self.workspace_plan_run_controls(ui);
-                        }
-                        let (safety_label, safety_color) =
-                            safety_badge(self.allow_shell, self.allow_elevation, self.dark);
-                        ui.label(
-                            RichText::new(safety_label)
-                                .strong()
-                                .size(9.0)
-                                .color(safety_color),
-                        )
-                        .on_hover_text(
-                            if self.allow_shell || self.allow_elevation {
-                                "Для текущего плана включены расширенные разрешения."
-                            } else {
-                                "Shell-команды и повышение прав для текущего плана запрещены."
-                            },
-                        );
-                    });
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(actions_width, available.y),
+                        Layout::right_to_left(Align::Center),
+                        |ui| self.top_bar_actions(ui),
+                    );
                 });
             });
+    }
+
+    fn top_bar_identity(&self, ui: &mut egui::Ui, breadcrumb: Option<&(String, String, String)>) {
+        Frame::new()
+            .fill(if self.dark { Color32::WHITE } else { INK })
+            .corner_radius(UI_RADIUS_CONTROL)
+            .inner_margin(Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.label(RichText::new("PP").strong().size(11.0).color(if self.dark {
+                    INK
+                } else {
+                    Color32::WHITE
+                }));
+            });
+        ui.label(
+            RichText::new("PPDUSTER")
+                .strong()
+                .size(UI_TEXT_BODY)
+                .color(text(self.dark)),
+        );
+
+        if let Some((project, task, task_id)) = breadcrumb {
+            ui.add_space(UI_SPACE_MD);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(project)
+                        .size(UI_TEXT_BODY)
+                        .color(ui_tone(UiTone::Muted, self.dark)),
+                )
+                .truncate(),
+            );
+            ui.label(
+                RichText::new("/")
+                    .size(UI_TEXT_BODY)
+                    .color(ui_tone(UiTone::Muted, self.dark)),
+            );
+            ui.add(
+                egui::Label::new(
+                    RichText::new(task)
+                        .strong()
+                        .size(UI_TEXT_BODY)
+                        .color(text(self.dark)),
+                )
+                .truncate(),
+            )
+            .on_hover_text(task_id);
+            if self.custom_project.is_some() && self.project_dirty {
+                ui.label(
+                    RichText::new("●")
+                        .size(8.0)
+                        .color(ui_tone(UiTone::Warning, self.dark)),
+                )
+                .on_hover_text("Есть несохранённые изменения");
+            }
+        }
+    }
+
+    fn top_bar_actions(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .button(if self.dark { "☀" } else { "☾" })
+            .on_hover_text(if self.dark {
+                "Включить светлую тему"
+            } else {
+                "Включить тёмную тему"
+            })
+            .clicked()
+        {
+            self.dark = !self.dark;
+            configure_styles(
+                ui.ctx(),
+                if self.dark {
+                    egui::ThemePreference::Dark
+                } else {
+                    egui::ThemePreference::Light
+                },
+            );
+        }
+        if self.custom_project.is_some() {
+            self.project_file_menu(ui);
+            self.workspace_plan_run_controls(ui);
+        }
+        let (safety_label, safety_color) =
+            safety_badge(self.allow_shell, self.allow_elevation, self.dark);
+        ui.label(
+            RichText::new(safety_label)
+                .strong()
+                .size(9.0)
+                .color(safety_color),
+        )
+        .on_hover_text(if self.allow_shell || self.allow_elevation {
+            "Для текущего плана включены расширенные разрешения."
+        } else {
+            "Shell-команды и повышение прав для текущего плана запрещены."
+        });
     }
 
     fn project_file_menu(&mut self, ui: &mut egui::Ui) {
@@ -9875,10 +10254,7 @@ impl ScenarioApp {
     }
 
     fn workspace_problem_count(&self) -> usize {
-        let validation =
-            self.custom_project
-                .as_ref()
-                .is_some_and(|project| validate_project(project).is_err()) as usize;
+        let validation = usize::from(self.selected_project_validation_error().is_some());
         validation
             + usize::from(self.plan_error.is_some())
             + usize::from(
@@ -9967,11 +10343,7 @@ impl ScenarioApp {
 
     fn workspace_problems_tab(&mut self, ui: &mut egui::Ui) {
         let mut shown = false;
-        if let Some(error) = self
-            .custom_project
-            .as_ref()
-            .and_then(|project| validate_project(project).err())
-        {
+        if let Some(error) = self.selected_project_validation_error() {
             shown = true;
             error_box(ui, &error, self.dark);
             ui.add_space(UI_SPACE_XS);
@@ -10302,6 +10674,11 @@ impl ScenarioApp {
     fn project_workspace_navigation(&mut self, root: &mut egui::Ui) {
         let workspace_rect = root.max_rect();
         let drawer_overlays = workspace_project_drawer_overlays(workspace_rect.width());
+        reconcile_workspace_side_panels(
+            &mut self.workspace_project_drawer_open,
+            self.workspace_inspector_open,
+            workspace_rect.width(),
+        );
         egui::Panel::left("project-workspace-rail")
             .exact_size(WORKSPACE_PROJECT_RAIL_WIDTH)
             .frame(
@@ -10574,10 +10951,7 @@ impl ScenarioApp {
     }
 
     fn inspector_action_bar(&mut self, ui: &mut egui::Ui) {
-        let validation_error = self
-            .custom_project
-            .as_ref()
-            .and_then(|project| validate_project(project).err());
+        let validation_error = self.selected_project_validation_error();
         let resolved = self
             .resolved_selected_task()
             .map_err(|error| format!("{error:#}"));
@@ -10684,10 +11058,7 @@ impl ScenarioApp {
     }
 
     fn workspace_plan_run_controls(&mut self, ui: &mut egui::Ui) {
-        let validation_error = self
-            .custom_project
-            .as_ref()
-            .and_then(|project| validate_project(project).err());
+        let validation_error = self.selected_project_validation_error();
         let resolved = self
             .resolved_selected_task()
             .map_err(|error| format!("{error:#}"));
@@ -12674,10 +13045,11 @@ impl ScenarioApp {
                     .on_hover_text(format!("{hover_title}\nID: {}", node.id));
                 if interaction.clicked_by(egui::PointerButton::Primary) {
                     self.selected_node = Some(node.id.clone());
-                    self.workspace_inspector_open = true;
-                    if workspace_project_drawer_overlays(ui.ctx().content_rect().width()) {
-                        self.workspace_project_drawer_open = false;
-                    }
+                    open_workspace_inspector(
+                        &mut self.workspace_project_drawer_open,
+                        &mut self.workspace_inspector_open,
+                        ui.ctx().content_rect().width(),
+                    );
                     self.selected_step = None;
                 }
                 if interaction.dragged_by(egui::PointerButton::Middle) {
@@ -13875,7 +14247,7 @@ fn github_repository_composer_task(ordinal: usize) -> Task {
         .expect("built-in GitHub selection and clone recipe must stay valid");
     Task {
         id: format!("github-repositories-{ordinal}"),
-        name: "Выбрать и клонировать репозитории GitHub".into(),
+        name: GITHUB_REPOSITORY_COMPOSER_NAME.into(),
         description: "Загрузить репозитории только в инспекторе настройки, сохранить выбранные публичные значения в блоке GitHub и при запуске без повторного discovery-запроса клонировать отсутствующие репозитории в $HOME/Developer/<owner>/<repository>.".into(),
         platform: ppduster::rules::Platform::Macos,
         trust: TrustRequirement::ExternalAllowed,
@@ -19255,6 +19627,138 @@ mod tests {
     }
 
     #[test]
+    fn github_recipe_replaces_the_pristine_new_project_scenario() {
+        let mut app = library_app_for_test(Vec::new());
+        app.start_custom_project();
+        app.custom_project
+            .as_mut()
+            .unwrap()
+            .canvases
+            .insert("custom-scenario".into(), ComposerCanvas::default());
+
+        app.add_github_project_scenario();
+
+        let project = app.custom_project.as_ref().unwrap();
+        let ProjectEntry::Group { entries, .. } = &project.entries[0] else {
+            panic!("new projects must keep their main group");
+        };
+        assert_eq!(entries.len(), 1);
+        let ProjectEntry::Scenario { task } = &entries[0] else {
+            panic!("the placeholder must be replaced by a scenario");
+        };
+        assert_eq!(task.id, "github-repositories-1");
+        assert!(!project.canvases.contains_key("custom-scenario"));
+        assert_eq!(app.selected_project_scenario, Some(vec![0, 0]));
+        assert_eq!(app.workspace_problem_count(), 1);
+        assert!(app
+            .selected_project_validation_error()
+            .is_some_and(|error| error.contains("Не выбран ни один репозиторий GitHub")));
+    }
+
+    #[test]
+    fn reopening_old_project_skips_the_redundant_pristine_placeholder() {
+        let project = ScenarioProject {
+            id: "scenario-project".into(),
+            name: "Новый проект".into(),
+            description: "Проект сценариев ppduster.".into(),
+            canvases: BTreeMap::new(),
+            entries: vec![ProjectEntry::Group {
+                id: "main".into(),
+                name: "Основные сценарии".into(),
+                entries: vec![
+                    ProjectEntry::Scenario {
+                        task: Box::new(new_composer_scenario_task(
+                            "custom-scenario",
+                            "Новый сценарий",
+                        )),
+                    },
+                    ProjectEntry::Scenario {
+                        task: Box::new(github_repository_composer_task(2)),
+                    },
+                ],
+            }],
+        };
+        let mut app = library_app_for_test(Vec::new());
+
+        app.open_custom_project(project);
+
+        assert_eq!(app.selected_project_scenario, Some(vec![0, 1]));
+        assert_eq!(app.selected_task().unwrap().id, "github-repositories-2");
+        assert_eq!(app.workspace_problem_count(), 1);
+        assert!(app
+            .selected_project_validation_error()
+            .is_some_and(|error| error.contains("Не выбран ни один репозиторий GitHub")));
+    }
+
+    #[test]
+    fn unfinished_other_scenario_does_not_block_selected_recipe() {
+        let mut app = library_app_for_test(Vec::new());
+        app.start_custom_project();
+        app.custom_project
+            .as_mut()
+            .unwrap()
+            .scenario_mut(&[0, 0])
+            .unwrap()
+            .name = "Мой черновик".into();
+
+        app.add_github_project_scenario();
+        {
+            let task = app
+                .custom_project
+                .as_mut()
+                .unwrap()
+                .scenario_mut(&[0, 1])
+                .unwrap();
+            let graph = task.graph.as_mut().unwrap();
+            let Some(GraphNode::Action(selector)) = graph_node_mut(graph, "select-repositories")
+            else {
+                panic!("GitHub starter selector")
+            };
+            assert!(apply_github_preview_selection(
+                selector,
+                &[github_repository("R_one", "owner/one", "main")],
+                &BTreeSet::from(["R_one".into()]),
+                true,
+            )
+            .unwrap());
+        }
+
+        let project = app.custom_project.as_ref().unwrap();
+        let ProjectEntry::Group { entries, .. } = &project.entries[0] else {
+            panic!("new projects must keep their main group");
+        };
+        assert_eq!(entries.len(), 2, "an edited draft must never be replaced");
+        assert_eq!(app.selected_project_scenario, Some(vec![0, 1]));
+        assert_eq!(app.selected_project_validation_error(), None);
+        assert_eq!(app.workspace_problem_count(), 0);
+        assert!(validate_project(project).is_err());
+
+        app.selected_project_scenario = Some(vec![0, 0]);
+        let error = app.selected_project_validation_error().unwrap();
+        assert!(error.contains("Сценарий «Мой черновик» пока не готов"));
+        assert!(!error.contains("invalid workflow graph"));
+        assert_eq!(app.workspace_problem_count(), 1);
+    }
+
+    #[test]
+    fn adding_a_block_on_compact_workspace_opens_only_the_inspector() {
+        let mut app = library_app_for_test(Vec::new());
+        app.start_custom_project();
+        app.workspace_project_drawer_open = true;
+        app.workspace_inspector_open = false;
+        app.open_graph_block_picker(ComposerGraphAttach::RootStart);
+
+        app.add_graph_composer_block(
+            ComposerGraphBlockKind::Action(ActionKind::CreateDirectory),
+            COMPACT_VIEWPORT_WIDTH,
+        );
+
+        assert!(!app.workspace_project_drawer_open);
+        assert!(app.workspace_inspector_open);
+        assert!(app.selected_node.is_some());
+    }
+
+    #[test]
     fn dirty_project_requires_explicit_discard_before_close() {
         let mut app = composer_app_for_test(composer_project_with_canvas(
             gui_supported_task_for_test(),
@@ -19515,7 +20019,10 @@ mod tests {
         assert_eq!(app.selected_project_scenario, Some(vec![0, 0]));
 
         app.open_graph_block_picker(ComposerGraphAttach::RootStart);
-        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        app.add_graph_composer_block(
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+            WIDE_VIEWPORT_WIDTH,
+        );
         let source_id = app.selected_node.clone().unwrap();
         selected_action_mut_for_test(&mut app, &source_id)
             .bindings
@@ -19525,7 +20032,7 @@ mod tests {
             node_id: source_id.clone(),
         });
         assert_eq!(app.graph_picker_port, Some(EdgePort::Success));
-        app.add_graph_composer_block(ComposerGraphBlockKind::If);
+        app.add_graph_composer_block(ComposerGraphBlockKind::If, WIDE_VIEWPORT_WIDTH);
         let if_id = app.selected_node.clone().unwrap();
         let GraphNode::If(if_node) =
             graph_node_mut(selected_graph_mut_for_test(&mut app), &if_id).unwrap()
@@ -19543,7 +20050,10 @@ mod tests {
                 owner_id: if_id.clone(),
             },
         });
-        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        app.add_graph_composer_block(
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+            WIDE_VIEWPORT_WIDTH,
+        );
         let then_id = app.selected_node.clone().unwrap();
         selected_action_mut_for_test(&mut app, &then_id)
             .bindings
@@ -19557,7 +20067,10 @@ mod tests {
                 owner_id: if_id.clone(),
             },
         });
-        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        app.add_graph_composer_block(
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+            WIDE_VIEWPORT_WIDTH,
+        );
         let else_id = app.selected_node.clone().unwrap();
         selected_action_mut_for_test(&mut app, &else_id)
             .bindings
@@ -19567,7 +20080,7 @@ mod tests {
             node_id: if_id.clone(),
         });
         assert_eq!(app.graph_picker_port, Some(EdgePort::Completed));
-        app.add_graph_composer_block(ComposerGraphBlockKind::ForEach);
+        app.add_graph_composer_block(ComposerGraphBlockKind::ForEach, WIDE_VIEWPORT_WIDTH);
         let loop_id = app.selected_node.clone().unwrap();
         let GraphNode::ForEach(loop_node) =
             graph_node_mut(selected_graph_mut_for_test(&mut app), &loop_id).unwrap()
@@ -19581,7 +20094,10 @@ mod tests {
                 scope: ComposerGraphNestedScope::ForEachBody { .. }
             })
         ));
-        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        app.add_graph_composer_block(
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+            WIDE_VIEWPORT_WIDTH,
+        );
         let loop_action_id = app.selected_node.clone().unwrap();
         let loop_action = selected_action_mut_for_test(&mut app, &loop_action_id);
         loop_action
@@ -19595,7 +20111,7 @@ mod tests {
         app.open_graph_block_picker(ComposerGraphAttach::RootAfter {
             node_id: loop_id.clone(),
         });
-        app.add_graph_composer_block(ComposerGraphBlockKind::Switch);
+        app.add_graph_composer_block(ComposerGraphBlockKind::Switch, WIDE_VIEWPORT_WIDTH);
         let switch_id = app.selected_node.clone().unwrap();
         let GraphNode::Switch(switch_node) =
             graph_node_mut(selected_graph_mut_for_test(&mut app), &switch_id).unwrap()
@@ -19611,7 +20127,10 @@ mod tests {
                 case_id: "case-1".into(),
             },
         });
-        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        app.add_graph_composer_block(
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+            WIDE_VIEWPORT_WIDTH,
+        );
         let case_id = app.selected_node.clone().unwrap();
         selected_action_mut_for_test(&mut app, &case_id)
             .bindings
@@ -19622,7 +20141,10 @@ mod tests {
                 owner_id: switch_id.clone(),
             },
         });
-        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        app.add_graph_composer_block(
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+            WIDE_VIEWPORT_WIDTH,
+        );
         let default_id = app.selected_node.clone().unwrap();
         selected_action_mut_for_test(&mut app, &default_id)
             .bindings
@@ -19631,7 +20153,10 @@ mod tests {
         app.open_graph_block_picker(ComposerGraphAttach::RootAfter {
             node_id: switch_id.clone(),
         });
-        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        app.add_graph_composer_block(
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+            WIDE_VIEWPORT_WIDTH,
+        );
         let branch_a_id = app.selected_node.clone().unwrap();
         selected_action_mut_for_test(&mut app, &branch_a_id)
             .bindings
@@ -19640,7 +20165,10 @@ mod tests {
         app.open_graph_block_picker(ComposerGraphAttach::RootAfter {
             node_id: switch_id.clone(),
         });
-        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::InspectPath));
+        app.add_graph_composer_block(
+            ComposerGraphBlockKind::Action(ActionKind::InspectPath),
+            WIDE_VIEWPORT_WIDTH,
+        );
         let branch_b_id = app.selected_node.clone().unwrap();
         selected_action_mut_for_test(&mut app, &branch_b_id)
             .bindings
@@ -19649,7 +20177,7 @@ mod tests {
         app.open_graph_block_picker(ComposerGraphAttach::RootAfter {
             node_id: branch_a_id.clone(),
         });
-        app.add_graph_composer_block(ComposerGraphBlockKind::Join);
+        app.add_graph_composer_block(ComposerGraphBlockKind::Join, WIDE_VIEWPORT_WIDTH);
         let join_id = app.selected_node.clone().unwrap();
         graph_set_incoming_edge(
             selected_graph_mut_for_test(&mut app),
@@ -19662,7 +20190,10 @@ mod tests {
         app.open_graph_block_picker(ComposerGraphAttach::RootAfter {
             node_id: join_id.clone(),
         });
-        app.add_graph_composer_block(ComposerGraphBlockKind::Action(ActionKind::CreateDirectory));
+        app.add_graph_composer_block(
+            ComposerGraphBlockKind::Action(ActionKind::CreateDirectory),
+            WIDE_VIEWPORT_WIDTH,
+        );
         let create_id = app.selected_node.clone().unwrap();
         selected_action_mut_for_test(&mut app, &create_id)
             .bindings
@@ -19957,6 +20488,49 @@ mod tests {
             workspace_panel_widths(WIDE_VIEWPORT_WIDTH),
             (WIDE_LIBRARY_WIDTH, WIDE_INSPECTOR_WIDTH)
         );
+    }
+
+    #[test]
+    fn compact_top_bar_reserves_space_for_all_project_actions() {
+        fn text_rect(shape: &egui::epaint::Shape, label: &str) -> Option<Rect> {
+            match shape {
+                egui::epaint::Shape::Text(text) if text.galley.job.text == label => {
+                    Some(text.visual_bounding_rect())
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().find_map(|shape| text_rect(shape, label))
+                }
+                _ => None,
+            }
+        }
+
+        let task = github_repository_composer_task(1);
+        let project = composer_project_with_canvas(task, ComposerCanvas::default());
+        let mut app = composer_app_for_test(project);
+        app.project_dirty = true;
+        let ctx = egui::Context::default();
+        configure_styles(&ctx, egui::ThemePreference::Dark);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(980.0, 680.0));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| app.top_bar(ui),
+        );
+        output.textures_delta.clear();
+
+        for label in ["Запустить", "Проверить план", "Проект ▾"] {
+            let bounds = output
+                .shapes
+                .iter()
+                .find_map(|clipped| text_rect(&clipped.shape, label))
+                .unwrap_or_else(|| panic!("top-bar action {label:?} was clipped away"));
+            assert!(
+                screen.contains_rect(bounds),
+                "top-bar action {label:?} escaped the compact viewport: {bounds:?}"
+            );
+        }
     }
 
     #[test]
@@ -22717,6 +23291,84 @@ task:
         round_trip.task.validate().unwrap();
     }
 
+    #[test]
+    fn github_clone_recipe_rejects_empty_selection() {
+        let mut task = github_repository_composer_task(1);
+        task.name = "Мой переименованный рецепт".into();
+        let error = validate_graph_for_ui(&task, task.graph.as_ref().unwrap()).unwrap_err();
+
+        assert!(error.contains("Не выбран ни один репозиторий GitHub"));
+        assert!(!error.contains("В цикле нет блока"));
+    }
+
+    #[test]
+    fn imported_live_github_recipe_is_not_misclassified_as_snapshot_starter() {
+        let step = default_step(ActionKind::GithubListRepositories, "list-repositories").unwrap();
+        let task = Task {
+            id: "github-repositories-9".into(),
+            name: GITHUB_REPOSITORY_COMPOSER_NAME.into(),
+            description: "Imported legacy recipe".into(),
+            platform: ppduster::rules::Platform::Macos,
+            trust: TrustRequirement::ExternalAllowed,
+            scenarios: Vec::new(),
+            resolved_scenarios: Vec::new(),
+            graph: Some(WorkflowGraph {
+                entries: vec![step.id.clone()],
+                nodes: vec![GraphNode::Action(Box::new(ActionNode {
+                    step,
+                    bindings: BTreeMap::new(),
+                }))],
+                ..WorkflowGraph::default()
+            }),
+            steps: Vec::new(),
+        };
+
+        validate_graph_for_ui(&task, task.graph.as_ref().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn github_clone_recipe_rejects_mkdir_only_and_shell_quoted_path() {
+        let mut task = github_repository_composer_task(1);
+        let graph = task.graph.as_mut().unwrap();
+        let Some(GraphNode::Action(selector)) = graph_node_mut(graph, "select-repositories") else {
+            panic!("GitHub starter selector")
+        };
+        assert!(apply_github_preview_selection(
+            selector,
+            &[github_repository("R_one", "owner/one", "main")],
+            &BTreeSet::from(["R_one".into()]),
+            true,
+        )
+        .unwrap());
+        let Some(GraphNode::ForEach(repositories)) = graph_node_mut(graph, "repositories") else {
+            panic!("repository loop")
+        };
+        let mut step = default_step(ActionKind::CreateDirectory, "create-directory-3").unwrap();
+        step.name = "Создать папку".into();
+        *repositories.body = WorkflowGraph {
+            entries: vec![step.id.clone()],
+            nodes: vec![GraphNode::Action(Box::new(ActionNode {
+                step,
+                bindings: BTreeMap::from([(
+                    "path".into(),
+                    Binding::interpolated([
+                        TemplatePart::literal("'/Users/example/Developer/t"),
+                        TemplatePart::field(FieldRef::loop_item("repositories").field("name")),
+                        TemplatePart::literal("'"),
+                    ]),
+                )]),
+            }))],
+            ..WorkflowGraph::default()
+        };
+        task.validate().unwrap();
+
+        let error = validate_graph_for_ui(&task, task.graph.as_ref().unwrap()).unwrap_err();
+
+        assert!(error.contains("В цикле нет блока «Клонировать, если отсутствует»"));
+        assert!(error.contains("внешние кавычки сохранены как часть пути"));
+        assert!(!error.contains("Не выбран ни один репозиторий GitHub"));
+    }
+
     fn repository_directory_graph() -> (WorkflowGraph, String) {
         let mut graph = github_repository_composer_task(1).graph.unwrap();
         let directory_id = graph_insert_composer_block(
@@ -22765,6 +23417,43 @@ task:
         let yaml = serde_yaml::to_string(&binding).unwrap();
         assert!(yaml.contains("kind: interpolated"));
         assert!(!yaml.contains("kind: template"));
+    }
+
+    #[test]
+    fn path_interpolation_rejects_shell_wrapping_quotes() {
+        let directory_path = ContextType::string(SemanticFormat::DirectoryPath);
+
+        assert_eq!(
+            graph_interpolation_path_error(
+                "'$HOME/Developer/{{repository.name}}'",
+                Some(&directory_path),
+            ),
+            Some(
+                "Не заключайте путь в кавычки: это не shell-команда, кавычки станут частью имени."
+            )
+        );
+        assert_eq!(
+            graph_interpolation_path_error(
+                "$HOME/Developer/{{repository.name}}",
+                Some(&directory_path),
+            ),
+            None
+        );
+        assert_eq!(
+            graph_interpolation_path_error("'обычный текст'", Some(&ContextType::STRING)),
+            None
+        );
+    }
+
+    #[test]
+    fn action_notes_distinguish_listing_and_mkdir_from_cloning() {
+        assert!(graph_action_behavior_note(&Action::GithubListRepositories)
+            .is_some_and(|note| note.contains("ничего не выбирает и не клонирует")));
+        let mkdir = default_step(ActionKind::CreateDirectory, "mkdir").unwrap();
+        assert!(graph_action_behavior_note(&mkdir.action)
+            .is_some_and(|note| note.contains("только создаёт пустую папку")));
+        let clone = default_step(ActionKind::GitCloneIfMissing, "clone").unwrap();
+        assert_eq!(graph_action_behavior_note(&clone.action), None);
     }
 
     #[test]
@@ -22876,7 +23565,7 @@ task:
             assert!(paint_graph_interpolation_editor(
                 ui,
                 &scope,
-                (&directory_id, "path"),
+                (&directory_id, "path", None),
                 &mut binding,
                 &graph,
                 &options,
@@ -22928,7 +23617,7 @@ task:
             changed = paint_graph_interpolation_editor(
                 ui,
                 &scope,
-                (&directory_id, "path"),
+                (&directory_id, "path", None),
                 &mut binding,
                 &graph,
                 &options,
@@ -22970,7 +23659,7 @@ task:
             paint_graph_interpolation_editor(
                 ui,
                 &scope,
-                (&directory_id, "path"),
+                (&directory_id, "path", None),
                 &mut binding,
                 &graph,
                 &renamed_options,
@@ -23012,7 +23701,7 @@ task:
                 assert!(!paint_graph_interpolation_editor(
                     ui,
                     &scope,
-                    (&directory_id, "path"),
+                    (&directory_id, "path", None),
                     &mut binding,
                     &graph,
                     &options,
@@ -23066,7 +23755,7 @@ task:
             assert!(!paint_graph_interpolation_editor(
                 ui,
                 &scope_a,
-                (&directory_id, "path"),
+                (&directory_id, "path", None),
                 &mut binding_a,
                 &graph_a,
                 &options_a,
@@ -23081,7 +23770,7 @@ task:
             assert!(!paint_graph_interpolation_editor(
                 ui,
                 &scope_b,
-                (&directory_id, "path"),
+                (&directory_id, "path", None),
                 &mut binding_b,
                 &graph_b,
                 &options_b,
@@ -23191,7 +23880,7 @@ task:
             assert!(!paint_graph_interpolation_editor(
                 ui,
                 &new_scope,
-                (&recreated_id, "path"),
+                (&recreated_id, "path", None),
                 &mut binding,
                 graph,
                 &options,
@@ -23796,6 +24485,130 @@ task:
         assert!(clone_plans[1].summary.contains("$HOME/Developer/owner/one"));
         assert!(clone_plans[1].summary.contains("branch main"));
         assert!(!report.steps.iter().any(|step| step.step_id.contains("[*]")));
+    }
+
+    #[test]
+    fn github_starter_applies_clone_for_each_saved_repository_offline() {
+        let temp = tempfile::tempdir().unwrap();
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let run_git = |cwd: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-c")
+                .arg("core.hooksPath=/dev/null")
+                .arg("-c")
+                .arg("commit.gpgSign=false")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let remote_arg = remote.to_string_lossy().into_owned();
+        run_git(temp.path(), &["init", "--bare", &remote_arg]);
+        run_git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run_git(&seed, &["init"]);
+        run_git(&seed, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run_git(&seed, &["config", "user.name", "ppduster tests"]);
+        run_git(
+            &seed,
+            &["config", "user.email", "ppduster-tests@example.invalid"],
+        );
+        fs::write(seed.join("state.txt"), "cloned\n").unwrap();
+        run_git(&seed, &["add", "state.txt"]);
+        run_git(&seed, &["commit", "-m", "initial"]);
+        run_git(&seed, &["remote", "add", "origin", &remote_arg]);
+        run_git(&seed, &["push", "--set-upstream", "origin", "main"]);
+
+        let mut task = github_repository_composer_task(1);
+        let graph = task.graph.as_mut().unwrap();
+        let Some(GraphNode::Action(selector)) = graph_node_mut(graph, "select-repositories") else {
+            panic!("GitHub starter selector")
+        };
+        let repositories = [
+            github_repository("R_one", "owner/one", "main"),
+            github_repository("R_two", "owner/two", "main"),
+        ];
+        assert!(apply_github_preview_selection(
+            selector,
+            &repositories,
+            &BTreeSet::from(["R_one".into(), "R_two".into()]),
+            true,
+        )
+        .unwrap());
+        let Some(GraphNode::ForEach(repositories)) = graph_node_mut(graph, "repositories") else {
+            panic!("repository loop")
+        };
+        let Some(GraphNode::Action(clone)) =
+            graph_node_mut(&mut repositories.body, "clone-repository")
+        else {
+            panic!("clone action")
+        };
+        clone.bindings.insert(
+            "repo".into(),
+            Binding::literal(format!("file://{}", remote.display())),
+        );
+        let checkout_root = temp.path().join("checkouts");
+        clone.bindings.insert(
+            "dest".into(),
+            Binding::interpolated([
+                TemplatePart::literal(format!("{}/", checkout_root.display())),
+                TemplatePart::field(FieldRef::loop_item("repositories").field("name")),
+            ]),
+        );
+        task.validate().unwrap();
+        validate_graph_for_ui(&task, task.graph.as_ref().unwrap()).unwrap();
+
+        let first = run_task(
+            &task,
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(first.errors.is_empty());
+        assert_eq!(
+            first
+                .steps
+                .iter()
+                .filter(|step| step.step_id.ends_with("/clone-repository"))
+                .filter(|step| matches!(step.status, StepStatus::Applied))
+                .count(),
+            2
+        );
+        for name in ["one", "two"] {
+            assert!(checkout_root.join(name).join(".git").is_dir());
+            assert_eq!(
+                fs::read_to_string(checkout_root.join(name).join("state.txt")).unwrap(),
+                "cloned\n"
+            );
+        }
+
+        let second = run_task(
+            &task,
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            second
+                .steps
+                .iter()
+                .filter(|step| step.step_id.ends_with("/clone-repository"))
+                .filter(|step| matches!(step.status, StepStatus::Satisfied))
+                .count(),
+            2
+        );
     }
 
     #[test]
