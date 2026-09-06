@@ -1,7 +1,7 @@
 use ppduster::automation::{
     run_task, Action, AppStoreOperation, ArchiveFormat, AuthPolicy, ElevationPolicy, GraphNode,
     LicenseMethod, LicenseProvider, PackTrust, RunOptions, ScriptInterpreter, Step, StepCondition,
-    Task, TaskFile, TaskPack, TaskSource, WorkflowGraph,
+    Task, TaskFile, TaskPack, TaskSource, TrustRequirement, WorkflowGraph,
 };
 #[cfg(unix)]
 use ppduster::automation::{ActionOutcome, StepOutput, StepStatus};
@@ -953,9 +953,27 @@ fn bundled_stack_leaves_are_typed_brew_installs() {
         ("macos-stack-vscode", "visual-studio-code", true),
         ("macos-stack-postgres", "postgresql@17", false),
     ];
+
+    // A seventh unreviewed stack leaf must fail here, not ship silently.
+    let mut present: Vec<&str> = pack
+        .tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .filter(|id| id.starts_with("macos-stack-"))
+        .collect();
+    present.sort_unstable();
+    let mut known: Vec<&str> = expected.iter().map(|(id, _, _)| *id).collect();
+    known.sort_unstable();
+    assert_eq!(present, known, "macos-stack-* leaf set drifted");
+
     for (id, package, cask) in expected {
         let task = pack.get(id).unwrap_or_else(|| panic!("missing stack leaf {id}"));
         assert!(!task.is_template(), "{id} must stay a leaf");
+        assert!(
+            task.scenarios.is_empty() && task.resolved_scenarios.is_empty(),
+            "{id} must not gain children"
+        );
+        assert_eq!(task.trust, TrustRequirement::BundledOnly, "{id} trust drifted");
         let steps = graph_action_steps(task);
         assert_eq!(steps.len(), 1, "{id} must be one brew-install step");
         match &steps[0].action {
@@ -968,6 +986,102 @@ fn bundled_stack_leaves_are_typed_brew_installs() {
             }
             other => panic!("{id} must be brew-install, got {other:?}"),
         }
+        // The idempotence check must name the same token as the install.
+        let check = steps[0]
+            .check
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id} must carry an install check"));
+        let command = check
+            .command_succeeds
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id} check must be command_succeeds"));
+        let expected_command: Vec<String> = if cask {
+            vec!["brew".into(), "list".into(), "--cask".into(), package.into()]
+        } else {
+            vec!["brew".into(), "list".into(), package.into()]
+        };
+        assert_eq!(command, &expected_command, "{id} check drifted from package");
+    }
+}
+
+/// The 13 bundled templates keep their child lists, and resolving one moves the
+/// children from `scenarios` to `resolved_scenarios` without turning it into a leaf.
+#[test]
+fn bundled_template_child_lists_and_resolve_identity() {
+    let pack = TaskPack::load_many(
+        &[TaskSource {
+            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks"),
+            trust: PackTrust::Bundled,
+        }],
+        false,
+    )
+    .unwrap();
+
+    let expected_templates = [
+        "macos-containers",
+        "macos-developer-workstation",
+        "macos-full-stack",
+        "macos-home-office",
+        "macos-maker-studio",
+        "macos-new-machine",
+        "macos-node-developer",
+        "macos-power-user",
+        "macos-privacy-baseline",
+        "macos-python-data",
+        "macos-recovery-kit",
+        "macos-rust-developer",
+        "macos-web-developer",
+    ];
+
+    let mut present: Vec<&str> = pack
+        .tasks
+        .iter()
+        .filter(|task| task.is_template())
+        .map(|task| task.id.as_str())
+        .collect();
+    present.sort_unstable();
+    assert_eq!(present, expected_templates, "bundled template set drifted");
+
+    for id in expected_templates {
+        let task = pack.get(id).unwrap_or_else(|| panic!("missing template {id}"));
+        assert!(task.is_template(), "{id} must stay a template");
+        assert!(!task.scenarios.is_empty(), "{id} must declare children");
+        assert_eq!(
+            task.included_scenarios(),
+            task.scenarios.as_slice(),
+            "{id} unresolved children must come from `scenarios`"
+        );
+        assert!(
+            task.resolved_scenarios.is_empty(),
+            "{id} must not be pre-resolved on load"
+        );
+        assert!(task.graph.is_none(), "{id} must have no graph before resolve");
+
+        // The catalog is flat today: no template lists another template.
+        for child in &task.scenarios {
+            assert!(
+                !expected_templates.contains(&child.as_str()),
+                "{id} nests template {child}; nesting needs its own test first"
+            );
+        }
+
+        let resolved = pack
+            .resolve(id)
+            .unwrap_or_else(|error| panic!("{id} failed to resolve: {error:#}"));
+        assert!(resolved.is_template(), "{id} must stay a template after resolve");
+        assert!(
+            resolved.scenarios.is_empty(),
+            "{id} must move children out of `scenarios` on resolve"
+        );
+        assert_eq!(
+            resolved.resolved_scenarios, task.scenarios,
+            "{id} resolved children drifted from the declared list"
+        );
+        assert!(resolved.graph.is_some(), "{id} must gain a graph on resolve");
+        assert!(
+            resolved.steps.is_empty(),
+            "{id} must express resolved work as a graph, not flat steps"
+        );
     }
 }
 
@@ -1064,6 +1178,7 @@ fn setup_list_prints_templates_before_scenarios() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let mut saw_scenario = false;
     let mut listed_templates = Vec::new();
+    let mut listed_stack_leaves = Vec::new();
     for line in stdout.lines() {
         let mut columns = line.split('\t');
         let id = columns.next().unwrap_or("");
@@ -1076,11 +1191,30 @@ fn setup_list_prints_templates_before_scenarios() {
                 );
                 listed_templates.push(id.to_owned());
             }
-            "scenario" => saw_scenario = true,
+            "scenario" => {
+                saw_scenario = true;
+                if id.starts_with("macos-stack-") {
+                    listed_stack_leaves.push(id.to_owned());
+                }
+            }
             other => panic!("unexpected setup list kind {other:?} for {id}"),
         }
     }
     assert!(saw_scenario, "setup list must include atomic scenarios");
+    listed_stack_leaves.sort();
+    assert_eq!(
+        listed_stack_leaves,
+        [
+            "macos-stack-docker",
+            "macos-stack-gh",
+            "macos-stack-node",
+            "macos-stack-postgres",
+            "macos-stack-rustup",
+            "macos-stack-uv",
+            "macos-stack-vscode",
+        ],
+        "stack leaves must print as scenarios, after the templates"
+    );
     listed_templates.sort();
     assert_eq!(
         listed_templates,

@@ -672,7 +672,13 @@ fn legacy_action_output(step: &Step, changed: bool) -> Option<StepOutput> {
         ),
         Action::GitFetch { repo, dest, branch } => structured_step_output(
             "ppduster.git.fetch@1",
-            repository_context_value(repo, dest, Some(branch), changed, "fetch"),
+            repository_context_value(
+                repo,
+                dest,
+                (branch != "*").then_some(branch.as_str()),
+                changed,
+                "fetch",
+            ),
         ),
         Action::GitFastForward { repo, dest, branch } => structured_step_output(
             "ppduster.git.fast-forward@1",
@@ -855,6 +861,16 @@ pub fn run_task(task: &Task, opts: &RunOptions) -> Result<RunReport> {
     run_task_with_interactivity(task, opts, terminal_is_interactive())
 }
 
+/// Run a canonical graph with live block lifecycle reports on the calling thread.
+/// The observer does not affect execution policy or the final report.
+pub fn run_task_with_progress(
+    task: &Task,
+    opts: &RunOptions,
+    observer: &dyn Fn(StepReport),
+) -> Result<RunReport> {
+    run_graph_task_with_interactivity(task, opts, terminal_is_interactive(), Some(observer))
+}
+
 fn run_task_with_interactivity(
     task: &Task,
     opts: &RunOptions,
@@ -869,7 +885,7 @@ fn run_task_with_interactivity(
             task.id
         )
     })?;
-    run_graph_task_with_interactivity(task, opts, terminal_interactive)
+    run_graph_task_with_interactivity(task, opts, terminal_interactive, None)
 }
 
 /// Execute an already materialized sequence of atomic actions.
@@ -1932,6 +1948,7 @@ impl GraphNodeResult {
 }
 
 struct GraphRuntime<'a> {
+    observer: Option<&'a dyn Fn(StepReport)>,
     task: &'a Task,
     opts: &'a RunOptions,
     terminal_interactive: bool,
@@ -1943,6 +1960,7 @@ fn run_graph_task_with_interactivity(
     task: &Task,
     opts: &RunOptions,
     terminal_interactive: bool,
+    observer: Option<&dyn Fn(StepReport)>,
 ) -> Result<RunReport> {
     let graph = task.workflow_graph().map_err(|error| {
         anyhow!(
@@ -1956,6 +1974,7 @@ fn run_graph_task_with_interactivity(
     preflight_graph_capabilities(&task.id, graph, opts, terminal_interactive)?;
 
     let mut runtime = GraphRuntime {
+        observer,
         task,
         opts,
         terminal_interactive,
@@ -2011,7 +2030,8 @@ fn preflight_graph_capabilities(
     opts: &RunOptions,
     terminal_interactive: bool,
 ) -> Result<()> {
-    preflight_graph_policy_order(task_id, graph, opts, terminal_interactive, false).map(|_| ())
+    preflight_graph_policy_order(task_id, graph, opts, terminal_interactive, false, false)
+        .map(|_| ())
 }
 
 /// Prove that inputs which can fail late or change safety policy are checked
@@ -2028,6 +2048,7 @@ fn preflight_graph_policy_order(
     opts: &RunOptions,
     terminal_interactive: bool,
     mut mutation_possible: bool,
+    loop_preflight: bool,
 ) -> Result<bool> {
     for index in deterministic_graph_order(graph)? {
         let node = &graph.nodes[index];
@@ -2056,7 +2077,7 @@ fn preflight_graph_policy_order(
                 // existing-DMG identity checks must fail before an earlier
                 // graph action can mutate the machine.
                 enforce_step_policy(task_id, &step, opts, terminal_interactive)?;
-                if mutation_possible {
+                if mutation_possible && !loop_preflight {
                     if let Some(target) = node.bindings.iter().find_map(|(target, binding)| {
                         (!binding_is_statically_resolvable(binding)
                             && (binding_affects_preflight_policy(&node.step.action, target)
@@ -2078,6 +2099,7 @@ fn preflight_graph_policy_order(
                     opts,
                     terminal_interactive,
                     mutation_possible,
+                    loop_preflight || !mutation_possible,
                 )?;
             }
             GraphNode::If(node) => {
@@ -2087,6 +2109,7 @@ fn preflight_graph_policy_order(
                     opts,
                     terminal_interactive,
                     mutation_possible,
+                    loop_preflight,
                 )?;
                 let else_mutation = if let Some(graph) = node.else_graph.as_deref() {
                     preflight_graph_policy_order(
@@ -2095,6 +2118,7 @@ fn preflight_graph_policy_order(
                         opts,
                         terminal_interactive,
                         mutation_possible,
+                        loop_preflight,
                     )?
                 } else {
                     mutation_possible
@@ -2110,6 +2134,7 @@ fn preflight_graph_policy_order(
                         opts,
                         terminal_interactive,
                         mutation_possible,
+                        loop_preflight,
                     )?;
                 }
                 if let Some(graph) = node.default.as_deref() {
@@ -2119,6 +2144,7 @@ fn preflight_graph_policy_order(
                         opts,
                         terminal_interactive,
                         mutation_possible,
+                        loop_preflight,
                     )?;
                 }
                 mutation_possible = branch_mutation;
@@ -2313,7 +2339,40 @@ impl GraphRuntime<'_> {
         depth: usize,
     ) -> Result<GraphNodeResult> {
         match node {
-            GraphNode::Action(node) => self.execute_action(node, scope, instance_prefix),
+            GraphNode::Action(node) => {
+                let id = if instance_prefix.is_empty() {
+                    node.step.id.clone()
+                } else {
+                    format!("{instance_prefix}/{}", node.step.id)
+                };
+                let started = StepReport {
+                    step_id: id,
+                    step_name: step_name(&node.step),
+                    summary: "Блок запущен".into(),
+                    status: StepStatus::Running,
+                    prerequisites: Vec::new(),
+                    logs: Vec::new(),
+                    output: None,
+                };
+                if self.opts.apply {
+                    if let Some(observer) = self.observer {
+                        observer(started.clone());
+                    }
+                }
+                let result = self.execute_action(node, scope, instance_prefix);
+                if let Err(error) = &result {
+                    if self.opts.apply {
+                        if let Some(observer) = self.observer {
+                            observer(StepReport {
+                                status: StepStatus::Failed,
+                                summary: format!("{error:#}"),
+                                ..started
+                            });
+                        }
+                    }
+                }
+                result
+            }
             GraphNode::ForEach(node) => {
                 self.execute_for_each(node, scope, instance_prefix, depth + 1)
             }
@@ -2625,6 +2684,11 @@ impl GraphRuntime<'_> {
             report.step_name = format!("{} · {}", report.step_name, instance_prefix);
             for log in &mut report.logs {
                 log.step_id = format!("{instance_prefix}/{}", log.step_id);
+            }
+        }
+        if self.opts.apply {
+            if let Some(observer) = self.observer {
+                observer(report.clone());
             }
         }
         self.accumulator.steps.push(report);
@@ -6710,10 +6774,38 @@ fn apply_git_fetch(
     branch: &str,
     approval_context: GitDestinationApprovalContext<'_>,
 ) -> Result<ApplyStepResult> {
-    validate_git_branch_name(branch)?;
+    if branch != "*" {
+        validate_git_branch_name(branch)?;
+    }
     let dest_path = expand_required_path(dest)?;
     let validated = validate_git_destination_with_approval(&dest_path, approval_context)?;
     validate_existing_git_repository(&dest_path, repo, validated.protected)?;
+    if branch == "*" {
+        let refs = [
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/remotes/origin/",
+        ];
+        let before = git_stdout(&dest_path, &refs, "inspect remote refs before fetch")?;
+        git_stdout(
+            &dest_path,
+            &[
+                "fetch",
+                "--no-tags",
+                "--recurse-submodules=no",
+                "origin",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+            "fetch all origin branches",
+        )?;
+        let after = git_stdout(&dest_path, &refs, "inspect remote refs after fetch")?;
+        let summary = "fetched all origin branches; working copy unchanged".to_owned();
+        return Ok(if before == after {
+            ApplyStepResult::AlreadySatisfied(summary)
+        } else {
+            ApplyStepResult::Applied(summary)
+        });
+    }
     let remote_ref = format!("refs/remotes/origin/{branch}");
     let before = git_ref_sha(&dest_path, &remote_ref)?;
     let refspec = format!("+refs/heads/{branch}:{remote_ref}");
@@ -9783,6 +9875,7 @@ mod tests {
         let task = graph_task(one_action_graph(clone.step.clone(), clone.bindings.clone()));
         let opts = RunOptions::default();
         let mut runtime = GraphRuntime {
+            observer: None,
             task: &task,
             opts: &opts,
             terminal_interactive: false,
@@ -9868,6 +9961,7 @@ mod tests {
             ..RunOptions::default()
         };
         let mut runtime = GraphRuntime {
+            observer: None,
             task: &task,
             opts: &opts,
             terminal_interactive: false,
@@ -10049,6 +10143,7 @@ mod tests {
         );
         let empty_task = graph_task(migrated);
         let mut empty_runtime = GraphRuntime {
+            observer: None,
             task: &empty_task,
             opts: &options,
             terminal_interactive: false,
@@ -10354,6 +10449,7 @@ mod tests {
             ..RunOptions::default()
         };
         let mut runtime = GraphRuntime {
+            observer: None,
             task: &task,
             opts: &opts,
             terminal_interactive: false,
@@ -11202,6 +11298,87 @@ mod tests {
                 && step.summary.contains("deferred until runtime context")
         }));
         assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn live_progress_precedes_mutation_and_reports_success_and_satisfaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("live-progress");
+        let task = graph_task(one_action_graph(
+            plain_step(
+                "create",
+                Action::CreateDirectory(CreateDirectoryAction {
+                    path: destination.to_string_lossy().into_owned(),
+                }),
+            ),
+            BTreeMap::new(),
+        ));
+        let events = std::cell::RefCell::new(Vec::new());
+        let options = RunOptions {
+            apply: true,
+            ..RunOptions::default()
+        };
+        let report = run_task_with_progress(&task, &options, &|step| {
+            if matches!(step.status, StepStatus::Running) {
+                assert!(!destination.exists());
+            }
+            if matches!(step.status, StepStatus::Applied) {
+                assert!(destination.is_dir());
+            }
+            events.borrow_mut().push(step);
+        })
+        .unwrap();
+        assert!(report.errors.is_empty());
+        assert_eq!(events.borrow().len(), 2);
+        assert!(matches!(events.borrow()[0].status, StepStatus::Running));
+        assert!(matches!(events.borrow()[1].status, StepStatus::Applied));
+        let repeated = std::cell::RefCell::new(Vec::new());
+        run_task_with_progress(&task, &options, &|step| repeated.borrow_mut().push(step)).unwrap();
+        assert!(matches!(
+            repeated.borrow().last().unwrap().status,
+            StepStatus::Satisfied
+        ));
+        let dry_events = std::cell::RefCell::new(Vec::new());
+        run_task_with_progress(&task, &RunOptions::default(), &|step| {
+            dry_events.borrow_mut().push(step)
+        })
+        .unwrap();
+        assert!(dry_events.borrow().is_empty());
+    }
+
+    #[test]
+    fn live_progress_reports_error_when_destination_changes_after_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("occupied-live");
+        let task = graph_task(one_action_graph(
+            plain_step(
+                "create",
+                Action::CreateDirectory(CreateDirectoryAction {
+                    path: destination.to_string_lossy().into_owned(),
+                }),
+            ),
+            BTreeMap::new(),
+        ));
+        let events = std::cell::RefCell::new(Vec::new());
+        let result = run_task_with_progress(
+            &task,
+            &RunOptions {
+                apply: true,
+                ..RunOptions::default()
+            },
+            &|step| {
+                if matches!(step.status, StepStatus::Running) {
+                    fs::write(&destination, "keep").unwrap();
+                }
+                events.borrow_mut().push(step);
+            },
+        );
+        assert!(result.is_err() || !result.unwrap().errors.is_empty());
+        assert!(matches!(
+            events.borrow().last().unwrap().status,
+            StepStatus::Failed
+        ));
+        assert_eq!(fs::read_to_string(destination).unwrap(), "keep");
     }
 
     #[test]
@@ -12219,6 +12396,103 @@ mod tests {
         assert!(matches!(updated.steps[2].status, StepStatus::Applied));
         assert!(matches!(updated.steps[3].status, StepStatus::Applied));
         assert_eq!(test_git(&destination, &["rev-parse", "HEAD"]), remote_sha);
+    }
+
+    #[test]
+    fn git_fetch_all_updates_remote_branches_and_preserves_dirty_checkout() {
+        let repository = init_git_test_repository();
+        let destination = repository._temp.path().join("fetch-all-checkout");
+        let clone = plain_step(
+            "clone",
+            Action::GitCloneIfMissing {
+                repo: repository.remote.to_string_lossy().into_owned(),
+                dest: destination.to_string_lossy().into_owned(),
+                branch: Some("main".into()),
+            },
+        );
+        let fetch = plain_step(
+            "fetch-all",
+            Action::GitFetch {
+                repo: repository.remote.to_string_lossy().into_owned(),
+                dest: destination.to_string_lossy().into_owned(),
+                branch: "*".into(),
+            },
+        );
+        let mut task = base_task(clone.clone());
+        task.steps.clear();
+        task.graph = Some(WorkflowGraph {
+            entries: vec!["repos".into()],
+            nodes: vec![GraphNode::ForEach(ForEachNode {
+                id: "repos".into(),
+                collection: Binding::literal(serde_json::json!([destination.to_string_lossy()])),
+                item_alias: "repo".into(),
+                index_alias: None,
+                concurrency: 1,
+                on_error: LoopFailurePolicy::Stop,
+                body: Box::new(WorkflowGraph {
+                    entries: vec!["clone".into()],
+                    nodes: vec![clone, fetch]
+                        .into_iter()
+                        .map(|step| {
+                            GraphNode::Action(Box::new(ActionNode {
+                                step,
+                                bindings: BTreeMap::from([(
+                                    "dest".into(),
+                                    Binding::interpolated([TemplatePart::field(
+                                        FieldRef::loop_item("repos"),
+                                    )]),
+                                )]),
+                            }))
+                        })
+                        .collect(),
+                    edges: vec![GraphEdge::new("clone", EdgePort::Success, "fetch-all")],
+                    ..WorkflowGraph::default()
+                }),
+            })],
+            ..WorkflowGraph::default()
+        });
+        let cloned = apply_test_task(&task);
+        assert!(cloned.errors.is_empty(), "{:?}", cloned.errors);
+        let original_head = test_git(&destination, &["rev-parse", "HEAD"]);
+        fs::write(destination.join("state.txt"), "local work\n").unwrap();
+        let remote_head = push_git_test_commit(&repository, "remote update\n");
+        test_git(
+            &repository.seed,
+            &["push", "origin", "HEAD:refs/heads/feature"],
+        );
+        let fetched = apply_test_task(&task);
+        assert!(fetched.errors.is_empty(), "{:?}", fetched.errors);
+        assert!(matches!(
+            fetched
+                .steps
+                .iter()
+                .find(|step| step.step_id.ends_with("/fetch-all"))
+                .unwrap()
+                .status,
+            StepStatus::Applied
+        ));
+        for branch in ["origin/main", "origin/feature"] {
+            assert_eq!(test_git(&destination, &["rev-parse", branch]), remote_head);
+        }
+        assert_eq!(
+            test_git(&destination, &["rev-parse", "HEAD"]),
+            original_head
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("state.txt")).unwrap(),
+            "local work\n"
+        );
+        let again = apply_test_task(&task);
+        assert!(again.errors.is_empty());
+        assert!(matches!(
+            again
+                .steps
+                .iter()
+                .find(|step| step.step_id.ends_with("/fetch-all"))
+                .unwrap()
+                .status,
+            StepStatus::Satisfied
+        ));
     }
 
     #[test]
@@ -14692,6 +14966,7 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
             ..RunOptions::default()
         };
         let mut runtime = GraphRuntime {
+            observer: None,
             task: &task,
             opts: &options,
             terminal_interactive: false,
@@ -14773,6 +15048,7 @@ $Encoding = New-Object System.Text.UTF8Encoding($false)
             ..RunOptions::default()
         };
         let mut runtime = GraphRuntime {
+            observer: None,
             task: &task,
             opts: &options,
             terminal_interactive: false,

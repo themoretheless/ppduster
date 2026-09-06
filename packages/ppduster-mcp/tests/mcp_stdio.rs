@@ -14,7 +14,15 @@ struct McpProcess {
 
 impl McpProcess {
     fn start(output_dir: &TempDir) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ppduster-mcp"))
+        Self::start_with_apply(output_dir, false)
+    }
+
+    fn start_with_apply(output_dir: &TempDir, allow_apply: bool) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ppduster-mcp"));
+        if allow_apply {
+            command.arg("--allow-apply");
+        }
+        let mut child = command
             .arg("--output-dir")
             .arg(output_dir.path())
             .stdin(Stdio::piped())
@@ -142,7 +150,19 @@ fn modern_stdio_discovery_lists_tools_and_creates_a_scheme() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(names, ["create_scheme", "list_blocks", "validate_scheme"]);
+    assert_eq!(
+        names,
+        [
+            "create_github_scheme",
+            "create_scheme",
+            "list_blocks",
+            "list_github_repositories",
+            "plan_scheme",
+            "read_scheme",
+            "run_scheme",
+            "validate_scheme"
+        ]
+    );
     let validate_tool = tools["result"]["tools"]
         .as_array()
         .unwrap()
@@ -247,7 +267,7 @@ fn legacy_initialize_clients_can_list_and_call_tools() {
         "method": "tools/list",
         "params": {}
     }));
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 8);
 
     let catalog = server.request(json!({
         "jsonrpc": "2.0",
@@ -275,5 +295,110 @@ fn legacy_initialize_clients_can_list_and_call_tools() {
     assert!(search_terms.iter().any(|term| term == "create directory"));
     assert!(search_terms.iter().any(|term| term == "создать папку"));
 
+    server.shutdown();
+}
+
+fn call(server: &mut McpProcess, name: &str, arguments: Value) -> Value {
+    server.request(json!({"jsonrpc":"2.0", "id": name, "method":"tools/call",
+        "params":{"name":name,"arguments":arguments,"_meta":request_meta()}}))["result"]
+        .clone()
+}
+
+#[test]
+fn saved_graph_is_reloaded_planned_and_applied_despite_a_sibling_draft() {
+    let output = TempDir::new().unwrap();
+    let destination = output.path().join("workspace");
+    let mut server = McpProcess::start(&output);
+    let mut spec = scheme();
+    spec["scenarios"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("steps");
+    spec["scenarios"][0]["workflow_graph"] = json!({
+        "version": 3, "entries": ["folders"], "edges": [],
+        "nodes": [{"kind":"for-each", "config":{
+            "id":"folders",
+            "collection":{"kind":"literal", "value":[destination.to_string_lossy()]},
+            "item_alias":"folder", "concurrency":1, "on_error":"stop",
+            "body":{"version":3,"entries":["mkdir"],"edges":[],
+                "nodes":[{"kind":"action", "config":{
+                    "step":{"id":"mkdir", "name":"Create folder", "type":"create-directory", "path":"$HOME/Developer"},
+                    "bindings":{"path":{"kind":"interpolated","parts":[
+                        {"kind":"field","field":{"scope":{"kind":"loop-item","step_id":"folders"}}}
+                    ]}}
+                }}]
+            }
+        }}]
+    });
+    let created = call(
+        &mut server,
+        "create_scheme",
+        json!({"scheme":spec,"output_path":"saved.yaml"}),
+    );
+    assert_ne!(created["isError"], true, "{created}");
+    server.shutdown();
+    // Preserve an unfinished sibling to reproduce the actual project-level blocker.
+    let yaml = std::fs::read_to_string(output.path().join("saved.yaml")).unwrap();
+    let mut project: Value = serde_yaml::from_str(&yaml).unwrap();
+    project["project"]["entries"].as_array_mut().unwrap().push(json!({"type":"scenario", "task":{
+        "format_version":3,"id":"draft","name":"Draft","description":"Not finished yet",
+        "platform":"any","trust":"external-allowed", "workflow_graph":{"version":3,"entries":[],"nodes":[],"edges":[]}
+    }}));
+    std::fs::write(
+        output.path().join("saved.yaml"),
+        serde_json::to_vec(&project).unwrap(),
+    )
+    .unwrap();
+    let mut server = McpProcess::start_with_apply(&output, true);
+    let read = call(&mut server, "read_scheme", json!({"path":"saved.yaml"}));
+    assert_ne!(read["isError"], true, "{read}");
+    assert_eq!(read["structuredContent"]["valid"], false);
+    let args = json!({"path":"saved.yaml","scenario_id":"create-workspace"});
+    let planned = call(&mut server, "plan_scheme", args.clone());
+    assert_ne!(planned["isError"], true, "{planned}");
+    assert!(!destination.exists(), "plan must not create the directory");
+    let applied = call(&mut server, "run_scheme", args.clone());
+    assert_ne!(applied["isError"], true, "{applied}");
+    assert!(destination.is_dir());
+    let second = call(&mut server, "run_scheme", args);
+    assert_ne!(second["isError"], true, "{second}");
+    let draft = call(
+        &mut server,
+        "plan_scheme",
+        json!({"path":"saved.yaml","scenario_id":"draft"}),
+    );
+    assert_eq!(draft["isError"], true);
+    server.shutdown();
+}
+
+#[test]
+fn execution_is_opt_in_and_saved_file_access_stays_confined() {
+    let output = TempDir::new().unwrap();
+    let mut server = McpProcess::start(&output);
+    let disabled = call(
+        &mut server,
+        "run_scheme",
+        json!({"path":"unknown.yaml","scenario_id":"test"}),
+    );
+    assert_eq!(disabled["isError"], true);
+    assert!(disabled["structuredContent"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("--allow-apply"));
+    let escape = call(
+        &mut server,
+        "read_scheme",
+        json!({"path":"../outside.yaml"}),
+    );
+    assert_eq!(escape["isError"], true);
+    let selection = call(
+        &mut server,
+        "create_github_scheme",
+        json!({
+            "repository_ids":["unknown"], "destination_root":"/tmp/workspace", "output_path":"selection.yaml"
+        }),
+    );
+    assert_eq!(selection["isError"], true);
+    assert!(!output.path().join("selection.yaml").exists());
     server.shutdown();
 }

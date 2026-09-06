@@ -419,3 +419,52 @@ parents:
         );
     }
 }
+
+/// Validate the editable project envelope without rejecting unfinished sibling scenarios.
+pub fn validate_project_for_editing(project: &ScenarioProject) -> Result<(), String> {
+    // Deserialization already performs the one-way v1 -> v3 import. Editing
+    // must never repair or mutate Task.steps as a shadow authoring model. A
+    // graph may itself be invalid here: the inspector is the place where a
+    // loaded draft is diagnosed and explicitly repaired.
+    if project.id.trim().is_empty() || project.name.trim().is_empty() {
+        return Err("У проекта должны быть заполнены ID и название.".into());
+    }
+
+    fn visit(entries: &[ProjectEntry], ids: &mut BTreeSet<String>) -> Result<(), String> {
+        for entry in entries {
+            match entry {
+                ProjectEntry::Group { id, name, entries } => {
+                    if id.trim().is_empty() || name.trim().is_empty() {
+                        return Err("У каждой группы должны быть заполнены ID и название.".into());
+                    }
+                    visit(entries, ids)?;
+                }
+                ProjectEntry::Scenario { task } => {
+                    if task.id.trim().is_empty()
+                        || task.id.contains('/')
+                        || task.name.trim().is_empty()
+                        || task.description.trim().is_empty()
+                    {
+                        return Err(
+                            "У каждого сценария должны быть корректные ID, название и описание."
+                                .into(),
+                        );
+                    }
+                    if task.graph.is_none() || !task.steps.is_empty() || !task.scenarios.is_empty()
+                    {
+                        return Err(format!(
+                            "Сценарий «{}» должен быть импортирован в WorkflowGraph v3 перед редактированием.",
+                            task.name
+                        ));
+                    }
+                    if !ids.insert(task.id.clone()) {
+                        return Err(format!("Повторяется ID сценария «{}».", task.id));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    visit(&project.entries, &mut BTreeSet::new())
+}

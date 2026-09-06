@@ -7,7 +7,12 @@ app_dir="$project_root/target/macos/ppduster.app"
 
 cargo build --manifest-path "$project_root/Cargo.toml" --release --bin ppduster-ui
 mkdir -p "$app_dir/Contents/MacOS"
-cp "$project_root/target/release/ppduster-ui" "$app_dir/Contents/MacOS/ppduster-ui"
+# Replace the executable atomically so an already-running app keeps its inode.
+staged_binary=$(mktemp "$app_dir/Contents/MacOS/.ppduster-ui.XXXXXX")
+trap 'rm -f "$staged_binary"' EXIT HUP INT TERM
+cp "$project_root/target/release/ppduster-ui" "$staged_binary"
+chmod 755 "$staged_binary"
+mv -f "$staged_binary" "$app_dir/Contents/MacOS/ppduster-ui"
 cp "$project_root/packaging/macos/Info.plist" "$app_dir/Contents/Info.plist"
 chmod 755 "$app_dir/Contents/MacOS/ppduster-ui"
 

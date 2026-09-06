@@ -5,7 +5,8 @@ use cap_std::{
     fs::{Dir, OpenOptions},
 };
 use ppduster::automation::{
-    block_definitions, validate_project, CanvasPoint, ComposerCanvas, GraphNode, ProjectEntry,
+    block_definitions, load_project_yaml, make_project_external, run_task, validate_project,
+    CanvasPoint, ComposerCanvas, GithubRepositoryInput, GraphNode, ProjectEntry, RunOptions,
     ScenarioProject, ScenarioProjectFile, Step, Task, TrustRequirement, WorkflowGraph,
 };
 use ppduster::rules::Platform;
@@ -19,11 +20,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 const SCHEME_FORMAT_VERSION: u32 = 1;
@@ -88,7 +89,13 @@ pub struct ScenarioSpec {
         description = "Ordered ppduster block declarations. Each object needs id, name, type, and the inputs declared by list_blocks. The MCP boundary compiles this order into explicit WorkflowGraph v3 edges."
     )]
     #[schemars(schema_with = "steps_input_schema")]
+    #[serde(default)]
     pub steps: Vec<Value>,
+    #[serde(default)]
+    #[schemars(
+        description = "Explicit WorkflowGraph v3, including nested loops, bindings, variables, and edges. Supply either workflow_graph or steps, never both."
+    )]
+    pub workflow_graph: Option<Value>,
 }
 
 fn steps_input_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -157,10 +164,39 @@ pub struct CreateSchemeRequest {
     pub output_path: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadSchemeRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RunSchemeRequest {
+    #[schemars(
+        description = "Saved YAML path relative to output_root, as returned by create_scheme or create_github_scheme"
+    )]
+    pub path: String,
+    pub scenario_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateGithubSchemeRequest {
+    #[schemars(
+        description = "Repository IDs selected from the most recent list_github_repositories result in this MCP session. Selection is frozen into the file, and never refreshed at runtime."
+    )]
+    pub repository_ids: Vec<String>,
+    pub destination_root: String,
+    pub output_path: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct PpdusterMcp {
     output_root: Arc<PathBuf>,
     output_dir: Arc<Dir>,
+    allow_apply: bool,
+    github_preview: Arc<Mutex<Option<Vec<GithubRepositoryInput>>>>,
 }
 
 impl PpdusterMcp {
@@ -182,7 +218,77 @@ impl PpdusterMcp {
         Ok(Self {
             output_root: Arc::new(root),
             output_dir: Arc::new(directory),
+            allow_apply: false,
+            github_preview: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub fn with_apply(mut self, allow_apply: bool) -> Self {
+        self.allow_apply = allow_apply;
+        self
+    }
+
+    fn read_document(&self, requested_path: &str) -> Result<String, String> {
+        let path = validate_output_path(requested_path)?;
+        let file = self
+            .output_dir
+            .open(&path)
+            .map_err(|e| format!("read project: {e}"))?;
+        let mut yaml = String::new();
+        file.take(MAX_SPEC_BYTES as u64 + 1)
+            .read_to_string(&mut yaml)
+            .map_err(|e| format!("read project: {e}"))?;
+        if yaml.len() > MAX_SPEC_BYTES {
+            return Err("project file exceeds size limit".into());
+        }
+        Ok(yaml)
+    }
+
+    fn read_project(&self, requested_path: &str) -> Result<ScenarioProject, String> {
+        let yaml = self.read_document(requested_path)?;
+        let mut project = load_project_yaml(&yaml).map_err(|e| format!("load project: {e:#}"))?;
+        make_project_external(&mut project.entries);
+        ppduster::automation::project::validate_project_for_editing(&project)?;
+        Ok(project)
+    }
+
+    fn execute_saved(&self, request: RunSchemeRequest, apply: bool) -> CallToolResult {
+        if apply && !self.allow_apply {
+            return tool_error(
+                "execution is disabled; start this server with --allow-apply to enable run_scheme",
+            );
+        }
+        let result = (|| {
+            let project = self.read_project(&request.path)?;
+            let task = find_task(&project.entries, &request.scenario_id).ok_or_else(|| {
+                format!(
+                    "scenario {:?} not found in saved project",
+                    request.scenario_id
+                )
+            })?;
+            run_task(
+                task,
+                &RunOptions {
+                    apply,
+                    ..RunOptions::default()
+                },
+            )
+            .map_err(|e| format!("{e:#}"))
+        })();
+        match result {
+            Ok(report) => {
+                let result =
+                    json!({"success": report.errors.is_empty(), "apply": apply, "report": report});
+                if report.errors.is_empty() {
+                    CallToolResult::structured(result)
+                } else {
+                    CallToolResult::structured_error(result)
+                }
+            }
+            Err(error) => CallToolResult::structured_error(
+                json!({"success": false, "apply": apply, "error": error}),
+            ),
+        }
     }
 
     pub fn output_root(&self) -> &Path {
@@ -233,7 +339,147 @@ pub struct CreatedScheme {
 #[tool_router]
 impl PpdusterMcp {
     #[tool(
-        description = "List ppduster block kinds and their versioned input/output contracts. Call this before composing step objects."
+        description = "List repositories from the signed-in GitHub CLI account for authoring. Caches the preview in this MCP session. Returns IDs to select with create_github_scheme; private, archived, and empty repositories are marked unavailable. No scenario is run.",
+        annotations(read_only_hint = true)
+    )]
+    fn list_github_repositories(&self) -> CallToolResult {
+        match ppduster::github::get_account_repositories() {
+            Ok(account) => {
+                let repositories = account
+                    .repositories
+                    .iter()
+                    .map(|repo| GithubRepositoryInput {
+                        id: repo.id.clone(),
+                        owner: repo.owner.clone(),
+                        name: repo.name.clone(),
+                        full_name: repo.name_with_owner.clone(),
+                        https_url: repo.url.clone(),
+                        ssh_url: repo.ssh_url.clone(),
+                        default_branch: repo.default_branch.clone(),
+                        private: repo.is_private,
+                        archived: repo.is_archived,
+                    })
+                    .collect::<Vec<_>>();
+                let items = repositories.iter().map(|repo| json!({
+                    "id": repo.id, "full_name": repo.full_name,
+                    "private": repo.private, "archived": repo.archived,
+                    "default_branch": repo.default_branch,
+                    "selectable": !repo.private && !repo.archived && repo.default_branch.is_some(),
+                })).collect::<Vec<_>>();
+                *self.github_preview.lock().unwrap() = Some(repositories);
+                CallToolResult::structured(
+                    json!({"repositories": items, "selection_is_saved_before_run": true}),
+                )
+            }
+            Err(error) => tool_error(format!("GitHub authoring preview failed: {error:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Save a GitHub clone-or-fetch scenario using the exact shared desktop recipe. First call list_github_repositories, select repository_ids, then call this with the destination folder and a new YAML output_path. Runtime uses only the persisted selection. Does not clone or fetch."
+    )]
+    fn create_github_scheme(
+        &self,
+        Parameters(request): Parameters<CreateGithubSchemeRequest>,
+    ) -> CallToolResult {
+        let result = (|| {
+            let preview = self.github_preview.lock().map_err(|e| e.to_string())?;
+            let preview = preview
+                .as_ref()
+                .ok_or("call list_github_repositories first in this MCP session")?;
+            if request.repository_ids.is_empty() {
+                return Err("select at least one repository".to_owned());
+            }
+            let mut unique = BTreeSet::new();
+            let mut selected = Vec::new();
+            for id in &request.repository_ids {
+                if !unique.insert(id) {
+                    return Err(format!("duplicate selected repository ID: {id}"));
+                }
+                let repository = preview.iter().find(|repo| &repo.id == id).ok_or_else(|| {
+                    format!("selected repository ID is absent from the authoring preview: {id}")
+                })?;
+                if repository.private || repository.archived || repository.default_branch.is_none()
+                {
+                    return Err(format!("repository {id} is unavailable: this snapshot recipe supports public, active repositories with a default branch"));
+                }
+                selected.push(repository.clone());
+            }
+            let task = ppduster::automation::recipes::github_repository_task(
+                1,
+                selected,
+                &request.destination_root,
+            )?;
+            self.create(
+                SchemeSpec {
+                    id: "github-repositories".into(),
+                    name: task.name.clone(),
+                    description: task.description.clone(),
+                    scenarios: vec![ScenarioSpec {
+                        id: task.id.clone(),
+                        name: task.name,
+                        description: task.description,
+                        platform: SchemePlatform::Macos,
+                        group_path: Vec::new(),
+                        steps: Vec::new(),
+                        workflow_graph: Some(
+                            serde_json::to_value(task.graph.unwrap()).map_err(|e| e.to_string())?,
+                        ),
+                    }],
+                },
+                Some(&request.output_path),
+            )
+        })();
+        match result {
+            Ok(created) => CallToolResult::structured(
+                json!({"created": true, "path": created.path, "relative_path": request.output_path, "scenario_id": "github-repositories-1", "warnings": created.warnings}),
+            ),
+            Err(error) => tool_error(error),
+        }
+    }
+
+    #[tool(
+        description = "Read and validate a saved project YAML below output_root, returning its canonical project and scenario IDs. Uses the same project loader as the desktop UI.",
+        annotations(read_only_hint = true)
+    )]
+    fn read_scheme(&self, Parameters(request): Parameters<ReadSchemeRequest>) -> CallToolResult {
+        let result = (|| {
+            let yaml = self.read_document(&request.path)?;
+            let project = load_project_yaml(&yaml).map_err(|e| format!("load project: {e:#}"))?;
+            ppduster::automation::project::validate_project_for_editing(&project)?;
+            let validation_error = validate_project(&project).err();
+            // Task serialization deliberately rejects unfinished graphs. Report
+            // the source document so reading a draft never panics or repairs it.
+            let source: Value = serde_yaml::from_str(&yaml).map_err(|e| e.to_string())?;
+            Ok::<_, String>(json!({
+                "valid": validation_error.is_none(), "validation_error": validation_error,
+                "project": source.get("project").unwrap_or(&source),
+            }))
+        })();
+        match result {
+            Ok(value) => CallToolResult::structured(value),
+            Err(error) => tool_error(error),
+        }
+    }
+
+    #[tool(
+        description = "Dry-run a scenario from its saved YAML with the real ppduster executor. Reports runtime binding and policy errors, exact per-repository plans, and step status. No clone, fetch, or other mutations are applied; GitHub selection is not refreshed.",
+        annotations(read_only_hint = true)
+    )]
+    fn plan_scheme(&self, Parameters(request): Parameters<RunSchemeRequest>) -> CallToolResult {
+        self.execute_saved(request, false)
+    }
+
+    #[tool(
+        description = "Execute a scenario from saved YAML using the real ppduster executor; may clone/fetch repositories or perform other declared actions. Requires server --allow-apply. Run plan_scheme first and call only when the user authorized those actions. Shell, elevation, and protected-folder approvals remain disabled. GitHub selection is not refreshed."
+    )]
+    fn run_scheme(&self, Parameters(request): Parameters<RunSchemeRequest>) -> CallToolResult {
+        self.execute_saved(request, true)
+    }
+
+    #[tool(
+        description = "List ppduster block kinds and their versioned input/output contracts. Call this before composing step objects.",
+        annotations(read_only_hint = true)
     )]
     fn list_blocks(&self, Parameters(request): Parameters<ListBlocksRequest>) -> CallToolResult {
         let mut definitions = block_definitions();
@@ -256,6 +502,8 @@ impl PpdusterMcp {
 
         CallToolResult::structured(json!({
             "scheme_format_version": SCHEME_FORMAT_VERSION,
+            "output_root": self.output_root(),
+            "apply_enabled": self.allow_apply,
             "step_shape": {
                 "required_common_fields": ["id", "name", "type"],
                 "optional_common_fields": [
@@ -264,7 +512,7 @@ impl PpdusterMcp {
                 "action_fields": "Add the fields declared by the selected block's input_schema at the same object level as type."
             },
             "execution_semantics": "Ordered block declarations are compiled into an explicit WorkflowGraph v3. Canvas positions are presentation metadata only; graph edges are the sole execution topology.",
-            "safety": "This server validates and writes project files only. It never plans or executes a scenario, never elevates privileges, and never replaces an existing file.",
+            "safety": "create_scheme only writes files; plan_scheme performs a dry run; run_scheme requires server --allow-apply. Shell and elevation are disabled, and existing project files are never replaced.",
             "example_step": {
                 "id": "create-workspace",
                 "name": "Create workspace directory",
@@ -276,7 +524,8 @@ impl PpdusterMcp {
     }
 
     #[tool(
-        description = "Build and validate a ppduster UI scheme without writing a file. Returns normalized project JSON and YAML preview."
+        description = "Build and validate a ppduster UI scheme without writing a file. Returns normalized project JSON and YAML preview.",
+        annotations(read_only_hint = true)
     )]
     fn validate_scheme(
         &self,
@@ -303,6 +552,7 @@ impl PpdusterMcp {
             Ok(created) => CallToolResult::structured(json!({
                 "created": true,
                 "path": created.path,
+                "relative_path": created.path.strip_prefix(self.output_root()).ok(),
                 "project_id": created.project_id,
                 "scenario_count": created.scenario_count,
                 "step_count": created.step_count,
@@ -317,7 +567,7 @@ impl PpdusterMcp {
 #[tool_handler(
     name = "ppduster-schemes",
     version = "0.1.0",
-    instructions = "Create ppduster Scenario Flow projects. Start with list_blocks, compose ordered block declarations from those contracts, validate with validate_scheme, then persist with create_scheme. The server emits WorkflowGraph v3; canvas positions never define execution topology."
+    instructions = "Create ppduster Scenario Flow projects. Start with list_blocks, compose ordered block declarations from those contracts, validate with validate_scheme, then persist with create_scheme. The server emits WorkflowGraph v3; canvas positions never define execution topology. Use list_github_repositories and create_github_scheme for the desktop GitHub recipe, then read_scheme, plan_scheme, and explicitly authorized run_scheme to reproduce the saved scenario lifecycle."
 )]
 impl ServerHandler for PpdusterMcp {
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
@@ -370,12 +620,6 @@ pub fn build_project(spec: SchemeSpec) -> Result<ScenarioProject, String> {
                 scenario.steps.len()
             ));
         }
-        total_steps = total_steps.saturating_add(scenario.steps.len());
-        if total_steps > MAX_TOTAL_STEPS {
-            return Err(format!(
-                "scheme contains more than {MAX_TOTAL_STEPS} total steps"
-            ));
-        }
 
         let mut steps = Vec::with_capacity(scenario.steps.len());
         for (index, value) in scenario.steps.into_iter().enumerate() {
@@ -404,6 +648,17 @@ pub fn build_project(spec: SchemeSpec) -> Result<ScenarioProject, String> {
             steps.push(step);
         }
 
+        if scenario.workflow_graph.is_some() && !steps.is_empty() {
+            return Err(format!(
+                "scenario {} must supply either steps or workflow_graph, not both",
+                scenario.id
+            ));
+        }
+        let explicit_graph = scenario
+            .workflow_graph
+            .map(serde_json::from_value::<WorkflowGraph>)
+            .transpose()
+            .map_err(|e| format!("scenario {} workflow_graph: {e}", scenario.id))?;
         let canvas = linear_canvas(&steps);
         let task_id = scenario.id.clone();
         let task = Task {
@@ -415,12 +670,22 @@ pub fn build_project(spec: SchemeSpec) -> Result<ScenarioProject, String> {
             scenarios: Vec::new(),
             resolved_scenarios: Vec::new(),
             steps,
-            graph: None,
+            graph: explicit_graph,
         }
         .into_v3()
         .map_err(|error| format!("scenario {task_id} cannot be compiled to graph v3: {error}"))?;
         task.validate()
             .map_err(|error| format!("scenario {} is invalid: {error}", task.id))?;
+        let node_count = task.graph.as_ref().map(count_graph_nodes).unwrap_or(0);
+        if node_count > MAX_STEPS_PER_SCENARIO {
+            return Err(format!("scenario {} contains {node_count} graph nodes; maximum is {MAX_STEPS_PER_SCENARIO}", task.id));
+        }
+        total_steps = total_steps.saturating_add(node_count);
+        if total_steps > MAX_TOTAL_STEPS {
+            return Err(format!(
+                "scheme contains more than {MAX_TOTAL_STEPS} total graph nodes"
+            ));
+        }
         canvases.insert(task.id.clone(), canvas);
         insert_scenario(&mut entries, &scenario.group_path, task)?;
     }
@@ -434,6 +699,14 @@ pub fn build_project(spec: SchemeSpec) -> Result<ScenarioProject, String> {
     };
     validate_project(&project)?;
     Ok(project)
+}
+
+fn find_task<'a>(entries: &'a [ProjectEntry], id: &str) -> Option<&'a Task> {
+    entries.iter().find_map(|entry| match entry {
+        ProjectEntry::Scenario { task } if task.id == id => Some(task.as_ref()),
+        ProjectEntry::Group { entries, .. } => find_task(entries, id),
+        _ => None,
+    })
 }
 
 pub fn project_yaml(project: &ScenarioProject) -> Result<String, String> {
@@ -762,6 +1035,7 @@ mod tests {
                 name: "Prepare workspace".into(),
                 description: "Create and inspect a development workspace.".into(),
                 platform: SchemePlatform::Any,
+                workflow_graph: None,
                 group_path: vec![GroupSpec {
                     id: "development".into(),
                     name: "Development".into(),

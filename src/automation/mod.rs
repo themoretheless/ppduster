@@ -7,6 +7,7 @@ pub mod loader;
 mod package_registry;
 pub mod package_secrets;
 pub mod project;
+pub mod recipes;
 pub mod runner;
 pub mod task;
 
@@ -48,7 +49,7 @@ pub use project::{
     CanvasPoint, CanvasView, ComposerCanvas, ProjectEntry, ScenarioProject, ScenarioProjectFile,
 };
 pub use runner::{
-    context_store_from_reports, describe_step, run_task, ActionOutcome, ActionPlan,
+    context_store_from_reports, describe_step, run_task, run_task_with_progress, ActionOutcome, ActionPlan,
     AutomationError, GithubAccountOutput, GithubContextOutput, GithubRepositoriesOutput,
     GithubRepositoryOutput, PathMetadataOutput, ProcessExitOutput, ProtectedPathApproval,
     ProtectedPathApprovalRequest, ProtectedPathApprovalRequired, ProtectedPathOperation,

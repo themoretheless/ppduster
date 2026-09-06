@@ -77,9 +77,14 @@ but iterations still run sequentially. Legacy templates can compose legacy step-
 including a graph task from a legacy template is rejected until graph-aware composition has an
 explicit ID, edge, scope, and export contract.
 
-The **GitHub · select and clone** starter uses snapshot semantics:
-**Select GitHub repositories** -> **For each** -> **Clone if missing**. The first block
+The **GitHub · клонировать или fetch** starter uses snapshot semantics:
+**Select GitHub repositories** -> **For each** -> **Clone if missing** -> **Fetch all origin branches**. The first block
 loads preview candidates only while authoring and shows the selection checkboxes itself.
+The scenario sidebar has a destination-folder picker; both Git actions use that folder
+with `<owner>/<repository>` appended. Save the project after choosing repositories.
+At runtime an existing checkout is validated and fetched without pull, merge, or changes
+to its working tree. A new checkout is cloned and then fetched. `git-fetch` accepts
+`branch: "*"` to fetch all origin branches; a named branch retains its existing behavior.
 It stores the complete selected public values in the project YAML and publishes them as
 the named typed scenario variable `selected_repositories[]` at runtime without listing GitHub
 again. Fields include `id`, `owner`, `name`, `full_name`, `https_url`, `ssh_url`,
@@ -178,7 +183,11 @@ cargo run --bin ppduster-ui
 server that lets MCP clients inspect the typed block catalog, validate Scenario
 Flow schemes, and create `.ppduster.yaml` projects for this UI. It shares the
 same Rust project model and validators as ppduster, generates deterministic
-canvas positions, never executes a scenario, and never overwrites a file.
+canvas positions, and never overwrites a project file. The GitHub authoring tools
+use the same recipe as the desktop UI. `read_scheme` and `plan_scheme` reproduce
+the saved-file path; `run_scheme` enables execution only with server `--allow-apply`.
+An unfinished sibling scenario no longer blocks the selected scenario from planning
+or running; its diagnostics remain visible.
 
 ```bash
 cargo install --locked --path packages/ppduster-mcp
@@ -401,8 +410,27 @@ Bundled templates (`macos-new-machine`, `macos-web-developer`,
 `macos-power-user`, `macos-home-office`, `macos-recovery-kit`,
 `macos-maker-studio`, `macos-developer-workstation`)
 compose existing child scenarios without copying their steps. They are review
-packs, not one-click blank-machine installers: some children still inspect
-state, require Homebrew already on PATH, or need elevation. The Scenario Flow
+packs, not one-click blank-machine installers. All of them require Homebrew
+already on PATH; the state-inspecting and elevation-requiring children live in
+`macos-developer-workstation`, `macos-privacy-baseline`, and
+`macos-new-machine`, not in the language packs below.
+
+What the language and service packs actually install:
+
+- `macos-node-developer`: Homebrew `node` + VS Code + fzf/ripgrep. No nvm, no
+  global npm packages.
+- `macos-python-data`: Homebrew `uv` + fzf/ripgrep. Not a data workstation:
+  no Anaconda, no venv, no torch, no Python runtime of its own.
+- `macos-rust-developer`: Homebrew `rustup` + VS Code + fzf/ripgrep. `rustup`
+  is keg-only and there is no toolchain until you run `rustup default`
+  yourself.
+- `macos-containers`: the Docker Desktop cask only. Not Compose, not Colima,
+  and it does not start the engine or pull images.
+- `macos-full-stack`: Node + PostgreSQL 17 + VS Code + fzf/ripgrep. First
+  install initialises Homebrew's default cluster but does not start the
+  database or set a password. No Docker, Python, or Rust.
+
+The Scenario Flow
 library lists templates first and collapses long macOS leaf bands. The block
 picker groups everyday actions by category and hides vendor-specific or
 composite blocks until you search for them.

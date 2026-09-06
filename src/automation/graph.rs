@@ -4870,15 +4870,13 @@ mod tests {
         }))
     }
 
+    // `content` is an unformatted STRING, so it accepts an Identifier-formatted producer field.
+    // Do not point this at `BrewInstall.package`: that input is `PackageName`-formatted and a
+    // GitHub login is not a package name.
     fn identifier_action_with_ref(id: &str, field: FieldRef) -> GraphNode {
-        let mut consumer = step(id);
-        consumer.action = Action::BrewInstall {
-            package: "placeholder".into(),
-            cask: false,
-        };
         GraphNode::Action(Box::new(ActionNode {
-            step: consumer,
-            bindings: BTreeMap::from([("package".into(), Binding::field(field))]),
+            step: default_step(ActionKind::WriteFile, id).unwrap(),
+            bindings: BTreeMap::from([("content".into(), Binding::field(field))]),
         }))
     }
 
@@ -5277,7 +5275,8 @@ mod tests {
             ],
             vec![GraphEdge::new("list", EdgePort::Success, "clone")],
         );
-        assert!(graph.validate().is_ok());
+        let result = graph.validate();
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]

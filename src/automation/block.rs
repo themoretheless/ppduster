@@ -636,7 +636,10 @@ pub fn block_definition(kind: ActionKind) -> BlockDefinition {
             };
             let inputs = match kind {
                 ActionKind::GitInspect => git_inputs(false),
-                ActionKind::GitFetch | ActionKind::GitFastForward => {
+                ActionKind::GitFetch => {
+                    git_inputs(false).with_field("branch", req(ContextType::STRING))
+                }
+                ActionKind::GitFastForward => {
                     git_inputs(false).with_field("branch", req(git_ref()))
                 }
                 ActionKind::GitClone | ActionKind::GitCloneIfMissing => git_inputs(true),
@@ -1690,12 +1693,18 @@ mod tests {
             block_catalog(ActionKind::ConfigurePackageRegistryFiles),
             BlockCatalog::Specialized
         );
-        assert_eq!(block_catalog(ActionKind::GitClone), BlockCatalog::Specialized);
+        assert_eq!(
+            block_catalog(ActionKind::GitClone),
+            BlockCatalog::Specialized
+        );
         assert_eq!(
             block_catalog(ActionKind::ForEachGitCloneIfMissing),
             BlockCatalog::Specialized
         );
-        assert_eq!(block_catalog(ActionKind::CreateDirectory), BlockCatalog::Core);
+        assert_eq!(
+            block_catalog(ActionKind::CreateDirectory),
+            BlockCatalog::Core
+        );
         assert_eq!(block_catalog(ActionKind::BrewInstall), BlockCatalog::Core);
         assert_eq!(
             block_definition(ActionKind::BambuStudioRelease).catalog,
@@ -2100,7 +2109,14 @@ mod tests {
                 .expect("git update block has a branch input");
             assert!(branch.required);
             assert!(!branch.nullable);
-            assert_eq!(branch.value_type, git_ref());
+            assert_eq!(
+                branch.value_type,
+                if kind == ActionKind::GitFetch {
+                    ContextType::STRING
+                } else {
+                    git_ref()
+                }
+            );
         }
 
         for kind in [ActionKind::GitClone, ActionKind::GitCloneIfMissing] {
