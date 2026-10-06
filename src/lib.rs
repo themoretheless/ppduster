@@ -8,3 +8,8 @@ pub mod report;
 pub mod rules;
 pub mod safety;
 pub mod scan;
+
+/// Shared native and WebAssembly data-pipeline engine.
+pub use peregon_engine as data_pipeline;
+
+pub mod data_graph;

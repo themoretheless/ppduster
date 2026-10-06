@@ -1,3 +1,6 @@
+#[path = "ppduster-ui/data_workspace.rs"]
+mod data_workspace;
+
 use anyhow::Context;
 use eframe::egui::{
     self,
@@ -48,7 +51,7 @@ use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
-const PAPER: Color32 = Color32::from_rgb(246, 245, 239);
+const PAPER: Color32 = Color32::from_rgb(244, 243, 237);
 const CARD: Color32 = Color32::from_rgb(255, 254, 250);
 const INK: Color32 = Color32::from_rgb(32, 34, 31);
 const MUTED: Color32 = Color32::from_rgb(124, 129, 122);
@@ -7600,7 +7603,7 @@ impl Default for GithubPickerState {
 
 fn main() -> eframe::Result {
     let viewport = egui::ViewportBuilder::default()
-        .with_title("ppduster · Scenario Flow")
+        .with_title("ppduster · Workspace")
         .with_inner_size([1440.0, 900.0])
         .with_min_inner_size([980.0, 680.0]);
     #[cfg(target_os = "macos")]
@@ -7610,7 +7613,7 @@ fn main() -> eframe::Result {
         .with_titlebar_shown(false)
         .with_titlebar_buttons_shown(true);
     eframe::run_native(
-        "ppduster · Scenario Flow",
+        "ppduster · Workspace",
         eframe::NativeOptions {
             viewport,
             ..Default::default()
@@ -7620,6 +7623,8 @@ fn main() -> eframe::Result {
 }
 
 struct ScenarioApp {
+    data_workspace: data_workspace::DataWorkspace,
+    data_open: bool,
     task_pack: Option<TaskPack>,
     load_error: Option<String>,
     selected_task: usize,
@@ -7683,7 +7688,7 @@ impl Drop for ScenarioApp {
 impl ScenarioApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_unicode_fonts(&cc.egui_ctx);
-        configure_styles(&cc.egui_ctx, egui::ThemePreference::System);
+        configure_styles(&cc.egui_ctx, egui::ThemePreference::Light);
         let dark = cc.egui_ctx.theme() == egui::Theme::Dark;
         let (task_pack, load_error) = match load_tasks() {
             Ok(pack) => (Some(pack), None),
@@ -7699,6 +7704,8 @@ impl ScenarioApp {
             })
             .unwrap_or(0);
         Self {
+            data_workspace: data_workspace::DataWorkspace::default(),
+            data_open: false,
             task_pack,
             load_error,
             selected_task,
@@ -9436,15 +9443,37 @@ impl eframe::App for ScenarioApp {
         // Keep custom colors in sync when the OS appearance changes while the
         // application is using the system theme preference.
         self.dark = ui.ctx().theme() == egui::Theme::Dark;
-        if ui.ctx().input(|input| input.viewport().close_requested())
-            && self.defer_viewport_close_if_dirty()
-        {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        ui.painter()
+            .rect_filled(ui.max_rect(), 0.0, canvas(self.dark));
+        if ui.ctx().input(|input| input.viewport().close_requested()) {
+            if self.data_workspace.dirty {
+                self.data_workspace.close_pending = true;
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            } else if self.defer_viewport_close_if_dirty() {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
         }
         self.poll_run(ui.ctx());
         self.poll_github_authorization(ui.ctx());
         self.poll_github_repository_load(ui.ctx());
+        self.data_workspace.poll();
+        self.top_bar(ui);
+        if self.data_open {
+            let open = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O);
+            let save = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
+            if ui.ctx().input_mut(|input| input.consume_shortcut(&open)) {
+                self.data_workspace.open();
+            }
+            if ui.ctx().input_mut(|input| input.consume_shortcut(&save)) {
+                self.data_workspace.save();
+            }
+            self.data_workspace.show(ui, self.dark);
+            self.project_action_confirmation(ui.ctx());
+            self.data_workspace.confirmation(ui.ctx());
+            return;
+        }
         let open_shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O);
         if ui
             .ctx()
@@ -9461,7 +9490,6 @@ impl eframe::App for ScenarioApp {
         {
             self.save_selected_scenario();
         }
-        self.top_bar(ui);
         self.workspace_bottom_dock(ui);
         self.left_library(ui);
         self.right_inspector(ui);
@@ -9473,6 +9501,7 @@ impl eframe::App for ScenarioApp {
             self.run_confirmation(ui.ctx());
         }
         self.project_action_confirmation(ui.ctx());
+        self.data_workspace.confirmation(ui.ctx());
     }
 }
 
@@ -9989,7 +10018,7 @@ impl ScenarioApp {
         });
 
         egui::Panel::top("topbar")
-            .exact_size(52.0)
+            .exact_size(60.0)
             .frame(
                 Frame::new()
                     .fill(surface(self.dark))
@@ -10015,18 +10044,50 @@ impl ScenarioApp {
                         .corner_radius(UI_RADIUS_CONTROL)
                         .inner_margin(Margin::symmetric(8, 6))
                         .show(ui, |ui| {
-                            ui.label(RichText::new("PP").strong().size(11.0).color(if self.dark {
+                            ui.label(RichText::new("P").strong().size(13.0).color(if self.dark {
                                 INK
                             } else {
                                 Color32::WHITE
                             }));
                         });
-                    ui.label(
-                        RichText::new("PPDUSTER")
-                            .strong()
-                            .size(UI_TEXT_BODY)
-                            .color(text(self.dark)),
-                    );
+                    if ui.available_width() > 1000.0 {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new("PPDUSTER")
+                                    .strong()
+                                    .size(11.0)
+                                    .color(text(self.dark)),
+                            );
+                            ui.label(RichText::new("Visual workspace").size(9.0).color(MUTED));
+                        });
+                    }
+                    if ui
+                        .button(if self.dark { "☀" } else { "☾" })
+                        .on_hover_text(if self.dark {
+                            "Включить светлую тему"
+                        } else {
+                            "Включить тёмную тему"
+                        })
+                        .clicked()
+                    {
+                        self.dark = !self.dark;
+                        configure_styles(
+                            ui.ctx(),
+                            if self.dark {
+                                egui::ThemePreference::Dark
+                            } else {
+                                egui::ThemePreference::Light
+                            },
+                        );
+                    }
+                    ui.add_space(12.0);
+                    ui.selectable_value(&mut self.data_open, false, "Автоматизация");
+                    ui.selectable_value(&mut self.data_open, true, "Данные");
+                    ui.separator();
+                    if self.data_open {
+                        self.data_workspace.toolbar(ui);
+                        return;
+                    }
                     if ui
                         .add_enabled(!self.running, egui::Button::new("Открыть…"))
                         .on_hover_text("Открыть сохранённый сценарий или проект (⌘O / Ctrl+O)")
@@ -10068,25 +10129,6 @@ impl ScenarioApp {
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .button(if self.dark { "☀" } else { "☾" })
-                            .on_hover_text(if self.dark {
-                                "Включить светлую тему"
-                            } else {
-                                "Включить тёмную тему"
-                            })
-                            .clicked()
-                        {
-                            self.dark = !self.dark;
-                            configure_styles(
-                                ui.ctx(),
-                                if self.dark {
-                                    egui::ThemePreference::Dark
-                                } else {
-                                    egui::ThemePreference::Light
-                                },
-                            );
-                        }
                         if self.custom_project.is_some() {
                             self.project_file_menu(ui);
                             self.workspace_plan_run_controls(ui);
@@ -10526,6 +10568,8 @@ impl ScenarioApp {
             .frame(
                 Frame::new()
                     .fill(surface(self.dark))
+                    .corner_radius(16)
+                    .outer_margin(Margin::same(10))
                     .stroke(Stroke::new(1.0, line(self.dark)))
                     .inner_margin(Margin::same(14)),
             )
@@ -11210,6 +11254,8 @@ impl ScenarioApp {
             .frame(
                 Frame::new()
                     .fill(surface(self.dark))
+                    .corner_radius(16)
+                    .outer_margin(Margin::same(10))
                     .stroke(Stroke::new(1.0, line(self.dark)))
                     .inner_margin(Margin::same(16)),
             )
@@ -18653,6 +18699,12 @@ fn configure_styles(ctx: &egui::Context, preference: egui::ThemePreference) {
         visuals.widgets.hovered.corner_radius = CornerRadius::same(UI_RADIUS_CONTROL);
         visuals.widgets.active.corner_radius = CornerRadius::same(UI_RADIUS_CONTROL);
         visuals.widgets.open.corner_radius = CornerRadius::same(UI_RADIUS_CONTROL);
+        if !dark {
+            visuals.widgets.inactive.bg_fill = CARD;
+            visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(246, 246, 241);
+            visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, LINE);
+            visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, INK);
+        }
         let primary = ui_tone(UiTone::Primary, dark);
         visuals.widgets.hovered.bg_fill = translucent(primary, if dark { 38 } else { 18 });
         visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, translucent(primary, 120));
@@ -18784,6 +18836,8 @@ mod tests {
 
     fn composer_app_for_test(project: ScenarioProject) -> ScenarioApp {
         ScenarioApp {
+            data_workspace: data_workspace::DataWorkspace::default(),
+            data_open: false,
             task_pack: None,
             load_error: None,
             selected_task: 0,

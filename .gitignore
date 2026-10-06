@@ -4,3 +4,10 @@
 *.swp
 .idea/
 .vscode/
+
+web/data-pipeline/node_modules/
+web/data-pipeline/dist/
+web/data-pipeline/src/generated/
+web/data-pipeline/packages/*/dist/
+web/data-pipeline/wasm/target/
+web/data-pipeline/.wrangler/

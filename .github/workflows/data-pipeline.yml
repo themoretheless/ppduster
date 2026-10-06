@@ -1,0 +1,36 @@
+name: Data pipelines
+
+on:
+  pull_request:
+    paths: ["web/data-pipeline/**", ".github/workflows/data-pipeline.yml"]
+  push:
+    paths: ["web/data-pipeline/**", ".github/workflows/data-pipeline.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web/data-pipeline
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.0
+          cache: npm
+          cache-dependency-path: web/data-pipeline/package-lock.json
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: web/data-pipeline/wasm
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.14.0,wasm-bindgen-cli@0.2.125
+      - run: npm ci
+      - run: cargo fetch --manifest-path wasm/Cargo.toml --locked
+      - run: npm test

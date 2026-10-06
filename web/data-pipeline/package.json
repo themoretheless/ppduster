@@ -1,0 +1,40 @@
+{
+  "name": "peregon",
+  "version": "1.0.1",
+  "description": "A visual data pipeline builder powered by Vue 3, WebGPU, and Rust/WebAssembly.",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "syntax:build": "npm run build --workspace @peregon/syntax-engine",
+    "wasm:dev": "wasm-pack build wasm --mode no-install --target web --dev --no-opt --out-dir ../src/generated/peregon_engine --out-name peregon_engine -- --locked --offline",
+    "wasm:release": "wasm-pack build wasm --mode no-install --target web --release --no-opt --out-dir ../src/generated/peregon_engine --out-name peregon_engine -- --locked --offline",
+    "dev": "npm run wasm:dev && npm run syntax:build && WRANGLER_LOG_PATH=.wrangler/wrangler.log vite dev",
+    "typecheck": "npm run syntax:build && vue-tsc --noEmit -p tsconfig.json",
+    "build": "npm run wasm:release && npm run typecheck && WRANGLER_LOG_PATH=.wrangler/wrangler.log vite build",
+    "build:pages": "npm run wasm:release && npm run typecheck && GITHUB_PAGES=true vite build",
+    "preview": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vite preview",
+    "bench:syntax": "npm run syntax:build && node tests/syntax-engine.bench.mjs",
+    "test": "cargo test --manifest-path wasm/Cargo.toml --locked --offline && npm run build && node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@duckdb/duckdb-wasm": "^1.32.0",
+    "@peregon/syntax-engine": "0.1.0",
+    "apache-arrow": "^17.0.0",
+    "vue": "3.5.40"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.37.1",
+    "@types/node": "22.19.19",
+    "@vitejs/plugin-vue": "6.0.8",
+    "typescript": "5.9.3",
+    "vite": "8.0.13",
+    "vue-tsc": "3.3.7",
+    "wrangler": "4.92.0"
+  }
+}

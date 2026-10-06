@@ -1,0 +1,10 @@
+{
+  "action": "transform",
+  "json": "[{\"name\":\"Alice\"},{\"name\":\"Bob\"}]",
+  "path": "",
+  "fields": ["name"],
+  "delimiter": "\n",
+  "skip_empty": true,
+  "unique": true,
+  "output_format": "csv"
+}

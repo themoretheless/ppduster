@@ -50,7 +50,7 @@ impl From<CliOutput> for OutputFormat {
 #[command(
     name = "ppduster",
     version,
-    about = "Safe cleaner and setup automation with an optional ppstore proxy",
+    about = "Safe cleanup, setup automation and data pipelines",
     long_about = "ppduster scans known junk locations using versioned YAML rule packs.\n\
                   Default is always safe: dry-run, age filters, never-touch paths, trash delete.\n\
                   On macOS it can proxy App Store commands to a separately installed ppstore.\n\
@@ -79,6 +79,14 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Process a Peregon-compatible data request (JSON file, or stdin).
+    Data {
+        #[arg(long)]
+        request: Option<PathBuf>,
+        /// Save the complete JSON response to a file instead of stdout.
+        #[arg(long)]
+        response: Option<PathBuf>,
+    },
     /// Scan for junk without deleting anything
     Scan {
         /// Only these category ids (comma-separated or repeat flag)
@@ -334,6 +342,30 @@ fn run() -> Result<()> {
     };
 
     let result: Result<()> = (|| match cli.command {
+        Commands::Data { request, response } => {
+            use std::io::Read;
+            let input = if let Some(path) = request {
+                std::fs::read_to_string(&path)
+                    .with_context(|| format!("Read {}", path.display()))?
+            } else {
+                let mut input = String::new();
+                std::io::stdin().read_to_string(&mut input)?;
+                input
+            };
+            let output = ppduster::data_pipeline::process_request(&input);
+            let value: serde_json::Value = serde_json::from_str(&output)?;
+            if let Some(path) = response {
+                std::fs::write(path, &output)?;
+            } else {
+                println!("{output}");
+            }
+            anyhow::ensure!(
+                value["ok"] == true,
+                "Data pipeline failed: {}",
+                value["error"]
+            );
+            Ok(())
+        }
         Commands::Scan {
             category,
             all,
