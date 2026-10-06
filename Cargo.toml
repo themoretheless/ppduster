@@ -3,13 +3,14 @@ name = "ppduster"
 default-run = "ppduster"
 version = "0.1.0"
 edition = "2021"
-description = "Safe, rule-driven system junk cleaner (logs, caches, temp, leftovers)"
+description = "Rule-driven cleanup, system automation, and visual data pipelines"
 license = "MIT"
 readme = "README.md"
 keywords = ["cleaner", "cache", "temp", "disk", "maintenance"]
 categories = ["command-line-utilities"]
 
 [dependencies]
+peregon_engine = { path = "web/data-pipeline/wasm" }
 age = { version = "0.12.1", default-features = false }
 anyhow = "1"
 bytesize = "2"

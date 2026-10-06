@@ -987,3 +987,39 @@ Open-source families covered in research batches: classic cleaners, duplicate fi
 ## License
 
 MIT
+
+## Data pipelines (formerly Peregon)
+
+The complete Peregon visual editor, graph/runtime, syntax-engine package and
+Rust/WASM engine now live in `web/data-pipeline/`. No external Peregon checkout
+is needed. Existing local presets and pipeline formats remain compatible.
+
+The native `ppduster-ui` now has a single workspace with **Автоматизация** and
+**Данные** sections sharing the header, visual style, graph canvas, library,
+inspector and results panels. Data graphs support JSON/CSV/list sources, field
+selection and ordering, nested filters, templates, multiple output branches,
+and JSON/CSV/XML/SQL/text exports. Processing runs in the background.
+
+Existing Peregon v2 pipeline files can be opened and saved in the native
+workspace; incompatible connections and cycles are rejected before execution.
+The web module remains available for compatibility and browser use. Native
+data graphs live in `ppduster::data_graph`, and the common engine is exposed
+as `ppduster::data_pipeline`.
+
+```sh
+cargo run --bin ppduster -- data --request examples/data-request.json
+cd web/data-pipeline
+npm ci
+cargo fetch --manifest-path wasm/Cargo.toml --locked
+npm run dev
+```
+
+CLI requests can also be read from stdin; `--response FILE` saves the complete
+JSON response. Engine errors return a nonzero exit code. Actions include
+`analyze`, `filter_preview`, `transform`, `execute_plan` and `tokenize_json`.
+Supported sources: JSON, CSV and lists. Outputs include JSON, CSV, XML, SQL,
+flat lists and templates, with field selection, filtering and deduplication.
+
+Validation: `cargo test --lib --bins`,
+`cargo test --manifest-path web/data-pipeline/wasm/Cargo.toml`, and
+`npm test` from `web/data-pipeline`.
