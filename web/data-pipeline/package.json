@@ -20,7 +20,7 @@
     "build:pages": "npm run wasm:release && npm run typecheck && GITHUB_PAGES=true vite build",
     "preview": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vite preview",
     "bench:syntax": "npm run syntax:build && node tests/syntax-engine.bench.mjs",
-    "test": "cargo test --manifest-path wasm/Cargo.toml --locked --offline && npm run build && node --test tests/*.test.mjs"
+    "test": "cargo test --manifest-path wasm/Cargo.toml --locked --offline && npm run build && node --experimental-strip-types --test tests/*.test.mjs"
   },
   "dependencies": {
     "@duckdb/duckdb-wasm": "^1.32.0",
